@@ -149,7 +149,8 @@ async function fetchResourceMetadata(fetchImpl: FetchLike, serverUrl: string, hi
     }
     if (typeof body.resource !== "string") throw new OAuthError("protocol", "resource metadata has no resource");
     // RFC 9728 §3.3：resource 必须是我们请求的那个地址，防止别的资源冒充。只比较到路径，忽略末尾的斜杠。
-    if (normalizeResource(body.resource) !== normalizeResource(serverUrl)) {
+    // 例外：同源且是服务器路径的上级（Slack 声明站点根 https://mcp.slack.com，MCP 地址是 /mcp）。
+    if (!coversServer(body.resource, serverUrl)) {
       throw new OAuthError("protocol", `resource metadata is for ${body.resource}, not ${serverUrl}`);
     }
     return {
@@ -159,6 +160,17 @@ async function fetchResourceMetadata(fetchImpl: FetchLike, serverUrl: string, hi
     };
   }
   throw new OAuthError("protocol", "the MCP server publishes no resource metadata");
+}
+
+function coversServer(resource: string, serverUrl: string): boolean {
+  let claimed: string;
+  try {
+    claimed = normalizeResource(resource);
+  } catch {
+    return false;
+  }
+  const actual = normalizeResource(serverUrl);
+  return actual === claimed || actual.startsWith(`${claimed}/`);
 }
 
 function normalizeResource(url: string): string {
