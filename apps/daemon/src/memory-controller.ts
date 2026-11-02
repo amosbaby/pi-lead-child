@@ -178,6 +178,14 @@ function switchDto(stored: StoredSwitch): MemorySwitch {
   const { desired: _desired, ...dto } = stored;
   return { ...dto, dataFlows: dto.dataFlows ?? [], parts: dto.parts ?? ["embedding"] };
 }
+// pg0 的密码会被 hindsight_api/pg0.py 拼进命令行 `pg0 start --password <值>`。base64url 的字母表有 `-`，
+// 密码以 `-` 开头时 pg0 的 CLI（clap）把它当成短选项，报 `unexpected argument`，PostgreSQL 起不来。所以只用 [A-Za-z0-9]：24 字节 = 48 位 hex。
+export const newDatabasePassword = (): string => randomBytes(24).toString("hex");
+
+// 以 `-` 开头的旧密码从来没让 pg0 启动成功：命令行解析在 initdb 之前就失败了，所以没有用它初始化过的数据目录（~/.pg0 下的 plc-hindsight-*），
+// 直接换新密码不会连不上，也不用重建数据目录。不以 `-` 开头的旧密码（含中间有 `-`、`_` 的）能正常启动，数据目录可能已经用它初始化，保留不动。
+export const isUsableDatabasePassword = (value: string): boolean => value.length > 0 && !value.startsWith("-");
+
 const digest = (secrets: HindsightSecrets) => createHash("sha256").update(json(secrets)).digest("hex");
 const rerankHost = (reranker: HindsightReranker) => reranker.provider === "typesafe" ? serviceUrlHost(reranker.baseUrl) : null;
 const embeddingHost = (embedding: HindsightEmbedding | null) =>
@@ -538,9 +546,10 @@ export class MemoryController implements MemoryService {
     return { embedding: service.embedding, reranker: service.reranker };
   }
 
-  private generated(name: "hindsight.apiKey" | "hindsight.databasePassword", make: () => string): string {
+  // usable 不通过时（现存的值不合法）换成新生成的。
+  private generated(name: "hindsight.apiKey" | "hindsight.databasePassword", make: () => string, usable: (value: string) => boolean = () => true): string {
     const existing = this.secrets.get(name);
-    if (existing) return existing.value;
+    if (existing && usable(existing.value)) return existing.value;
     const value = make();
     this.secrets.set(name, { value, host: null });
     return value;
@@ -570,7 +579,7 @@ export class MemoryController implements MemoryService {
     return {
       // daemon 第一次初始化 Hindsight 时生成（2026-10-16 用户决定）。之后连接和启动都用它。
       apiKey: this.generated("hindsight.apiKey", () => randomUUID()),
-      databasePassword: this.generated("hindsight.databasePassword", () => randomBytes(24).toString("base64url")),
+      databasePassword: this.generated("hindsight.databasePassword", newDatabasePassword, isUsableDatabasePassword),
       ...(embeddingApiKey ? { embeddingApiKey } : {}),
       ...(decisionApiKey ? { decisionApiKey } : {}),
       ...(llmApiKey ? { llmApiKey } : {}),
