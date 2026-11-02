@@ -3,6 +3,8 @@ import {
   type BindingDto,
   type GatewayEvent,
   type HelloV2,
+  type MemorySettingsDto,
+  type MemorySwitch,
   type Overview,
   type TicketSummary,
 } from '@pi-lead-child/protocol';
@@ -330,6 +332,50 @@ describe('web companion loopback startup', () => {
     expect(storedCredentials(storage)).toMatchObject({ baseUrl: WORKING_ORIGIN, accessToken: 'fresh-test-token' });
     expect(gateway.sockets).toHaveLength(1);
     await expect(runtime.resolveApproval(5, 'approve')).resolves.toBeUndefined();
+    runtime.stop();
+  });
+
+  // 设置 → 记忆的切换卡（reranker 改用决策模型、数据发去外部）也是用户的决定：换到本机网页的凭证以后，同意能生效。
+  it('swaps a stored credential that cannot decide, so agreeing to a memory switch works', async () => {
+    const storage = new MemoryKeyValueStorage();
+    storage.values.set(CREDENTIAL_KEY, JSON.stringify({
+      baseUrl: WORKING_ORIGIN,
+      accessToken: 'admin-paired-test-token',
+      binding: adminPairedBinding,
+      lastSeq: 12,
+    }));
+    const credentials = createJsonCredentialStore(storage);
+    const applied: MemorySwitch = {
+      id: 'msw_rerank00001', summary: 'reranker 改用决策模型', reason: '每次召回会把查询和最多 30 条记忆片段发给 api.example.com',
+      needsConfirmation: true, dataFlows: [{ kind: 'rerank', host: 'api.example.com', maxCandidates: 30 }], parts: ['reranker'],
+      state: 'applied', createdAt: '2026-10-16T09:00:00.000Z',
+    };
+    const memory: MemorySettingsDto = {
+      embedding: {
+        mode: 'unset',
+        local: { model: 'acme/local-embedding', download: { model: 'acme/local-embedding', state: 'idle', bytes: 0, total: 0, error: null } },
+        remote: { baseUrl: null, model: null, dimensions: null, apiKeySet: false, apiKeyHost: null },
+      },
+      reranker: {
+        mode: 'decision', effective: 'decision',
+        local: { model: 'acme/local-reranker', download: { model: 'acme/local-reranker', state: 'idle', bytes: 0, total: 0, error: null } },
+        external: { host: 'api.example.com', maxCandidates: 30 },
+      },
+      service: { state: 'off', backend: 'hindsight', embedding: null, reranker: null, index: { notes: 0, indexed: 0 }, message: null },
+      pendingSwitch: null,
+    };
+    const gateway = loopbackGateway((pathname, init) => {
+      if (pathname !== '/v1/memory/switches/msw_rerank00001/confirm') return null;
+      return bearer(init) === 'Bearer fresh-test-token' ? json({ memory, switch: applied }) : missingDecisionScope();
+    });
+    const client = new ControlPlaneClient({ fetch: gateway.fetch, credentials, createWebSocket: gateway.createWebSocket });
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler });
+
+    await runtime.start({ loopbackEndpoint: webLoopbackEndpoint() });
+    gateway.sockets[0]!.hello(0);
+
+    await expect(runtime.confirmMemorySwitch('msw_rerank00001', true)).resolves.toMatchObject({ switch: { state: 'applied' } });
+    expect(gateway.count(`POST ${WORKING_ORIGIN}/v1/memory/switches/msw_rerank00001/confirm`)).toBe(1);
     runtime.stop();
   });
 
