@@ -740,28 +740,26 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let leadSilentSince: number | null = null;
   // 用户最后一次在看会话的时间（Jarvis 模式：Lead 据此判断现在推还是等他回来；审批据此算送到）。
   let lastAttendedAt: number | null = null;
-  // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数。epoch 见 leadWakeEpoch。
-  type LeadWakeRetry = { at: number; failures: number; epoch: number };
+  // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数。epoch 见 leadWakeEpoch；setup 见 WakeAfterFailure。
+  type LeadWakeRetry = { at: number; failures: number; epoch: number; setup: boolean };
   let leadWakeRetry: LeadWakeRetry | null = null;
   const leadWakeRetryBaseMs = Number(process.env.PLC_LEAD_WAKE_RETRY_MS ?? 15_000);
-  // 认证、配置这类失败（没有 key、key 错、模型名不对），又没有别的模型可换、也没有等着换回的模型时，退避最长 30 分钟
+  // 认证、配置这类失败（没有 key、key 错、模型名不对），又没有马上要换的模型时，退避最长 30 分钟
   // （以前最长 5 分钟，三天失败了几百轮）。不完全停：OAuth 在断网时、代理包着上游 403 的 503 也分成认证失败，它们会自己好。
   const leadSetupWakeCapMs = Number(process.env.PLC_LEAD_SETUP_WAKE_CAP_MS ?? 30 * 60_000);
-  // 最近一次失败的一轮之后怎样再叫醒 Lead（runTurnNow 的 catch 定）：normal 按平常的退避；setup 按上面的长退避；
-  // stale：这一轮开始以后模型设置改了，失败是旧设置的，不退避。
-  let lastFailureWake: "normal" | "setup" | "stale" = "normal";
-  // 最近一次失败是不是 setup：之后有一轮成功（模型能用了），长退避作废。
-  let setupFailing = false;
-  // 模型设置改了（服务商、key、分工、换模型）、拉不到目录的服务商回来了、setup 失败之后有一轮成功：加一。
+  // 一轮失败以后怎样再叫醒 Lead（runTurnNow 的 catch 定，随这一轮的结果交回）：normal 按平常的退避（最长 5 分钟）；
+  // setup 按上面的长退避，但不超过模型切换换回的时间；stale：这一轮开始以后模型设置改了，失败是旧设置的，不退避。
+  type WakeAfterFailure = { kind: "normal" | "setup" | "stale"; capMs: number };
+  const NORMAL_WAKE: WakeAfterFailure = { kind: "normal", capMs: 5 * 60_000 };
+  // 模型设置改了（服务商、key、分工、换模型）、正在用的服务商拉到了目录：加一。
   // 旧的 epoch 下排的退避作废；一轮开始时记下它，失败时不一样就是 stale。
   let leadWakeEpoch = 0;
-  function nextWakeRetry(previous: LeadWakeRetry | null): LeadWakeRetry | null {
-    if (lastFailureWake === "stale") return null;
+  function nextWakeRetry(previous: LeadWakeRetry | null, wake: WakeAfterFailure): LeadWakeRetry | null {
+    if (wake.kind === "stale") return null;
     const failures = (previous?.epoch === leadWakeEpoch ? previous.failures : 0) + 1;
-    const cap = lastFailureWake === "setup" ? leadSetupWakeCapMs : 5 * 60_000;
-    const delay = Math.min(leadWakeRetryBaseMs * 2 ** (failures - 1), cap);
-    log(`lead wake backoff (${lastFailureWake}): next try in ${Math.round(delay / 1000)} s`);
-    return { at: Date.now() + delay, failures, epoch: leadWakeEpoch };
+    const delay = Math.min(leadWakeRetryBaseMs * 2 ** (failures - 1), wake.capMs);
+    log(`lead wake backoff (${wake.kind}): next try in ${Math.round(delay / 1000)} s`);
+    return { at: Date.now() + delay, failures, epoch: leadWakeEpoch, setup: wake.kind === "setup" };
   }
   function backingOff(retry: LeadWakeRetry | null): boolean {
     return retry !== null && retry.epoch === leadWakeEpoch && retry.at > Date.now();
@@ -809,6 +807,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     deferred?: true;
     // 这一轮作为消息交给 Lead 的事件对应的 inbox 行（工单 04）。
     inboxIds?: number[];
+    // 失败时：怎样再叫醒 Lead（WakeAfterFailure）。
+    wake?: WakeAfterFailure;
   }
 
   interface ActiveChannelTurn {
@@ -3684,7 +3684,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     busy = true;
     publishLeadQueue();
     const turnEpoch = leadWakeEpoch;
-    lastFailureWake = "normal";
+    let wake = NORMAL_WAKE;
     // 新回合开始，上一回合遗留的插话锚（受理了但 lead 一直没再开口）作废——
     // 否则它会去接下一回合的水，把答非所问的文本挂到一条早已过去的消息下面。
     // 必须在下面两个等待之前清：等待期间 daemon 已经忙，用户发来的消息走插话，它的锚属于这一轮，要留着
@@ -3807,10 +3807,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (!emptyUserTurn) {
         modelFailover?.turnSucceeded();
         succeeded = true;
-        if (setupFailing) {
-          setupFailing = false;
-          leadWakeEpoch += 1;
-        }
+        // 模型能用了：认证失败排的长退避作废。
+        if (leadWakeRetry?.setup) leadWakeRetry = null;
+        if (digestRetry?.setup) digestRetry = null;
       }
     } catch (err: any) {
       // 系统回合失败（例如模型连不上）也要让在听的人看到：没开口的这时落成一轮，再收口为失败。
@@ -3842,16 +3841,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
       if (!interrupted && !networkFailure) {
         noteLeadModelFailure(error);
-        // 在备用模型上、或者有额度封禁：到点会换回第一个模型（syncLeadModel 只在一轮开始时换），按平常的退避。
-        const awaitingReturn = modelFailover
-          ? appliedLeadModel !== modelFailover.models[0] || modelFailover.blockedModels().length > 0
-          : false;
-        if (leadModelFailureNeedsUser(classifyLeadModelError(error)) && pendingModelSwitch === null && !awaitingReturn) {
-          lastFailureWake = "setup";
-          setupFailing = true;
+        // 下一轮要换的模型已经定了（pendingModelSwitch）：按平常的退避去试它。否则按长退避，
+        // 但不等过模型切换换回的时间（换回、额度到期只在一轮开始时生效）。
+        if (leadModelFailureNeedsUser(classifyLeadModelError(error)) && pendingModelSwitch === null) {
+          const returnAt = modelFailover?.returnAt() ?? null;
+          const untilReturn = returnAt === null ? leadSetupWakeCapMs : Math.max(0, returnAt - Date.now());
+          wake = { kind: "setup", capMs: Math.min(leadSetupWakeCapMs, untilReturn) };
         }
       }
-      if (turnEpoch !== leadWakeEpoch) lastFailureWake = "stale";
+      if (turnEpoch !== leadWakeEpoch) wake = { kind: "stale", capMs: 0 };
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn
@@ -3902,6 +3900,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         voiced: Boolean(systemEntry?.assistantText.trim()),
         systemTurnId: systemEntry?.turn.id ?? null,
         ...(offline ? { offline: true as const } : {}),
+        ...(succeeded ? {} : { wake }),
       };
       systemEntryThisTurn = null;
       pendingSystemReuseTurnId = null;
@@ -3927,7 +3926,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (digested) log(`digest: ${digested} event(s) digested`);
       if (deliveredInboxIds.length) outcome.inboxIds = deliveredInboxIds;
       if (carriedEvents && !offline && !interrupted) {
-        leadWakeRetry = succeeded ? null : nextWakeRetry(leadWakeRetry);
+        leadWakeRetry = succeeded ? null : nextWakeRetry(leadWakeRetry, wake);
       }
       busy = false;
       publishLeadQueue();
@@ -4972,7 +4971,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         leadHealth.patrolled();
         return;
       }
-      digestRetry = nextWakeRetry(digestRetry);
+      digestRetry = nextWakeRetry(digestRetry, outcome.wake ?? NORMAL_WAKE);
     });
   }
   const heartbeat = setNodeInterval(() => {

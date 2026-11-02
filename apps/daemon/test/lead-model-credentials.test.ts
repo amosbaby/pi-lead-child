@@ -171,16 +171,30 @@ describe("a credential failure while another model can still be used", () => {
     expect(backoffs(logs)).toEqual([expect.stringContaining("(normal)")]);
   }, 30_000);
 
-  // 审查 1a：主用限流换到备用，备用没有 key。没有别的模型可换，但到点要换回主用（只在一轮开始时换），
-  // 所以不能按长退避停着，照平常的退避再叫醒。
-  it("keeps the usual backoff on a fallback without a key while the first model waits to come back", async () => {
+  // 第二轮审阅 4：分工里的模型都没有 key 时，以前主用、备用来回换，每次都按 5 分钟的上限退避，失败一直不停。
+  // 现在下一轮没有要换的模型时，按长退避。
+  it("backs off long once no model in the chain has a key", async () => {
+    const { logs, withEvent } = await boot({ models: ["openai/gpt-test", "spare/model"], reply: () => "no-key" });
+    blocker();
+    await vi.waitFor(() => expect(withEvent().map((entry) => entry.model)).toEqual(["openai/gpt-test", "spare/model"]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(backoffs(logs).map((line) => line.slice(0, 26))).toEqual([
+      "lead wake backoff (normal)", "lead wake backoff (setup):",
+    ]), { timeout: 10_000 });
+  }, 30_000);
+});
+
+describe("a fallback without a key while the first model waits to come back", () => {
+  // 审查 1a：主用的额度封着、Lead 在备用上，备用没有 key。长退避不等过主用的封禁到期（换回只在一轮开始时做），
+  // 到期那一轮换回主用，事情交给它。
+  it("wakes Lead when the first model's block ends, and the first model takes the events", async () => {
+    db.prepare("INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))")
+      .run("lead.model_quota_blocked", JSON.stringify({ "openai/gpt-test": Date.now() + 1_500 }));
     const { logs, withEvent } = await boot({
       models: ["openai/gpt-test", "spare/model"],
-      reply: (model) => (model === "openai/gpt-test" ? { error: "429 Too Many Requests: rate_limit_error" } : "no-key"),
+      reply: (model) => (model === "spare/model" ? "no-key" : { say: "处理了。" }),
     });
     blocker();
-    await vi.waitFor(() => expect(withEvent().map((entry) => entry.model).slice(0, 2)).toEqual(["openai/gpt-test", "spare/model"]), { timeout: 10_000 });
-    await vi.waitFor(() => expect(withEvent().length).toBeGreaterThanOrEqual(3), { timeout: 10_000 });
-    expect(backoffs(logs).some((line) => line.includes("(setup)"))).toBe(false);
+    await vi.waitFor(() => expect(withEvent().map((entry) => entry.model)).toEqual(["spare/model", "openai/gpt-test"]), { timeout: 10_000 });
+    expect(backoffs(logs)).toEqual([expect.stringMatching(/^lead wake backoff \(setup\): next try in [0-2] s$/)]);
   }, 30_000);
 });
