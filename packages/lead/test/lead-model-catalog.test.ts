@@ -118,6 +118,28 @@ describe("the Lead model catalog", () => {
     expect(JSON.stringify(result)).not.toContain("sk-test");
   });
 
+  // 第二轮审阅：只重拉还缺目录的服务商。拉得到目录的不再拉、也不重新注册，一次抖动不会把它换成缺省的（128K、只看文字）。
+  it("re-registers only the providers it is asked to, leaving the others alone", async () => {
+    const registered: string[] = [];
+    const fetched: string[] = [];
+    const runtime = { registerProvider(name: string) { registered.push(name); } } as never;
+    const twoProviders = normalizeLeadModelConfig({
+      providers: {
+        vibeproxy: { baseUrl: "http://127.0.0.1:8317/v1", apiKey: { value: "test" }, discover: true },
+        spare: { baseUrl: "http://127.0.0.1:8318/v1", apiKey: { value: "test" }, discover: true },
+      },
+      models: ["vibeproxy/claude-sonnet-5", "spare/claude-sonnet-5"],
+    });
+    const failing = async (input: string | URL | Request) => {
+      fetched.push(new URL(String(input)).port);
+      throw new Error("fetch failed");
+    };
+    const result = await registerLeadProviders(runtime, twoProviders, {}, failing as typeof fetch, new Set(["spare"]));
+    expect(registered).toEqual(["spare"]);
+    expect(fetched.every((port) => port === "8318")).toBe(true);
+    expect(result.unavailable.map((entry) => entry.provider)).toEqual(["spare"]);
+  });
+
   // 2026-10-26：as4/claude-sonnet-5-5 按 128K 注册（目录说 1M）。压缩以后系统提示词、工具定义和摘要就有 122K，
   // pi 把回答的长度压到 1 个 token，回答以 stopReason length 结束，压缩也压不出空间。用户决定按 500K 算。
   it("registers the catalog's context window up to 500K, so Lead compacts near 500K and keeps room to answer", async () => {

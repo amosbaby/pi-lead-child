@@ -328,16 +328,19 @@ export async function leadModelCatalog(
 }
 
 // unavailable：分工里在用、目录却拉不到的服务商和原因（服务商名字和错误原文，不带 key）。
+// only：只重新注册这几个服务商（daemon 按退避重拉还缺目录的）。别的不动：拉得到目录的注册不会因为一次抖动被换成缺省的。
 export async function registerLeadProviders(
   runtime: ModelRuntime,
   config: LeadModelConfig,
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
+  only?: ReadonlySet<string>,
 ): Promise<{ notes: string[]; unavailable: Array<{ provider: string; reason: string }> }> {
   const notes: string[] = [];
   const unavailable: Array<{ provider: string; reason: string }> = [];
   const chosenProviders = new Set(config.models.map((spec) => parseModelName(spec).provider));
   for (const [name, provider] of Object.entries(config.providers)) {
+    if (only && !only.has(name)) continue;
     let catalog: Awaited<ReturnType<typeof providerCatalog>>;
     try {
       catalog = await providerCatalog(name, provider, env, fetchImpl);

@@ -54,7 +54,7 @@ describe("a chosen provider whose catalog fails at start", () => {
     expect(lead.modelName).toBe("good/m");
     expect(lead.modelUnavailable).toBeNull();
     // 备用的服务商也要再拉：daemon 按 providersUnavailable 退避重拉。
-    expect(lead.providersUnavailable).toEqual([expect.stringMatching(/^broken: model catalog failed/)]);
+    expect(lead.providersUnavailable).toEqual(["broken"]);
   });
 
   it("marks Lead unavailable, naming the provider, when the model in use is on it", async () => {
@@ -63,7 +63,9 @@ describe("a chosen provider whose catalog fails at start", () => {
       expect(lead.modelName).toBe("broken/x");
       expect(lead.modelUnavailable).toMatch(/^broken: model catalog failed .*401/);
       // 重新注册时报告还拉不到的；拉到以后是空的（daemon 据此停止重拉）。
-      expect(await lead.refreshProviders()).toEqual([expect.stringMatching(/^broken: /)]);
+      expect(await lead.refreshProviders()).toEqual(["broken"]);
+      // 只重拉还缺目录的：good 不在里面，不会被报告。
+      expect(await lead.refreshProviders(["broken"])).toEqual(["broken"]);
       fixed = true;
       expect(await lead.refreshProviders()).toEqual([]);
     } finally {
