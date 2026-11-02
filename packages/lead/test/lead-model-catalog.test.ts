@@ -113,7 +113,7 @@ describe("the Lead model catalog", () => {
     });
     const result = await registerLeadProviders(runtime, twoProviders, {}, denied as typeof fetch);
     expect(registered).toEqual([{ name: "vibeproxy", models: ["claude-sonnet-5"] }]);
-    expect(result.unavailable).toEqual([expect.stringMatching(/^vibeproxy: model catalog failed .*401 Unauthorized/)]);
+    expect(result.unavailable).toEqual([{ provider: "vibeproxy", reason: expect.stringMatching(/^vibeproxy: model catalog failed .*401 Unauthorized/) }]);
     expect(result.notes).toContainEqual(expect.stringMatching(/^spare: skipped/));
     expect(JSON.stringify(result)).not.toContain("sk-test");
   });

@@ -413,7 +413,7 @@ export async function leadModelCatalog(
   return { models, notes, providers };
 }
 
-// unavailable：分工里在用、目录却拉不到的服务商，一个一行原因（服务商名字和错误原文，不带 key）。daemon 把它记成 Lead 的模型失败。
+// unavailable：分工里在用、目录却拉不到的服务商和原因（服务商名字和错误原文，不带 key）。
 export async function registerLeadProviders(
   runtime: ModelRuntime,
   config: LeadModelConfig,
@@ -421,9 +421,9 @@ export async function registerLeadProviders(
   fetchImpl: typeof fetch = fetch,
   // 最大输出。缺省是 Lead 用的 16384；子 agent 另起的 ModelRuntime 要更大的（lookup/session.ts）。目录说的更小时用目录的。
   options: { maxOutputTokens?: number } = {},
-): Promise<{ notes: string[]; unavailable: string[] }> {
+): Promise<{ notes: string[]; unavailable: Array<{ provider: string; reason: string }> }> {
   const notes: string[] = [];
-  const unavailable: string[] = [];
+  const unavailable: Array<{ provider: string; reason: string }> = [];
   const chosenProviders = new Set(config.models.map((spec) => parseModelName(spec).provider));
   for (const [name, provider] of Object.entries(config.providers)) {
     let catalog: Awaited<ReturnType<typeof providerCatalog>>;
@@ -439,7 +439,7 @@ export async function registerLeadProviders(
       // Lead 照常起来，模型调用失败时按降级显示，原因交给 daemon。
       const reason = `${name}: model catalog failed (${String(error)})`;
       notes.push(reason);
-      unavailable.push(reason);
+      unavailable.push({ provider: name, reason });
       catalog = { models: [], note: null };
     }
     if (catalog.note) notes.push(catalog.note);
