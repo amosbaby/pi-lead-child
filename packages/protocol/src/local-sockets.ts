@@ -143,6 +143,7 @@ export type SupervisorPhase =
   | "running"
   | "stopped"
   | "waiting_for_drain"
+  | "building"
   | "backing_up"
   | "restarting"
   | "verifying"
@@ -170,7 +171,11 @@ export interface MaintenanceRequest {
   // 这次维护要不要备份数据库。旧版本 supervisor 的记录里没有这一项。
   backup?: boolean;
   error: string | null;
+  // 停机前失败的类别。daemon 叫醒 Lead 时只写它，不写 error 里的构建输出（可能引用源码）。
+  failureKind?: MaintenanceFailureKind;
 }
+
+export type MaintenanceFailureKind = "build_failed" | "build_mismatch" | "backup_failed" | "deploy_refused";
 
 /** supervisor 支持重启前备份（request_maintenance 的 backup）。旧版本的 status 里没有它。 */
 export const SUPERVISOR_FEATURE_MAINTENANCE_BACKUP = "maintenance_backup";

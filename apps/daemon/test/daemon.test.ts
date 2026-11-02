@@ -21,7 +21,8 @@ import {
   createAgentToolHandlers, createDispatcher, effectiveRunPurpose, liveChildren, scheduleConversationWorkspaceCheck,
   setWorkspaceTreeHashForTesting,
 } from "@pi-lead-child/engine";
-import { addInbox, listInbox } from "@pi-lead-child/store";
+import { addInbox, listInbox, markInbox } from "@pi-lead-child/store";
+import { setTimeout as delay } from "node:timers/promises";
 import { appendAssistantDelta, completeTurn, createTurn } from "@pi-lead-child/store";
 import { listNotifications } from "@pi-lead-child/store";
 import { repairMissingBlockerAlerts } from "@pi-lead-child/store";
@@ -1828,14 +1829,15 @@ describe("daemon 插话回答的归属", () => {
   });
 
   // 审查 2026-11-02：维护请求被接受以后才在停机前失败（例如从 HEAD 重新构建失败），请求方早就拿到了「已接受」。
-  // supervisor 只发维护的 id；daemon 回头向 supervisor 核对这次维护确实失败了，才叫醒 Lead，原因用 supervisor 记的。
+  // supervisor 只发维护的 id；daemon 回头向 supervisor 核对这次维护确实失败了，才叫醒 Lead。
+  // 二审：inbox 只写失败的类别，不写构建输出（可能引用源码）；同一次维护只叫醒一次。
   it("维护在停机前失败时，按 supervisor 记下的原因叫醒 Lead；id 对不上的通知不算", async () => {
     const supervisor = createServer((socket) => {
       attachJsonlReader(socket, (line) => {
         if (!line.trim()) return;
         const command = JSON.parse(line) as { type: string; id?: string };
         socket.write(`${JSON.stringify({ type: "response", id: command.id, success: true, data: command.type !== "status" ? {} : {
-          supervisor: { maintenance: { id: "m-1", action: "restart", state: "failed",
+          supervisor: { maintenance: { id: "m-1", action: "restart", state: "failed", failureKind: "build_failed",
             error: "deploy refused:\n- 停机前从 HEAD 重新构建失败（Could not resolve ./missing.js）。" } },
         } })}\n`);
       });
@@ -1850,9 +1852,14 @@ describe("daemon 插话回答的归属", () => {
       sendCmd(socket, { type: "maintenance_failed", id: "n-1", maintenanceId: "m-1" });
       await vi.waitFor(() => {
         expect(notices()).toHaveLength(1);
-        expect(notices()[0].summary).toContain("Could not resolve");
+        expect(notices()[0].summary).toContain("构建");
+        expect(notices()[0].summary).not.toContain("Could not resolve");
         expect(JSON.parse(notices()[0].payload)).toMatchObject({ wakeLead: true, needsUser: true });
       }, { timeout: 5_000 });
+      markInbox(db, [notices()[0].id], "consumed");
+      sendCmd(socket, { type: "maintenance_failed", id: "n-2", maintenanceId: "m-1" });
+      await delay(1_000);
+      expect(notices()).toHaveLength(1);
     } finally {
       socket.destroy();
       await daemon.close();

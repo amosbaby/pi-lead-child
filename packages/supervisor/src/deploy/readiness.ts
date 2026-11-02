@@ -8,12 +8,13 @@
 //     崩溃后的自动拉起不拦截，只记警告（supervisor 的 spawnDaemon）。
 //   · 主 checkout 干净，dist 却没有构建记录、构建时有改动，或者构建的 commit 是 HEAD 的祖先、HEAD 已经往前走了
 //     （2026-11-02：修复合并后重启，跑的还是旧 dist）：维护在停机之前先从 HEAD 构建（buildDaemonDist），构建失败就不停机。
+//     构建到暂存目录 dist/.next，备份成功、停机之前才换进 dist（promoteStagedBuild）。
 //     dist 来自别的分支、commit 不在仓库里、git 说不清的，照旧拒绝，不自动构建。
 // 「没提交的改动」只看会进构建的代码：packages/、apps/ 下的改动和没被忽略的新文件，以及仓库根目录下的文件
 // （package.json、package-lock.json、tsconfig.json 这类）。不算的：docs/、artifacts/、.scratch/、.claude/（它们不进 dist，
 // 而且有的测试会改写 artifacts/ 里的证据文件），以及测试文件（test/ 目录下的、*.test.* 和 *.spec.*）。
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const BUILD_INFO_FILE = "build-info.json";
@@ -122,9 +123,30 @@ export function writeBuildProvenance(root: string, distDir: string, startCommit?
     provenance.dirtyFiles = [...provenance.dirtyFiles, `HEAD 在构建期间从 ${startCommit} 变成了 ${provenance.commit}`];
   }
   const path = join(distDir, BUILD_INFO_FILE);
-  writeFileSync(`${path}.tmp`, `${JSON.stringify(provenance, null, 2)}\n`);
-  renameSync(`${path}.tmp`, path);
+  // 临时文件名带 pid：两次构建同时跑（例如手动 npm run build）时不会互相覆盖。
+  writeFileSync(`${path}.${process.pid}.tmp`, `${JSON.stringify(provenance, null, 2)}\n`);
+  renameSync(`${path}.${process.pid}.tmp`, path);
   return provenance;
+}
+
+// 维护时的暂存构建（2026-11-02 二审）：先构建到这里，备份成功、停机之前才换进 dist。dist/ 被 git 忽略，它也是。
+export function stagingDistDir(distDir: string): string {
+  return join(distDir, ".next");
+}
+
+export function discardStagedBuild(distDir: string): void {
+  rmSync(stagingDistDir(distDir), { recursive: true, force: true });
+}
+
+/** 把暂存的构建换进 dist：先删旧的构建记录，逐个改名（同一个文件系统，每个都是原子的），构建记录最后。dist/web 不动。 */
+export function promoteStagedBuild(distDir: string): void {
+  const staging = stagingDistDir(distDir);
+  clearBuildProvenance(distDir);
+  for (const name of readdirSync(staging)) {
+    if (name !== BUILD_INFO_FILE) renameSync(join(staging, name), join(distDir, name));
+  }
+  renameSync(join(staging, BUILD_INFO_FILE), join(distDir, BUILD_INFO_FILE));
+  discardStagedBuild(distDir);
 }
 
 export function readBuildProvenance(distDir: string): BuildProvenance | null {
@@ -202,36 +224,61 @@ const BUILD_OUTPUT_KEPT = 4_096;
 // 构建只拿这几个环境变量：supervisor 的环境里有从钥匙串和 config.json 读进来的密钥（main.ts），构建用不着。
 const BUILD_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "USER", "LANG"];
 
+export interface BuildDistOptions {
+  // daemon 的产物写到哪里。缺省是 dist（scripts/build.ts 的 distDir()）；维护时是暂存目录。
+  outdir?: string;
+  // supervisor 停下时取消构建。
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  killGraceMs?: number;
+}
+
 /**
  * 从 root 当前的 checkout 构建 plc 的 cli 和 daemon 的 dist（等于 npm run build，daemon 最后，它写构建记录）。
  * 失败时 reject，带上输出的最后几行。每一步到时先 SIGTERM，killGraceMs 后 SIGKILL，无论如何都会结束。
  */
-export async function buildDaemonDist(root: string, timeoutMs = BUILD_TIMEOUT_MS, killGraceMs = BUILD_KILL_GRACE_MS): Promise<void> {
-  for (const app of ["cli", "daemon"]) await runBuildScript(join(root, "apps", app), app, timeoutMs, killGraceMs);
+export async function buildDaemonDist(root: string, options: BuildDistOptions = {}): Promise<void> {
+  for (const app of ["cli", "daemon"]) {
+    if (options.signal?.aborted) throw new Error(`apps/${app} 构建被取消`);
+    const args = app === "daemon" && options.outdir ? ["--outdir", options.outdir] : [];
+    await runBuildScript(join(root, "apps", app), app, args, options);
+  }
 }
 
-function runBuildScript(cwd: string, app: string, timeoutMs: number, killGraceMs: number): Promise<void> {
+function runBuildScript(cwd: string, app: string, args: string[], options: BuildDistOptions): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? BUILD_TIMEOUT_MS;
+  const killGraceMs = options.killGraceMs ?? BUILD_KILL_GRACE_MS;
   return new Promise((resolve, reject) => {
     const env = Object.fromEntries(BUILD_ENV_KEYS.flatMap((key) => (process.env[key] === undefined ? [] : [[key, process.env[key]]])));
     // 不用 tsx 命令行：它要开一个 IPC socket，沙箱里 listen 会 EPERM。
-    const child = spawn(process.execPath, ["--import", "tsx", "scripts/build.ts"], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--import", "tsx", "scripts/build.ts", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const keep = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-BUILD_OUTPUT_KEPT); };
     child.stdout.on("data", keep);
     child.stderr.on("data", keep);
     let settled = false;
     const timers: ReturnType<typeof setTimeout>[] = [];
+    // 计时器 unref：supervisor 停下时不用等它们。
+    const later = (ms: number, run: () => void) => { const timer = setTimeout(run, ms); timer.unref(); timers.push(timer); };
     const settle = (error?: Error) => {
       if (settled) return;
       settled = true;
+      options.signal?.removeEventListener("abort", onAbort);
       for (const timer of timers) clearTimeout(timer);
       if (error) reject(error);
       else resolve();
     };
-    timers.push(setTimeout(() => child.kill("SIGTERM"), timeoutMs));
-    timers.push(setTimeout(() => child.kill("SIGKILL"), timeoutMs + killGraceMs));
+    // 取消：马上结束，子进程先 SIGTERM，不理的话 killGraceMs 后 SIGKILL。
+    const onAbort = () => {
+      settle(new Error(`apps/${app} 构建被取消`));
+      child.kill("SIGTERM");
+      setTimeout(() => child.kill("SIGKILL"), killGraceMs).unref();
+    };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
+    later(timeoutMs, () => child.kill("SIGTERM"));
+    later(timeoutMs + killGraceMs, () => child.kill("SIGKILL"));
     // SIGKILL 以后 close 还没来（例如别的进程还占着输出管道）：也结束，不让维护一直卡着。
-    timers.push(setTimeout(() => settle(new Error(`apps/${app} 构建超过时限 ${timeoutMs}ms，SIGKILL 以后还没结束`)), timeoutMs + 2 * killGraceMs));
+    later(timeoutMs + 2 * killGraceMs, () => settle(new Error(`apps/${app} 构建超过时限 ${timeoutMs}ms，SIGKILL 以后还没结束`)));
     child.once("error", (error) => settle(error));
     child.once("close", (code, signal) => {
       if (code === 0) return settle();

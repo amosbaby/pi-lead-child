@@ -185,7 +185,7 @@ import { repairStoppedRunCrashCheckpoints } from "@pi-lead-child/engine";
 import { repairOutcomeSnapshots } from "@pi-lead-child/engine";
 import { reregisterFinishedRuns } from "@pi-lead-child/engine";
 import { claimInstanceLock, daemonLockPath, readKeychainSecret, supervisorRequest } from "@pi-lead-child/supervisor";
-import type { InstanceLock, MaintenanceRequest, SupervisorStatus } from "@pi-lead-child/supervisor";
+import type { InstanceLock, MaintenanceFailureKind, MaintenanceRequest, SupervisorStatus } from "@pi-lead-child/supervisor";
 import {
   ConnectionError,
   ConnectionHub,
@@ -5261,15 +5261,27 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
 
   // 一次已接受的维护在停机前失败了（supervisor 发 maintenance_failed）。请求方（Lead、换模型后的重启）只拿到过「已接受」：
-  // 向 supervisor 核对确实是这次维护失败了，用 supervisor 记的原因写一条叫醒 Lead 的 inbox，由它转告用户。
+  // 向 supervisor 核对确实是这次维护失败了，写一条叫醒 Lead 的 inbox，由它转告用户。
+  // inbox 只写失败的类别：error 里有构建输出（可能引用源码），不当成系统事实给 Lead（二审 2026-11-02）。
+  // 同一次维护只报一次：能连上 plc.sock 的进程反复发同一个 id，也只叫醒 Lead 一次。
+  const reportedMaintenance = new Set<string>();
+  const MAINTENANCE_FAILURE_TEXT: Record<MaintenanceFailureKind, string> = {
+    build_failed: "从 HEAD 重新构建 dist 失败",
+    build_mismatch: "构建出来的不是请求时的 HEAD（构建期间 HEAD 变了）",
+    backup_failed: "停机前备份数据库失败",
+    deploy_refused: "停机前复查部署闸门没有通过",
+  };
   async function reportMaintenanceFailure(maintenanceId: string): Promise<void> {
     try {
       const maintenance = (await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: opts.dataDir })).supervisor?.maintenance;
       if (!maintenance || maintenance.id !== maintenanceId || maintenance.state !== "failed" || closing) return;
+      if (reportedMaintenance.has(maintenance.id)) return;
+      reportedMaintenance.add(maintenance.id);
+      const what = maintenance.failureKind ? MAINTENANCE_FAILURE_TEXT[maintenance.failureKind] : "停机前的一步失败了";
       addInbox(db, {
         dedupScope: `maintenance-failed:${maintenance.id}`, severity: "attention", source: "structural",
-        summary: `${maintenance.action === "upgrade" ? "升级" : "重启"} daemon 的维护在停机前失败了，daemon 没有重启，还在跑原来的构建：`
-          + (maintenance.error ?? "没有记录原因"),
+        summary: `${maintenance.action === "upgrade" ? "升级" : "重启"} daemon 的维护没有完成：${what}。daemon 没有重启，还在跑原来的构建。`
+          + "详细原因在 supervisor 的日志里，get_runtime_health 里这次维护的 error 也有。",
         payload: { inboxKind: "maintenance_failed", wakeLead: true, needsUser: true },
       });
     } catch (error) {

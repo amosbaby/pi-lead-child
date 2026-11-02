@@ -243,7 +243,7 @@ describe("the deploy gate at the maintenance entry", () => {
   async function start(
     dir: string, deployment: { root: string; distDir: string },
     backupDatabase?: (source: string, destination: string) => Promise<void>,
-    buildDist?: (root: string) => Promise<void>,
+    buildDist?: (root: string, outdir: string, signal: AbortSignal) => Promise<void>,
   ) {
     const dbFile = join(dir, "plc.db");
     openDb(dbFile).close();
@@ -385,9 +385,9 @@ describe("the deploy gate at the maintenance entry", () => {
     const dir = tempDir("plc-supervisor-stale-dist-");
     const deployment = deployCheckout(dir);
     const builds: string[] = [];
-    const pid = await start(dir, deployment, undefined, async (root) => {
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
       builds.push(root);
-      writeBuildProvenance(root, deployment.distDir);
+      writeBuildProvenance(root, outdir);
     });
     writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 7;\n");
     deployment.git("commit", "-qam", "the fix");
@@ -423,10 +423,10 @@ describe("the deploy gate at the maintenance entry", () => {
     const dir = tempDir("plc-supervisor-build-then-wait-");
     const deployment = deployCheckout(dir);
     const builds: string[] = [];
-    const pid = await start(dir, deployment, undefined, async (root) => {
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
       builds.push(root);
       writeFileSync(join(dir, "fake-lead-busy"), "1\n");
-      writeBuildProvenance(root, deployment.distDir);
+      writeBuildProvenance(root, outdir);
     });
     writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 11;\n");
     deployment.git("commit", "-qam", "the fix");
@@ -443,10 +443,10 @@ describe("the deploy gate at the maintenance entry", () => {
   it("does not restart onto a build of a different commit than the HEAD it set out to build", async () => {
     const dir = tempDir("plc-supervisor-build-head-moved-");
     const deployment = deployCheckout(dir);
-    const pid = await start(dir, deployment, undefined, async (root) => {
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
       writeFileSync(join(root, "packages", "code.ts"), "export const x = 13;\n");
       deployment.git("commit", "-qam", "during the build");
-      writeBuildProvenance(root, deployment.distDir);
+      writeBuildProvenance(root, outdir);
     });
     writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 12;\n");
     deployment.git("commit", "-qam", "the fix");
@@ -470,11 +470,94 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(failed.supervisor.maintenance?.error).toContain("deploy refused");
     expect(failed.supervisor.maintenance?.error).toContain("Could not resolve");
     expect(failed.supervisor.maintenance?.backupPath).toBeNull();
+    expect(failed.supervisor.maintenance?.failureKind).toBe("build_failed");
     expect(Number(failed.daemon?.pid)).toBe(pid);
     expect(failed.supervisor.phase).toBe("running");
     // 审查 2026-11-02：请求方早就拿到了「已接受」，失败要另外告诉 daemon，由它叫醒 Lead。
     await vi.waitFor(() => expect(readFileSync(join(dir, "fake-commands.log"), "utf8")).toContain("maintenance_failed"));
   }, 30_000);
+
+  // 二审 2026-11-02：构建完就换进 dist 的话，之后备份失败，旧 daemon 照跑，dist 却已经是新的；daemon 一崩溃就从新 dist
+  // 拉起，迁移在没有备份的情况下执行。现在构建到暂存目录，备份成功、停机之前才换进 dist。
+  it("keeps the new build out of dist until the backup succeeded", async () => {
+    const dir = tempDir("plc-supervisor-staged-build-");
+    const deployment = deployCheckout(dir);
+    const base = deployment.git("rev-parse", "HEAD");
+    mkdirSync(join(deployment.distDir, "web"));
+    writeFileSync(join(deployment.distDir, "web", "index.html"), "web\n");
+    const outdirs: string[] = [];
+    const pid = await start(dir, deployment, async () => { throw new Error("disk full"); }, async (root, outdir) => {
+      outdirs.push(outdir);
+      writeFileSync(join(outdir, "coordinatord.mjs"), "// new\n");
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 14;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.error).toContain("database backup failed");
+    expect(outdirs).toHaveLength(1);
+    expect(outdirs[0]).not.toBe(deployment.distDir);
+    expect(existsSync(outdirs[0])).toBe(false);
+    expect(existsSync(join(deployment.distDir, "coordinatord.mjs"))).toBe(false);
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(base);
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+  }, 45_000);
+
+  it("swaps the staged build into dist after the backup, and leaves dist/web alone", async () => {
+    const dir = tempDir("plc-supervisor-staged-swap-");
+    const deployment = deployCheckout(dir);
+    mkdirSync(join(deployment.distDir, "web"));
+    writeFileSync(join(deployment.distDir, "web", "index.html"), "web\n");
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
+      writeFileSync(join(outdir, "coordinatord.mjs"), "// new\n");
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 15;\n");
+    deployment.git("commit", "-qam", "the fix");
+    const head = deployment.git("rev-parse", "HEAD");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(readFileSync(join(deployment.distDir, "coordinatord.mjs"), "utf8")).toBe("// new\n");
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(head);
+    expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("web\n");
+  }, 45_000);
+
+  // 二审 2026-11-02：构建期间 status 说「backing_up」，Lead 就告诉用户在备份。
+  it("says building while it builds", async () => {
+    const dir = tempDir("plc-supervisor-building-phase-");
+    const deployment = deployCheckout(dir);
+    let release!: () => void;
+    const gate = new Promise<void>((done) => { release = done; });
+    await start(dir, deployment, undefined, async (root, outdir) => {
+      await gate;
+      writeBuildProvenance(root, outdir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 16;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    await waitStatus(dir, (status) => status.supervisor.phase === "building");
+    release();
+    await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded");
+  }, 45_000);
+
+  // 二审 2026-11-02：supervisor 停下时还在跑的构建要一起停，不能留着它、也不能让 close 等它。
+  it("cancels a running build when the supervisor closes", async () => {
+    const dir = tempDir("plc-supervisor-build-cancel-");
+    const deployment = deployCheckout(dir);
+    let seen: AbortSignal | null = null;
+    await start(dir, deployment, undefined, (_root, _outdir, signal) => {
+      seen = signal;
+      return new Promise<void>(() => {});
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 17;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    await vi.waitFor(() => expect(seen).not.toBeNull(), { timeout: 15_000 });
+    await handle!.close();
+    handle = null;
+    expect(seen!.aborted).toBe(true);
+  }, 45_000);
 
   it("keeps only the newest restart backups and leaves the others alone", () => {
     const dir = join(tempDir("plc-supervisor-prune-"), "backups");

@@ -257,7 +257,23 @@ describe("building dist for maintenance", () => {
     const root = fakeRoot({ daemon: `process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);` });
     const started = Date.now();
     // 时限 3 秒：假脚本早就装好了 SIGTERM 处理。
-    await expect(buildDaemonDist(root, 3_000, 500)).rejects.toThrow(/SIGKILL|时限/);
+    await expect(buildDaemonDist(root, { timeoutMs: 3_000, killGraceMs: 500 })).rejects.toThrow(/SIGKILL|时限/);
     expect(Date.now() - started).toBeLessThan(15_000);
+  }, 30_000);
+
+  // 二审 2026-11-02：维护时构建到暂存目录，备份成功以后才换进 dist。
+  it("builds the daemon into the given outdir", async () => {
+    const root = fakeRoot({ daemon: `import { writeFileSync } from "node:fs"; writeFileSync("../../argv.json", JSON.stringify(process.argv.slice(2)));` });
+    await buildDaemonDist(root, { outdir: "/tmp/plc-staged-example" });
+    expect(JSON.parse(readFileSync(join(root, "argv.json"), "utf8"))).toEqual(["--outdir", "/tmp/plc-staged-example"]);
+  }, 60_000);
+
+  it("stops at once when it is cancelled", async () => {
+    const root = fakeRoot({ daemon: `process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);` });
+    const abort = new AbortController();
+    setTimeout(() => abort.abort(), 1_500);
+    const started = Date.now();
+    await expect(buildDaemonDist(root, { signal: abort.signal, killGraceMs: 500 })).rejects.toThrow("取消");
+    expect(Date.now() - started).toBeLessThan(10_000);
   }, 30_000);
 });

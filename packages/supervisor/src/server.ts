@@ -14,11 +14,14 @@ import {
   LEAD_DRAIN_TIMEOUT_MS, SUPERVISOR_FEATURE_DEPLOY_GATE, SUPERVISOR_FEATURE_MAINTENANCE_BACKUP, type DaemonDrainResult,
   redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
-import { buildDaemonDist, deployReadiness, readBuildProvenance, type DeployReadiness } from "./deploy/readiness.js";
+import {
+  buildDaemonDist, deployReadiness, discardStagedBuild, promoteStagedBuild, readBuildProvenance, stagingDistDir, type DeployReadiness,
+} from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
 import { DEFAULT_DAEMON_READY_TIMEOUT_MS } from "./daemon-ready-timeout.js";
 import { findRuntimeExecutable, runtimeSearchPath } from "@pi-lead-child/runtime";
 import type {
+  MaintenanceFailureKind,
   MaintenanceRequest,
   SupervisorCommand,
   SupervisorPersistentState,
@@ -52,8 +55,8 @@ export interface SupervisorOptions {
   deployment?: { root: string; distDir: string } | null;
   // 维护前的数据库备份（缺省是 deploy/backup.ts 的 backupSqlite，有时限）。测试用它模拟一次很慢的备份。
   backupDatabase?: (source: string, destination: string) => Promise<void>;
-  // 维护前从 HEAD 构建 dist（缺省是 deploy/readiness.ts 的 buildDaemonDist）。测试用它代替真的构建。
-  buildDist?: (root: string) => Promise<void>;
+  // 维护前从 HEAD 构建 dist 到 outdir（暂存目录；缺省是 deploy/readiness.ts 的 buildDaemonDist）。测试用它代替真的构建。
+  buildDist?: (root: string, outdir: string, signal: AbortSignal) => Promise<void>;
 }
 
 export class DeployRefusedError extends Error {
@@ -503,11 +506,20 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     return readiness.ready ? [] : readiness.reasons;
   };
 
-  // 停机之前的那几步失败时：daemon 照常在跑，这次维护记成失败，不拉起任何东西。
-  const refuseBeforeStop = (request: MaintenanceRequest, error: string): void => {
+  // 从 HEAD 构建好、还没换进 dist 的暂存构建（deploy/readiness.ts 的 stagingDistDir）。
+  let stagedBuild = false;
+  // 正在跑的构建。supervisor 停下时取消它。
+  let buildAbort: AbortController | null = null;
+
+  // 停机之前的那几步失败时：daemon 照常在跑，这次维护记成失败，不拉起任何东西。暂存的构建丢掉，dist 不动。
+  // kind 是给 Lead 看的类别（daemon 的 inbox 只写它，不写 error 里的构建输出）。
+  const refuseBeforeStop = (request: MaintenanceRequest, error: string, kind: MaintenanceFailureKind): void => {
+    if (opts.deployment) discardStagedBuild(opts.deployment.distDir);
+    stagedBuild = false;
     request.state = "failed";
     request.completedAt = new Date().toISOString();
     request.error = error;
+    request.failureKind = kind;
     state.phase = "running";
     persist();
     log(`maintenance ${request.id} refused before the stop: ${error}`);
@@ -524,40 +536,53 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     state.phase = request.backup ? "backing_up" : "restarting";
     persist();
     try {
-      // dist 落后于干净的 HEAD（2026-11-02：修复合并后重启，跑的还是旧 dist）：停机之前先从 HEAD 构建。
-      // 构建失败、或者构建出来的不是这个 HEAD，就不停机，daemon 照旧跑原来的构建，原因记在这次维护上。
-      const before = opts.deployment ? deployReadiness(opts.deployment.root, opts.deployment.distDir) : null;
-      if (opts.deployment && before?.rebuild) {
-        log(`maintenance ${request.id}: building dist from ${before.head} (dist was built from ${before.build?.commit ?? "unknown"})`);
-        let failure: string | null = null;
-        try {
-          await (opts.buildDist ?? buildDaemonDist)(opts.deployment.root);
-        } catch (error: any) {
-          failure = `从 HEAD 重新构建失败（${redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env))}）`;
-        }
-        readinessCache = null;
-        const built = failure ? null : readBuildProvenance(opts.deployment.distDir);
-        if (!failure && (!built || built.dirty || built.commit !== before.head)) {
-          failure = `构建出来的不是 HEAD ${before.head}（${built ? `是 ${built.commit}${built.dirty ? "，有改动" : ""}` : "没有构建记录"}），构建期间 HEAD 可能变了`;
-        }
-        if (failure) {
-          refuseBeforeStop(request, new DeployRefusedError([
-            `dist 不是从 HEAD ${before.head} 构建的，停机前${failure}。daemon 没有停，还在跑原来的构建。`
-            + `在主 checkout 里运行 npm run build 可以看完整输出。`,
-          ]).message);
+      // 部署闸门。等排空的这段时间里 checkout 可能变了：停机之前再查一次。有暂存的构建时查它。
+      if (opts.deployment) {
+        const { root, distDir } = opts.deployment;
+        const readiness = deployReadiness(root, stagedBuild ? stagingDistDir(distDir) : distDir);
+        // dist 落后于干净的 HEAD（2026-11-02：修复合并后重启，跑的还是旧 dist）：从 HEAD 构建到暂存目录。
+        // 备份成功、停机之前才换进 dist（二审：先换的话，备份失败时 daemon 一崩溃就从新 dist 拉起，迁移在没有备份时执行）。
+        if (readiness.rebuild) {
+          state.phase = "building";
+          persist();
+          log(`maintenance ${request.id}: building dist from ${readiness.head} (dist was built from ${readiness.build?.commit ?? "unknown"})`);
+          const staging = stagingDistDir(distDir);
+          discardStagedBuild(distDir);
+          stagedBuild = false;
+          mkdirSync(staging, { recursive: true });
+          let failure: string | null = null;
+          let kind: MaintenanceFailureKind = "build_failed";
+          buildAbort = new AbortController();
+          try {
+            await (opts.buildDist ?? ((r, outdir, signal) => buildDaemonDist(r, { outdir, signal })))(root, staging, buildAbort.signal);
+          } catch (error: any) {
+            failure = `从 HEAD 重新构建失败（${redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env))}）`;
+          } finally {
+            buildAbort = null;
+          }
+          const built = failure ? null : readBuildProvenance(staging);
+          if (!failure && (!built || built.dirty || built.commit !== readiness.head)) {
+            failure = `构建出来的不是 HEAD ${readiness.head}（${built ? `是 ${built.commit}${built.dirty ? "，有改动" : ""}` : "没有构建记录"}），构建期间 HEAD 可能变了`;
+            kind = "build_mismatch";
+          }
+          if (failure) {
+            refuseBeforeStop(request, new DeployRefusedError([
+              `dist 不是从 HEAD ${readiness.head} 构建的，停机前${failure}。daemon 没有停，还在跑原来的构建。`
+              + `在主 checkout 里运行 npm run build 可以看完整输出。`,
+            ]).message, kind);
+            return;
+          }
+          // 构建要花时间，这期间 Lead 可能开始了新的一轮：回到 pending，下一次巡检重新等 Lead 和 Run 排空，再过闸门。
+          stagedBuild = true;
+          request.state = "pending";
+          state.phase = "running";
+          persist();
           return;
         }
-        // 构建要花时间，这期间 Lead 可能开始了新的一轮：回到 pending，下一次巡检重新等 Lead 和 Run 排空，再过闸门。
-        request.state = "pending";
-        state.phase = "running";
-        persist();
-        return;
-      }
-      // 等排空的这段时间里 checkout 可能变了：停机之前再查一次。
-      const refusal = deployRefusal();
-      if (refusal.length) {
-        refuseBeforeStop(request, new DeployRefusedError(refusal).message);
-        return;
+        if (!readiness.ready) {
+          refuseBeforeStop(request, new DeployRefusedError(readiness.reasons).message, "deploy_refused");
+          return;
+        }
       }
       // 顺序：先排空 Lead，再在线备份，最后才停 daemon（审查 2026-10-20 C：先备份的话，排空期间 Lead 那一轮写的东西不在备份里）。
       // 备份失败就不停机（审查 2026-10-19 第 4 条：以前先停机再备份，备份失败时巡检直接用新 dist 拉起 daemon，
@@ -572,11 +597,18 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
           request.backupPath = await backupDatabase(request);
           persist();
         } catch (error: any) {
-          refuseBeforeStop(request, `database backup failed, the daemon was not stopped: ${error.message}`);
+          refuseBeforeStop(request, `database backup failed, the daemon was not stopped: ${error.message}`, "backup_failed");
           return;
         }
       }
       daemonDown = true;
+      // 备份好了：把暂存的构建换进 dist，再停机。
+      if (stagedBuild && opts.deployment) {
+        promoteStagedBuild(opts.deployment.distDir);
+        stagedBuild = false;
+        readinessCache = null;
+        log(`maintenance ${request.id}: swapped the staged build into ${opts.deployment.distDir}`);
+      }
       state.phase = "restarting";
       persist();
       await shutdownDaemon(answered);
@@ -758,6 +790,7 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     if (closing) return;
     closing = true;
     clearInterval(timer);
+    buildAbort?.abort();
     if (restartTimer) clearTimeout(restartTimer);
     await stopDaemon(false).catch((error) => log(`daemon stop during supervisor close failed: ${error.message}`));
     for (const client of clients) client.destroy();
