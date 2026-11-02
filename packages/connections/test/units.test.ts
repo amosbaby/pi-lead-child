@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { Vault, connectionSecretAad, fileKeySource } from "../src/vault.js";
-import { discover, parseBearerChallenge, requestedScope, OAuthError } from "../src/oauth.js";
+import { discover, exchangeCode, parseBearerChallenge, requestedScope, OAuthError } from "../src/oauth.js";
 import { McpHttpClient } from "../src/mcp-client.js";
 import { backoffMs, pickAccount } from "../src/hub.js";
 import { loadConnectionsConfig, normalizeCustomServerUrl } from "../src/catalog.js";
@@ -86,6 +86,21 @@ describe("OAuth discovery", () => {
 
   it("refuses plain HTTP to anything but loopback", async () => {
     await expect(discover(async () => new Response(null), "http://mcp.example.test/mcp")).rejects.toBeInstanceOf(OAuthError);
+  });
+});
+
+describe("token exchange", () => {
+  const server = { token_endpoint: "https://auth.fake.test/token", token_endpoint_auth_methods_supported: ["client_secret_post"] };
+  const input = { code: "c", verifier: "v", redirectUri: "http://127.0.0.1:1/oauth/callback", resource: "https://mcp.fake.test/mcp" };
+
+  it("reports the error code of a 200 response that carries ok:false and no token", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ ok: false, error: "bad_redirect_uri" }), { status: 200 });
+    await expect(exchangeCode(fetchImpl, server, { clientId: "id", clientSecret: "s" }, input)).rejects.toThrow(/no access_token \(the server says: bad_redirect_uri\)/);
+  });
+
+  it("never echoes the response body into the message", async () => {
+    const fetchImpl = async () => new Response(JSON.stringify({ ok: false, error: "x y z", refresh_token: "secret-refresh" }), { status: 200 });
+    await expect(exchangeCode(fetchImpl, server, { clientId: "id", clientSecret: "s" }, input)).rejects.toThrow(/^token response has no access_token$/);
   });
 });
 
