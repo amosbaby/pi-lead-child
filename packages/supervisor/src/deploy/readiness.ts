@@ -55,20 +55,49 @@ function isTestFile(path: string): boolean {
   return name.includes(".test.") || name.includes(".spec.");
 }
 
-function gitRaw(root: string, args: string[]): string {
-  return execFileSync("git", ["-C", root, ...args], {
-    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
-  });
+// 跑一条 git 命令，返回 stdout。可注入，测试用它模拟超时。
+export type GitExec = (root: string, args: string[], timeoutMs: number) => string;
+const GIT_TIMEOUT_MS = 10_000;
+
+const execGit: GitExec = (root, args, timeoutMs) => execFileSync("git", ["-C", root, ...args], {
+  encoding: "utf8", timeout: timeoutMs, stdio: ["ignore", "pipe", "pipe"],
+});
+
+function gitRaw(root: string, args: string[], exec = execGit, timeoutMs = GIT_TIMEOUT_MS): string {
+  return exec(root, args, timeoutMs);
 }
 
-function git(root: string, args: string[]): string {
-  return gitRaw(root, args).trim();
+function git(root: string, args: string[], exec = execGit, timeoutMs = GIT_TIMEOUT_MS): string {
+  return gitRaw(root, args, exec, timeoutMs).trim();
+}
+
+// git 失败属于哪一类。闸门只在 git 明确回答了的时候才下结论：
+//   · timeout / killed：execFileSync 超时（code ETIMEDOUT）或者 git 被信号杀掉（status 为 null）。git 没有回答，什么都不能说；
+//   · missing：退出码 128，stderr 是 Not a valid object name（cat-file -e 找不到这个对象）；
+//   · not_ancestor：退出码 1（merge-base --is-ancestor 的「不是祖先」）；
+//   · other：别的错误，原样报出来。
+export type GitFailureKind = "timeout" | "killed" | "missing" | "not_ancestor" | "other";
+export function gitFailureKind(error: unknown): GitFailureKind {
+  if (!error || typeof error !== "object") return "other";
+  const e = error as { code?: unknown; status?: unknown; signal?: unknown; stderr?: unknown };
+  if (e.code === "ETIMEDOUT") return "timeout";
+  if (e.status === null && e.signal) return "killed";
+  if (e.status === 128 && /Not a valid object name/.test(String(e.stderr ?? ""))) return "missing";
+  if (e.status === 1) return "not_ancestor";
+  return "other";
+}
+
+// 「无法判断」的原因，接在提示后面的括号里。
+function gitFailureNote(kind: GitFailureKind, error: unknown): string {
+  if (kind === "timeout") return "git 超时";
+  if (kind === "killed") return `git 被 ${String((error as { signal?: unknown }).signal)} 终止`;
+  return `git 出错：${error instanceof Error ? error.message : String(error)}`;
 }
 
 /** 主 checkout 里没提交的改动（按上面的口径），最多列 limit 个。 */
-export function uncommittedSourceChanges(root: string, limit = 20): string[] {
+export function uncommittedSourceChanges(root: string, limit = 20, exec = execGit, timeoutMs = GIT_TIMEOUT_MS): string[] {
   // 不能 trim：porcelain 每行的前两个字符是状态，第一个可能是空格。
-  const lines = gitRaw(root, ["status", "--porcelain", "--untracked-files=all"]).split("\n").filter(Boolean);
+  const lines = gitRaw(root, ["status", "--porcelain", "--untracked-files=all"], exec, timeoutMs).split("\n").filter(Boolean);
   const changed = lines.filter((line) => {
     // 改名写成「旧 -> 新」，两边都算。
     const paths = line.slice(3).split(" -> ").map((path) => path.replace(/^"|"$/g, ""));
@@ -106,16 +135,27 @@ export function readBuildProvenance(distDir: string): BuildProvenance | null {
   }
 }
 
+export interface DeployReadinessOptions {
+  execGit?: GitExec;
+  // 每条 git 命令最多等多久。默认 10 秒。
+  timeoutMs?: number;
+}
+
 /** 现在能不能从 root 的 dist 部署。只读：不改 checkout，不构建。root 有 release.json 时走发布模式，不调用 git。 */
-export function deployReadiness(root: string, distDir: string, release: ReleaseContext = {}): DeployReadiness {
+export function deployReadiness(
+  root: string, distDir: string, release: ReleaseContext = {}, options: DeployReadinessOptions = {},
+): DeployReadiness {
   if (hasReleaseManifest(root)) {
     return { mode: "release", head: null, build: null, ...releaseReadiness(root, release.installRoot, release.dbPath) };
   }
+  const exec = options.execGit ?? execGit;
+  const timeoutMs = options.timeoutMs ?? GIT_TIMEOUT_MS;
+  const run = (args: string[]) => git(root, args, exec, timeoutMs);
   const reasons: string[] = [];
   let head: string | null = null;
   try {
-    head = git(root, ["rev-parse", "HEAD"]);
-    const changes = uncommittedSourceChanges(root);
+    head = run(["rev-parse", "HEAD"]);
+    const changes = uncommittedSourceChanges(root, 20, exec, timeoutMs);
     if (changes.length) {
       reasons.push(`主 checkout ${root} 有没提交的改动：${changes.join("、")}。先提交（或者撤销）这些改动，再重新构建。`);
     }
@@ -129,15 +169,22 @@ export function deployReadiness(root: string, distDir: string, release: ReleaseC
     if (build.dirty) {
       reasons.push(`dist 构建时源码有没提交的改动（${build.dirtyFiles.join("、") || "未列出"}），不是从一个已提交的 commit 构建的。提交以后重新构建。`);
     }
+    // 只有 git 明确说「没有这个对象」「不是祖先」时才报那两句；超时等情况报「无法判断」，照样拒绝部署。
     try {
-      git(root, ["cat-file", "-e", `${build.commit}^{commit}`]);
+      run(["cat-file", "-e", `${build.commit}^{commit}`]);
       try {
-        git(root, ["merge-base", "--is-ancestor", build.commit, "HEAD"]);
-      } catch {
-        reasons.push(`dist 的构建 commit ${build.commit} 不在主 checkout 当前分支的历史里（HEAD 是 ${head ?? "未知"}）。在当前分支上重新构建。`);
+        run(["merge-base", "--is-ancestor", build.commit, "HEAD"]);
+      } catch (error) {
+        const kind = gitFailureKind(error);
+        reasons.push(kind === "not_ancestor"
+          ? `dist 的构建 commit ${build.commit} 不在主 checkout 当前分支的历史里（HEAD 是 ${head ?? "未知"}）。在当前分支上重新构建。`
+          : `无法判断 dist 的构建 commit ${build.commit} 是否在主 checkout 当前分支的历史里（${gitFailureNote(kind, error)}）。先不部署，稍后再试。`);
       }
-    } catch {
-      reasons.push(`dist 的构建 commit ${build.commit} 不在这个仓库里。`);
+    } catch (error) {
+      const kind = gitFailureKind(error);
+      reasons.push(kind === "missing"
+        ? `dist 的构建 commit ${build.commit} 不在这个仓库里。`
+        : `无法判断 dist 的构建 commit ${build.commit} 是否在这个仓库里（${gitFailureNote(kind, error)}）。先不部署，稍后再试。`);
     }
   }
   return { ready: reasons.length === 0, reasons, mode: "dev", head, build, release: null };
