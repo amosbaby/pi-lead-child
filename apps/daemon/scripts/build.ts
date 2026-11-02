@@ -19,7 +19,10 @@ const external = [
   "@anthropic-ai/sandbox-runtime",
 ];
 
-const outdir = distDir();
+// --outdir：supervisor 维护时构建到暂存目录（dist/.next），备份成功以后才换进 dist（2026-11-02 二审）。
+const outdirArg = process.argv.indexOf("--outdir");
+const outdir = outdirArg > 0 ? process.argv[outdirArg + 1] : distDir();
+if (!outdir) throw new Error("--outdir needs a directory");
 mkdirSync(outdir, { recursive: true });
 // 构建开始时的 HEAD：构建期间 HEAD 变了，构建记录按有改动记（2026-11-02 审查）。
 const startCommit = headCommit(projectRoot());
@@ -47,17 +50,17 @@ const result = await build({
   logLevel: "info",
   write: false,
 });
-// 每个文件先写 .tmp 再改名：构建中途被杀，不会留下写了一半的 coordinatord.mjs。
+// 每个文件先写临时文件再改名：构建中途被杀，不会留下写了一半的 coordinatord.mjs。临时文件名带 pid，两次构建同时跑也不冲突。
 const writeAtomically = (path: string, contents: Uint8Array | string) => {
   mkdirSync(dirname(path), { recursive: true });
-  writeFileSync(`${path}.tmp`, contents);
-  renameSync(`${path}.tmp`, path);
+  writeFileSync(`${path}.${process.pid}.tmp`, contents);
+  renameSync(`${path}.${process.pid}.tmp`, path);
 };
 for (const file of result.outputFiles) writeAtomically(file.path, file.contents);
 // 启动垫片（工单 14）是独立运行的脚本，不打包。launcher.ts 在自己所在的目录里找它，
 // 所以把它复制到 dist/，和同一次构建的 launcher 放在一起。
-copyFileSync(packageSource("runtime", "launcher-shim.mjs"), join(outdir, "launcher-shim.mjs.tmp"));
-renameSync(join(outdir, "launcher-shim.mjs.tmp"), join(outdir, "launcher-shim.mjs"));
+copyFileSync(packageSource("runtime", "launcher-shim.mjs"), join(outdir, `launcher-shim.mjs.${process.pid}.tmp`));
+renameSync(join(outdir, `launcher-shim.mjs.${process.pid}.tmp`), join(outdir, "launcher-shim.mjs"));
 // 记下这次构建来自哪个 commit、构建时源码有没有改动。Lead 请求重启前按它检查（supervisor 的 deploy/readiness.ts）：
 // 没提交的代码不能部署。
 const provenance = writeBuildProvenance(projectRoot(), outdir, startCommit);
