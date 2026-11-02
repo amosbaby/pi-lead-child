@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { Value } from "typebox/value";
 import { MODEL_SETTINGS_RESOURCE, ModelSettingsDtoSchema } from "@pi-lead-child/protocol";
+import { loadLeadModelConfig, resolveLeadApiKey } from "@pi-lead-child/lead";
 import { createPairing, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { startDaemon } from "../src/server.js";
@@ -148,6 +149,28 @@ describe("settings → models through the gateway", () => {
     const ledger = db.prepare("SELECT payload FROM events WHERE kind = 'ui_action.performed'").all() as Array<{ payload: string }>;
     expect(ledger.map((row) => row.payload).join("\n")).not.toContain("sk-secret");
     expect(lead.refreshes()).toBe(1);
+  });
+
+  // 只在设置页存了 key 的用户：重启以后 Lead 的会话第一次注册服务商时就要拿得到它，不然选中的服务商拉目录 401，daemon 起不来。
+  it("hands a key saved on the page to the Lead session on the next start, before the session registers its providers", async () => {
+    const { http } = await start(stubLead());
+    const baseUrl = config().lead.providers.vibeproxy.baseUrl;
+    const saved = await http(...act("save_provider", { name: "vibeproxy", baseUrl, api: "openai-completions", apiKey: "sk-test-restart-0123" }));
+    expect(saved.status).toBe(200);
+    for (const socket of sockets.splice(0)) socket.close();
+    await daemon!.close();
+    daemon = null;
+
+    const seen: Array<string | undefined> = [];
+    const lead = stubLead();
+    const factory = lead.factory;
+    lead.factory = async () => {
+      // 这一刻就是 createLeadSession 调 registerLeadProviders 的时候。
+      seen.push(resolveLeadApiKey(loadLeadModelConfig(dir).providers.vibeproxy!, {}, "vibeproxy"));
+      return factory();
+    };
+    await start(lead);
+    expect(seen).toEqual(["sk-test-restart-0123"]);
   });
 
   it("adds a second decision model and sets the fast chain, mirrored into the old decision fields", async () => {

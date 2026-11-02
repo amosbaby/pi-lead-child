@@ -13,7 +13,7 @@ import { ModelSettingsDtoSchema } from "@pi-lead-child/protocol";
 import { openDb } from "@pi-lead-child/store";
 import { Value } from "typebox/value";
 import { loadDecisionModels } from "../src/decision-models.js";
-import { ModelSettings } from "../src/model-settings.js";
+import { ModelSettings, storedProviderKey } from "../src/model-settings.js";
 import { SealedSecrets } from "../src/sealed-secrets.js";
 
 const DAY = 86_400;
@@ -168,6 +168,25 @@ describe("ModelSettings: the brain", () => {
     expect(moved.note).toBe("The address changed to gateway.example.com. The old key was only for api.openai.com, so the daemon deleted it.");
     expect(t.secrets().get("lead.provider.openai")).toBeNull();
     expect(resolveLeadApiKey(loadLeadModelConfig(t.dataDir).providers.openai!, {}, "openai")).toBeUndefined();
+  });
+
+  // daemon 启动时在建 ModelSettings 之前就用它接上 Lead 的取 key（server.ts）：只有主机和存 key 时一样才给。
+  it("gives a stored provider key only to the host it was saved for, without a ModelSettings", () => {
+    const dataDir = tempDir("plc-model-settings-key-");
+    const db = openDb(join(dataDir, "plc.db"));
+    const vault = new Vault(randomBytes(32));
+    const logged: string[] = [];
+    const store = { db, vault, log: (line: string) => logged.push(line) };
+    new SealedSecrets<string>(db, vault).set("lead.provider.openai", { value: "sk-test-boundary", host: "api.openai.com" });
+    expect(storedProviderKey(store, "openai", { baseUrl: "https://api.openai.com/v1" })).toEqual({ value: "sk-test-boundary", host: "api.openai.com" });
+    expect(storedProviderKey(store, "openai", { baseUrl: "https://gateway.example.com/v1" })).toBeNull();
+    expect(storedProviderKey(store, "other", { baseUrl: "https://api.openai.com/v1" })).toBeNull();
+    // 保险库的密钥换了：解不开，不给 key，记一行不带内容的日志。
+    expect(storedProviderKey({ ...store, vault: new Vault(randomBytes(32)) }, "openai", { baseUrl: "https://api.openai.com/v1" })).toBeNull();
+    expect(logged).toHaveLength(1);
+    expect(logged[0]).toMatch(/^\[models\] provider key for openai cannot be opened: /);
+    expect(logged[0]).not.toContain("sk-test");
+    db.close();
   });
 
   it("drops a key written in config.json when the provider moves to another host", async () => {

@@ -18,6 +18,7 @@ import {
 import {
   assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, OPENAI_COMPATIBLE_APIS, removeLeadProviderInConfig,
   saveLeadProviderInConfig, setLeadProviderKeySource, type LeadCatalogModel, type LeadModelConfig, type LeadProviderConfig,
+  type LeadProviderKeySource,
 } from "@pi-lead-child/lead";
 import { resolveEnvSpec } from "@pi-lead-child/core";
 import { UiActionError, type ModelSettingsChange, type ModelSettingsService, type ModelSettingsSummary } from "@pi-lead-child/engine";
@@ -36,6 +37,33 @@ const MAX_FAST_MODELS = 32;
 
 export function providerSecretName(name: string): string {
   return `lead.provider.${name}`;
+}
+
+export interface ProviderKeyStore {
+  db: Db;
+  vault: SecretVault;
+  log: (line: string) => void;
+}
+
+// 页面存的服务商 key，绑定的主机和服务商现在的地址一样时才给。解不开时记一行（不带内容），当没有。
+export function storedProviderKey(
+  store: ProviderKeyStore, name: string, provider: Pick<LeadProviderConfig, "baseUrl">,
+): { value: string; host: string } | null {
+  let stored;
+  try {
+    stored = new SealedSecrets<string>(store.db, store.vault).get(providerSecretName(name));
+  } catch (error) {
+    store.log(`[models] provider key for ${name} cannot be opened: ${error instanceof Error ? error.name : "Error"}`);
+    return null;
+  }
+  const host = serviceUrlHost(provider.baseUrl);
+  return stored && host && stored.host === host ? { value: stored.value, host } : null;
+}
+
+// Lead 的会话、查找会话、Hindsight 的 LLM 取服务商的 key 时先问这里。daemon 建好保险库就接上（server.ts）：
+// Lead 的会话第一次注册服务商时 ModelSettings 还没建。
+export function providerKeySource(store: ProviderKeyStore): LeadProviderKeySource {
+  return (name, provider) => storedProviderKey(store, name, provider)?.value ?? null;
 }
 
 export interface ModelSettingsBrain {
@@ -107,8 +135,8 @@ export class ModelSettings implements ModelSettingsService {
 
   constructor(private readonly options: ModelSettingsOptions) {
     this.secrets = new SealedSecrets<string>(options.db, options.vault);
-    // Lead 的会话、查找会话、Hindsight 的 LLM 取服务商的 key 时先问这里：页面存的、绑定现在主机的那一个。
-    setLeadProviderKeySource((name, provider) => this.storedProviderKey(name, provider)?.value ?? null);
+    // Lead 取服务商的 key 时先问页面存的、绑定现在主机的那一个。daemon 建好保险库时已经接过（server.ts），这里照旧接上，stop() 时摘掉。
+    setLeadProviderKeySource(providerKeySource(options));
   }
 
   // 用户现在选的界面语言：设置页直接显示这里返回的摘要、说明和错误。
@@ -134,20 +162,8 @@ export class ModelSettings implements ModelSettingsService {
     return loadLeadModelConfig(this.options.dataDir, this.options.env);
   }
 
-  private storedProviderKey(name: string, provider: Pick<LeadProviderConfig, "baseUrl">): { value: string; host: string } | null {
-    let stored;
-    try {
-      stored = this.secrets.get(providerSecretName(name));
-    } catch (error) {
-      this.options.log(`[models] provider key for ${name} cannot be opened: ${error instanceof Error ? error.name : "Error"}`);
-      return null;
-    }
-    const host = serviceUrlHost(provider.baseUrl);
-    return stored && host && stored.host === host ? { value: stored.value, host } : null;
-  }
-
   private providerKey(name: string, provider: LeadProviderConfig): { set: boolean; source: ModelKeySource; host: string | null } {
-    const stored = this.storedProviderKey(name, provider);
+    const stored = storedProviderKey(this.options, name, provider);
     if (stored) return { set: true, source: "settings", host: stored.host };
     if (provider.apiKey?.value !== undefined) return { set: true, source: "config", host: null };
     if (provider.apiKey && resolveEnvSpec(provider.apiKey, this.options.env ?? process.env)) return { set: true, source: "env", host: null };

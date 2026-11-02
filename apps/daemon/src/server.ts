@@ -16,7 +16,8 @@ import {
   listLookupCandidates, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
 } from "@pi-lead-child/lead";
 import {
-  assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
+  assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, setLeadProviderKeySource,
+  type LeadCatalogModel,
 } from "@pi-lead-child/lead";
 import { overflowLimits, overflowReached, overflowReminder, queueNotice, queueNoticeMs, waitingText, type WaitingConversation } from "@pi-lead-child/lead";
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
@@ -45,7 +46,7 @@ import {
   DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type UserActionRequest,
 } from "@pi-lead-child/protocol";
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
-import { ModelSettings } from "./model-settings.js";
+import { ModelSettings, providerKeySource } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerMessage } from "@pi-lead-child/engine";
@@ -2339,6 +2340,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 保险库：连接的令牌和记忆的密钥都用它加密（packages/connections 的 vault）。hindsight-main 用同一个密钥。
   const vault = lazyVault(opts.connections?.keySource
     ?? (testDaemon ? fileKeySource(join(opts.dataDir, "connections.key")) : defaultKeySource(join(opts.dataDir, "connections.key"))));
+  // 设置页存的服务商 key 现在就接上：Lead 的会话第一次注册服务商在建 ModelSettings 之前，拿不到 key 时选中的服务商拉目录 401。
+  setLeadProviderKeySource(providerKeySource({ db, vault, log }));
   const connections = new ConnectionHub({
     db,
     vault,
