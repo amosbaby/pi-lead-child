@@ -6,13 +6,14 @@
 //     plc daemon restart/upgrade）检查下面几件事，有一件不满足就拒绝，并说明原因：
 //     主 checkout 没有没提交的改动；dist 是从一个已提交、构建时没有改动、在当前分支历史里的 commit 构建的。
 //     崩溃后的自动拉起不拦截，只记警告（supervisor 的 spawnDaemon）。
-//   · 主 checkout 干净、dist 却不是 HEAD 的干净构建（2026-11-02：修复合并后重启，跑的还是旧 dist）：维护在停机之前
-//     先从 HEAD 构建（buildDaemonDist），构建失败就不停机。
+//   · 主 checkout 干净，dist 却没有构建记录、构建时有改动，或者构建的 commit 是 HEAD 的祖先、HEAD 已经往前走了
+//     （2026-11-02：修复合并后重启，跑的还是旧 dist）：维护在停机之前先从 HEAD 构建（buildDaemonDist），构建失败就不停机。
+//     dist 来自别的分支、commit 不在仓库里、git 说不清的，照旧拒绝，不自动构建。
 // 「没提交的改动」只看会进构建的代码：packages/、apps/ 下的改动和没被忽略的新文件，以及仓库根目录下的文件
 // （package.json、package-lock.json、tsconfig.json 这类）。不算的：docs/、artifacts/、.scratch/、.claude/（它们不进 dist，
 // 而且有的测试会改写 artifacts/ 里的证据文件），以及测试文件（test/ 目录下的、*.test.* 和 *.spec.*）。
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const BUILD_INFO_FILE = "build-info.json";
@@ -32,7 +33,8 @@ export interface DeployReadiness {
   reasons: string[];
   head: string | null;
   build: BuildProvenance | null;
-  // 主 checkout 干净，dist 却不是 HEAD 的干净构建：维护会先从 HEAD 重新构建。
+  // 主 checkout 干净，dist 没有构建记录、构建时有改动，或者落后于 HEAD（构建的 commit 是 HEAD 的祖先）：
+  // 维护会先从 HEAD 重新构建。不是拒绝。
   rebuild: boolean;
 }
 
@@ -98,6 +100,10 @@ export function uncommittedSourceChanges(root: string, limit = 20, exec = execGi
   return changed.slice(0, limit).map((line) => line.slice(3));
 }
 
+export function headCommit(root: string): string {
+  return git(root, ["rev-parse", "HEAD"]);
+}
+
 export function buildProvenance(root: string, now = new Date()): BuildProvenance {
   const dirtyFiles = uncommittedSourceChanges(root);
   return { version: 1, commit: git(root, ["rev-parse", "HEAD"]), dirty: dirtyFiles.length > 0, dirtyFiles, builtAt: now.toISOString() };
@@ -108,9 +114,16 @@ export function clearBuildProvenance(distDir: string): void {
   rmSync(join(distDir, BUILD_INFO_FILE), { force: true });
 }
 
-export function writeBuildProvenance(root: string, distDir: string): BuildProvenance {
+/** startCommit：构建开始时的 HEAD。构建期间 HEAD 变了，dist 里可能混着两个 commit 的代码，按有改动记。 */
+export function writeBuildProvenance(root: string, distDir: string, startCommit?: string): BuildProvenance {
   const provenance = buildProvenance(root);
-  writeFileSync(join(distDir, BUILD_INFO_FILE), `${JSON.stringify(provenance, null, 2)}\n`);
+  if (startCommit && startCommit !== provenance.commit) {
+    provenance.dirty = true;
+    provenance.dirtyFiles = [...provenance.dirtyFiles, `HEAD 在构建期间从 ${startCommit} 变成了 ${provenance.commit}`];
+  }
+  const path = join(distDir, BUILD_INFO_FILE);
+  writeFileSync(`${path}.tmp`, `${JSON.stringify(provenance, null, 2)}\n`);
+  renameSync(`${path}.tmp`, path);
   return provenance;
 }
 
@@ -152,6 +165,8 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
     reasons.push(`读不了主 checkout ${root} 的 git 状态：${error instanceof Error ? error.message : String(error)}`);
   }
   const build = readBuildProvenance(distDir);
+  // git 明确回答了：dist 的 commit 在仓库里，并且是 HEAD 的祖先（或者就是 HEAD）。
+  let inHistory = false;
   if (!build) {
     reasons.push(`${join(distDir, BUILD_INFO_FILE)} 不存在：无法确认 dist 来自哪个 commit。在干净的 checkout 上重新运行 npm run build。`);
   } else {
@@ -163,6 +178,7 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
       run(["cat-file", "-e", `${build.commit}^{commit}`]);
       try {
         run(["merge-base", "--is-ancestor", build.commit, "HEAD"]);
+        inHistory = true;
       } catch (error) {
         const kind = gitFailureKind(error);
         reasons.push(kind === "not_ancestor"
@@ -176,35 +192,52 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
         : `无法判断 dist 的构建 commit ${build.commit} 是否在这个仓库里（${gitFailureNote(kind, error)}）。先不部署，稍后再试。`);
     }
   }
-  const rebuild = clean && head !== null && !(build && !build.dirty && build.commit === head);
+  const rebuild = clean && head !== null && (!build || (inHistory && (build.dirty || build.commit !== head)));
   return { ready: reasons.length === 0, reasons, head, build, rebuild };
 }
 
 const BUILD_TIMEOUT_MS = 5 * 60_000;
+const BUILD_KILL_GRACE_MS = 10_000;
 const BUILD_OUTPUT_KEPT = 4_096;
+// 构建只拿这几个环境变量：supervisor 的环境里有从钥匙串和 config.json 读进来的密钥（main.ts），构建用不着。
+const BUILD_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "USER", "LANG"];
 
-/** 从 root 当前的 checkout 构建 dist（apps/daemon 的 npm run build）。失败时 reject，带上输出的最后几行。 */
-export function buildDaemonDist(root: string, timeoutMs = BUILD_TIMEOUT_MS): Promise<void> {
+/**
+ * 从 root 当前的 checkout 构建 plc 的 cli 和 daemon 的 dist（等于 npm run build，daemon 最后，它写构建记录）。
+ * 失败时 reject，带上输出的最后几行。每一步到时先 SIGTERM，killGraceMs 后 SIGKILL，无论如何都会结束。
+ */
+export async function buildDaemonDist(root: string, timeoutMs = BUILD_TIMEOUT_MS, killGraceMs = BUILD_KILL_GRACE_MS): Promise<void> {
+  for (const app of ["cli", "daemon"]) await runBuildScript(join(root, "apps", app), app, timeoutMs, killGraceMs);
+}
+
+function runBuildScript(cwd: string, app: string, timeoutMs: number, killGraceMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
+    const env = Object.fromEntries(BUILD_ENV_KEYS.flatMap((key) => (process.env[key] === undefined ? [] : [[key, process.env[key]]])));
     // 不用 tsx 命令行：它要开一个 IPC socket，沙箱里 listen 会 EPERM。
-    const child = spawn(process.execPath, ["--import", "tsx", "scripts/build.ts"], {
-      cwd: join(root, "apps", "daemon"), stdio: ["ignore", "pipe", "pipe"],
-    });
+    const child = spawn(process.execPath, ["--import", "tsx", "scripts/build.ts"], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const keep = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-BUILD_OUTPUT_KEPT); };
     child.stdout.on("data", keep);
     child.stderr.on("data", keep);
-    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
+    let settled = false;
+    const timers: ReturnType<typeof setTimeout>[] = [];
+    const settle = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      for (const timer of timers) clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    timers.push(setTimeout(() => child.kill("SIGTERM"), timeoutMs));
+    timers.push(setTimeout(() => child.kill("SIGKILL"), timeoutMs + killGraceMs));
+    // SIGKILL 以后 close 还没来（例如别的进程还占着输出管道）：也结束，不让维护一直卡着。
+    timers.push(setTimeout(() => settle(new Error(`apps/${app} 构建超过时限 ${timeoutMs}ms，SIGKILL 以后还没结束`)), timeoutMs + 2 * killGraceMs));
+    child.once("error", (error) => settle(error));
     child.once("close", (code, signal) => {
-      clearTimeout(timer);
-      if (code === 0) return resolve();
+      if (code === 0) return settle();
       const tail = output.split("\n").map((line) => line.trim()).filter(Boolean).slice(-5).join(" | ");
       const how = signal ? `被 ${signal} 终止（时限 ${timeoutMs}ms）` : `退出码 ${code}`;
-      reject(new Error(`构建${how}${tail ? `：${tail}` : ""}`));
+      settle(new Error(`apps/${app} 构建${how}${tail ? `：${tail}` : ""}`));
     });
   });
 }

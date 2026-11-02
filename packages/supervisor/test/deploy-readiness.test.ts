@@ -2,10 +2,12 @@
 // 没提交的代码部署上线了。supervisor 的维护入口按这里的判断拒绝（supervisor.test.ts 测入口本身）。
 import { beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { deployReadiness, gitFailureKind, writeBuildProvenance, type GitExec } from "../src/deploy/readiness.js";
+import {
+  buildDaemonDist, deployReadiness, gitFailureKind, writeBuildProvenance, type GitExec,
+} from "../src/deploy/readiness.js";
 
 let checkout: string;
 let dist: string;
@@ -108,6 +110,36 @@ describe("deploy readiness", () => {
     writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 6;\n");
     expect(readiness()).toMatchObject({ ready: false, rebuild: false });
   });
+
+  it("asks for a rebuild of a dist built from uncommitted code once the checkout is clean again", () => {
+    writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 7;\n");
+    writeBuildProvenance(checkout, dist);
+    git("checkout", "--", ".");
+    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+  });
+
+  // 审查 2026-11-02：只有 HEAD 往前走了才自动构建。dist 来自别的分支、commit 不在仓库里，照旧拒绝，不构建。
+  it("does not ask for a rebuild of a build from another branch or a commit missing from the repository", () => {
+    git("checkout", "-qb", "side");
+    writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 8;\n");
+    git("commit", "-qam", "side");
+    writeBuildProvenance(checkout, dist);
+    git("checkout", "-q", "main");
+    expect(readiness()).toMatchObject({ ready: false, rebuild: false });
+    writeFileSync(join(dist, "build-info.json"), JSON.stringify({ version: 1, commit: "0123456789abcdef0123456789abcdef01234567", dirty: false }));
+    expect(readiness()).toMatchObject({ ready: false, rebuild: false });
+  });
+
+  // 审查 2026-11-02：构建期间 HEAD 变了，dist 里可能混着两个 commit 的代码。
+  it("marks a build dirty when HEAD changed while it ran", () => {
+    const start = git("rev-parse", "HEAD");
+    writeFileSync(join(checkout, "README.md"), "during the build\n");
+    git("add", "README.md");
+    git("commit", "-qm", "during");
+    const built = writeBuildProvenance(checkout, dist, start);
+    expect(built).toMatchObject({ dirty: true, dirtyFiles: [expect.stringContaining(start)] });
+    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+  });
 });
 
 // 2026-11-02：系统负载高时 git 超时，闸门把 cat-file 的超时报成「不在这个仓库里」，把 merge-base 的超时报成
@@ -136,6 +168,18 @@ describe("deploy readiness when git fails", () => {
     const text = result.reasons.join("\n");
     expect(text).toContain("git 超时");
     expect(text).not.toContain("不在主 checkout 当前分支的历史里");
+  });
+
+  // 审查 2026-11-02：git 说不清 dist 的 commit 在不在历史里时，照旧拒绝，不自动构建。
+  it("does not ask for a rebuild when git cannot tell where the build commit is", () => {
+    writeBuildProvenance(checkout, dist);
+    writeFileSync(join(checkout, "README.md"), "later\n");
+    git("add", "README.md");
+    git("commit", "-qm", "later");
+    expect(readiness()).toMatchObject({ ready: true, rebuild: true });
+    for (const subcommand of ["cat-file", "merge-base"]) {
+      expect(deployReadiness(checkout, dist, { execGit: timingOut(subcommand) })).toMatchObject({ ready: false, rebuild: false });
+    }
   });
 
   it("still says a commit is not in the repository when git really cannot find it", () => {
@@ -168,4 +212,52 @@ describe("gitFailureKind", () => {
     expect(gitFailureKind(Object.assign(new Error("Command failed"), { status: 128, signal: null, stderr: "fatal: not a git repository\n" }))).toBe("other");
     expect(gitFailureKind("boom")).toBe("other");
   });
+});
+
+// 维护时 supervisor 用它从 HEAD 构建（server.ts 的 executeMaintenance）。这里用假的构建脚本，不跑真的构建。
+describe("building dist for maintenance", () => {
+  // 假的 checkout：apps/cli 和 apps/daemon 各有一个 scripts/build.ts。node_modules 指向本仓库，--import tsx 才找得到。
+  function fakeRoot(scripts: { cli?: string; daemon: string }): string {
+    const root = tempDir("plc-build-dist-");
+    symlinkSync(resolve("node_modules"), join(root, "node_modules"));
+    for (const [app, body] of Object.entries({ cli: "", ...scripts })) {
+      mkdirSync(join(root, "apps", app, "scripts"), { recursive: true });
+      writeFileSync(join(root, "apps", app, "scripts", "build.ts"), body);
+    }
+    return root;
+  }
+
+  it("builds the cli, then the daemon", async () => {
+    const root = fakeRoot({
+      cli: `import { writeFileSync } from "node:fs"; writeFileSync("../../order.txt", "cli\\n", { flag: "a" });`,
+      daemon: `import { writeFileSync } from "node:fs"; writeFileSync("../../order.txt", "daemon\\n", { flag: "a" });`,
+    });
+    await buildDaemonDist(root);
+    expect(readFileSync(join(root, "order.txt"), "utf8")).toBe("cli\ndaemon\n");
+  }, 60_000);
+
+  it("rejects with the last lines of the output when the build fails", async () => {
+    const root = fakeRoot({ daemon: `console.error("Could not resolve ./missing.js"); process.exit(3);` });
+    await expect(buildDaemonDist(root)).rejects.toThrow(/退出码 3.*Could not resolve/);
+  }, 60_000);
+
+  // 审查 2026-11-02：supervisor 的环境里有从钥匙串读进来的密钥（main.ts），构建不需要它们。
+  it("does not hand the supervisor's secrets to the build", async () => {
+    process.env.PLC_TEST_FAKE_SECRET = "fake-secret-value";
+    try {
+      const root = fakeRoot({ daemon: `console.error("seen:" + (process.env.PLC_TEST_FAKE_SECRET ?? "none")); process.exit(1);` });
+      await expect(buildDaemonDist(root)).rejects.toThrow("seen:none");
+    } finally {
+      delete process.env.PLC_TEST_FAKE_SECRET;
+    }
+  }, 60_000);
+
+  // 审查 2026-11-02：以前到时只发 SIGTERM，不理 SIGTERM 的构建一直不结束，维护一直卡在 running。
+  it("kills a build that ignores SIGTERM, and always settles", async () => {
+    const root = fakeRoot({ daemon: `process.on("SIGTERM", () => {}); setInterval(() => {}, 1_000);` });
+    const started = Date.now();
+    // 时限 3 秒：假脚本早就装好了 SIGTERM 处理。
+    await expect(buildDaemonDist(root, 3_000, 500)).rejects.toThrow(/SIGKILL|时限/);
+    expect(Date.now() - started).toBeLessThan(15_000);
+  }, 30_000);
 });

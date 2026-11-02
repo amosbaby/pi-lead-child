@@ -14,7 +14,7 @@ import {
   LEAD_DRAIN_TIMEOUT_MS, SUPERVISOR_FEATURE_DEPLOY_GATE, SUPERVISOR_FEATURE_MAINTENANCE_BACKUP, type DaemonDrainResult,
   redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
-import { buildDaemonDist, deployReadiness, type DeployReadiness } from "./deploy/readiness.js";
+import { buildDaemonDist, deployReadiness, readBuildProvenance, type DeployReadiness } from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
 import { DEFAULT_DAEMON_READY_TIMEOUT_MS } from "./daemon-ready-timeout.js";
 import { findRuntimeExecutable, runtimeSearchPath } from "@pi-lead-child/runtime";
@@ -511,6 +511,9 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     state.phase = "running";
     persist();
     log(`maintenance ${request.id} refused before the stop: ${error}`);
+    // 请求方早就拿到了「已接受」，不知道它失败了：告诉 daemon，由它叫醒 Lead。只发 id，daemon 回头向这里核对原因。
+    void socketCommand(daemonSockPath, { type: "maintenance_failed", maintenanceId: request.id })
+      .catch((reportError: Error) => log(`maintenance ${request.id} failure not reported to the daemon: ${reportError.message}`));
   };
 
   const executeMaintenance = async (request: MaintenanceRequest): Promise<void> => {
@@ -521,23 +524,34 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     state.phase = request.backup ? "backing_up" : "restarting";
     persist();
     try {
-      // dist 不是干净 HEAD 的构建（2026-11-02：修复合并后重启，跑的还是旧 dist）：停机之前先从 HEAD 构建。
-      // 构建失败就不停机，daemon 照旧跑原来的构建，原因记在这次维护上。
+      // dist 落后于干净的 HEAD（2026-11-02：修复合并后重启，跑的还是旧 dist）：停机之前先从 HEAD 构建。
+      // 构建失败、或者构建出来的不是这个 HEAD，就不停机，daemon 照旧跑原来的构建，原因记在这次维护上。
       const before = opts.deployment ? deployReadiness(opts.deployment.root, opts.deployment.distDir) : null;
       if (opts.deployment && before?.rebuild) {
         log(`maintenance ${request.id}: building dist from ${before.head} (dist was built from ${before.build?.commit ?? "unknown"})`);
+        let failure: string | null = null;
         try {
           await (opts.buildDist ?? buildDaemonDist)(opts.deployment.root);
         } catch (error: any) {
-          const note = redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env));
+          failure = `从 HEAD 重新构建失败（${redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env))}）`;
+        }
+        readinessCache = null;
+        const built = failure ? null : readBuildProvenance(opts.deployment.distDir);
+        if (!failure && (!built || built.dirty || built.commit !== before.head)) {
+          failure = `构建出来的不是 HEAD ${before.head}（${built ? `是 ${built.commit}${built.dirty ? "，有改动" : ""}` : "没有构建记录"}），构建期间 HEAD 可能变了`;
+        }
+        if (failure) {
           refuseBeforeStop(request, new DeployRefusedError([
-            `dist 不是从 HEAD ${before.head} 构建的，停机前从 HEAD 重新构建失败（${note}）。daemon 没有停，还在跑原来的构建。`
+            `dist 不是从 HEAD ${before.head} 构建的，停机前${failure}。daemon 没有停，还在跑原来的构建。`
             + `在主 checkout 里运行 npm run build 可以看完整输出。`,
           ]).message);
           return;
-        } finally {
-          readinessCache = null;
         }
+        // 构建要花时间，这期间 Lead 可能开始了新的一轮：回到 pending，下一次巡检重新等 Lead 和 Run 排空，再过闸门。
+        request.state = "pending";
+        state.phase = "running";
+        persist();
+        return;
       }
       // 等排空的这段时间里 checkout 可能变了：停机之前再查一次。
       const refusal = deployRefusal();

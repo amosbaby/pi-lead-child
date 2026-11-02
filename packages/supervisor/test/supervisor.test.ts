@@ -250,7 +250,8 @@ describe("the deploy gate at the maintenance entry", () => {
     writeFileSync(join(dir, "fake-active-items.json"), JSON.stringify([]));
     handle = await startSupervisor({
       ...(backupDatabase ? { backupDatabase } : {}),
-      ...(buildDist ? { buildDist } : {}),
+      // 不给就用一个会失败的假构建：测试不会不小心跑真的构建。
+      buildDist: buildDist ?? (async () => { throw new Error("test: no build here"); }),
       dataDir: dir,
       dbPath: dbFile,
       daemonCommand: { bin: resolve("node_modules/.bin/tsx"), args: [resolve("packages/supervisor/test/fake-supervised-daemon.ts")] },
@@ -399,6 +400,62 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(done.deploy).toMatchObject({ ready: true, head, build: { commit: head } });
   }, 30_000);
 
+  // 审查 2026-11-02：dist 来自别的分支时以前就拒绝，现在也不能变成「自动构建再部署」。
+  it("still refuses a dist from another branch, and does not build", async () => {
+    const dir = tempDir("plc-supervisor-side-dist-");
+    const deployment = deployCheckout(dir);
+    const builds: string[] = [];
+    await start(dir, deployment, undefined, async (root) => { builds.push(root); });
+    deployment.git("checkout", "-qb", "side");
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 10;\n");
+    deployment.git("commit", "-qam", "side");
+    writeBuildProvenance(deployment.root, deployment.distDir);
+    deployment.git("checkout", "-q", "main");
+    const refusal = await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy" }, { dataDir: dir })
+      .then(() => null, (error: Error & { code?: string }) => error);
+    expect(refusal).toMatchObject({ code: "deploy_refused", message: expect.stringContaining("不在主 checkout 当前分支的历史里") });
+    expect(builds).toEqual([]);
+  }, 30_000);
+
+  // 审查 2026-11-02：构建在「Lead 空着」检查之后、排空之前。构建期间 Lead 开始的一轮会被重启打断。
+  // 现在构建完回到 pending，下一次巡检重新等 Lead 和 Run 排空。
+  it("waits for Lead again after the build, before it stops the daemon", async () => {
+    const dir = tempDir("plc-supervisor-build-then-wait-");
+    const deployment = deployCheckout(dir);
+    const builds: string[] = [];
+    const pid = await start(dir, deployment, undefined, async (root) => {
+      builds.push(root);
+      writeFileSync(join(dir, "fake-lead-busy"), "1\n");
+      writeBuildProvenance(root, deployment.distDir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 11;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const waiting = await waitStatus(dir, (status) => builds.length === 1 && status.supervisor.maintenance?.state === "waiting_for_drain");
+    expect(Number(waiting.daemon?.pid)).toBe(pid);
+    writeFileSync(join(dir, "fake-lead-busy"), "0\n");
+    const done = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(builds).toHaveLength(1);
+    expect(done.deploy).toMatchObject({ ready: true, rebuild: false });
+  }, 45_000);
+
+  // 审查 2026-11-02：构建期间 HEAD 又变了，构建出来的不是请求时的 HEAD。
+  it("does not restart onto a build of a different commit than the HEAD it set out to build", async () => {
+    const dir = tempDir("plc-supervisor-build-head-moved-");
+    const deployment = deployCheckout(dir);
+    const pid = await start(dir, deployment, undefined, async (root) => {
+      writeFileSync(join(root, "packages", "code.ts"), "export const x = 13;\n");
+      deployment.git("commit", "-qam", "during the build");
+      writeBuildProvenance(root, deployment.distDir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 12;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.error).toContain("HEAD");
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+  }, 30_000);
+
   it("keeps the running daemon and reports why when that build fails", async () => {
     const dir = tempDir("plc-supervisor-stale-dist-fails-");
     const deployment = deployCheckout(dir);
@@ -415,6 +472,8 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(failed.supervisor.maintenance?.backupPath).toBeNull();
     expect(Number(failed.daemon?.pid)).toBe(pid);
     expect(failed.supervisor.phase).toBe("running");
+    // 审查 2026-11-02：请求方早就拿到了「已接受」，失败要另外告诉 daemon，由它叫醒 Lead。
+    await vi.waitFor(() => expect(readFileSync(join(dir, "fake-commands.log"), "utf8")).toContain("maintenance_failed"));
   }, 30_000);
 
   it("keeps only the newest restart backups and leaves the others alone", () => {

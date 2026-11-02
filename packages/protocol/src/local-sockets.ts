@@ -31,6 +31,9 @@ export const LocalSocketCommandSchema = Type.Union([
   // 把 Lead 的默认模型写进 config.json（plc lead use）。经 daemon 写，daemon 核对 config.json 时才认得出这是它自己写的
   // （2026-10-19 审查：别的进程直接改 config.json 会报警）。回答 { path, models }。改完要重启 daemon 才生效。
   StrictObject({ type: Type.Literal("set_lead_model"), ...RequestId, spec: Type.String({ minLength: 3, maxLength: 200 }) }),
+  // supervisor 发：一次已接受的维护在停机前失败了（例如从 HEAD 重新构建失败）。只带维护的 id：daemon 向 supervisor
+  // 核对这次维护确实失败了，用 supervisor 记的原因叫醒 Lead。能连上 plc.sock 的进程写不进自己的话。
+  StrictObject({ type: Type.Literal("maintenance_failed"), ...RequestId, maintenanceId: Type.String({ minLength: 1, maxLength: 100 }) }),
 ]);
 export type LocalSocketCommand = Static<typeof LocalSocketCommandSchema>;
 

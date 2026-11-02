@@ -185,7 +185,7 @@ import { repairStoppedRunCrashCheckpoints } from "@pi-lead-child/engine";
 import { repairOutcomeSnapshots } from "@pi-lead-child/engine";
 import { reregisterFinishedRuns } from "@pi-lead-child/engine";
 import { claimInstanceLock, daemonLockPath, readKeychainSecret, supervisorRequest } from "@pi-lead-child/supervisor";
-import type { InstanceLock, MaintenanceRequest } from "@pi-lead-child/supervisor";
+import type { InstanceLock, MaintenanceRequest, SupervisorStatus } from "@pi-lead-child/supervisor";
 import {
   ConnectionError,
   ConnectionHub,
@@ -5260,6 +5260,23 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       bound ? null : "cannot bind the wildcard address; listening on loopback only (see the daemon log)");
   }
 
+  // 一次已接受的维护在停机前失败了（supervisor 发 maintenance_failed）。请求方（Lead、换模型后的重启）只拿到过「已接受」：
+  // 向 supervisor 核对确实是这次维护失败了，用 supervisor 记的原因写一条叫醒 Lead 的 inbox，由它转告用户。
+  async function reportMaintenanceFailure(maintenanceId: string): Promise<void> {
+    try {
+      const maintenance = (await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: opts.dataDir })).supervisor?.maintenance;
+      if (!maintenance || maintenance.id !== maintenanceId || maintenance.state !== "failed" || closing) return;
+      addInbox(db, {
+        dedupScope: `maintenance-failed:${maintenance.id}`, severity: "attention", source: "structural",
+        summary: `${maintenance.action === "upgrade" ? "升级" : "重启"} daemon 的维护在停机前失败了，daemon 没有重启，还在跑原来的构建：`
+          + (maintenance.error ?? "没有记录原因"),
+        payload: { inboxKind: "maintenance_failed", wakeLead: true, needsUser: true },
+      });
+    } catch (error) {
+      log(`maintenance ${maintenanceId} failure not recorded: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // plc.sock：本机自举和运维（0600）。plc 在这里换一个网关凭证，supervisor 用它探活和停机。
   // 聊天、事项动作、授权和重检都走网关，这里一条都没有：plc 和 companion 走同一条路。
   // 连接不算"有客户端在听"，也收不到广播。
@@ -5299,6 +5316,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             (data) => sendTo(sock, { type: "response", id: cmd.id, success: true, data }),
             (error: any) => sendTo(sock, { type: "response", id: cmd.id, success: false, error: String(error?.message ?? error) }),
           );
+          break;
+        }
+        case "maintenance_failed": {
+          sendTo(sock, { type: "response", id: cmd.id, success: true });
+          void reportMaintenanceFailure(cmd.maintenanceId);
           break;
         }
         case "shutdown": {
