@@ -2,7 +2,7 @@
 // daemon 检查令牌、加密存进保险库、热重连 Slack 的 Socket 连接，状态回到设置页。daemon、store、网关、通道 hub、
 // Slack 插件、真实的 WebClient 都是真的；Slack 是假的（FakeSlack 的 fetch 和假的 SocketModeClient），Lead 的会话是替身。
 //   1. PUT 有效的令牌：不重启就连上，状态 connected，账号正确；bot token 被拒并说明原因；缺权限时列出来，不保存。
-//      连上以后收到第一个事件：状态里有 firstEventAt，kv 里记下「存了令牌以后收到过事件」（以后不提醒检查订阅）。
+//      连上以后收到第一个事件：kv 里记下「存了令牌以后收到过事件」（以后不提醒检查订阅）。
 //      DELETE：断开，状态 not_configured。
 //   2. 「不是我」：删掉保险库里这个来源的令牌并断开。
 //   3. 保险库优先于 Keychain；只换一个令牌时另一个用 Keychain 的补上，补来的不写进保险库；删掉以后退回 Keychain。
@@ -145,7 +145,7 @@ describe("the channel settings through the daemon", () => {
       status: "connected", lastError: null, lastConnectedAt: expect.any(String), missingScopes: [],
       account: { userId: "U0SELF", userName: "Leo", teamId: "T0HOME", teamName: "Home" },
       secrets: [{ present: true, origin: "vault" }, { present: true, origin: "vault" }],
-      firstEventAt: null, noEventsWarning: null,
+      noEventsWarning: null,
     });
     expect(eventsRecord()).toEqual({ savedAt: expect.any(String), firstEventAt: null });
     expect(listEvents(db, { kind: "owner_action.performed" }).map((event) => event.payload.detail)).toEqual([
@@ -154,9 +154,9 @@ describe("the channel settings through the daemon", () => {
     // 连上的 Socket 照常收消息。
     slack.push(slack.dm("U0ZHANG", "周五评审的材料收到了吗？"));
     await vi.waitFor(() => expect(daemon!.channels!.listCards()).toHaveLength(1));
-    // 收到了第一个事件：设置页看得到，kv 里记下了（以后不提醒检查事件订阅）。
-    await vi.waitFor(async () => expect((await slackSettings()).firstEventAt).toEqual(expect.any(String)));
-    expect(eventsRecord()).toEqual({ savedAt: expect.any(String), firstEventAt: expect.any(String) });
+    // 收到了第一个事件：kv 里记下了（以后不提醒检查事件订阅）。
+    await vi.waitFor(() => expect(eventsRecord()).toEqual({ savedAt: expect.any(String), firstEventAt: expect.any(String) }));
+    expect((await slackSettings()).noEventsWarning).toBeNull();
 
     // DELETE：断开，没有配置。
     const removed = await call("DELETE", "/v1/channels/settings/slack");
