@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { basename, join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -11,7 +11,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { supervisorAvailable, supervisorListening, supervisorRequest } from "../src/client.js";
 import type { SupervisorStatus } from "../src/protocol.js";
 import {
-  autoStartRefusal, DEFAULT_DAEMON_READY_TIMEOUT_MS, explicitStartRefusal, itemsBlockingMaintenance, pruneMaintenanceBackups,
+  autoStartRefusal, daemonStderrTail, DEFAULT_DAEMON_READY_TIMEOUT_MS, explicitStartRefusal, itemsBlockingMaintenance, pruneMaintenanceBackups,
   startingDaemonVerdict, startSupervisor, type SupervisorHandle,
 } from "../src/server.js";
 import { loadSupervisorState } from "../src/state.js";
@@ -695,6 +695,72 @@ describe("a daemon that starts slower than the ready deadline", () => {
       status.supervisor.phase === "running" && Boolean(status.daemon?.pid) && Number(status.daemon?.pid) !== firstPid);
     expect(recovered.supervisor.desiredState).toBe("running");
   }, 45_000);
+
+  // 2026-11-02：daemon 崩了一次，拉起来的新 daemon 启动慢，supervisor 第一次等超时、下一轮接着等到它就绪。
+  // 就绪走的是「已有 child 在启动」那条分支，crashCount 没清零：phase 是 running，crashCount 还停在崩溃时的数，
+  // 下次崩溃的退避时间也按它算。
+  it("clears the crash count once a daemon that crashed comes back through a slow start", async () => {
+    const dir = tempDir("plc-supervisor-crash-slow-");
+    const lines: string[] = [];
+    const firstPid = await supervise(dir, (line) => lines.push(line));
+    // 崩溃后的第一次拉起马上退出，第二次拉起拿到锁、迟迟不监听。
+    writeFileSync(join(dir, "fake-exit-on-start"), "");
+    writeFileSync(join(dir, "fake-hold-start"), "");
+    process.kill(firstPid, "SIGKILL");
+    const holding = join(dir, "fake-holding");
+    await vi.waitFor(() => expect(existsSync(holding)).toBe(true), { timeout: 15_000, interval: 50 });
+    const slowPid = Number(readFileSync(holding, "utf8"));
+    expect(loadSupervisorState(join(dir, "supervisor-state.json")).crashCount).toBeGreaterThan(0);
+
+    // 拨过等就绪的期限：这一轮放弃等待，下一轮接着等同一个进程。
+    vi.setSystemTime(Date.now() + DEFAULT_DAEMON_READY_TIMEOUT_MS + 1_000);
+    await vi.waitFor(() => expect(lines.some((line) => line.includes("did not become ready"))).toBe(true), { timeout: 15_000, interval: 50 });
+    unlinkSync(join(dir, "fake-hold-start"));
+    const recovered = await waitStatus(dir, (status) => status.supervisor.phase === "running" && Number(status.daemon?.pid) === slowPid);
+    expect(recovered.supervisor.crashCount).toBe(0);
+    expect(loadSupervisorState(join(dir, "supervisor-state.json")).crashCount).toBe(0);
+  }, 45_000);
+
+  // 2026-11-02：daemon 没就绪就退出时，supervisor.log 只有 (code=1, signal=null)，原因在 coordinatord.err.log 里，
+  // 还混着以前几次启动的输出。现在把本次启动写进 err.log 的末尾几行（脱敏后）附进 supervisor.log。
+  it("logs the tail of what the exiting daemon wrote to stderr, without earlier runs or tokens", async () => {
+    const dir = tempDir("plc-supervisor-exit-stderr-");
+    const lines: string[] = [];
+    const firstPid = await supervise(dir, (line) => lines.push(line));
+    appendFileSync(join(dir, "logs", "coordinatord.err.log"), "an earlier run said this\n");
+    writeFileSync(join(dir, "fake-exit-on-start"), "");
+    process.kill(firstPid, "SIGKILL");
+
+    await vi.waitFor(() => expect(lines.some((line) => line.includes("cannot open the ledger"))).toBe(true), { timeout: 15_000, interval: 50 });
+    const exited = lines.find((line) => line.includes("cannot open the ledger"))!;
+    expect(exited).toContain("exited before it answered status");
+    expect(exited).not.toContain("an earlier run said this");
+    expect(exited).not.toContain("fake0token0value0abcdef123456");
+    expect(exited).toContain("[REDACTED]");
+    // 只进 supervisor.log：status（会经 get_runtime_health 到达 Lead）里没有 stderr。
+    const recovered = await waitStatus(dir, (status) => status.supervisor.phase === "running" && Boolean(status.daemon?.pid));
+    expect(JSON.stringify(recovered)).not.toContain("cannot open the ledger");
+  }, 45_000);
+});
+
+// 决策边界：本次启动写进 err.log 的哪一段进 supervisor.log。
+describe("the stderr tail of a daemon that exited while starting", () => {
+  it("reads only what was written after the offset, keeps the last 2 KB of whole lines, and redacts secrets", () => {
+    const dir = tempDir("plc-supervisor-stderr-tail-");
+    const path = join(dir, "coordinatord.err.log");
+    expect(daemonStderrTail(join(dir, "missing.log"), 0, {})).toBe("");
+    writeFileSync(path, "old run\n");
+    const offset = statSync(path).size;
+    expect(daemonStderrTail(path, offset, {})).toBe("");
+    appendFileSync(path, "first\nsecond\n");
+    expect(daemonStderrTail(path, offset, {})).toBe("first | second");
+
+    appendFileSync(path, `${"x".repeat(3_000)}\nAM_API_KEY value is k3y-0123456789abcdefABCDEF\nboom\n`);
+    const tail = daemonStderrTail(path, offset, { AM_API_KEY: "k3y-0123456789abcdefABCDEF" });
+    expect(tail).not.toContain("first");
+    expect(tail).not.toContain("xxx");
+    expect(tail).toBe("AM_API_KEY value is [REDACTED] | boom");
+  });
 });
 
 // 决策边界：一个已经启动、还没回答 status 的 daemon，要不要接着等。
