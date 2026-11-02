@@ -3,10 +3,12 @@
 //   - 取密钥：保险库 → daemon 专用的环境变量 → Keychain；保险库里解不开的当作没有，只记一次日志，不写值；
 //   - 状态：出错的原因去掉现在的密钥；重连时留着上一次的错误；连上时清掉；同一个人时留着检查认出的账号；
 //   - 检查：请求里没给的用现在的补上；来源插件回的文字里带了密钥也去掉；有一项没过 ok 就是 false；等太久算没过；
-//   - 保存：只写请求里给的（去掉首尾空白）；检查没过不写；删除只删保险库里的。
+//   - 保存：只写请求里给的（去掉首尾空白）；检查没过不写；删除只删保险库里的；
+//   - 收不到事件：存了令牌、连满 30 分钟还没收到事件才提醒（假时钟）；收到过一次以后不再提醒（重启以后也不）；
+//     不是设置页存的令牌不提醒；重新保存从头等。
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { Vault } from "@pi-lead-child/connections";
 import type { ChannelAdapter, ChannelSettingsSpec } from "@pi-lead-child/engine";
@@ -40,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   db.close();
 });
 
@@ -51,6 +54,7 @@ function adapter(): ChannelAdapter {
     ],
     manifest: null,
     setupUrl: null,
+    noEventsWarning: (locale) => (locale === "zh" ? "去查事件订阅" : "Check the event subscriptions"),
     test: async (secrets) => {
       tested.push({ ...secrets });
       return answer(secrets);
@@ -198,5 +202,66 @@ describe("checking and saving", () => {
     expect(removed.source.secrets.map((secret) => secret.origin)).toEqual([null, "env"]);
     expect(reloads).toEqual(["fake", "fake"]);
     expect(logs.join("\n")).not.toContain(SAVED);
+  });
+});
+
+// 2026-11-02：手建的应用没有订阅用户事件，Socket 连上了 1.5 小时一个事件都没收到，哪里都没说。
+describe("a source that connects but receives no events", () => {
+  const MINUTE = 60_000;
+  const connect = (settings: ChannelSettings) => settings.sourceStatus("fake", { state: "connected", account: null });
+
+  it("warns after 30 minutes connected with no event since the tokens were saved, until the first event comes in", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const settings = setup();
+    expect((await settings.save("fake", { [ONE]: SAVED, [TWO]: "fake-two-value" })).ok).toBe(true);
+    connect(settings);
+    expect(settings.list()[0]).toMatchObject({ status: "connected", firstEventAt: null, noEventsWarning: null });
+    // 一次重连不从头算。
+    settings.sourceStatus("fake", { state: "connecting" });
+    vi.advanceTimersByTime(10 * MINUTE);
+    connect(settings);
+    vi.advanceTimersByTime(19 * MINUTE);
+    expect(settings.list()[0]!.noEventsWarning).toBeNull();
+    // 到点时通知客户端重新读，不用等别的状态变。
+    const before = publishes;
+    vi.advanceTimersByTime(1 * MINUTE);
+    expect(publishes).toBe(before + 1);
+    expect(settings.list()[0]!.noEventsWarning).toBe("Check the event subscriptions");
+    updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
+    expect(settings.list()[0]!.noEventsWarning).toBe("去查事件订阅");
+
+    settings.sourceStatus("fake", { state: "received" });
+    expect(settings.list()[0]).toMatchObject({ firstEventAt: "2026-11-02T08:30:00.000Z", noEventsWarning: null });
+    // 收到过以后一直没人发消息：不提醒，重启以后也不。
+    vi.advanceTimersByTime(5 * 60 * MINUTE);
+    connect(settings);
+    expect(settings.list()[0]).toMatchObject({ firstEventAt: null, noEventsWarning: null });
+    const restarted = setup();
+    connect(restarted);
+    vi.advanceTimersByTime(2 * 60 * MINUTE);
+    expect(restarted.list()[0]!.noEventsWarning).toBeNull();
+
+    // 重新保存了令牌：从头等第一个事件。
+    expect((await restarted.save("fake", { [TWO]: "fake-two-new-value" })).ok).toBe(true);
+    connect(restarted);
+    vi.advanceTimersByTime(30 * MINUTE);
+    expect(restarted.list()[0]!.noEventsWarning).toBe("去查事件订阅");
+    // 断开了不提醒；删掉密钥以后也不再等。
+    restarted.sourceStatus("fake", { state: "error", error: "down" });
+    expect(restarted.list()[0]!.noEventsWarning).toBeNull();
+    await restarted.remove("fake");
+    connect(restarted);
+    vi.advanceTimersByTime(60 * MINUTE);
+    expect(restarted.list()[0]!.noEventsWarning).toBeNull();
+  });
+
+  it("does not warn for tokens that the settings page did not save", () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
+    env[ONE] = "fake-one-env-value";
+    env[TWO] = "fake-two-env-value";
+    const settings = setup();
+    connect(settings);
+    vi.advanceTimersByTime(3 * 60 * MINUTE);
+    expect(settings.list()[0]).toMatchObject({ status: "connected", noEventsWarning: null });
   });
 });

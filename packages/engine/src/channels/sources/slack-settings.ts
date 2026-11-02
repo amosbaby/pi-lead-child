@@ -6,10 +6,12 @@
 //   3. 权限：auth.test 的结果里 response_metadata.scopes（WebClient 从 x-oauth-scopes 头取的）和要求的清单比，列出缺的。
 //   4. apps.connections.open（App-Level Token）：成功即可（拿到的地址不用）。
 // 结果里的文字不含令牌：先把这次的两个令牌原样换掉，再按通用的规则脱敏。
+// 连上了却一直收不到事件时（daemon 判断），设置页显示 noEventsWarning：查用户事件的订阅和 User Token Scopes。
 import { SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
 import { CHANNEL_SETUP_URL_MAX, type ChannelSecretCheck, type ChannelSecretsTestResult, type ChannelSourceAccount } from "@pi-lead-child/protocol";
 import type { ChannelSecretSpec, ChannelSettingsSpec } from "../types.js";
 import { ASSISTANT_NAME_DEFAULT } from "../disclosure.js";
+import { slackSettingsMessages } from "./slack-settings.messages.js";
 import { scrubSlackText, type SlackWebApi } from "./slack-web-api.js";
 
 /** Slack 通道要的用户权限（user scopes）。清单和设置页的检查都用它。 */
@@ -249,6 +251,8 @@ export function createSlackSettings(input: {
     secrets: SECRETS,
     get manifest() { return slackAppManifest(input.ownerName, assistantName()); },
     get setupUrl() { return slackSetupUrl(slackAppManifest(input.ownerName, assistantName())); },
+    // 2026-11-02：手建应用时没有订阅用户事件、没有加 User Token Scopes，Socket 连上了却一个事件都收不到，哪里都没说。
+    noEventsWarning: (locale) => slackSettingsMessages(locale).noEvents(SLACK_USER_EVENTS, SLACK_USER_SCOPES),
     test,
   };
 }

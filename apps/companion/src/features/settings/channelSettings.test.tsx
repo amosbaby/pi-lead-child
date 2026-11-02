@@ -29,6 +29,8 @@ function slack(overrides: Partial<ChannelSourceSettingsDto> = {}): ChannelSource
     missingScopes: [],
     lastError: null,
     lastConnectedAt: null,
+    firstEventAt: null,
+    noEventsWarning: null,
     secrets: [
       { name: 'PLC_SLACK_APP_TOKEN', label: 'App-Level Token', prefix: 'xapp-', hint: '在 Basic Information → App-Level Tokens 里生成', present: false, origin: null },
       { name: 'PLC_SLACK_USER_TOKEN', label: 'User OAuth Token', prefix: 'xoxp-', hint: '在 OAuth & Permissions 里安装应用后拿到', present: false, origin: null },
@@ -288,6 +290,17 @@ describe('the channel settings section', () => {
     act(() => { runtime.control.setState({ channelSettings: { sources: [saved(['keychain', 'env'])] } }); });
     expect(screen.queryByTestId('channel-slack-disconnect-start')).toBeNull();
     expect(screen.getByTestId('channel-slack-external').textContent).toContain('dev-secret:PLC_SLACK_APP_TOKEN');
+  });
+
+  // 2026-11-02：连上了却一个事件都没收到时，卡上显示 daemon 给的提醒。
+  it('shows the warning when the source is connected but no events come in', () => {
+    const { runtime } = render([saved(['vault', 'vault'], { noEventsWarning: 'Check Event Subscriptions → Subscribe to events on behalf of users.' })]);
+    const card = screen.getByTestId('channel-slack-no-events');
+    expect(card.textContent).toContain('Connected, but no events come in');
+    expect(card.textContent).toContain('Subscribe to events on behalf of users');
+    // 收到了事件：提醒消失。
+    act(() => { runtime.control.setState({ channelSettings: { sources: [saved(['vault', 'vault'])] } }); });
+    expect(screen.queryByTestId('channel-slack-no-events')).toBeNull();
   });
 
   it('expands the app manifest, copies it, and links to the page that creates the app', async () => {

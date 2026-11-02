@@ -81,6 +81,21 @@ describe("the Slack settings", () => {
     expect(slackSetupUrl("x".repeat(CHANNEL_SETUP_URL_MAX))).toBe("https://api.slack.com/apps");
   });
 
+  // 连上了却收不到事件时的提醒：说清在哪里订阅哪 4 个用户事件、User Token Scopes 要哪些，重装、重存令牌，怎样验证。
+  it("says where to subscribe the user events and add the user scopes when no events come in", () => {
+    const settings = settingsOf(createSlackChannelAdapter({ api: new FakeSlack().api }));
+    for (const locale of ["en", "zh"] as const) {
+      const text = settings.noEventsWarning!(locale);
+      for (const part of ["Subscribe to events on behalf of users", "User Token Scopes", "Reinstall to Workspace", "User OAuth Token",
+        "message.im", "message.mpim", "message.channels", "message.groups", ...SLACK_USER_SCOPES]) {
+        expect(text).toContain(part);
+      }
+      expect(text.length).toBeLessThanOrEqual(1_000);
+    }
+    expect(settings.noEventsWarning!("en")).toContain("send yourself a direct message");
+    expect(settings.noEventsWarning!("zh")).toContain("给自己发一条私信");
+  });
+
   it("refuses an adapter whose settings name a secret it does not declare", () => {
     const adapter = createSlackChannelAdapter({ api: new FakeSlack().api });
     const broken = { ...adapter, settings: { ...settingsOf(adapter), secrets: settingsOf(adapter).secrets.slice(0, 1) } };
