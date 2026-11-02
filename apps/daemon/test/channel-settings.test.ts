@@ -4,15 +4,16 @@
 //   - 状态：出错的原因去掉现在的密钥；重连时留着上一次的错误；连上时清掉；同一个人时留着检查认出的账号；
 //   - 检查：请求里没给的用现在的补上；来源插件回的文字里带了密钥也去掉；有一项没过 ok 就是 false；等太久算没过；
 //   - 保存：只写请求里给的（去掉首尾空白）；检查没过不写；删除只删保险库里的；
-//   - 收不到事件：存了令牌、连满 30 分钟还没收到事件才提醒（假时钟）；收到过一次以后不再提醒（重启以后也不）；
-//     不是设置页存的令牌不提醒；重新保存从头等。
+//   - 收不到事件：存了令牌以后第一次连上起满 30 分钟、这次连接至少 2 分钟、还没收到事件才提醒（假时钟）；断线、出错不从头算；
+//     收到过一次以后不再提醒（重启以后也不）；不是设置页存的令牌不提醒；重新保存从头等；停机清掉定时器；
+//   - 建应用的链接超过契约的长度时不给。
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { Vault } from "@pi-lead-child/connections";
 import type { ChannelAdapter, ChannelSettingsSpec } from "@pi-lead-child/engine";
-import type { ChannelSecretsTestResult } from "@pi-lead-child/protocol";
+import { CHANNEL_SETUP_URL_MAX, type ChannelSecretsTestResult } from "@pi-lead-child/protocol";
 import { openDb, type Db } from "@pi-lead-child/store";
 import { updateDesignPreferences } from "@pi-lead-child/engine";
 import { ChannelSettings } from "../src/channel-settings.js";
@@ -29,6 +30,7 @@ let publishes: number;
 let reloads: string[];
 let tested: Array<Record<string, string>>;
 let answer: (secrets: Readonly<Record<string, string>>) => Promise<ChannelSecretsTestResult>;
+let setupUrl: string | null;
 
 beforeEach(() => {
   db = openDb(join(tempDir("plc-channel-settings-"), "plc.db"));
@@ -38,6 +40,7 @@ beforeEach(() => {
   publishes = 0;
   reloads = [];
   tested = [];
+  setupUrl = null;
   answer = async () => ({ ok: true, checks: [{ id: "one", label: "一", pass: true, detail: "好" }], account: null, missingScopes: [] });
 });
 
@@ -53,7 +56,7 @@ function adapter(): ChannelAdapter {
       { name: TWO, label: "第二个", prefix: "fake-", hint: "" },
     ],
     manifest: null,
-    setupUrl: null,
+    get setupUrl() { return setupUrl; },
     noEventsWarning: (locale) => (locale === "zh" ? "去查事件订阅" : "Check the event subscriptions"),
     test: async (secrets) => {
       tested.push({ ...secrets });
@@ -123,6 +126,15 @@ describe("the status of a source", () => {
     const before = publishes;
     settings.sourceStatus("fake", { state: "not_configured" });
     expect(publishes).toBe(before);
+  });
+
+  // 一个来源的长链接不能让整个列表过不了客户端的 schema 校验：超过契约的长度时不给。
+  it("gives no setup link that is longer than the contract allows", () => {
+    const settings = setup();
+    setupUrl = `https://chat.example/apps?manifest=${"x".repeat(CHANNEL_SETUP_URL_MAX)}`;
+    expect(settings.list()[0]!.setupUrl).toBeNull();
+    setupUrl = "https://chat.example/apps?manifest=short";
+    expect(settings.list()[0]!.setupUrl).toBe("https://chat.example/apps?manifest=short");
   });
 
   it("keeps the account the check found while the same user connects", async () => {
@@ -210,12 +222,12 @@ describe("a source that connects but receives no events", () => {
   const MINUTE = 60_000;
   const connect = (settings: ChannelSettings) => settings.sourceStatus("fake", { state: "connected", account: null });
 
-  it("warns after 30 minutes connected with no event since the tokens were saved, until the first event comes in", async () => {
+  it("warns 30 minutes after the first connection since the tokens were saved, until the first event comes in", async () => {
     vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
     const settings = setup();
     expect((await settings.save("fake", { [ONE]: SAVED, [TWO]: "fake-two-value" })).ok).toBe(true);
     connect(settings);
-    expect(settings.list()[0]).toMatchObject({ status: "connected", firstEventAt: null, noEventsWarning: null });
+    expect(settings.list()[0]).toMatchObject({ status: "connected", noEventsWarning: null });
     // 一次重连不从头算。
     settings.sourceStatus("fake", { state: "connecting" });
     vi.advanceTimersByTime(10 * MINUTE);
@@ -231,11 +243,13 @@ describe("a source that connects but receives no events", () => {
     expect(settings.list()[0]!.noEventsWarning).toBe("去查事件订阅");
 
     settings.sourceStatus("fake", { state: "received" });
-    expect(settings.list()[0]).toMatchObject({ firstEventAt: "2026-11-02T08:30:00.000Z", noEventsWarning: null });
+    expect(settings.list()[0]!.noEventsWarning).toBeNull();
+    expect(db.prepare("SELECT value FROM kv WHERE key = 'channel.fake.events'").get())
+      .toEqual({ value: JSON.stringify({ savedAt: "2026-11-02T08:00:00.000Z", firstEventAt: "2026-11-02T08:30:00.000Z" }) });
     // 收到过以后一直没人发消息：不提醒，重启以后也不。
     vi.advanceTimersByTime(5 * 60 * MINUTE);
     connect(settings);
-    expect(settings.list()[0]).toMatchObject({ firstEventAt: null, noEventsWarning: null });
+    expect(settings.list()[0]!.noEventsWarning).toBeNull();
     const restarted = setup();
     connect(restarted);
     vi.advanceTimersByTime(2 * 60 * MINUTE);
@@ -246,7 +260,7 @@ describe("a source that connects but receives no events", () => {
     connect(restarted);
     vi.advanceTimersByTime(30 * MINUTE);
     expect(restarted.list()[0]!.noEventsWarning).toBe("去查事件订阅");
-    // 断开了不提醒；删掉密钥以后也不再等。
+    // 现在没连着不提醒；删掉密钥以后也不再等。
     restarted.sourceStatus("fake", { state: "error", error: "down" });
     expect(restarted.list()[0]!.noEventsWarning).toBeNull();
     await restarted.remove("fake");
@@ -264,4 +278,39 @@ describe("a source that connects but receives no events", () => {
     vi.advanceTimersByTime(3 * 60 * MINUTE);
     expect(settings.list()[0]).toMatchObject({ status: "connected", noEventsWarning: null });
   });
+
+  // 网络抖：出错、断线都不从头算，否则一直抖的连接永远等不到提醒。断线很久以后刚连上，这次连接连满 2 分钟才提醒。
+  it("keeps counting through errors, and waits 2 minutes into a new connection before it warns", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const settings = setup();
+    expect((await settings.save("fake", { [ONE]: SAVED, [TWO]: "fake-two-value" })).ok).toBe(true);
+    connect(settings);
+    vi.advanceTimersByTime(20 * MINUTE);
+    settings.sourceStatus("fake", { state: "error", error: "down" });
+    vi.advanceTimersByTime(60 * MINUTE);
+    expect(settings.list()[0]).toMatchObject({ status: "error", noEventsWarning: null });
+    connect(settings);
+    vi.advanceTimersByTime(1 * MINUTE);
+    expect(settings.list()[0]!.noEventsWarning).toBeNull();
+    const before = publishes;
+    vi.advanceTimersByTime(1 * MINUTE);
+    expect(publishes).toBe(before + 1);
+    expect(settings.list()[0]!.noEventsWarning).toBe("Check the event subscriptions");
+  });
+
+  it("clears the warning timer on stop", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const settings = setup();
+    expect((await settings.save("fake", { [ONE]: SAVED, [TWO]: "fake-two-value" })).ok).toBe(true);
+    connect(settings);
+    expect(vi.getTimerCount()).toBe(1);
+    settings.stop();
+    expect(vi.getTimerCount()).toBe(0);
+    const before = publishes;
+    connect(settings);
+    vi.advanceTimersByTime(60 * MINUTE);
+    expect(vi.getTimerCount()).toBe(0);
+    expect(publishes).toBe(before);
+  });
+
 });

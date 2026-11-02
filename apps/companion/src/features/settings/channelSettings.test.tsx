@@ -29,7 +29,6 @@ function slack(overrides: Partial<ChannelSourceSettingsDto> = {}): ChannelSource
     missingScopes: [],
     lastError: null,
     lastConnectedAt: null,
-    firstEventAt: null,
     noEventsWarning: null,
     secrets: [
       { name: 'PLC_SLACK_APP_TOKEN', label: 'App-Level Token', prefix: 'xapp-', hint: '在 Basic Information → App-Level Tokens 里生成', present: false, origin: null },
