@@ -15,7 +15,7 @@ import { ChannelConnectionBlock, ChannelWritesSwitch, useChannelConnection } fro
 import { channelsMessages } from './channels.messages';
 import {
   canDisconnect, channelErrorText, channelStatusView, checkRows, emptySecretForm,
-  externalSecretNotes, readOnlyNote, secretPlaceholder, secretRequest, secretStateText, testSummary,
+  externalSecretNotes, readOnlyNote, secretPlaceholder, secretRequest, secretStateText, setupLinkText, testSummary,
   type ChannelStatusTone, type SecretForm,
 } from './channelSettingsModel';
 import { HandbookSection } from './HandbookSection';
@@ -425,7 +425,7 @@ function AppSetup({ source }: { source: ChannelSourceSettingsDto }) {
       {source.setupUrl ? (
         <Text size="secondary" tone="secondary">
           {m.setupBefore}
-          <Link testID={`channel-${id}-setup-url`} href={source.setupUrl} size="secondary">{source.setupUrl}</Link>
+          <Link testID={`channel-${id}-setup-url`} href={source.setupUrl} size="secondary">{setupLinkText(source.setupUrl)}</Link>
           {manifest ? m.setupAfterManifest : m.setupAfter}
         </Text>
       ) : null}
