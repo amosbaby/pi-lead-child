@@ -362,4 +362,88 @@ describe('web companion loopback startup', () => {
     });
     runtime.stop();
   });
+
+  // 配对那时网关还没按来历去掉 approvals:respond：存着的 scope 里有，网关现在不给。以前启动时取审批回 403，整页进入错误。
+  it('decides on the scopes the gateway gives now, not the ones stored at pairing time', async () => {
+    const storage = new MemoryKeyValueStorage();
+    storage.values.set(CREDENTIAL_KEY, JSON.stringify({
+      baseUrl: WORKING_ORIGIN,
+      accessToken: 'admin-paired-test-token',
+      binding: { ...adminPairedBinding, scopes: ['chat', 'tickets:view', 'approvals:respond'] },
+      lastSeq: 12,
+    }));
+    const credentials = createJsonCredentialStore(storage);
+    const gateway = loopbackGateway((pathname, init) => {
+      const fresh = bearer(init) === 'Bearer fresh-test-token';
+      if (pathname === '/v1/paired/me') return json({ binding: fresh ? binding : adminPairedBinding });
+      if (pathname === '/v1/approvals' && !fresh) return missingDecisionScope();
+      return null;
+    });
+    const client = new ControlPlaneClient({ fetch: gateway.fetch, credentials, createWebSocket: gateway.createWebSocket });
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler });
+
+    await runtime.start({ loopbackEndpoint: webLoopbackEndpoint() });
+    gateway.sockets[0]!.hello(0);
+
+    expect(gateway.count(`POST ${WORKING_ORIGIN}/v1/paired/loopback`)).toBe(1);
+    expect(storedCredentials(storage)).toMatchObject({ accessToken: 'fresh-test-token' });
+    expect(runtime.control.getState()).toMatchObject({ phase: 'ready', connectionState: 'connected', error: null });
+    runtime.stop();
+  });
+
+  // 网关不认这个页面是本机网页（origin 不在允许列表，回 403）：不能叫用户去开 PLC_ALLOW_LOOPBACK_AUTO_PAIR，它已经开了。
+  it('names the origin allow-list when the gateway refuses this page as a local page', async () => {
+    const storage = new MemoryKeyValueStorage();
+    storage.values.set(CREDENTIAL_KEY, JSON.stringify({
+      baseUrl: WORKING_ORIGIN,
+      accessToken: 'admin-paired-test-token',
+      binding: adminPairedBinding,
+      lastSeq: 12,
+    }));
+    const credentials = createJsonCredentialStore(storage);
+    const gateway = loopbackGateway((pathname) => {
+      if (pathname === '/v1/paired/loopback') {
+        return json({ error: { code: 'forbidden', message: 'loopback auto-pair is not allowed for this request' } }, 403);
+      }
+      if (pathname === '/v1/approvals/5/resolve') return missingDecisionScope();
+      return null;
+    });
+    const client = new ControlPlaneClient({ fetch: gateway.fetch, credentials, createWebSocket: gateway.createWebSocket });
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler });
+
+    await runtime.start({ loopbackEndpoint: webLoopbackEndpoint() });
+    gateway.sockets[0]!.hello(12);
+
+    const refused = await runtime.resolveApproval(5, 'approve').catch((reason: unknown) => reason as Error);
+    expect(refused).toMatchObject({ status: 403, message: expect.stringContaining('PLC_LOOPBACK_AUTO_PAIR_ORIGINS') });
+    expect((refused as Error).message).not.toContain('PLC_ALLOW_LOOPBACK_AUTO_PAIR=1');
+    runtime.stop();
+  });
+
+  // 不是本机网页（例如手机），存着的 scope 也是配对那时的：取审批回 403 不让整页进入错误，点决定时说去哪里做。
+  it('stays usable when stored scopes are wider than the gateway gives, away from the local page', async () => {
+    const storage = new MemoryKeyValueStorage();
+    storage.values.set(CREDENTIAL_KEY, JSON.stringify({
+      baseUrl: WORKING_ORIGIN,
+      accessToken: 'admin-paired-test-token',
+      binding: { ...adminPairedBinding, scopes: ['chat', 'tickets:view', 'approvals:respond'] },
+      lastSeq: 12,
+    }));
+    const credentials = createJsonCredentialStore(storage);
+    const gateway = loopbackGateway((pathname) => (
+      pathname === '/v1/approvals' || pathname === '/v1/approvals/5/resolve' ? missingDecisionScope() : null
+    ));
+    const client = new ControlPlaneClient({ fetch: gateway.fetch, credentials, createWebSocket: gateway.createWebSocket });
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler });
+
+    await runtime.start();
+    gateway.sockets[0]!.hello(12);
+
+    expect(runtime.control.getState()).toMatchObject({ phase: 'ready', connectionState: 'connected', error: null });
+    await expect(runtime.resolveApproval(5, 'approve')).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining('phone paired by QR code'),
+    });
+    runtime.stop();
+  });
 });
