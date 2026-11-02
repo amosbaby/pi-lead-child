@@ -53,6 +53,7 @@ const source: ChannelSourceSettingsDto = {
   ],
   manifest: 'display_information:\n  name: test',
   setupUrl: 'https://api.slack.com/apps',
+  setupNote: null,
   editable: true,
 };
 

@@ -377,8 +377,8 @@ export interface ChannelSecretSpec {
   label: string;
   // 应该以什么开头（界面提示用；校验在 test 里做）。
   prefix: string;
-  // 在哪里生成它（给人看的一句话）。
-  hint: string;
+  // 在哪里生成它（给人看的一句话，按界面语言）。
+  hint(locale: Locale): string;
   // 值最多多少个字符（daemon 查）。缺省是 CHANNEL_TOKEN_MAX_LENGTH（令牌）；浏览器会话的 cookie 这类长的密钥声明更大的，
   // 但不超过协议的 CHANNEL_SECRET_MAX_LENGTH（请求体本身的上限）。
   maxLength?: number;
@@ -398,6 +398,8 @@ export interface ChannelSettingsSpec {
   readonly manifest: string | null;
   // 建应用的网页。没有时是 null。
   readonly setupUrl: string | null;
+  // 建应用的要点（给人看，按界面语言），设置页放在建应用的链接下面。没有时不显示。
+  setupNote?(locale: Locale): string;
   // 存了令牌、连上了很久，却一个事件都没收到时，设置页上的提醒（多半是应用没有订阅事件）：该查哪里、怎样验证。没有时不提醒。
   noEventsWarning?(locale: Locale): string;
   /**

@@ -341,6 +341,7 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
   private view(adapter: ChannelAdapter): ChannelSourceSettingsView {
     const settings = adapter.settings!;
     const state = this.sourceState(adapter.id);
+    const locale = getLocale(this.options.db);
     return {
       source: adapter.id,
       label: adapter.label.slice(0, 60),
@@ -353,13 +354,14 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
       secrets: settings.secrets.slice(0, 8).map((spec) => {
         const found = this.resolve(spec.name);
         return {
-          name: spec.name, label: spec.label, prefix: spec.prefix, hint: spec.hint,
+          name: spec.name, label: spec.label, prefix: spec.prefix, hint: spec.hint(locale).slice(0, 300),
           present: found !== null, origin: found?.origin ?? null,
         };
       }),
       manifest: settings.manifest,
       // 超过契约的长度时不给：一个来源的长链接不能让整个列表过不了客户端的校验。
       setupUrl: settings.setupUrl && settings.setupUrl.length <= CHANNEL_SETUP_URL_MAX ? settings.setupUrl : null,
+      setupNote: settings.setupNote?.(locale).slice(0, 1_000) || null,
     };
   }
 
