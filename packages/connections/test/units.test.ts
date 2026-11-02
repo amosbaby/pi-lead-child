@@ -47,6 +47,31 @@ describe("OAuth discovery", () => {
     await expect(discover(fetchImpl, vendor.mcpUrl)).rejects.toThrow(/not https:\/\/mcp.fake.test\/mcp/);
   });
 
+  it("accepts resource metadata that names the origin or a parent path of the MCP URL (Slack publishes the origin)", async () => {
+    const vendor = new FakeVendor(() => Date.now());
+    const fetchImpl: typeof vendor.fetch = async (input, init) => {
+      if (input.includes("oauth-protected-resource")) {
+        return new Response(JSON.stringify({ resource: "https://mcp.fake.test", authorization_servers: [vendor.issuer] }), { status: 200 });
+      }
+      return vendor.fetch(input, init);
+    };
+    const discovery = await discover(fetchImpl, vendor.mcpUrl);
+    expect(discovery.resource?.resource).toBe("https://mcp.fake.test");
+  });
+
+  it("rejects resource metadata for a sibling path or a lookalike prefix", async () => {
+    const vendor = new FakeVendor(() => Date.now());
+    for (const resource of ["https://mcp.fake.test/mcp2", "https://mcp.fake.test/other", "https://mcp.fake.test.evil.test"]) {
+      const fetchImpl: typeof vendor.fetch = async (input, init) => {
+        if (input.includes("oauth-protected-resource")) {
+          return new Response(JSON.stringify({ resource, authorization_servers: [vendor.issuer] }), { status: 200 });
+        }
+        return vendor.fetch(input, init);
+      };
+      await expect(discover(fetchImpl, vendor.mcpUrl)).rejects.toThrow(/resource metadata is for/);
+    }
+  });
+
   it("finds the metadata of an issuer with a path at the RFC 8414 address", async () => {
     const vendor = new FakeVendor(() => Date.now(), { issuer: "https://auth.fake.test/tenant-1" });
     const discovery = await discover(vendor.fetch, vendor.mcpUrl);
