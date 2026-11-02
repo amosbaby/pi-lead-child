@@ -3324,27 +3324,31 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   uiActionServices.leadModels = leadModelService;
 
-  // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）。大脑的分工整条写进 lead.models，主用变了才换模型：
-  // 只改备用的顺序时不动正在用的（模型自动切换可能正用着备用）。
   // 重新注册 Lead 的服务商（设置 → 模型改了服务商，或者按退避重拉），正在用的模型再挂一次。成功注册时返回 true。
   // 分工里还有服务商拉不到目录（本机代理还没起来、key 错、地址错）时按退避再拉，拉到为止：
-  // 拉不到时那个服务商的模型只按缺省（128K、只看文字）注册。
+  // 拉不到时那个服务商的模型只按缺省（128K、只看文字）注册。按退避重拉时只拉还缺目录的（missingProviders）。
   const providerRetryBaseMs = Number(process.env.PLC_LEAD_PROVIDER_RETRY_MS ?? 30_000);
   let providerRetry: NodeJS.Timeout | null = null;
+  let missingProviders = new Set(providersUnavailable ?? []);
   async function reloadLeadProviders(attempt = 0): Promise<boolean> {
     leadCatalogCache = null;
     if (!refreshProviders) return false;
+    const retrying = attempt > 0;
     let still: string[] = [];
     try {
-      still = (await refreshProviders()) ?? [];
+      still = (await refreshProviders(retrying ? [...missingProviders] : undefined)) ?? [];
     } catch (error: any) {
       log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
       return false;
     }
+    const current = parseLeadModelSpec(appliedLeadModel).provider;
+    const currentBack = missingProviders.has(current) && !still.includes(current);
+    missingProviders = new Set(still);
     if (still.length) retryLeadProviders(attempt);
-    // 按退避重拉、还没拉到：正在用的模型不用再挂。
-    if (attempt > 0 && still.length) return true;
-    if (attempt > 0) modelSettingsChanged("every chosen provider's catalog is back");
+    // 按退避重拉：正在用的模型的服务商拉到了目录才再挂（窗口、看图这些信息才对），模型可能又能用了，旧的退避作废。
+    // 只是备用的服务商还缺目录时照样再挂（以前要等全部拉到）。
+    if (retrying && !currentBack) return true;
+    if (retrying) modelSettingsChanged(`${current}'s catalog is back`);
     if (sched.busy || sched.draining || sched.starting) {
       rebindLeadModel = true;
       return true;
@@ -3365,6 +3369,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     providerRetry.unref();
   }
 
+  // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）。大脑的分工整条写进 lead.models，主用变了才换模型：
+  // 只改备用的顺序时不动正在用的（模型自动切换可能正用着备用）。
   const modelSettings = new ModelSettings({
     db, dataDir: opts.dataDir, vault, log, memory: memoryControl,
     externalSecret: (name) => daemonOnlySecrets.get(name) ?? cachedKeychainSecret(name),

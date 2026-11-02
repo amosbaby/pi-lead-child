@@ -206,10 +206,10 @@ describe("settings → models through the gateway", () => {
     let refreshes = 0;
     lead.factory = async () => ({
       ...(await factory()),
-      providersUnavailable: ["vibeproxy: model catalog failed (Error: fetch failed)"],
+      providersUnavailable: ["vibeproxy"],
       refreshProviders: async () => {
         refreshes += 1;
-        return refreshes < 3 ? ["vibeproxy: model catalog failed (Error: fetch failed)"] : [];
+        return refreshes < 3 ? ["vibeproxy"] : [];
       },
     });
     await start(lead);
@@ -217,6 +217,29 @@ describe("settings → models through the gateway", () => {
     expect(refreshes).toBe(3);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(refreshes).toBe(3);
+  });
+
+  // 第二轮审阅：重拉时只拉还缺目录的服务商（拉得到目录的不再拉，一次抖动不会把它换成缺省的注册）；
+  // 正在用的模型的服务商拉到了就再挂，不等一直坏着的备用服务商。
+  it("re-registers only the providers still missing a catalog, and rebinds once the one in use is back", async () => {
+    vi.stubEnv("PLC_LEAD_PROVIDER_RETRY_MS", "30");
+    const lead = stubLead();
+    const factory = lead.factory;
+    const asked: Array<readonly string[] | undefined> = [];
+    lead.factory = async () => ({
+      ...(await factory()),
+      providersUnavailable: ["vibeproxy", "spare"],
+      refreshProviders: async (only?: readonly string[]) => {
+        asked.push(only);
+        // 正在用的 vibeproxy 第二次重拉时回来了，备用的 spare 一直拉不到。
+        return asked.length < 2 ? ["vibeproxy", "spare"] : ["spare"];
+      },
+    });
+    await start(lead);
+    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(asked.length).toBeGreaterThanOrEqual(3), { timeout: 10_000 });
+    expect(asked.slice(0, 3)).toEqual([["vibeproxy", "spare"], ["vibeproxy", "spare"], ["spare"]]);
+    expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]);
   });
 
   it("adds a second decision model and sets the fast chain, mirrored into the old decision fields", async () => {
