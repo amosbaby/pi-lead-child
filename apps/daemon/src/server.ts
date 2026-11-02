@@ -104,7 +104,7 @@ import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
   classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
-  LEAD_RESTART_INTERRUPTED_ERROR, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
+  LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
   partialUiSurface,
   PRESENCE_IDLE_MS, QUIET_REPLY, redactAndCap, redactSecretText, userFacingBacklogText,
   stripQuietReply,
@@ -3767,6 +3767,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           error = markUpstreamFailure(error);
           leadHealth.reclassify(error);
         }
+      }
+      // pi 发 prompt 前的检查失败（没有 key、凭据过期）时不调模型，也没有 message_end：上面没记进健康状态，顶栏一直是绿点
+      // （缺省模型没有 key 时失败了三天，用户看不出来）。认证、配置这类失败在这里记上。
+      if (!interrupted && !networkFailure && activeTurnError === null && leadModelFailureNeedsUser(classifyLeadModelError(error))) {
+        leadHealth.failed(error);
       }
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
       if (!interrupted && !networkFailure) noteLeadModelFailure(error);
