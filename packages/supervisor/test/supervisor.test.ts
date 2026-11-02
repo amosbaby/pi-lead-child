@@ -243,12 +243,14 @@ describe("the deploy gate at the maintenance entry", () => {
   async function start(
     dir: string, deployment: { root: string; distDir: string },
     backupDatabase?: (source: string, destination: string) => Promise<void>,
+    buildDist?: (root: string) => Promise<void>,
   ) {
     const dbFile = join(dir, "plc.db");
     openDb(dbFile).close();
     writeFileSync(join(dir, "fake-active-items.json"), JSON.stringify([]));
     handle = await startSupervisor({
       ...(backupDatabase ? { backupDatabase } : {}),
+      ...(buildDist ? { buildDist } : {}),
       dataDir: dir,
       dbPath: dbFile,
       daemonCommand: { bin: resolve("node_modules/.bin/tsx"), args: [resolve("packages/supervisor/test/fake-supervised-daemon.ts")] },
@@ -374,6 +376,45 @@ describe("the deploy gate at the maintenance entry", () => {
     const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
     expect(failed.supervisor.maintenance?.error).toContain("deploy refused");
     expect(Number(failed.daemon?.pid)).toBe(pid);
+  }, 30_000);
+
+  // 2026-11-02：修复合并进主 checkout 以后请求重启，dist 还是旧 commit 构建的；闸门只看「是 HEAD 的祖先」就放行了，
+  // 重启跑的还是旧代码。现在 dist 不是干净 HEAD 的构建时，维护在停机之前先从 HEAD 构建。
+  it("builds dist from HEAD before the restart when the build is behind a clean HEAD", async () => {
+    const dir = tempDir("plc-supervisor-stale-dist-");
+    const deployment = deployCheckout(dir);
+    const builds: string[] = [];
+    const pid = await start(dir, deployment, undefined, async (root) => {
+      builds.push(root);
+      writeBuildProvenance(root, deployment.distDir);
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 7;\n");
+    deployment.git("commit", "-qam", "the fix");
+    const head = deployment.git("rev-parse", "HEAD");
+    expect((await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: dir })).deploy?.build?.commit).not.toBe(head);
+
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const done = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(builds).toEqual([deployment.root]);
+    expect(done.deploy).toMatchObject({ ready: true, head, build: { commit: head } });
+  }, 30_000);
+
+  it("keeps the running daemon and reports why when that build fails", async () => {
+    const dir = tempDir("plc-supervisor-stale-dist-fails-");
+    const deployment = deployCheckout(dir);
+    const pid = await start(dir, deployment, undefined, async () => {
+      throw new Error("esbuild: Could not resolve \"./missing.js\"");
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 8;\n");
+    deployment.git("commit", "-qam", "the fix");
+
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.error).toContain("deploy refused");
+    expect(failed.supervisor.maintenance?.error).toContain("Could not resolve");
+    expect(failed.supervisor.maintenance?.backupPath).toBeNull();
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+    expect(failed.supervisor.phase).toBe("running");
   }, 30_000);
 
   it("keeps only the newest restart backups and leaves the others alone", () => {

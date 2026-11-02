@@ -93,6 +93,21 @@ describe("deploy readiness", () => {
     git("commit", "-qm", "later");
     expect(readiness()).toMatchObject({ ready: true, build: { commit: built.commit } });
   });
+
+  // 2026-11-02：dist 落后于 HEAD 时闸门照样放行，重启跑的还是旧代码。rebuild 告诉维护先从 HEAD 构建。
+  it("asks for a rebuild when the checkout is clean but dist is not a clean build of HEAD", () => {
+    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+    const built = writeBuildProvenance(checkout, dist);
+    expect(readiness()).toMatchObject({ ready: true, rebuild: false, head: built.commit });
+    writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 5;\n");
+    git("commit", "-qam", "the fix");
+    expect(readiness()).toMatchObject({ ready: true, rebuild: true });
+  });
+
+  it("does not ask for a rebuild of a checkout with uncommitted code", () => {
+    writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 6;\n");
+    expect(readiness()).toMatchObject({ ready: false, rebuild: false });
+  });
 });
 
 // 2026-11-02：系统负载高时 git 超时，闸门把 cat-file 的超时报成「不在这个仓库里」，把 merge-base 的超时报成

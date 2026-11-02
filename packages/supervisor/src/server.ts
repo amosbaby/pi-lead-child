@@ -14,7 +14,7 @@ import {
   LEAD_DRAIN_TIMEOUT_MS, SUPERVISOR_FEATURE_DEPLOY_GATE, SUPERVISOR_FEATURE_MAINTENANCE_BACKUP, type DaemonDrainResult,
   redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
-import { deployReadiness, type DeployReadiness } from "./deploy/readiness.js";
+import { buildDaemonDist, deployReadiness, type DeployReadiness } from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
 import { DEFAULT_DAEMON_READY_TIMEOUT_MS } from "./daemon-ready-timeout.js";
 import { findRuntimeExecutable, runtimeSearchPath } from "@pi-lead-child/runtime";
@@ -52,6 +52,8 @@ export interface SupervisorOptions {
   deployment?: { root: string; distDir: string } | null;
   // 维护前的数据库备份（缺省是 deploy/backup.ts 的 backupSqlite，有时限）。测试用它模拟一次很慢的备份。
   backupDatabase?: (source: string, destination: string) => Promise<void>;
+  // 维护前从 HEAD 构建 dist（缺省是 deploy/readiness.ts 的 buildDaemonDist）。测试用它代替真的构建。
+  buildDist?: (root: string) => Promise<void>;
 }
 
 export class DeployRefusedError extends Error {
@@ -519,6 +521,24 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     state.phase = request.backup ? "backing_up" : "restarting";
     persist();
     try {
+      // dist 不是干净 HEAD 的构建（2026-11-02：修复合并后重启，跑的还是旧 dist）：停机之前先从 HEAD 构建。
+      // 构建失败就不停机，daemon 照旧跑原来的构建，原因记在这次维护上。
+      const before = opts.deployment ? deployReadiness(opts.deployment.root, opts.deployment.distDir) : null;
+      if (opts.deployment && before?.rebuild) {
+        log(`maintenance ${request.id}: building dist from ${before.head} (dist was built from ${before.build?.commit ?? "unknown"})`);
+        try {
+          await (opts.buildDist ?? buildDaemonDist)(opts.deployment.root);
+        } catch (error: any) {
+          const note = redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env));
+          refuseBeforeStop(request, new DeployRefusedError([
+            `dist 不是从 HEAD ${before.head} 构建的，停机前从 HEAD 重新构建失败（${note}）。daemon 没有停，还在跑原来的构建。`
+            + `在主 checkout 里运行 npm run build 可以看完整输出。`,
+          ]).message);
+          return;
+        } finally {
+          readinessCache = null;
+        }
+      }
       // 等排空的这段时间里 checkout 可能变了：停机之前再查一次。
       const refusal = deployRefusal();
       if (refusal.length) {
@@ -601,8 +621,9 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
       throw new Error(`maintenance request ${state.maintenance.id} is already ${state.maintenance.state}`);
     }
     // 部署闸门：没提交的代码不能部署。拒绝时 daemon 不动，原因原样返回给请求方。
-    const refusal = deployRefusal();
-    if (refusal.length) throw new DeployRefusedError(refusal);
+    // 只是 dist 不是干净 HEAD 的构建（rebuild）时不拒绝：维护在停机之前先从 HEAD 构建。
+    const readiness = opts.deployment ? deployReadiness(opts.deployment.root, opts.deployment.distDir) : null;
+    if (readiness && !readiness.ready && !readiness.rebuild) throw new DeployRefusedError(readiness.reasons);
     const request: MaintenanceRequest = {
       id: randomUUID(),
       action: command.action,

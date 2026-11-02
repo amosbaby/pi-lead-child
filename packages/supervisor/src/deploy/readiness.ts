@@ -6,10 +6,12 @@
 //     plc daemon restart/upgrade）检查下面几件事，有一件不满足就拒绝，并说明原因：
 //     主 checkout 没有没提交的改动；dist 是从一个已提交、构建时没有改动、在当前分支历史里的 commit 构建的。
 //     崩溃后的自动拉起不拦截，只记警告（supervisor 的 spawnDaemon）。
+//   · 主 checkout 干净、dist 却不是 HEAD 的干净构建（2026-11-02：修复合并后重启，跑的还是旧 dist）：维护在停机之前
+//     先从 HEAD 构建（buildDaemonDist），构建失败就不停机。
 // 「没提交的改动」只看会进构建的代码：packages/、apps/ 下的改动和没被忽略的新文件，以及仓库根目录下的文件
 // （package.json、package-lock.json、tsconfig.json 这类）。不算的：docs/、artifacts/、.scratch/、.claude/（它们不进 dist，
 // 而且有的测试会改写 artifacts/ 里的证据文件），以及测试文件（test/ 目录下的、*.test.* 和 *.spec.*）。
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
@@ -30,6 +32,8 @@ export interface DeployReadiness {
   reasons: string[];
   head: string | null;
   build: BuildProvenance | null;
+  // 主 checkout 干净，dist 却不是 HEAD 的干净构建：维护会先从 HEAD 重新构建。
+  rebuild: boolean;
 }
 
 const SOURCE_DIRS = ["packages/", "apps/"];
@@ -135,11 +139,14 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
   const run = (args: string[]) => git(root, args, exec, timeoutMs);
   const reasons: string[] = [];
   let head: string | null = null;
+  let clean = false;
   try {
     head = run(["rev-parse", "HEAD"]);
     const changes = uncommittedSourceChanges(root, 20, exec, timeoutMs);
     if (changes.length) {
       reasons.push(`主 checkout ${root} 有没提交的改动：${changes.join("、")}。先提交（或者撤销）这些改动，再重新构建。`);
+    } else {
+      clean = true;
     }
   } catch (error) {
     reasons.push(`读不了主 checkout ${root} 的 git 状态：${error instanceof Error ? error.message : String(error)}`);
@@ -169,5 +176,35 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
         : `无法判断 dist 的构建 commit ${build.commit} 是否在这个仓库里（${gitFailureNote(kind, error)}）。先不部署，稍后再试。`);
     }
   }
-  return { ready: reasons.length === 0, reasons, head, build };
+  const rebuild = clean && head !== null && !(build && !build.dirty && build.commit === head);
+  return { ready: reasons.length === 0, reasons, head, build, rebuild };
+}
+
+const BUILD_TIMEOUT_MS = 5 * 60_000;
+const BUILD_OUTPUT_KEPT = 4_096;
+
+/** 从 root 当前的 checkout 构建 dist（apps/daemon 的 npm run build）。失败时 reject，带上输出的最后几行。 */
+export function buildDaemonDist(root: string, timeoutMs = BUILD_TIMEOUT_MS): Promise<void> {
+  return new Promise((resolve, reject) => {
+    // 不用 tsx 命令行：它要开一个 IPC socket，沙箱里 listen 会 EPERM。
+    const child = spawn(process.execPath, ["--import", "tsx", "scripts/build.ts"], {
+      cwd: join(root, "apps", "daemon"), stdio: ["ignore", "pipe", "pipe"],
+    });
+    let output = "";
+    const keep = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-BUILD_OUTPUT_KEPT); };
+    child.stdout.on("data", keep);
+    child.stderr.on("data", keep);
+    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) return resolve();
+      const tail = output.split("\n").map((line) => line.trim()).filter(Boolean).slice(-5).join(" | ");
+      const how = signal ? `被 ${signal} 终止（时限 ${timeoutMs}ms）` : `退出码 ${code}`;
+      reject(new Error(`构建${how}${tail ? `：${tail}` : ""}`));
+    });
+  });
 }

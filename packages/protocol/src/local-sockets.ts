@@ -202,5 +202,6 @@ export interface SupervisorStatus {
   // 这个 supervisor 支持的可选功能，例如 SUPERVISOR_FEATURE_MAINTENANCE_BACKUP。
   features?: string[];
   // 部署闸门现在的判断（supervisor 知道 daemon 从哪个 checkout 启动时才有）。
-  deploy?: { ready: boolean; reasons: string[]; head: string | null; build: { commit: string; dirty: boolean } | null };
+  // rebuild：dist 不是干净 HEAD 的构建，维护会先从 HEAD 构建。
+  deploy?: { ready: boolean; reasons: string[]; head: string | null; build: { commit: string; dirty: boolean } | null; rebuild?: boolean };
 }
