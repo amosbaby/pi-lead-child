@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import {
-  closeSync, existsSync, mkdirSync, openSync, readdirSync, rmSync, unlinkSync,
+  closeSync, existsSync, fstatSync, mkdirSync, openSync, readdirSync, readSync, rmSync, statSync, unlinkSync,
 } from "node:fs";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
 import { LATEST_SCHEMA_VERSION } from "@pi-lead-child/store";
 import {
   LEAD_DRAIN_TIMEOUT_MS, SUPERVISOR_FEATURE_DEPLOY_GATE, SUPERVISOR_FEATURE_MAINTENANCE_BACKUP, type DaemonDrainResult,
+  redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
 import { deployReadiness, type DeployReadiness } from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
@@ -76,6 +77,41 @@ export function startingDaemonVerdict(check: {
   if (check.answered) return "ready";
   if (check.exited) return "exited";
   return check.waitedMs >= check.timeoutMs ? "timed_out" : "starting";
+}
+
+// daemon 没就绪就退出时，supervisor.log 里那一行带上这次启动写进 err.log 的末尾几行（2026-11-02：以前只有 code 和 signal，
+// 原因要去 err.log 里翻，还混着以前几次启动的输出）。只从 fromOffset（spawn 前 err.log 的长度）读起，最多 maxBytes，
+// 截断时丢掉不完整的第一行。先按规则、再按 daemon 环境里的密钥值脱敏。只写 supervisor.log，不进 status：
+// status 会经 get_runtime_health 到达 Lead。读不到时返回空串。
+export const DAEMON_STDERR_TAIL_BYTES = 2_048;
+export function daemonStderrTail(
+  path: string,
+  fromOffset: number,
+  env: Record<string, string | undefined>,
+  maxBytes = DAEMON_STDERR_TAIL_BYTES,
+): string {
+  let raw: string;
+  let cut: boolean;
+  try {
+    const fd = openSync(path, "r");
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(fromOffset, size - maxBytes);
+      if (start >= size) return "";
+      const buffer = Buffer.alloc(size - start);
+      const read = readSync(fd, buffer, 0, buffer.length, start);
+      raw = buffer.subarray(0, read).toString("utf8");
+      cut = start > fromOffset;
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return "";
+  }
+  const lines = raw.split("\n");
+  if (cut) lines.shift();
+  const tail = lines.map((line) => line.trim()).filter(Boolean).join(" | ");
+  return redactKnownValues(redactSecretText(tail), secretEnvValues(env));
 }
 
 export interface SupervisorHandle {
@@ -209,6 +245,8 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
   let restartTimer: ReturnType<typeof setNodeTimeout> | null = null;
   let daemonOutFd: number | null = null;
   let daemonErrFd: number | null = null;
+  // child 启动前 err.log 的长度。和 child 一起设置。
+  let childErrOffset = 0;
 
   const persist = () => saveSupervisorState(statePath, state);
 
@@ -237,7 +275,10 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
   // 等本 supervisor 拉起的 daemon 回答第一次 status。以前固定等 30 秒：2026-10-19 14:54Z 负载约 37，
   // daemon 39 秒才开始监听，维护在第 30 秒把这个健康的 daemon 记成了失败。
   const readyTimeoutMs = opts.daemonReadyTimeoutMs ?? DEFAULT_DAEMON_READY_TIMEOUT_MS;
-  const waitForStartedDaemon = async (started: ChildProcess): Promise<Record<string, unknown>> => {
+  const daemonErrLogPath = join(logsDir, "coordinatord.err.log");
+  const daemonEnv = (): Record<string, string | undefined> => ({ ...process.env, ...opts.env });
+  // errOffset：spawn 这个进程之前 err.log 的长度，它退出时只读这之后写的内容。
+  const waitForStartedDaemon = async (started: ChildProcess, errOffset: number): Promise<Record<string, unknown>> => {
     const startedAt = Date.now();
     for (;;) {
       const status = await daemonStatus();
@@ -250,8 +291,12 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
       });
       if (verdict === "ready") return status!;
       if (verdict === "exited") {
-        throw new Error(`daemon pid ${started.pid ?? "?"} exited before it answered status `
-          + `(code=${started.exitCode}, signal=${started.signalCode})`);
+        const message = `daemon pid ${started.pid ?? "?"} exited before it answered status `
+          + `(code=${started.exitCode}, signal=${started.signalCode})`;
+        // stderr 只进 supervisor.log。抛出的错误会进维护记录和 status，不带它。
+        const tail = daemonStderrTail(daemonErrLogPath, errOffset, daemonEnv());
+        log(tail ? `${message}; last stderr: ${tail}` : message);
+        throw new Error(message);
       }
       if (verdict === "timed_out") {
         const listening = await socketListening(daemonSockPath);
@@ -288,24 +333,30 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
   const spawnDaemon = async (): Promise<Record<string, unknown>> => {
     const deadline = Date.now() + readyTimeoutMs;
     for (;;) {
+      // 下面三条路都是 daemon 已经在了，phase 回到 running，crashCount 也清零（2026-11-02）：以前只有自己拉起、
+      // 一次就等到就绪的那条路清零。崩溃以后拉起的 daemon 启动慢、第二轮才等到时，phase 是 running，
+      // crashCount 却还停在崩溃时的数，下次崩溃的退避也按它算。
       const existing = await daemonStatus();
       if (existing) {
         state.daemonPid = Number(existing.pid ?? 0) || null;
         state.phase = "running";
+        state.crashCount = 0;
         persist();
         return existing;
       }
       // daemon 的 socket 在监听，只是 status 没有及时回答：它在忙，不是不在。不再起第二个。
       if (!child && await socketListening(daemonSockPath)) {
         state.phase = "running";
+        state.crashCount = 0;
         persist();
         return {};
       }
       if (child) {
         const starting = child;
-        const ready = await waitForStartedDaemon(starting);
+        const ready = await waitForStartedDaemon(starting, childErrOffset);
         state.daemonPid = Number(ready.pid ?? starting.pid ?? 0) || null;
         state.phase = "running";
+        state.crashCount = 0;
         persist();
         return ready;
       }
@@ -322,8 +373,10 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
     // 崩溃后的自动拉起、开机启动：不拦截（拦截就等于停服），只把不符合部署闸门的原因记下来。
     const startRefusal = deployRefusal();
     if (startRefusal.length) log(`starting the daemon from a build the deploy gate would refuse: ${startRefusal.join(" ")}`);
+    let errOffset = 0;
+    try { errOffset = statSync(daemonErrLogPath).size; } catch { /* 还没有 err.log */ }
     daemonOutFd = openSync(join(logsDir, "coordinatord.out.log"), "a");
-    daemonErrFd = openSync(join(logsDir, "coordinatord.err.log"), "a");
+    daemonErrFd = openSync(daemonErrLogPath, "a");
     state.phase = "starting";
     persist();
     const spawned = spawn(opts.daemonCommand.bin, opts.daemonCommand.args, {
@@ -337,6 +390,7 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
       stdio: ["ignore", daemonOutFd, daemonErrFd],
     });
     child = spawned;
+    childErrOffset = errOffset;
     state.daemonPid = spawned.pid ?? null;
     persist();
     spawned.once("error", (error) => {
@@ -357,7 +411,7 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
         persist();
       }
     });
-    const ready = await waitForStartedDaemon(spawned);
+    const ready = await waitForStartedDaemon(spawned, errOffset);
     state.daemonPid = Number(ready.pid ?? spawned.pid ?? 0) || null;
     state.phase = "running";
     state.crashCount = 0;
