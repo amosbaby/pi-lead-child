@@ -17,6 +17,11 @@ export const runtimeMessages = defineMessages({
     noChannelCards: 'This daemon does not support channel cards.',
     noQueue: 'This daemon does not support the queue.',
     noFollowUp: 'This daemon does not support Steer and cancel.',
+    // 凭证做不了决定（网关去掉了 approvals:respond），本机网页又换不到能做决定的凭证。
+    decisionNeedsLoopbackPairing: 'This page\'s credential cannot make decisions. '
+      + 'Restart the daemon with PLC_ALLOW_LOOPBACK_AUTO_PAIR=1, then reload this page.',
+    decisionNeedsPairedDevice: 'This device\'s credential cannot make decisions. '
+      + 'Decide in the web page opened on the Mac that runs the daemon, or on a phone paired by QR code.',
   },
   zh: {
     noLeadModelSwitch: '这个 daemon 还不能换 Lead 的模型',
@@ -32,5 +37,7 @@ export const runtimeMessages = defineMessages({
     noChannelCards: '这个 daemon 不支持通道卡片',
     noQueue: '这个 daemon 不支持排队',
     noFollowUp: '这个 daemon 不支持 Steer 和取消',
+    decisionNeedsLoopbackPairing: '这个页面的凭证不能做决定。请用 PLC_ALLOW_LOOPBACK_AUTO_PAIR=1 重启 daemon，然后刷新这个页面。',
+    decisionNeedsPairedDevice: '这台设备的凭证不能做决定。请在运行 daemon 的 Mac 上打开的网页里做，或者在扫码配对的手机上做。',
   },
 });

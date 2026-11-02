@@ -117,14 +117,14 @@ function json(value: unknown, status = 200): Response {
 
 // A gateway on WORKING_ORIGIN. Nothing listens on REFUSED_ORIGIN, which a
 // browser reports as a TypeError (net::ERR_CONNECTION_REFUSED).
-function loopbackGateway(extra: (pathname: string) => Response | null = () => null) {
+function loopbackGateway(extra: (pathname: string, init?: RequestInit) => Response | null = () => null) {
   const requests: string[] = [];
   const sockets: FakeSocket[] = [];
   const fetch = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     requests.push(`${init?.method ?? 'GET'} ${url.origin}${url.pathname}`);
     if (url.origin !== WORKING_ORIGIN) throw new TypeError('Failed to fetch');
-    const answered = extra(url.pathname);
+    const answered = extra(url.pathname, init);
     if (answered) return answered;
     switch (url.pathname) {
       case '/v1/paired/loopback': return json({ binding, access_token: 'fresh-test-token' }, 201);
@@ -292,5 +292,76 @@ describe('web companion loopback startup', () => {
     expect(gateway.count(`GET ${WORKING_ORIGIN}/v1/connections`)).toBe(1);
     expect(runtime.control.getState().resourceState.connections).toMatchObject({ state: 'ready' });
     release();
+  });
+
+  // 2026-11 第一次用：网页用 plc pair new 配的凭证（来历 admin_pairing），网关去掉了 approvals:respond，点批准回 403。
+  // 开了 PLC_ALLOW_LOOPBACK_AUTO_PAIR=1 也没用：只有没凭证或 401 时才走回环自动配对。现在启动时就换一张能做决定的。
+  const adminPairedBinding: BindingDto = {
+    id: 3,
+    kind: 'companion',
+    name: 'Ethan 的浏览器',
+    // 去掉了 approvals:respond 的 DEFAULT_SCOPES；这里只留假网关答得上的。
+    scopes: ['chat', 'tickets:view'],
+  };
+  const missingDecisionScope = () => json({ error: {
+    code: 'forbidden',
+    message: 'missing scope: approvals:respond. Only the user decides, in the web page or on the paired phone',
+  } }, 403);
+  const bearer = (init?: RequestInit) => new Headers(init?.headers).get('authorization');
+
+  it('swaps a stored credential that cannot decide for a loopback credential, so approving works', async () => {
+    const storage = new MemoryKeyValueStorage();
+    storage.values.set(CREDENTIAL_KEY, JSON.stringify({
+      baseUrl: WORKING_ORIGIN,
+      accessToken: 'admin-paired-test-token',
+      binding: adminPairedBinding,
+      lastSeq: 12,
+    }));
+    const credentials = createJsonCredentialStore(storage);
+    const gateway = loopbackGateway((pathname, init) => {
+      if (pathname !== '/v1/approvals/5/resolve') return null;
+      return bearer(init) === 'Bearer fresh-test-token' ? json({ ok: true }) : missingDecisionScope();
+    });
+    const client = new ControlPlaneClient({ fetch: gateway.fetch, credentials, createWebSocket: gateway.createWebSocket });
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler });
+
+    await runtime.start({ loopbackEndpoint: webLoopbackEndpoint() });
+    gateway.sockets[0]!.hello(0);
+
+    expect(gateway.count(`POST ${WORKING_ORIGIN}/v1/paired/loopback`)).toBe(1);
+    expect(storedCredentials(storage)).toMatchObject({ baseUrl: WORKING_ORIGIN, accessToken: 'fresh-test-token' });
+    expect(gateway.sockets).toHaveLength(1);
+    await expect(runtime.resolveApproval(5, 'approve')).resolves.toBeUndefined();
+    runtime.stop();
+  });
+
+  it('keeps the credential when loopback auto-pair is off and says what to do on a refused decision', async () => {
+    const storage = new MemoryKeyValueStorage();
+    storage.values.set(CREDENTIAL_KEY, JSON.stringify({
+      baseUrl: WORKING_ORIGIN,
+      accessToken: 'admin-paired-test-token',
+      binding: adminPairedBinding,
+      lastSeq: 12,
+    }));
+    const credentials = createJsonCredentialStore(storage);
+    // 没开 PLC_ALLOW_LOOPBACK_AUTO_PAIR：网关上没有回环配对的路由。
+    const gateway = loopbackGateway((pathname) => {
+      if (pathname === '/v1/paired/loopback') return json({ error: { code: 'not_found', message: 'not found' } }, 404);
+      if (pathname === '/v1/approvals/5/resolve') return missingDecisionScope();
+      return null;
+    });
+    const client = new ControlPlaneClient({ fetch: gateway.fetch, credentials, createWebSocket: gateway.createWebSocket });
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler });
+
+    await runtime.start({ loopbackEndpoint: webLoopbackEndpoint() });
+    gateway.sockets[0]!.hello(12);
+
+    expect(storedCredentials(storage)).toMatchObject({ accessToken: 'admin-paired-test-token', lastSeq: 12 });
+    expect(runtime.control.getState()).toMatchObject({ phase: 'ready', connectionState: 'connected', error: null });
+    await expect(runtime.resolveApproval(5, 'approve')).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining('PLC_ALLOW_LOOPBACK_AUTO_PAIR=1'),
+    });
+    runtime.stop();
   });
 });
