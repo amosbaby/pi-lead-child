@@ -293,7 +293,8 @@ describe('the channel settings section', () => {
   it('expands the app manifest, copies it, and links to the page that creates the app', async () => {
     const writeText = vi.fn(async () => {});
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
-    render([slack()]);
+    // 链接带上了清单（2026-11-02）：只显示网页的地址，不显示整份清单。
+    render([slack({ setupUrl: 'https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A' })]);
     expect(screen.getByTestId('channel-slack-setup-url').textContent).toBe('https://api.slack.com/apps');
     expect(screen.queryByTestId('channel-slack-manifest')).toBeNull();
     fireEvent.click(screen.getByTestId('channel-slack-manifest-toggle'));

@@ -101,7 +101,8 @@ describe("the channel settings through the daemon", () => {
     const slack = new FakeSlack({ self: { id: "U0SELF", name: "Leo" } });
     const { call, slackSettings, responses } = await boot(slack);
     expect(await slackSettings()).toMatchObject({
-      label: "Slack", status: "not_configured", account: null, editable: true, setupUrl: "https://api.slack.com/apps",
+      label: "Slack", status: "not_configured", account: null, editable: true,
+      setupUrl: expect.stringMatching(/^https:\/\/api\.slack\.com\/apps\?new_app=1&manifest_yaml=/),
       manifest: expect.stringContaining("socket_mode_enabled: true"),
       secrets: [{ name: APP, prefix: "xapp-", present: false, origin: null }, { name: USER, prefix: "xoxp-", present: false, origin: null }],
     });

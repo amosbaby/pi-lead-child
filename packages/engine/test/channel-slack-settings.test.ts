@@ -3,10 +3,10 @@
 // 权限要从 x-oauth-scopes 头里读（WebClient 放进 response_metadata.scopes）。Slack 一律是假的。
 import { describe, expect, it } from "vitest";
 import { Value } from "typebox/value";
-import { ChannelSecretsTestResultSchema, ChannelSecretSettingSchema } from "@pi-lead-child/protocol";
+import { CHANNEL_SETUP_URL_MAX, ChannelSecretsTestResultSchema, ChannelSecretSettingSchema } from "@pi-lead-child/protocol";
 import {
   builtinChannelAdapters, ChannelRegistry, createSlackChannelAdapter, createSlackWebApi, SLACK_USER_SCOPES, slackAppManifest,
-  validateChannelAdapter, type ChannelAdapter,
+  slackSetupUrl, validateChannelAdapter, type ChannelAdapter,
 } from "../src/index.js";
 import { FAKE_SLACK_APP_TOKEN, FAKE_SLACK_BOT_TOKEN, FAKE_SLACK_TOKEN, FakeSlack } from "../testing/index.js";
 
@@ -50,7 +50,7 @@ describe("the Slack settings", () => {
     for (const secret of settings.secrets) {
       expect(Value.Check(ChannelSecretSettingSchema, { ...secret, present: false, origin: null })).toBe(true);
     }
-    expect(settings.setupUrl).toBe("https://api.slack.com/apps");
+    expect(settings.setupUrl).toBe(slackSetupUrl(settings.manifest!));
     // 应用名是助手名（Slack 在代发的消息下面写「Sent using @Paimon」），说明里写主人名。
     expect(settings.manifest).toContain('name: "Paimon"');
     expect(settings.manifest).toContain('description: "替 Leo 查资料'); 
@@ -65,6 +65,20 @@ describe("the Slack settings", () => {
     expect(slackAppManifest(null)).toContain('name: "Paimon"');
     expect(slackAppManifest(null, "Nova")).toContain('name: "Nova"');
     expect(validateChannelAdapter(adapter)).toEqual([]);
+  });
+
+  // 2026-11-02：手建应用时漏了 User Token Scopes 和用户事件，连上了却一个事件都收不到。建应用的链接带上清单，打开就填好了。
+  it("links to the app-creation page with the manifest filled in, and falls back to the plain page when it is too long", () => {
+    const settings = settingsOf(createSlackChannelAdapter({ api: new FakeSlack().api, ownerName: "韩梅梅" }));
+    const url = new URL(settings.setupUrl!);
+    expect(`${url.origin}${url.pathname}`).toBe("https://api.slack.com/apps");
+    expect(url.searchParams.get("new_app")).toBe("1");
+    expect(url.searchParams.get("manifest_yaml")).toBe(settings.manifest);
+    expect(settings.setupUrl!.length).toBeLessThanOrEqual(CHANNEL_SETUP_URL_MAX);
+    // 名字最长时（主人名、应用名各 20 个汉字）也放得下。
+    const longest = slackAppManifest("韩".repeat(40), "李".repeat(40));
+    expect(slackSetupUrl(longest)).toContain("manifest_yaml=");
+    expect(slackSetupUrl("x".repeat(CHANNEL_SETUP_URL_MAX))).toBe("https://api.slack.com/apps");
   });
 
   it("refuses an adapter whose settings name a secret it does not declare", () => {

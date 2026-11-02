@@ -7,7 +7,7 @@
 //   4. apps.connections.open（App-Level Token）：成功即可（拿到的地址不用）。
 // 结果里的文字不含令牌：先把这次的两个令牌原样换掉，再按通用的规则脱敏。
 import { SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
-import type { ChannelSecretCheck, ChannelSecretsTestResult, ChannelSourceAccount } from "@pi-lead-child/protocol";
+import { CHANNEL_SETUP_URL_MAX, type ChannelSecretCheck, type ChannelSecretsTestResult, type ChannelSourceAccount } from "@pi-lead-child/protocol";
 import type { ChannelSecretSpec, ChannelSettingsSpec } from "../types.js";
 import { ASSISTANT_NAME_DEFAULT } from "../disclosure.js";
 import { scrubSlackText, type SlackWebApi } from "./slack-web-api.js";
@@ -33,6 +33,15 @@ export const SLACK_USER_EVENTS = ["message.channels", "message.groups", "message
 
 /** 建 Slack 应用的网页。 */
 export const SLACK_SETUP_URL = "https://api.slack.com/apps";
+
+/**
+ * 带上清单的建应用链接：打开就是从清单建应用，权限和用户事件都填好了（Slack 文档 app-manifests 的
+ * 「new_app=1&manifest_yaml=<URL 编码的 YAML>」）。太长（超过 CHANNEL_SETUP_URL_MAX）时退回不带清单的网页，用户复制清单。
+ */
+export function slackSetupUrl(manifest: string): string {
+  const url = `${SLACK_SETUP_URL}?new_app=1&manifest_yaml=${encodeURIComponent(manifest)}`;
+  return url.length <= CHANNEL_SETUP_URL_MAX ? url : SLACK_SETUP_URL;
+}
 
 const SECRETS: readonly ChannelSecretSpec[] = [
   {
@@ -239,7 +248,7 @@ export function createSlackSettings(input: {
   return {
     secrets: SECRETS,
     get manifest() { return slackAppManifest(input.ownerName, assistantName()); },
-    setupUrl: SLACK_SETUP_URL,
+    get setupUrl() { return slackSetupUrl(slackAppManifest(input.ownerName, assistantName())); },
     test,
   };
 }

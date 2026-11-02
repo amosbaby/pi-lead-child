@@ -25,6 +25,12 @@ export type ChannelSecretOrigin = typeof CHANNEL_SECRET_ORIGINS[number];
 export const CHANNEL_SOURCE_STATUSES = ["not_configured", "connecting", "connected", "error"] as const;
 export type ChannelSourceStatus = typeof CHANNEL_SOURCE_STATUSES[number];
 
+/**
+ * 建应用的网页地址最长多少个字符。地址里可以带上整份清单（例如 Slack 的 new_app=1&manifest_yaml=…），来源插件超过时退回不带清单的地址。
+ * 2000：比浏览器和代理常见的下限（2048）还小；RFC 9110 只建议至少支持 8000。
+ */
+export const CHANNEL_SETUP_URL_MAX = 2_000;
+
 export const ChannelSecretSettingSchema = StrictObject({
   // 密钥的名字（例如 PLC_SLACK_APP_TOKEN）。
   name: Type.String({ minLength: 1, maxLength: 100 }),
@@ -61,8 +67,8 @@ export const ChannelSourceSettingsDtoSchema = StrictObject({
   secrets: Type.Array(ChannelSecretSettingSchema, { maxItems: 8 }),
   // 建应用用的清单（例如 Slack 的 YAML），给「复制」按钮。来源没有清单时是 null。
   manifest: Nullable(Type.String({ maxLength: 8_000 })),
-  // 建应用的网页。
-  setupUrl: Nullable(Type.String({ maxLength: 500 })),
+  // 建应用的网页（可以带上清单，最长 CHANNEL_SETUP_URL_MAX）。
+  setupUrl: Nullable(Type.String({ maxLength: CHANNEL_SETUP_URL_MAX })),
   // 这个调用方能不能在这里改密钥：只有本机网页能改。
   editable: Type.Boolean(),
 });
