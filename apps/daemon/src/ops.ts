@@ -19,7 +19,7 @@ import {
   dataDir, dbPath, distDir, envConfigPath, loadEnvConfig, packageSource, projectRoot, workspaceDir,
 } from "@pi-lead-child/core";
 import {
-  agentStatus, autoStartRefusal, buildsFreshReal, loadSupervisorState, saveSupervisorState, dbProbesReal, distFreshReal, formatChecks, installAgent, keychainSecretExists,
+  agentStatus, autoStartRefusal, buildsFreshReal, loadSupervisorState, saveSupervisorState, dbProbesReal, distFreshReal, formatChecks, installAgent, keychainSecretExists, keychainSetCommand,
   plistContent, plistPath, resolveDaemonOnlyKey, resolveKeyReal, runDoctor, supervisorAvailable, supervisorListening, supervisorRequest, supervisorSockPath,
   uninstallAgent, uninstallHindsightService, type BuildOutput, type DoctorProbes, type SupervisorStatus,
 } from "@pi-lead-child/supervisor";
@@ -220,8 +220,7 @@ async function install(): Promise<number> {
   const configuredKey = resolveKeyReal(dataDir(), {}, "AM_API_KEY") === "config";
   if (!configuredKey && !keychainSecretExists("AM_API_KEY")) {
     console.error(
-      "无法安装：launchd 后台没有可持久读取的 AM_API_KEY。请先运行 "
-      + "bash ~/.agents/skills/keychain-secrets/keychain-secrets.sh set AM_API_KEY",
+      `无法安装：launchd 后台没有可持久读取的 AM_API_KEY。请先运行 ${keychainSetCommand("AM_API_KEY")}`,
     );
     return 1;
   }
