@@ -42,4 +42,6 @@ export interface LeadEngineFactoryResult {
   brainReady?: () => Promise<boolean>;
   // 按 config.json 现在的 lead.providers 重新注册（设置 → 模型改了服务商）。没有时要重启 daemon 才生效。
   refreshProviders?: () => Promise<void>;
+  // 启动时分工里在用、目录却拉不到的服务商的原因（服务商名字和错误原文，不带 key）。daemon 照常起来，把它记成 Lead 的模型失败。
+  modelUnavailable?: string | null;
 }

@@ -327,13 +327,15 @@ export async function leadModelCatalog(
   return { models, notes };
 }
 
+// unavailable：分工里在用、目录却拉不到的服务商，一个一行原因（服务商名字和错误原文，不带 key）。daemon 把它记成 Lead 的模型失败。
 export async function registerLeadProviders(
   runtime: ModelRuntime,
   config: LeadModelConfig,
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
-): Promise<string[]> {
+): Promise<{ notes: string[]; unavailable: string[] }> {
   const notes: string[] = [];
+  const unavailable: string[] = [];
   const chosenProviders = new Set(config.models.map((spec) => parseModelName(spec).provider));
   for (const [name, provider] of Object.entries(config.providers)) {
     let catalog: Awaited<ReturnType<typeof providerCatalog>>;
@@ -341,10 +343,16 @@ export async function registerLeadProviders(
       catalog = await providerCatalog(name, provider, env, fetchImpl);
     } catch (error) {
       // 设置页能接入服务商（2026-10-29）：一个地址填错、分工里又没用它的服务商，不能让 Lead 起不来。跳过它，原因写进说明。
-      // 分工里在用的服务商照旧报错：Lead 要用的模型注册不上。
-      if (chosenProviders.has(name)) throw error;
-      notes.push(`${name}: skipped (${String(error)})`);
-      continue;
+      if (!chosenProviders.has(name)) {
+        notes.push(`${name}: skipped (${String(error)})`);
+        continue;
+      }
+      // 分工里在用的服务商也不再抛错（以前 daemon 起不来，被反复重启）：只注册分工里的模型，
+      // Lead 照常起来，模型调用失败时按降级显示，原因交给 daemon。
+      const reason = `${name}: model catalog failed (${String(error)})`;
+      notes.push(reason);
+      unavailable.push(reason);
+      catalog = { models: [], note: null };
     }
     if (catalog.note) notes.push(catalog.note);
     // lead.models 里这个 provider 的模型也要注册：带推理强度后缀的（as4/claude-sonnet-5(high)）不在目录里。
@@ -355,7 +363,7 @@ export async function registerLeadProviders(
     const modelIds = uniqueStrings([...catalog.models.map((model) => model.id), ...chosen]);
     runtime.registerProvider(name, toProviderConfigInput(provider, modelIds, resolveLeadApiKey(provider, env, name), catalog.models));
   }
-  return notes;
+  return { notes, unavailable };
 }
 
 export async function listConfiguredLeadModelSpecs(

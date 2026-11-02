@@ -208,13 +208,16 @@ export async function createLeadSession(opts: {
   refreshProviders: () => Promise<void>;
   // 大脑现在能不能用（首次启动引导，.scratch/onboarding）：正在用的模型有认证。
   brainReady: () => Promise<boolean>;
+  // 启动时分工里在用、目录却拉不到的服务商（registerLeadProviders 的 unavailable）。都拉到了时为 null。
+  modelUnavailable: string | null;
 }> {
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
     refreshOnCreate: false,
   });
   const leadModels = loadLeadModelConfig(opts.dataDir);
-  for (const note of await registerLeadProviders(modelRuntime, leadModels)) {
+  const registered = await registerLeadProviders(modelRuntime, leadModels);
+  for (const note of registered.notes) {
     console.error(`[lead] ${note}`);
   }
   const spec = selectedLeadModelSpec(leadModels);
@@ -506,7 +509,7 @@ export async function createLeadSession(opts: {
     switchModel: async (next: string) => {
       const { provider, id } = parseModelName(next);
       if (!modelRuntime.getModel(provider, id)) {
-        for (const note of await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))) {
+        for (const note of (await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))).notes) {
           console.error(`[lead] ${note}`);
         }
       }
@@ -520,7 +523,7 @@ export async function createLeadSession(opts: {
     smartModelLlm,
     // 设置 → 模型改了服务商（2026-10-29）：照 config.json 现在的样子重新注册。正在用的模型由 daemon 再挂一次（switchModel）。
     refreshProviders: async () => {
-      for (const note of await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))) {
+      for (const note of (await registerLeadProviders(modelRuntime, loadLeadModelConfig(opts.dataDir))).notes) {
         console.error(`[lead] ${note}`);
       }
     },
@@ -530,5 +533,6 @@ export async function createLeadSession(opts: {
       if (!current) return false;
       return modelRuntime.hasConfiguredAuth(current.provider) || (await modelRuntime.checkAuth(current.provider)) !== undefined;
     },
+    modelUnavailable: registered.unavailable.length ? registered.unavailable.join("; ") : null,
   };
 }

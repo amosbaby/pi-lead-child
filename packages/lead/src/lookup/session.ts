@@ -121,7 +121,7 @@ export function createLookupSessionFactory(input: {
     const modelRuntime = await ModelRuntime.create({
       allowModelNetwork: false, refreshOnCreate: false, ...(input.authPath ? { authPath: input.authPath } : {}),
     });
-    for (const note of await registerLeadProviders(modelRuntime, config, env)) input.log?.(`[lookup] ${note}`);
+    for (const note of (await registerLeadProviders(modelRuntime, config, env)).notes) input.log?.(`[lookup] ${note}`);
     const choice = selectSmartModelSpec({
       env,
       configuredSpecs: configuredLeadModelSpecs(config, (provider) => modelRuntime.getModels(provider).map((model) => model.id)),
