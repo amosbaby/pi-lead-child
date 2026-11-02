@@ -121,6 +121,7 @@ import {
   shouldRecoverLoopbackCredentials,
   shouldReplaceLoopbackCredentials,
   shouldUpgradeLoopbackCredentials,
+  usesLoopbackEndpoint,
   type OutboxEntry,
   type OutboxStorage,
 } from '@pi-lead-child/client';
@@ -325,8 +326,9 @@ export class CompanionStateRuntime {
   private ticketAttachmentContents = new Map<string, Promise<{ mimeType: string; data: string }>>();
   private leadAvatarImagesLoading = new Set<string>();
   private scopes = new Set<Scope>();
-  // 这一页能用的回环自动配对地址（本机网页才有）。做不了决定时的提示按它说下一步。
+  // 这一页能用的回环自动配对地址（本机网页才有），和启动时换凭证被网关拒绝的原因。做不了决定时的提示按它们说下一步。
   private loopbackEndpoint: string | null = null;
+  private loopbackUpgradeRefusal: 'auto_pair_off' | 'not_local_page' | 'failed' | null = null;
   private capabilities = new Set<string>();
   private currentAgendaScope: AgendaResourceScope | null = null;
   private replayThroughSeq = 0;
@@ -1130,7 +1132,7 @@ export class CompanionStateRuntime {
         input,
         commandId,
         controller.signal,
-      );
+      ).catch(this.decisionError);
       if (!this.isCurrent(epoch)) return;
       if (intervention) {
         await Promise.allSettled([
@@ -1746,7 +1748,7 @@ export class CompanionStateRuntime {
   }
 
   async disownOwnerAction(eventId: string): Promise<OwnerActionDto> {
-    const view = await this.ownerActionClient('disownOwnerAction')(eventId);
+    const view = await this.ownerActionClient('disownOwnerAction')(eventId).catch(this.decisionError);
     // 推送的通知已经确认，被撤销的工单、审批也变了：重取通知和总览，工单列表跟着网关的事件更新。
     await Promise.allSettled([
       this.ensureResource(RESOURCE_KEYS.notifications, true),
@@ -1949,10 +1951,16 @@ export class CompanionStateRuntime {
     if (!this.isCurrent(epoch)) return;
     this.credentials = credentials;
     this.loopbackEndpoint = options.loopbackEndpoint ?? null;
+    this.loopbackUpgradeRefusal = null;
     if (credentials && shouldReplaceLoopbackCredentials(credentials, options.loopbackEndpoint)) {
       if (!await this.switchLoopbackEndpoint(epoch, credentials, options.loopbackEndpoint!)) return;
-    } else if (credentials && shouldUpgradeLoopbackCredentials(credentials, options.loopbackEndpoint)) {
-      if (!await this.upgradeLoopbackCredentials(epoch, options.loopbackEndpoint!)) return;
+    } else if (credentials && usesLoopbackEndpoint(credentials, options.loopbackEndpoint)) {
+      // 存着的 scope 是配对那时的：先按网关现在给的算，再决定要不要换一张能做决定的凭证。
+      if (!await this.refreshOwnScopes(epoch)) return;
+      if (
+        shouldUpgradeLoopbackCredentials(this.credentials!, options.loopbackEndpoint) &&
+        !await this.upgradeLoopbackCredentials(epoch, options.loopbackEndpoint!)
+      ) return;
     } else if (!credentials && options.loopbackEndpoint) {
       const controller = this.controller();
       try {
@@ -2062,30 +2070,49 @@ export class CompanionStateRuntime {
       this.resetForCredentialRecovery();
       this.credentials = paired;
       return true;
-    } catch {
+    } catch (reason) {
+      const status = reason instanceof ControlPlaneClientError ? reason.status : undefined;
+      // 404：网关没开回环自动配对；403：网关不认这个页面是本机网页（origin 不在允许列表）。
+      this.loopbackUpgradeRefusal = status === 404 ? 'auto_pair_off' : status === 403 ? 'not_local_page' : 'failed';
       return this.isCurrent(epoch);
     } finally {
       this.controllers.delete(controller);
     }
   }
 
-  // 网关说这张凭证做不了用户的决定（protocol 的 originMayDecide）：换成告诉用户下一步怎么做的话。
-  // 本机网页启动时本该换到能做决定的凭证（upgradeLoopbackCredentials），走到这里说明网关没给。
+  // GET /v1/paired/me 回的是有效 scope，客户端同时把它写回存着的凭证。读不到（旧 daemon、网络）就按存着的；401 留给后面的恢复。
+  private async refreshOwnScopes(epoch: number): Promise<boolean> {
+    const { client } = this.dependencies;
+    if (typeof client.getOwnBinding !== 'function' || !this.credentials) return true;
+    const controller = this.controller();
+    try {
+      const binding = await client.getOwnBinding(controller.signal);
+      if (!this.isCurrent(epoch)) return false;
+      this.credentials = { ...this.credentials, binding };
+    } catch {
+      if (!this.isCurrent(epoch)) return false;
+    } finally {
+      this.controllers.delete(controller);
+    }
+    return true;
+  }
+
+  // 这张凭证做不了用户的决定（有效 scope 里没有 approvals:respond，见 protocol 的 originMayDecide），网关回了 403：
+  // 换成告诉用户下一步怎么做的话。本机网页启动时本该换到能做决定的凭证（upgradeLoopbackCredentials），走到这里说明没换成。
   private decisionError = (reason: unknown): never => {
-    if (
-      reason instanceof ControlPlaneClientError && reason.status === 403 &&
-      reason.message.startsWith('missing scope: approvals:respond')
-    ) {
-      const m = this.messages();
-      throw new ControlPlaneClientError(
-        this.loopbackEndpoint ? m.decisionNeedsLoopbackPairing : m.decisionNeedsPairedDevice,
-        reason.code,
-        reason.status,
-        reason.body,
-      );
+    if (reason instanceof ControlPlaneClientError && reason.status === 403 && !this.scopes.has('approvals:respond')) {
+      throw new ControlPlaneClientError(this.decisionHint(), reason.code, reason.status, reason.body);
     }
     throw reason;
   };
+
+  private decisionHint(): string {
+    const m = this.messages();
+    if (!this.loopbackEndpoint) return m.decisionNeedsPairedDevice;
+    if (this.loopbackUpgradeRefusal === 'auto_pair_off') return m.decisionAutoPairOff;
+    if (this.loopbackUpgradeRefusal === 'not_local_page') return m.decisionNotLocalPage;
+    return m.decisionPairAgain;
+  }
 
   private resetForCredentialRecovery(): void {
     this.credentials = null;
@@ -2145,7 +2172,12 @@ export class CompanionStateRuntime {
       }
     }
     if (scopeSet.has('approvals:respond')) {
-      add((signal) => this.dependencies.client.getApprovals(signal), (value) => this.control.getState().replaceApprovals(value));
+      add((signal) => this.dependencies.client.getApprovals(signal).catch((reason: unknown) => {
+        // 存着的 scope 比网关现在给的多（配对以后按来历去掉了）：这张凭证没有审批可看，不算连接失败。
+        if (!(reason instanceof ControlPlaneClientError) || reason.status !== 403) throw reason;
+        this.scopes.delete('approvals:respond');
+        return [];
+      }), (value) => this.control.getState().replaceApprovals(value));
     }
     if (scopeSet.has('notices')) {
       add((signal) => this.dependencies.client.getNotifications(['pending', 'delivered'], signal),
