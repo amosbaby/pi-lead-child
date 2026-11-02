@@ -1,14 +1,16 @@
 // Lead 的模型没有 key（一次真实的首次运行改写）：缺省模型的服务商没有 key，pi 在发 prompt 前就报
 // "No API key found for openai."，不调模型，也没有 message_end。以前：
 //   - 这句错误分成 unknown，也没记进 Lead 的健康状态：顶栏一直是绿点，用户看不出来；
-//   - 交给 Lead 的事每一轮都失败，按退避（最长 5 分钟）一直叫醒 Lead，失败了几百次。现在等用户改了模型设置再叫。
-// daemon、store 是真的；Lead 的会话是替身，prompt 直接抛出 pi 的那句错误。
+//   - 交给 Lead 的事每一轮都失败，按退避（最长 5 分钟）一直叫醒 Lead，三天失败了几百轮。
+// 现在这类失败（又没有别的模型可换、没有等着换回的模型）退避最长 30 分钟；改了模型设置、或者有一轮成功，马上再叫。
+// daemon、store 是真的；Lead 的会话是替身（fake-pi-session.ts），broken 时 prompt 直接抛出 pi 的那句错误。
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { addInbox, createItem, createPairing, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
+import { fakePiLead, type FakeReply } from "./fake-pi-session.js";
 
 let dir: string;
 let dbPath: string;
@@ -16,6 +18,7 @@ let db: Db;
 let daemon: Awaited<ReturnType<typeof startDaemon>> | null = null;
 
 const NO_KEY = "No API key found for openai.\n\nUse /login to log into a provider via OAuth or API key.";
+const EVENT = "Run #7 crashed";
 
 beforeEach(() => {
   dir = tempDir("plc-lead-model-credentials-");
@@ -23,7 +26,8 @@ beforeEach(() => {
   db = openDb(dbPath);
   vi.stubEnv("PLC_DATA_DIR", dir);
   vi.stubEnv("PLC_NOTICE_POLL_MS", "20");
-  vi.stubEnv("PLC_LEAD_WAKE_RETRY_MS", "50");
+  // 退避的第一步就比平常的上限（5 分钟）长：认证失败的长退避看日志里的说法，测试里不会自己再叫醒。
+  vi.stubEnv("PLC_LEAD_WAKE_RETRY_MS", "400000");
 });
 
 afterEach(async () => {
@@ -33,49 +37,73 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-async function boot() {
-  const prompts: string[] = [];
-  daemon = await startDaemon({
-    dataDir: dir, dbPath, log: () => {}, notifyDesktop: () => {}, triageShadow: false,
-    sessionFactory: (async () => ({
-      modelName: "openai/gpt-test",
-      refreshProviders: async () => {},
-      session: {
-        sessionId: "no-key-session",
-        subscribe() { return () => {}; },
-        async prompt(text: string) {
-          prompts.push(text);
-          throw new Error(NO_KEY);
-        },
-        async steer() {},
-        async followUp() {},
-        dispose() {},
-      },
-    })) as never,
-  });
-  const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view", "tickets:create"] }).code);
-  const headers = { authorization: `Bearer ${issued.accessToken}` };
-  const overview = async () => (await (await fetch(`http://127.0.0.1:${daemon!.pairedPort}/v1/overview?include=lead`, { headers })).json()) as
-    { lead?: Record<string, any> };
-  // 设置 → 模型：用户填上服务商的 key（和网页走同一个操作入口）。
-  const saveProvider = async () => (await fetch(`http://127.0.0.1:${daemon!.pairedPort}/v1/actions/model_settings/models/save_provider`, {
-    method: "POST",
-    headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ input: { name: "openai", baseUrl: "https://api.example.com/v1", api: "openai-completions", apiKey: "sk-test-new-0123" } }),
-  })).status;
-  return { prompts, overview, saveProvider };
+interface BootOptions {
+  // 模型的分工（第一个是正在用的）。不给时只有一个模型，没有模型切换。
+  models?: string[];
+  // 这一次调用（正在用的模型）怎样结束：抛出 pi 的预检错误，或者给 fake 会话的回答。
+  reply?: (model: string) => "no-key" | FakeReply;
+  // 每次 prompt 开始以后先等它（测试在这时改设置）。
+  gate?: () => Promise<void> | undefined;
 }
 
-function blocker(summary: string) {
+async function boot(options: BootOptions = {}) {
+  const models = options.models ?? ["openai/gpt-test"];
+  let current = models[0]!;
+  const reply = options.reply ?? (() => "no-key" as const);
+  const lead = fakePiLead(() => {
+    const answer = reply(current);
+    return answer === "no-key" ? { say: "不该到这里" } : answer;
+  });
+  const prompts: Array<{ model: string; text: string }> = [];
+  const logs: string[] = [];
+  daemon = await startDaemon({
+    dataDir: dir, dbPath, log: (line) => logs.push(line), notifyDesktop: () => {}, triageShadow: false,
+    sessionFactory: (async (args: any) => {
+      const made = await lead.factory(args);
+      const prompt = made.session.prompt.bind(made.session);
+      made.session.prompt = (async (text: string, extra?: any) => {
+        prompts.push({ model: current, text });
+        await options.gate?.();
+        if (reply(current) === "no-key") throw new Error(NO_KEY);
+        return prompt(text, extra);
+      }) as never;
+      return {
+        ...made,
+        modelName: current,
+        refreshProviders: async () => [],
+        ...(models.length > 1 ? { models, switchModel: async (spec: string) => { current = spec; } } : {}),
+      };
+    }) as never,
+  });
+  const issued = redeemPairing(db, createPairing(db, { name: "app", kind: "companion", scopes: ["chat", "tickets:view", "tickets:create"] }).code);
+  const headers = { authorization: `Bearer ${issued.accessToken}`, "content-type": "application/json" };
+  const base = `http://127.0.0.1:${daemon!.pairedPort}`;
+  const overview = async () => (await (await fetch(`${base}/v1/overview?include=lead`, { headers })).json()) as
+    { lead?: Record<string, any> };
+  // 设置 → 模型：用户填上服务商的 key（和网页走同一个操作入口）。
+  const saveProvider = async () => (await fetch(`${base}/v1/actions/model_settings/models/save_provider`, {
+    method: "POST", headers,
+    body: JSON.stringify({ input: { name: "openai", baseUrl: "https://api.example.com/v1", api: "openai-completions", apiKey: "sk-test-new-0123" } }),
+  })).status;
+  const send = async (message: string) => (await fetch(`${base}/v1/chat/send`, {
+    method: "POST", headers, body: JSON.stringify({ id: `cmd-${message.length}`, message }),
+  })).status;
+  const withEvent = () => prompts.filter((entry) => entry.text.includes(EVENT));
+  return { prompts, logs, overview, saveProvider, send, withEvent };
+}
+
+function blocker(summary = EVENT) {
   addInbox(db, {
     itemId: createItem(db, { title: summary, brief: "b", createdBy: "system" }), severity: "blocker", source: "structural", summary, lossless: true,
   });
 }
 
+const backoffs = (logs: string[]) => logs.filter((line) => line.startsWith("lead wake backoff ("));
+
 describe("Lead's model has no API key", () => {
   it("shows Lead degraded with an account problem, not a green dot", async () => {
     const { prompts, overview } = await boot();
-    blocker("Run #7 crashed");
+    blocker();
     await vi.waitFor(() => expect(prompts.length).toBeGreaterThanOrEqual(1), { timeout: 10_000 });
     await vi.waitFor(async () => expect((await overview()).lead).toMatchObject({ state: "degraded" }), { timeout: 10_000 });
     const lead = (await overview()).lead!;
@@ -83,16 +111,76 @@ describe("Lead's model has no API key", () => {
     expect(lead.reason).toMatch(/account|账号/);
   }, 30_000);
 
-  // 回归：以前按退避（50ms 起，翻倍）一直叫醒 Lead，1.5 秒里就有五六轮，真实环境里是每 5 分钟一轮、三天几百轮。
-  it("does not wake Lead again for the same events until the user changes the model settings", async () => {
-    const { prompts, saveProvider } = await boot();
-    blocker("Run #7 crashed");
-    await vi.waitFor(() => expect(prompts).toHaveLength(1), { timeout: 10_000 });
-    await delay(1_500);
-    expect(prompts).toHaveLength(1);
-    // 用户在设置 → 模型填了 key：交给 Lead 的事马上再交一次。
+  // 回归：以前退避最长 5 分钟，一直叫醒 Lead。现在最长 30 分钟；用户在设置 → 模型填了 key，马上再交一次。
+  it("backs off longer than usual, and wakes Lead again as soon as the user changes the model settings", async () => {
+    const { logs, saveProvider, withEvent } = await boot();
+    blocker();
+    await vi.waitFor(() => expect(withEvent()).toHaveLength(1), { timeout: 10_000 });
+    await vi.waitFor(() => expect(backoffs(logs)).toEqual(["lead wake backoff (setup): next try in 400 s"]), { timeout: 10_000 });
+    await delay(300);
+    expect(withEvent()).toHaveLength(1);
     expect(await saveProvider()).toBe(200);
-    await vi.waitFor(() => expect(prompts).toHaveLength(2), { timeout: 10_000 });
-    expect(prompts[1]).toContain("Run #7 crashed");
+    await vi.waitFor(() => expect(withEvent()).toHaveLength(2), { timeout: 10_000 });
+  }, 30_000);
+
+  // 用户自己的消息不受退避影响；它答上了（模型能用了），交给 Lead 的事不再等长退避。
+  it("still answers the user while backed off, and a successful turn ends the long backoff", async () => {
+    let broken = true;
+    const { prompts, send, withEvent } = await boot({ reply: () => (broken ? "no-key" : { say: "好的。" }) });
+    blocker();
+    await vi.waitFor(() => expect(withEvent()).toHaveLength(1), { timeout: 10_000 });
+    await delay(100);
+    broken = false;
+    expect(await send("你好")).toBe(200);
+    await vi.waitFor(() => expect(prompts.some((entry) => entry.text.includes("你好"))).toBe(true), { timeout: 10_000 });
+    // 用户那一轮的当前局面里也列着积压的事：只数为交给 Lead 的事开的那几轮。
+    await vi.waitFor(() => expect(withEvent().filter((entry) => !entry.text.includes("你好"))).toHaveLength(2), { timeout: 10_000 });
+  }, 30_000);
+
+  // 设置是在这一轮开始以后改的：这一轮用的还是旧的 key，它的失败不退避，按新设置马上再叫。
+  it("does not back off for a turn that started before the user saved new settings", async () => {
+    let release!: () => void;
+    let first = true;
+    const gate = () => {
+      if (!first) return undefined;
+      first = false;
+      return new Promise<void>((resolve) => { release = resolve; });
+    };
+    const { logs, saveProvider, withEvent } = await boot({ gate });
+    blocker();
+    await vi.waitFor(() => expect(withEvent()).toHaveLength(1), { timeout: 10_000 });
+    expect(await saveProvider()).toBe(200);
+    release();
+    await vi.waitFor(() => expect(withEvent()).toHaveLength(2), { timeout: 10_000 });
+    // 第二轮是按新设置跑的：它的失败照常长退避。
+    await vi.waitFor(() => expect(backoffs(logs)).toEqual(["lead wake backoff (setup): next try in 400 s"]), { timeout: 10_000 });
+  }, 30_000);
+});
+
+describe("a credential failure while another model can still be used", () => {
+  beforeEach(() => vi.stubEnv("PLC_LEAD_WAKE_RETRY_MS", "50"));
+
+  // 有备用模型：换过去接着做，不按长退避。
+  it("fails over to the fallback model instead of backing off long", async () => {
+    const { logs, withEvent } = await boot({
+      models: ["openai/gpt-test", "spare/model"],
+      reply: (model) => (model === "openai/gpt-test" ? "no-key" : { say: "处理了。" }),
+    });
+    blocker();
+    await vi.waitFor(() => expect(withEvent().map((entry) => entry.model)).toEqual(["openai/gpt-test", "spare/model"]), { timeout: 10_000 });
+    expect(backoffs(logs)).toEqual([expect.stringContaining("(normal)")]);
+  }, 30_000);
+
+  // 审查 1a：主用限流换到备用，备用没有 key。没有别的模型可换，但到点要换回主用（只在一轮开始时换），
+  // 所以不能按长退避停着，照平常的退避再叫醒。
+  it("keeps the usual backoff on a fallback without a key while the first model waits to come back", async () => {
+    const { logs, withEvent } = await boot({
+      models: ["openai/gpt-test", "spare/model"],
+      reply: (model) => (model === "openai/gpt-test" ? { error: "429 Too Many Requests: rate_limit_error" } : "no-key"),
+    });
+    blocker();
+    await vi.waitFor(() => expect(withEvent().map((entry) => entry.model).slice(0, 2)).toEqual(["openai/gpt-test", "spare/model"]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(withEvent().length).toBeGreaterThanOrEqual(3), { timeout: 10_000 });
+    expect(backoffs(logs).some((line) => line.includes("(setup)"))).toBe(false);
   }, 30_000);
 });

@@ -72,7 +72,7 @@ import {
   slackEmojiPreview,
 } from "@pi-lead-child/engine";
 import { outageStart, outageStep, restoreOutages, type OpenOutage, type OutageItem } from "./lead-outage.js";
-import { DEFAULT_WAKE_RETRY_MAX_FAILURES, nextWakeRetry, wakeRetryBlocks, type WakeRetry } from "./lead-wake-retry.js";
+import { DEFAULT_WAKE_RETRY_MAX_FAILURES, nextWakeRetry as nextCappedRetry, wakeRetryBlocks, type WakeRetry } from "./lead-wake-retry.js";
 import type { LeadDaemonEnvironment, LeadEngine, LeadEngineFactoryResult } from "@pi-lead-child/lead";
 import { channelPolicy, coreMemoryRefreshPrefix } from "@pi-lead-child/store";
 import { createSetupTracker, type SetupTracker } from "./setup-status.js";
@@ -858,23 +858,42 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let leadSilentSince: number | null = null;
   // 用户最后一次在看会话的时间（Jarvis 模式：Lead 据此判断现在推还是等他回来；审批据此算送到）。
   let lastAttendedAt: number | null = null;
-  // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数；连续失败到上限就停止自动叫醒（#21）。
-  let leadWakeRetry: WakeRetry | null = null;
+  // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数。epoch 见 leadWakeEpoch。
+  // 连续失败到上限（stopped）就停止自动叫醒（#21）；模型设置改了（epoch 变了）或 Lead 的一次成功回合清掉它。
+  type LeadWakeRetry = WakeRetry & { epoch: number };
+  let leadWakeRetry: LeadWakeRetry | null = null;
   // 摘要的那一轮失败了（模型的问题）：按退避再叫，不在每次轮询时重来；到上限一样停止。Lead 的一次成功回合清掉两个。
-  let digestRetry: WakeRetry | null = null;
+  let digestRetry: LeadWakeRetry | null = null;
   const leadWakeRetryBaseMs = Number(process.env.PLC_LEAD_WAKE_RETRY_MS ?? 15_000);
   const leadWakeMaxFailures = Number(process.env.PLC_LEAD_WAKE_MAX_FAILURES ?? DEFAULT_WAKE_RETRY_MAX_FAILURES);
   // 到上限的通知发过了没有：一次停止只通知一次，成功的回合以后重新计。
   let wakeRetryStoppedNotified = false;
-  // Lead 最近一次失败是认证、配置这类（没有 key、key 错、模型名不对），也没有别的模型可换：再试也一样。
-  // 这时系统不再按退避自己叫醒 Lead（以前每 5 分钟一次，失败了几百次），等用户改了模型设置，或者有一轮成功。
-  let leadWakeParked = false;
-  // 用户改了模型设置（服务商、key、分工、换模型）：交给 Lead 的事下一次轮询照常叫醒它，不再等退避。
-  function resumeLeadWake(why: string): void {
-    if (!leadWakeParked) return;
-    leadWakeParked = false;
-    leadWakeRetry = null;
-    log(`lead wake resumed: ${why}`);
+  // 认证、配置这类失败（没有 key、key 错、模型名不对），又没有别的模型可换、也没有等着换回的模型时，退避最长 30 分钟
+  // （以前最长 5 分钟，三天失败了几百轮）。不完全停：OAuth 在断网时、代理包着上游 403 的 503 也分成认证失败，它们会自己好。
+  const leadSetupWakeCapMs = Number(process.env.PLC_LEAD_SETUP_WAKE_CAP_MS ?? 30 * 60_000);
+  // 最近一次失败的一轮之后怎样再叫醒 Lead（runTurnNow 的 catch 定）：normal 按平常的退避；setup 按上面的长退避；
+  // stale：这一轮开始以后模型设置改了，失败是旧设置的，不退避。
+  let lastFailureWake: "normal" | "setup" | "stale" = "normal";
+  // 最近一次失败是不是 setup：之后有一轮成功（模型能用了），长退避作废。
+  let setupFailing = false;
+  // 模型设置改了（服务商、key、分工、换模型）、拉不到目录的服务商回来了、setup 失败之后有一轮成功：加一。
+  // 旧的 epoch 下排的退避（含到上限的停止）作废；一轮开始时记下它，失败时不一样就是 stale。
+  let leadWakeEpoch = 0;
+  function nextWakeRetry(previous: LeadWakeRetry | null): LeadWakeRetry | null {
+    if (lastFailureWake === "stale") return null;
+    const sameEpoch = previous?.epoch === leadWakeEpoch ? previous : null;
+    const cap = lastFailureWake === "setup" ? leadSetupWakeCapMs : 5 * 60_000;
+    const next = nextCappedRetry(sameEpoch, { now: Date.now(), baseMs: leadWakeRetryBaseMs, maxFailures: leadWakeMaxFailures, maxBackoffMs: cap });
+    log(`lead wake backoff (${lastFailureWake}): ${next.stopped ? "stopped" : `next try in ${Math.round((next.at - Date.now()) / 1000)} s`}`);
+    return { ...next, epoch: leadWakeEpoch };
+  }
+  function backingOff(retry: LeadWakeRetry | null): boolean {
+    return retry !== null && retry.epoch === leadWakeEpoch && wakeRetryBlocks(retry, Date.now());
+  }
+  function modelSettingsChanged(why: string): void {
+    leadWakeEpoch += 1;
+    wakeRetryStoppedNotified = false;
+    log(`lead wake backoff cleared: ${why}`);
   }
   // 正在跑的这一轮是谁发起的（system: 来源；用户的回合为 null）。整理笔记那一轮不接 inbox。
   let runningSystemOrigin: SystemTurnOrigin | null = null;
@@ -3288,7 +3307,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       modelFailover.clearBlocked(spec);
       setLeadModelInConfig(spec, opts.dataDir);
       rebuildModelFailover();
-      resumeLeadWake("the user chose another model");
+      modelSettingsChanged("the user chose another model");
       pendingModelSwitch = { reason: "用户在输入框里换了模型", restoreAt: null, manual: true };
       log(`lead model chosen by the user: ${previousSpec} -> ${spec}`);
       // Lead 正在回答：这一轮结束以后，下一轮开始前换（runTurnNow 的 syncLeadModel）。
@@ -3325,7 +3344,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (still.length) retryLeadProviders(attempt);
     // 按退避重拉、还没拉到：正在用的模型不用再挂。
     if (attempt > 0 && still.length) return true;
-    if (attempt > 0) log("lead providers: every chosen provider's catalog is back");
+    if (attempt > 0) modelSettingsChanged("every chosen provider's catalog is back");
     if (sched.busy || sched.draining || sched.starting) {
       rebindLeadModel = true;
       return true;
@@ -3367,7 +3386,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         setLeadModelChainInConfig(specs, opts.dataDir);
         rebuildModelFailover();
         leadCatalogCache = null;
-        resumeLeadWake("the user changed the model chain");
+        modelSettingsChanged("the user changed the model chain");
         if (!switching || primary === leadModelName) return "unchanged";
         // 你点名要用它：它的额度封禁不再挡着。它真的还不能用时，模型自动切换会再换走。
         modelFailover!.clearBlocked(primary);
@@ -3383,7 +3402,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         return "now";
       },
       async providersChanged() {
-        if (await reloadLeadProviders()) resumeLeadWake("the user changed a model provider");
+        if (await reloadLeadProviders()) modelSettingsChanged("the user changed a model provider");
       },
     },
   });
@@ -4235,6 +4254,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     });
     idleLane.unitOpened(unitId, openedLane);
     publishLeadQueue();
+    const turnEpoch = leadWakeEpoch;
+    lastFailureWake = "normal";
     // 新回合开始，上一回合遗留的插话锚（受理了但 lead 一直没再开口）作废——
     // 否则它会去接下一回合的水，把答非所问的文本挂到一条早已过去的消息下面。
     // 必须在下面两个等待之前清：等待期间 daemon 已经忙，用户发来的消息走插话，它的锚属于这一轮，要留着
@@ -4445,7 +4466,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // 用户停下的一轮、换了会话的一轮说明不了模型好不好。
         if (!stoppedByUser(sched.state) && !released) modelFailover?.turnSucceeded();
         succeeded = true;
-        leadWakeParked = false;
+        if (setupFailing) {
+          setupFailing = false;
+          leadWakeEpoch += 1;
+        }
       }
     } catch (err: any) {
       // 系统回合失败（例如模型连不上）也要让在听的人看到：没开口的这时落成一轮，再收口为失败。
@@ -4477,9 +4501,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
       if (!interrupted && !networkFailure) {
         noteLeadModelFailure(error);
-        leadWakeParked = leadModelFailureNeedsUser(classifyLeadModelError(error)) && pendingModelSwitch === null;
-        if (leadWakeParked) log("lead wake parked: the model needs the user's setup; waiting for a model settings change");
+        // 在备用模型上、或者有额度封禁：到点会换回第一个模型（syncLeadModel 只在一轮开始时换），按平常的退避。
+        const awaitingReturn = modelFailover
+          ? appliedLeadModel !== modelFailover.models[0] || modelFailover.blockedModels().length > 0
+          : false;
+        if (leadModelFailureNeedsUser(classifyLeadModelError(error)) && pendingModelSwitch === null && !awaitingReturn) {
+          lastFailureWake = "setup";
+          setupFailing = true;
+        }
       }
+      if (turnEpoch !== leadWakeEpoch) lastFailureWake = "stale";
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn
@@ -4561,8 +4592,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         digestRetry = null;
         wakeRetryStoppedNotified = false;
       } else if (carriedEvents && !offline && !interrupted) {
-        leadWakeRetry = nextWakeRetry(leadWakeRetry, { now: Date.now(), baseMs: leadWakeRetryBaseMs, maxFailures: leadWakeMaxFailures });
-        if (leadWakeRetry.stopped) noteWakeRetryStopped(leadWakeRetry.failures);
+        leadWakeRetry = nextWakeRetry(leadWakeRetry);
+        if (leadWakeRetry?.stopped) noteWakeRetryStopped(leadWakeRetry.failures);
       }
       // 单元结束（lead-scheduler spec D12）：关联编号用这一轮最后接文字的那一轮，结果按停下、被重启打断、断网、成败分。
       if (runTurnId) sched.dispatch({ type: "unit.turn", turnId: runTurnId });
@@ -4794,7 +4825,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   scheduledLeadAttempts.push(() => {
     const times = [...voicingRetries.values()].map((retry) => retry.at);
-    if (leadWakeRetry && !leadWakeRetry.stopped) times.push(leadWakeRetry.at);
+    if (leadWakeRetry && leadWakeRetry.epoch === leadWakeEpoch && !leadWakeRetry.stopped) times.push(leadWakeRetry.at);
     return times.length ? Math.min(...times) : null;
   });
   // 工作区 TTL 清扫不跟着通知轮询每一轮都跑：TTL 是 7 天和 14 天，用不着 3 秒一次，
@@ -5395,7 +5426,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     retryWaitingUserTurn();
     if (sched.busy || !network.online) return;
-    if (leadInput.pendingMessages().length && !leadWakeParked && !wakeRetryBlocks(leadWakeRetry, Date.now())) {
+    if (leadInput.pendingMessages().length && !backingOff(leadWakeRetry)) {
       wakeForEvents();
       return;
     }
@@ -5985,15 +6016,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let attendedAtLastPoll = false;
   // 上一次判断时，按等待时间该叫醒的时间（顶栏的「下一次自动调用」）。
   let digestDueAt: number | null = null;
-  scheduledLeadAttempts.push(() => (digestRetry && !digestRetry.stopped && digestRetry.at > Date.now() ? digestRetry.at : digestDueAt));
+  scheduledLeadAttempts.push(() => (digestRetry && digestRetry.epoch === leadWakeEpoch && !digestRetry.stopped && digestRetry.at > Date.now() ? digestRetry.at : digestDueAt));
   const DIGEST_WAKE_TEXT = "（摘要：上面当前局面（kind=\"situation\"）里「上一轮以后的变化」是这一批积压的事。请消化处理——需要跟进的工单用工具跟进，"
     + "纯知悉的简要记录即可。同一个根因合并进来的几件事说一次就够了。"
     + `处理完如果没有需要用户知道的事，只回复 ${QUIET_REPLY}（不写别的字），会话里不会留下这一轮；有要告诉用户的事才正常说。）`;
   function maybeWakeForDigest(options: { patrol?: boolean } = {}): void {
     if (sched.busy || sched.starting || sched.draining || !network.online) return;
     // 带着事的那一轮刚失败过、还在退避：也等到点，不另外再调模型（发布评审 f796c1c 的 B1）。
-    if (leadWakeParked || wakeRetryBlocks(leadWakeRetry, Date.now())) return;
-    if (wakeRetryBlocks(digestRetry, Date.now())) return;
+    if (backingOff(leadWakeRetry)) return;
+    if (backingOff(digestRetry)) return;
     const decision = digestBatch(db, {
       now: new Date(), pending: leadInput.pendingDigest(), lastWakeAt: new Date(lastDigestWakeAt), userReturnedAt,
     });
@@ -6018,8 +6049,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         leadHealth.patrolled();
         return;
       }
-      digestRetry = nextWakeRetry(digestRetry, { now: Date.now(), baseMs: leadWakeRetryBaseMs, maxFailures: leadWakeMaxFailures });
-      if (digestRetry.stopped) noteWakeRetryStopped(digestRetry.failures);
+      digestRetry = nextWakeRetry(digestRetry);
+      if (digestRetry?.stopped) noteWakeRetryStopped(digestRetry.failures);
     });
   }
   const heartbeat = setNodeInterval(() => {

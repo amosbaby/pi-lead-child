@@ -17,12 +17,13 @@ const MAX_BACKOFF_MS = 5 * 60_000;
 
 /** 又失败了一次：算下一次叫醒的时间，到上限时标成停止。maxFailures 不是正数时用缺省值。 */
 export function nextWakeRetry(
-  previous: WakeRetry | null, input: { now: number; baseMs: number; maxFailures: number },
+  previous: WakeRetry | null,
+  input: { now: number; baseMs: number; maxFailures: number; /** 退避的上限，缺省 5 分钟。 */ maxBackoffMs?: number },
 ): WakeRetry {
   const failures = (previous?.failures ?? 0) + 1;
   const cap = input.maxFailures > 0 ? input.maxFailures : DEFAULT_WAKE_RETRY_MAX_FAILURES;
   return {
-    at: input.now + Math.min(input.baseMs * 2 ** (failures - 1), MAX_BACKOFF_MS),
+    at: input.now + Math.min(input.baseMs * 2 ** (failures - 1), input.maxBackoffMs ?? MAX_BACKOFF_MS),
     failures,
     stopped: failures >= cap,
   };
