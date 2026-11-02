@@ -2616,6 +2616,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const {
     session, modelName, syncToolAccess, reloadExtensions, models: leadModels, switchModel: switchLeadModel,
     reportsInputDelivery, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady, modelUnavailable,
+    providersUnavailable,
   } = await factory({
     memory,
     // 直觉的整条分工（设置 → 模型，2026-10-29）：SmartModel 按顺序问，都失败时问 LLM。
@@ -2849,6 +2850,45 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）。大脑的分工整条写进 lead.models，主用变了才换模型：
   // 只改备用的顺序时不动正在用的（模型自动切换可能正用着备用）。
+  // 重新注册 Lead 的服务商（设置 → 模型改了服务商，或者按退避重拉），正在用的模型再挂一次。成功注册时返回 true。
+  // 分工里还有服务商拉不到目录（本机代理还没起来、key 错、地址错）时按退避再拉，拉到为止：
+  // 拉不到时那个服务商的模型只按缺省（128K、只看文字）注册。
+  const providerRetryBaseMs = Number(process.env.PLC_LEAD_PROVIDER_RETRY_MS ?? 30_000);
+  let providerRetry: NodeJS.Timeout | null = null;
+  async function reloadLeadProviders(attempt = 0): Promise<boolean> {
+    leadCatalogCache = null;
+    if (!refreshProviders) return false;
+    let still: string[] = [];
+    try {
+      still = (await refreshProviders()) ?? [];
+    } catch (error: any) {
+      log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
+      return false;
+    }
+    if (still.length) retryLeadProviders(attempt);
+    // 按退避重拉、还没拉到：正在用的模型不用再挂。
+    if (attempt > 0 && still.length) return true;
+    if (attempt > 0) log("lead providers: every chosen provider's catalog is back");
+    if (busy || draining || systemTurnStarting) {
+      rebindLeadModel = true;
+      return true;
+    }
+    try {
+      await switchLeadModel?.(appliedLeadModel);
+    } catch (error: any) {
+      log(`lead model rebind after a provider change failed: ${error?.message ?? String(error)}`);
+    }
+    return true;
+  }
+  function retryLeadProviders(attempt: number): void {
+    if (providerRetry || leadQueueStopped) return;
+    providerRetry = setTimeout(() => {
+      providerRetry = null;
+      void reloadLeadProviders(attempt + 1);
+    }, Math.min(providerRetryBaseMs * 2 ** attempt, 10 * 60_000));
+    providerRetry.unref();
+  }
+
   const modelSettings = new ModelSettings({
     db, dataDir: opts.dataDir, vault, log, memory: memoryControl,
     externalSecret: (name) => daemonOnlySecrets.get(name) ?? cachedKeychainSecret(name),
@@ -2886,24 +2926,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         return "now";
       },
       async providersChanged() {
-        leadCatalogCache = null;
-        if (!refreshProviders) return;
-        try {
-          await refreshProviders();
-        } catch (error: any) {
-          log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
-          return;
-        }
-        resumeLeadWake("the user changed a model provider");
-        if (busy || draining || systemTurnStarting) {
-          rebindLeadModel = true;
-          return;
-        }
-        try {
-          await switchLeadModel?.(appliedLeadModel);
-        } catch (error: any) {
-          log(`lead model rebind after a provider change failed: ${error?.message ?? String(error)}`);
-        }
+        if (await reloadLeadProviders()) resumeLeadWake("the user changed a model provider");
       },
     },
   });
@@ -3032,6 +3055,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     log(`lead model unavailable at start: ${redactSecretText(modelUnavailable)}`);
     leadHealth.failed(modelUnavailable);
   }
+  if (providersUnavailable?.length) retryLeadProviders(0);
   // 断网不是模型的问题（2026-10-16）：系统回合叫醒 Lead 之前先探网络，不通时等它恢复，恢复后马上接着做。
   const network = new NetworkMonitor({
     probe: opts.networkProbe ?? (opts.sessionFactory
@@ -5413,6 +5437,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     await channelMemory?.stop();
     network.stop();
     if (livenessTimer) clearTimeout(livenessTimer);
+    if (providerRetry) clearTimeout(providerRetry);
     clearNodeInterval(schedTimer); clearNodeInterval(orchestratorTimer);
     healthRecovery.stop();
     preflight.stop();

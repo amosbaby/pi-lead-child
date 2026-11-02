@@ -69,7 +69,7 @@ function stubLead() {
     modelName: "vibeproxy/claude-sonnet-5",
     models: ["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"],
     switchModel: async (spec: string) => { switched.push(spec); },
-    refreshProviders: async () => { refreshes += 1; },
+    refreshProviders: async (): Promise<string[] | void> => { refreshes += 1; },
     smartModelLlm: "vibeproxy/gemini-3.8-flash-high",
     session: {
       sessionId: "stub-session",
@@ -185,6 +185,28 @@ describe("settings → models through the gateway", () => {
     const { http } = await start(lead);
     const overview = await http("GET", "/v1/overview?include=lead");
     expect(overview.body.lead).toMatchObject({ state: "degraded", failures: 1, detail: expect.stringContaining("vibeproxy") });
+  });
+
+  // 回归：启动时服务商拉不到目录（例如本机代理还没起来）以后，以前整个 daemon 运行期间都不再拉，
+  // 那个服务商的模型一直按缺省（128K、只看文字）注册。现在按退避再拉，拉到为止，拉到以后正在用的模型再挂一次。
+  it("retries a chosen provider whose catalog failed at start until it comes back, then rebinds the model", async () => {
+    vi.stubEnv("PLC_LEAD_PROVIDER_RETRY_MS", "30");
+    const lead = stubLead();
+    const factory = lead.factory;
+    let refreshes = 0;
+    lead.factory = async () => ({
+      ...(await factory()),
+      providersUnavailable: ["vibeproxy: model catalog failed (Error: fetch failed)"],
+      refreshProviders: async () => {
+        refreshes += 1;
+        return refreshes < 3 ? ["vibeproxy: model catalog failed (Error: fetch failed)"] : [];
+      },
+    });
+    await start(lead);
+    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]), { timeout: 10_000 });
+    expect(refreshes).toBe(3);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(refreshes).toBe(3);
   });
 
   it("adds a second decision model and sets the fast chain, mirrored into the old decision fields", async () => {

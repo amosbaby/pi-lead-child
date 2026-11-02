@@ -11,16 +11,19 @@ import { openDb } from "@pi-lead-child/store";
 import { createLeadSession } from "../src/session.js";
 
 let server: Server | null = null;
+// 服务商的 key 填对了（或者本机代理起来了）：/broken/ 也给目录。
+let fixed = false;
 afterEach(async () => {
   if (server) await new Promise<void>((resolve) => server!.close(() => resolve()));
   server = null;
+  fixed = false;
 });
 
-// /good/v1/models 给一个模型；/broken/ 下面都是 401。
+// /good/v1/models 给一个模型；/broken/ 下面在 fixed 以前都是 401。
 async function catalogStub(): Promise<string> {
   server = createServer((req, res) => {
     res.setHeader("content-type", "application/json");
-    if (req.url?.startsWith("/broken/")) { res.statusCode = 401; res.end("{}"); return; }
+    if (req.url?.startsWith("/broken/") && !fixed) { res.statusCode = 401; res.end("{}"); return; }
     res.end(JSON.stringify({ data: [{ id: "m" }] }));
   });
   await new Promise<void>((resolve) => server!.listen(0, "127.0.0.1", resolve));
@@ -41,21 +44,30 @@ async function startWith(models: string[]) {
   }));
   const db = openDb(join(dataDir, "plc.db"));
   const lead = await createLeadSession({ dataDir, dbPath: join(dataDir, "plc.db"), db });
-  (lead.session as unknown as { dispose(): void }).dispose();
-  db.close();
-  return lead;
+  return { lead, close: () => { (lead.session as unknown as { dispose(): void }).dispose(); db.close(); } };
 }
 
 describe("a chosen provider whose catalog fails at start", () => {
   it("does not mark Lead unavailable when only a fallback model's provider fails", async () => {
-    const lead = await startWith(["good/m", "broken/x"]);
+    const { lead, close } = await startWith(["good/m", "broken/x"]);
+    close();
     expect(lead.modelName).toBe("good/m");
     expect(lead.modelUnavailable).toBeNull();
+    // 备用的服务商也要再拉：daemon 按 providersUnavailable 退避重拉。
+    expect(lead.providersUnavailable).toEqual([expect.stringMatching(/^broken: model catalog failed/)]);
   });
 
   it("marks Lead unavailable, naming the provider, when the model in use is on it", async () => {
-    const lead = await startWith(["broken/x", "good/m"]);
-    expect(lead.modelName).toBe("broken/x");
-    expect(lead.modelUnavailable).toMatch(/^broken: model catalog failed .*401/);
+    const { lead, close } = await startWith(["broken/x", "good/m"]);
+    try {
+      expect(lead.modelName).toBe("broken/x");
+      expect(lead.modelUnavailable).toMatch(/^broken: model catalog failed .*401/);
+      // 重新注册时报告还拉不到的；拉到以后是空的（daemon 据此停止重拉）。
+      expect(await lead.refreshProviders()).toEqual([expect.stringMatching(/^broken: /)]);
+      fixed = true;
+      expect(await lead.refreshProviders()).toEqual([]);
+    } finally {
+      close();
+    }
   });
 });
