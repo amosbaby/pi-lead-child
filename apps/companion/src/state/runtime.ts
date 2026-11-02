@@ -111,6 +111,7 @@ import {
   createJsonOutboxStorage,
   shouldRecoverLoopbackCredentials,
   shouldReplaceLoopbackCredentials,
+  shouldUpgradeLoopbackCredentials,
   type OutboxEntry,
   type OutboxStorage,
 } from '@pi-lead-child/client';
@@ -288,6 +289,8 @@ export class CompanionStateRuntime {
   private chatImages = new Map<string, Promise<ChatImageInput>>();
   private leadAvatarImagesLoading = new Set<string>();
   private scopes = new Set<Scope>();
+  // 这一页能用的回环自动配对地址（本机网页才有）。做不了决定时的提示按它说下一步。
+  private loopbackEndpoint: string | null = null;
   private capabilities = new Set<string>();
   private currentAgendaScope: AgendaResourceScope | null = null;
   private replayThroughSeq = 0;
@@ -573,7 +576,7 @@ export class CompanionStateRuntime {
     approvalId: number,
     decision: 'approve' | 'reject' | 'approve_session',
   ): Promise<void> {
-    await this.dependencies.client.resolveApproval(approvalId, decision);
+    await this.dependencies.client.resolveApproval(approvalId, decision).catch(this.decisionError);
     await this.refresh();
   }
 
@@ -1271,7 +1274,7 @@ export class CompanionStateRuntime {
   }
 
   resolveConnectionConfirmation(id: string, approve: boolean): Promise<ConnectionConfirmationDto> {
-    return this.connectionClient('resolveConnectionConfirmation')(id, approve);
+    return this.connectionClient('resolveConnectionConfirmation')(id, approve).catch(this.decisionError);
   }
 
   // 会话里的 MemorySwitchConfirm 卡：读一次记忆切换，按你的决定确认或者不切换。
@@ -1280,7 +1283,7 @@ export class CompanionStateRuntime {
   }
 
   async confirmMemorySwitch(id: string, approve: boolean): Promise<MemorySwitchConfirmResponse> {
-    const response = await this.memoryClient('confirmMemorySwitch')(id, approve);
+    const response = await this.memoryClient('confirmMemorySwitch')(id, approve).catch(this.decisionError);
     // 设置页和会话卡读同一份记忆设置：确认（或不切换）以后马上换成 daemon 回的这一份。
     this.control.setState({ memory: response.memory });
     return response;
@@ -1559,7 +1562,7 @@ export class CompanionStateRuntime {
   }
 
   async decideStandingOrderProposal(approvalId: number, approve: boolean): Promise<StandingOrderProposalResponse> {
-    return this.standingOrderClient('decideStandingOrderProposal')(approvalId, approve);
+    return this.standingOrderClient('decideStandingOrderProposal')(approvalId, approve).catch(this.decisionError);
   }
 
   // 会话里改规则的确认卡（UserAction confirm_rule_change，统一的消息事件工单 09）：卡片自己保存读到的结果，
@@ -1569,7 +1572,7 @@ export class CompanionStateRuntime {
   }
 
   async resolveRuleChangeConfirmation(id: string, decision: RuleChangeDecision): Promise<RuleChangeConfirmationDto> {
-    return this.ruleChangeClient('resolveRuleChangeConfirmation')(id, decision);
+    return this.ruleChangeClient('resolveRuleChangeConfirmation')(id, decision).catch(this.decisionError);
   }
 
   // 外部的人要求设的定时器（统一的消息事件 spec D16，工单 12）：会话里的确认卡（UserAction confirm_timer）自己保存读到的结果，
@@ -1579,7 +1582,7 @@ export class CompanionStateRuntime {
   }
 
   async resolveTimerRequest(id: string, decision: TimerRequestDecision): Promise<TimerRequestDto> {
-    return this.timerClient('resolveTimerRequest')(id, decision);
+    return this.timerClient('resolveTimerRequest')(id, decision).catch(this.decisionError);
   }
 
   async externalTimers(signal?: AbortSignal): Promise<ExternalTimerDto[]> {
@@ -1778,8 +1781,11 @@ export class CompanionStateRuntime {
     const credentials = await this.dependencies.credentials.load();
     if (!this.isCurrent(epoch)) return;
     this.credentials = credentials;
+    this.loopbackEndpoint = options.loopbackEndpoint ?? null;
     if (credentials && shouldReplaceLoopbackCredentials(credentials, options.loopbackEndpoint)) {
       if (!await this.switchLoopbackEndpoint(epoch, credentials, options.loopbackEndpoint!)) return;
+    } else if (credentials && shouldUpgradeLoopbackCredentials(credentials, options.loopbackEndpoint)) {
+      if (!await this.upgradeLoopbackCredentials(epoch, options.loopbackEndpoint!)) return;
     } else if (!credentials && options.loopbackEndpoint) {
       const controller = this.controller();
       try {
@@ -1874,6 +1880,45 @@ export class CompanionStateRuntime {
       this.controllers.delete(controller);
     }
   }
+
+  // 存着的凭证做不了决定（approvals:respond）：走和第一次自动配对同一条路换一张本机网页的凭证。
+  // 网关不给（没开 PLC_ALLOW_LOOPBACK_AUTO_PAIR、origin 不在允许列表）就留着原来的凭证照常连。
+  private async upgradeLoopbackCredentials(epoch: number, endpoint: string): Promise<boolean> {
+    const controller = this.controller();
+    try {
+      const paired = await this.dependencies.client.pairLoopback(
+        endpoint,
+        'localhost-web',
+        controller.signal,
+      );
+      if (!this.isCurrent(epoch)) return false;
+      this.resetForCredentialRecovery();
+      this.credentials = paired;
+      return true;
+    } catch {
+      return this.isCurrent(epoch);
+    } finally {
+      this.controllers.delete(controller);
+    }
+  }
+
+  // 网关说这张凭证做不了用户的决定（protocol 的 originMayDecide）：换成告诉用户下一步怎么做的话。
+  // 本机网页启动时本该换到能做决定的凭证（upgradeLoopbackCredentials），走到这里说明网关没给。
+  private decisionError = (reason: unknown): never => {
+    if (
+      reason instanceof ControlPlaneClientError && reason.status === 403 &&
+      reason.message.startsWith('missing scope: approvals:respond')
+    ) {
+      const m = this.messages();
+      throw new ControlPlaneClientError(
+        this.loopbackEndpoint ? m.decisionNeedsLoopbackPairing : m.decisionNeedsPairedDevice,
+        reason.code,
+        reason.status,
+        reason.body,
+      );
+    }
+    throw reason;
+  };
 
   private resetForCredentialRecovery(): void {
     this.credentials = null;
