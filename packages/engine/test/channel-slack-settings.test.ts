@@ -51,6 +51,9 @@ describe("the Slack settings", () => {
       expect(Value.Check(ChannelSecretSettingSchema, { ...secret, present: false, origin: null })).toBe(true);
     }
     expect(settings.setupUrl).toBe(slackSetupUrl(settings.manifest!));
+    // 用户令牌的说明：权限加在 User Token Scopes，改了要重装、重填（2026-11-02）。
+    expect(settings.secrets[1]!.hint).toContain("User Token Scopes（不是 Bot Token Scopes）");
+    expect(settings.secrets[1]!.hint).toContain("Reinstall to Workspace");
     // 应用名是助手名（Slack 在代发的消息下面写「Sent using @Paimon」），说明里写主人名。
     expect(settings.manifest).toContain('name: "Paimon"');
     expect(settings.manifest).toContain('description: "替 Leo 查资料'); 
