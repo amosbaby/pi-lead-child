@@ -71,6 +71,8 @@ export const ChannelSourceSettingsDtoSchema = StrictObject({
   manifest: Nullable(Type.String({ maxLength: 8_000 })),
   // 建应用的网页（可以带上清单，最长 CHANNEL_SETUP_URL_MAX）。
   setupUrl: Nullable(Type.String({ maxLength: CHANNEL_SETUP_URL_MAX })),
+  // 建应用的要点（来源插件写的，按界面语言）。没有时是 null。
+  setupNote: Nullable(Type.String({ maxLength: 1_000 })),
   // 这个调用方能不能在这里改密钥：只有本机网页能改。
   editable: Type.Boolean(),
 });

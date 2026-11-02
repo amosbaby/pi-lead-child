@@ -67,12 +67,6 @@ export const channelsMessages = defineMessages({
     setupBefore: 'Go to ',
     setupAfterManifest: ' to create the app. The page fills in the manifest below. If it does not, create the app from that manifest. Then enter the new tokens above.',
     setupAfter: ' and create the app. Then enter the new tokens above.',
-    // 来源自己的建应用要点（按来源名）。手建 Slack 应用时最容易漏的两处（2026-11-02）。
-    sourceSetupNote: {
-      slack: 'Add the scopes under User Token Scopes, not Bot Token Scopes. '
-        + 'Subscribe to events on behalf of users must list message.im, message.mpim, message.channels and message.groups. '
-        + 'After you change scopes or events, click Reinstall to Workspace and paste the new User OAuth Token above.',
-    },
     showManifest: 'Show the manifest',
     hideManifest: 'Hide the manifest',
     copy: 'Copy',
@@ -133,11 +127,6 @@ export const channelsMessages = defineMessages({
     setupBefore: '在 ',
     setupAfterManifest: ' 建应用：网页会填好下面的清单，没有填好时用这份清单建。再把生成的令牌填在上面。',
     setupAfter: ' 建应用，再把生成的令牌填在上面。',
-    sourceSetupNote: {
-      slack: '权限加在 User Token Scopes 里（不是 Bot Token Scopes）。'
-        + 'Subscribe to events on behalf of users 里要有 message.im、message.mpim、message.channels、message.groups。'
-        + '改了权限或事件以后，点 Reinstall to Workspace，把新的 User OAuth Token 填在上面。',
-    },
     showManifest: '查看清单',
     hideManifest: '收起清单',
     copy: '复制',

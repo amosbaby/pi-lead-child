@@ -52,11 +52,12 @@ afterEach(() => {
 function adapter(): ChannelAdapter {
   const settings: ChannelSettingsSpec = {
     secrets: [
-      { name: ONE, label: "第一个", prefix: "fake-", hint: "" },
-      { name: TWO, label: "第二个", prefix: "fake-", hint: "" },
+      { name: ONE, label: "第一个", prefix: "fake-", hint: (locale) => (locale === "zh" ? "在这里生成" : "Generate it here") },
+      { name: TWO, label: "第二个", prefix: "fake-", hint: () => "" },
     ],
     manifest: null,
     get setupUrl() { return setupUrl; },
+    setupNote: (locale) => (locale === "zh" ? "权限加在用户令牌上" : "Add the scopes to the user token"),
     noEventsWarning: (locale) => (locale === "zh" ? "去查事件订阅" : "Check the event subscriptions"),
     test: async (secrets) => {
       tested.push({ ...secrets });
@@ -129,6 +130,14 @@ describe("the status of a source", () => {
   });
 
   // 一个来源的长链接不能让整个列表过不了客户端的 schema 校验：超过契约的长度时不给。
+  // 令牌的说明和建应用的要点按界面语言（2026-11-02）：来源插件给两种语言，daemon 按用户现在选的取。
+  it("writes the secret hints and the setup note in the language the user chose", () => {
+    const settings = setup();
+    expect(settings.list()[0]).toMatchObject({ setupNote: "Add the scopes to the user token", secrets: [{ hint: "Generate it here" }, { hint: "" }] });
+    updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
+    expect(settings.list()[0]).toMatchObject({ setupNote: "权限加在用户令牌上", secrets: [{ hint: "在这里生成" }, { hint: "" }] });
+  });
+
   it("gives no setup link that is longer than the contract allows", () => {
     const settings = setup();
     setupUrl = `https://chat.example/apps?manifest=${"x".repeat(CHANNEL_SETUP_URL_MAX)}`;

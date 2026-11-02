@@ -36,6 +36,7 @@ function slack(overrides: Partial<ChannelSourceSettingsDto> = {}): ChannelSource
     ],
     manifest: MANIFEST,
     setupUrl: 'https://api.slack.com/apps',
+    setupNote: null,
     editable: true,
     ...overrides,
   };
@@ -306,12 +307,11 @@ describe('the channel settings section', () => {
     const writeText = vi.fn(async () => {});
     vi.stubGlobal('navigator', { ...navigator, clipboard: { writeText } });
     // 链接带上了清单（2026-11-02）：只显示网页的地址，不显示整份清单。
-    render([slack({ setupUrl: 'https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A' })]);
+    const setupNote = 'Add the scopes under User Token Scopes, not Bot Token Scopes.';
+    render([slack({ setupUrl: 'https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A', setupNote })]);
     expect(screen.getByTestId('channel-slack-setup-url').textContent).toBe('https://api.slack.com/apps');
-    // 手建应用时最容易漏的两处（2026-11-02）：权限加在 User Token Scopes，用户事件要订阅；改了要重装、重存令牌。
-    const note = screen.getByTestId('channel-slack-setup-note').textContent;
-    for (const part of ['User Token Scopes, not Bot Token Scopes', 'Subscribe to events on behalf of users', 'message.im', 'message.mpim',
-      'message.channels', 'message.groups', 'Reinstall to Workspace', 'new User OAuth Token']) expect(note).toContain(part);
+    // 建应用的要点由来源插件给（2026-11-02），原样显示在链接下面。
+    expect(screen.getByTestId('channel-slack-setup-note').textContent).toBe(setupNote);
     expect(screen.queryByTestId('channel-slack-manifest')).toBeNull();
     fireEvent.click(screen.getByTestId('channel-slack-manifest-toggle'));
     expect(screen.getByTestId('channel-slack-manifest').textContent).toContain('socket_mode_enabled: true');

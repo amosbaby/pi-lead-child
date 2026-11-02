@@ -50,14 +50,13 @@ const SECRETS: readonly ChannelSecretSpec[] = [
     name: SLACK_APP_TOKEN_ENV,
     label: "App-Level Token",
     prefix: "xapp-",
-    hint: "在应用的 Basic Information → App-Level Tokens 点 Generate Token and Scopes，加 connections:write 和 authorizations:read（别人也装了这个应用时，用它认出哪些消息是你能看到的）。",
+    hint: (locale) => slackSettingsMessages(locale).appTokenHint,
   },
   {
     name: SLACK_USER_TOKEN_ENV,
     label: "User OAuth Token",
     prefix: "xoxp-",
-    hint: "在应用的 OAuth & Permissions 点 Install to Workspace，授权以后复制 User OAuth Token（不是 Bot User OAuth Token）。"
-      + "权限加在 User Token Scopes（不是 Bot Token Scopes）；改了权限或事件订阅，要点 Reinstall to Workspace，再填新的令牌。",
+    hint: (locale) => slackSettingsMessages(locale).userTokenHint,
   },
 ];
 
@@ -252,6 +251,7 @@ export function createSlackSettings(input: {
     secrets: SECRETS,
     get manifest() { return slackAppManifest(input.ownerName, assistantName()); },
     get setupUrl() { return slackSetupUrl(slackAppManifest(input.ownerName, assistantName())); },
+    setupNote: (locale) => slackSettingsMessages(locale).setupNote(SLACK_USER_EVENTS),
     // 2026-11-02：手建应用时没有订阅用户事件、没有加 User Token Scopes，Socket 连上了却一个事件都收不到，哪里都没说。
     noEventsWarning: (locale) => slackSettingsMessages(locale).noEvents(SLACK_USER_EVENTS, SLACK_USER_SCOPES),
     test,
