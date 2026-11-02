@@ -64,6 +64,10 @@ export const ChannelSourceSettingsDtoSchema = StrictObject({
   // 最近一次出错的原因（不含密钥）。
   lastError: Nullable(Type.String({ maxLength: 500 })),
   lastConnectedAt: Nullable(Type.String()),
+  // 这次连上以后收到第一个事件的时间。还没有收到时是 null。
+  firstEventAt: Nullable(Type.String()),
+  // 存了令牌、连上了很久却一个事件都没收到时给人看的提醒（该查哪里、怎样验证，来源插件写的）。没有时是 null。
+  noEventsWarning: Nullable(Type.String({ maxLength: 1_000 })),
   secrets: Type.Array(ChannelSecretSettingSchema, { maxItems: 8 }),
   // 建应用用的清单（例如 Slack 的 YAML），给「复制」按钮。来源没有清单时是 null。
   manifest: Nullable(Type.String({ maxLength: 8_000 })),

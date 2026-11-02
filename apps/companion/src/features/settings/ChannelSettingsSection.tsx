@@ -86,6 +86,7 @@ function ChannelSourceCard({ source }: { source: ChannelSourceSettingsDto }) {
       </Row>
       <ChannelConnectionBlock source={source} view={connectionView} />
       {source.missingScopes.length && !signedInMode ? <MissingScopes id={id} scopes={source.missingScopes} /> : null}
+      {source.noEventsWarning ? <NoEvents id={id} warning={source.noEventsWarning} /> : null}
       {!source.editable ? <ReadOnlySecrets source={source} />
         : signingIn ? null
         : signedInMode ? (
@@ -214,6 +215,17 @@ function MissingScopes({ id, scopes }: { id: string; scopes: readonly string[] }
         {scopes.map((scope) => <Text key={scope} size="code" mono>{`· ${scope}`}</Text>)}
       </Column>
       <Text size="secondary" tone="secondary">{m.missingScopesHelp}</Text>
+    </Card>
+  );
+}
+
+// 连上了很久却一个事件都没收到（2026-11-02）：daemon 给的提醒，来源插件写的该查哪里、怎样验证。
+function NoEvents({ id, warning }: { id: string; warning: string }) {
+  const m = useMessages(channelsMessages);
+  return (
+    <Card testID={`channel-${id}-no-events`} tone="warning" rounded="lg" px="inset-x" py="inset-y" gap="card-row">
+      <Text size="label" weight="semibold">{m.noEventsTitle}</Text>
+      <Text size="secondary" tone="secondary">{warning}</Text>
     </Card>
   );
 }
