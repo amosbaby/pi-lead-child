@@ -362,7 +362,11 @@ async function tokenRequest(
     throw error;
   }
   if (!response.ok) throw classifyTokenError(response.status, body);
-  if (typeof body.access_token !== "string" || !body.access_token) throw new OAuthError("protocol", "token response has no access_token");
+  if (typeof body.access_token !== "string" || !body.access_token) {
+    // Slack 把授权失败放在 HTTP 200 的 {"ok":false,"error":"..."} 里。只带错误码，不带正文，避免把令牌写进提示。
+    const code = body.ok === false && typeof body.error === "string" && /^[a-z0-9_.-]{1,64}$/i.test(body.error) ? body.error : null;
+    throw new OAuthError("protocol", code ? `token response has no access_token (the server says: ${code})` : "token response has no access_token");
+  }
   const expiresIn = typeof body.expires_in === "number" ? body.expires_in
     : typeof body.expires_in === "string" && /^\d+$/.test(body.expires_in) ? Number(body.expires_in) : null;
   return {
