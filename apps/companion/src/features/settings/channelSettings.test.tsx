@@ -324,6 +324,10 @@ describe('the channel settings section', () => {
     // 链接带上了清单（2026-11-02）：只显示网页的地址，不显示整份清单。
     render([slack({ setupUrl: 'https://api.slack.com/apps?new_app=1&manifest_yaml=display_information%3A%0A' })]);
     expect(screen.getByTestId('channel-slack-setup-url').textContent).toBe('https://api.slack.com/apps');
+    // 手建应用时最容易漏的两处（2026-11-02）：权限加在 User Token Scopes，用户事件要订阅；改了要重装、重存令牌。
+    const note = screen.getByTestId('channel-slack-setup-note').textContent;
+    for (const part of ['User Token Scopes, not Bot Token Scopes', 'Subscribe to events on behalf of users', 'message.im', 'message.mpim',
+      'message.channels', 'message.groups', 'Reinstall to Workspace', 'new User OAuth Token']) expect(note).toContain(part);
     expect(screen.queryByTestId('channel-slack-manifest')).toBeNull();
     fireEvent.click(screen.getByTestId('channel-slack-manifest-toggle'));
     expect(screen.getByTestId('channel-slack-manifest').textContent).toContain('socket_mode_enabled: true');

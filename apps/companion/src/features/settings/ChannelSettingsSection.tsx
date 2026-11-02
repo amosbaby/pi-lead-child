@@ -425,6 +425,7 @@ function AppSetup({ source }: { source: ChannelSourceSettingsDto }) {
   }, []);
   if (!source.manifest && !source.setupUrl) return null;
   const manifest = source.manifest;
+  const note = (m.sourceSetupNote as Readonly<Record<string, string | undefined>>)[id];
   const copy = async () => {
     if (!manifest || !(await copyText(manifest))) return;
     setCopied(true);
@@ -441,6 +442,7 @@ function AppSetup({ source }: { source: ChannelSourceSettingsDto }) {
           {manifest ? m.setupAfterManifest : m.setupAfter}
         </Text>
       ) : null}
+      {note ? <Text testID={`channel-${id}-setup-note`} size="secondary" tone="secondary">{note}</Text> : null}
       {manifest ? (
         <Row items="center" gap="actions" flexWrap="wrap">
           <Button

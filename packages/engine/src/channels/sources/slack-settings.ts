@@ -62,7 +62,8 @@ const SECRETS: readonly ChannelSecretSpec[] = [
     name: SLACK_USER_TOKEN_ENV,
     label: "User OAuth Token",
     prefix: "xoxp-",
-    hint: "在应用的 OAuth & Permissions 点 Install to Workspace，授权以后复制 User OAuth Token（不是 Bot User OAuth Token）。",
+    hint: "在应用的 OAuth & Permissions 点 Install to Workspace，授权以后复制 User OAuth Token（不是 Bot User OAuth Token）。"
+      + "权限加在 User Token Scopes（不是 Bot Token Scopes）；改了权限或事件订阅，要点 Reinstall to Workspace，再填新的令牌。",
   },
 ];
 
