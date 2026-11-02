@@ -16,6 +16,7 @@ import {
 } from "@pi-lead-child/protocol";
 import { deployReadiness, type DeployReadiness } from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
+import { DEFAULT_DAEMON_READY_TIMEOUT_MS } from "./daemon-ready-timeout.js";
 import { findRuntimeExecutable, runtimeSearchPath } from "@pi-lead-child/runtime";
 import type {
   MaintenanceRequest,
@@ -60,9 +61,7 @@ export class DeployRefusedError extends Error {
   }
 }
 
-// 负载高时 daemon 启动会超过 30 秒：2026-10-19 14:54Z 负载约 37，daemon 用了 39 秒才开始监听。
-// 进程还活着就接着等，所以这个期限只用来认定启动卡住了，可以比正常启动时间长得多。
-export const DEFAULT_DAEMON_READY_TIMEOUT_MS = 120_000;
+export { DEFAULT_DAEMON_READY_TIMEOUT_MS };
 
 export type StartingDaemonVerdict = "ready" | "exited" | "timed_out" | "starting";
 

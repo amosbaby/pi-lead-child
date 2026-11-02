@@ -14,6 +14,7 @@ import {
   startingDaemonVerdict, startSupervisor, type SupervisorHandle,
 } from "../src/server.js";
 import { loadSupervisorState } from "../src/state.js";
+import { daemonReadyTimeoutMs, ENSURE_RUNNING_MARGIN_MS, ensureRunningTimeoutMs } from "../src/daemon-ready-timeout.js";
 import { writeBuildProvenance } from "../src/deploy/readiness.js";
 import { backupSqlite } from "../src/deploy/backup.js";
 import { setTimeout as delay } from "node:timers/promises";
@@ -587,6 +588,16 @@ describe("waiting for a daemon that is starting", () => {
     expect(verdict(true, false, 39_000)).toBe("ready");
     expect(verdict(false, true, 1_000)).toBe("exited");
     expect(verdict(false, false, DEFAULT_DAEMON_READY_TIMEOUT_MS)).toBe("timed_out");
+  });
+
+  // plc daemon start 等 ensure_running 的期限跟着 supervisor 等 daemon 的期限走，读同一个环境变量（2026-11-02）。
+  it("lets plc wait for ensure_running longer than the supervisor waits for the daemon, from the same variable", () => {
+    expect(daemonReadyTimeoutMs({})).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS);
+    expect(daemonReadyTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "abc" })).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS);
+    expect(daemonReadyTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "-5" })).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS);
+    expect(daemonReadyTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "300000" })).toBe(300_000);
+    expect(ensureRunningTimeoutMs({})).toBe(DEFAULT_DAEMON_READY_TIMEOUT_MS + ENSURE_RUNNING_MARGIN_MS);
+    expect(ensureRunningTimeoutMs({ PLC_DAEMON_READY_TIMEOUT_MS: "300000" })).toBe(300_000 + ENSURE_RUNNING_MARGIN_MS);
   });
 });
 
