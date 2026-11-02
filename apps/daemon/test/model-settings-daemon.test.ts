@@ -183,6 +183,20 @@ describe("settings → models through the gateway", () => {
     expect(readFileSync(join(dir, "config.json"), "utf8")).not.toContain("sk-vault");
   });
 
+  // 回归：分工里在用的服务商启动时拉不到目录（key 错），以前 daemon 起不来、被反复重启，网页和 Slack 都连不上。
+  // 现在 daemon 照常起来，Lead 一开始就是降级，顶栏写着要检查账号，技术详情里有服务商的名字。
+  it("starts with Lead degraded when the chosen provider's catalog failed, naming the provider", async () => {
+    const lead = stubLead();
+    const factory = lead.factory;
+    lead.factory = async () => ({
+      ...(await factory()),
+      modelUnavailable: "vibeproxy: model catalog failed (Error: GET http://127.0.0.1:9/v1/models failed: 401 Unauthorized)",
+    });
+    const { http } = await start(lead);
+    const overview = await http("GET", "/v1/overview?include=lead");
+    expect(overview.body.lead).toMatchObject({ state: "degraded", failures: 1, detail: expect.stringContaining("vibeproxy") });
+  });
+
   it("adds a second decision model and sets the fast chain, mirrored into the old decision fields", async () => {
     const { http } = await start(stubLead());
     const added = await http(...act("save_fast_model", { name: "decision-1", baseUrl: "https://jev.example.com", model: "jev-latest", apiKey: "tsk-1" }));

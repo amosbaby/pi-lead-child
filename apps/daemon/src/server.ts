@@ -3137,6 +3137,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const {
     session, modelName, syncToolAccess, reloadExtensions, models: leadModels, switchModel: switchLeadModel,
     reportsInputDelivery, interruptStep: interruptLeadStep, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady,
+    modelUnavailable,
   } = leadSlot.result();
   log(`lead ready (model=${modelName}, session=${session.sessionId})`);
   // 部署改了 Lead 能用的工具或操作时，下一轮告诉它一次（lead-capabilities.ts，2026-11-02）。
@@ -3469,6 +3470,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     leadName: () => leadDisplayName(db),
     locale: () => getLocale(db),
   });
+  // 分工里在用的服务商启动时拉不到目录（key 错、地址错）：daemon 照常起来，Lead 一开始就是降级，原因写在顶栏。
+  // 以前这里抛错，daemon 退出，被反复重启，网页和 Slack 都连不上。
+  if (modelUnavailable) {
+    log(`lead model unavailable at start: ${redactSecretText(modelUnavailable)}`);
+    leadHealth.failed(modelUnavailable);
+  }
   // 断网不是模型的问题（2026-10-16）：系统回合叫醒 Lead 之前先探网络，不通时等它恢复，恢复后马上接着做。
   const networkProbeHost = process.env.PLC_NETWORK_PROBE_HOST ?? "api.anthropic.com";
   const network = new NetworkMonitor({
