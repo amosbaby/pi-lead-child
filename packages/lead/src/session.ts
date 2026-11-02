@@ -208,7 +208,8 @@ export async function createLeadSession(opts: {
   refreshProviders: () => Promise<void>;
   // 大脑现在能不能用（首次启动引导，.scratch/onboarding）：正在用的模型有认证。
   brainReady: () => Promise<boolean>;
-  // 启动时分工里在用、目录却拉不到的服务商（registerLeadProviders 的 unavailable）。都拉到了时为 null。
+  // 启动时正在用的模型的服务商拉不到目录的原因（registerLeadProviders 的 unavailable）。拉到了时为 null。
+  // 只是备用模型的服务商拉不到时不算：Lead 照常能用，原因只写进日志。
   modelUnavailable: string | null;
 }> {
   const modelRuntime = await ModelRuntime.create({
@@ -533,6 +534,6 @@ export async function createLeadSession(opts: {
       if (!current) return false;
       return modelRuntime.hasConfiguredAuth(current.provider) || (await modelRuntime.checkAuth(current.provider)) !== undefined;
     },
-    modelUnavailable: registered.unavailable.length ? registered.unavailable.join("; ") : null,
+    modelUnavailable: registered.unavailable.find((entry) => entry.provider === model.provider)?.reason ?? null,
   };
 }
