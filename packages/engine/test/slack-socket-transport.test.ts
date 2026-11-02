@@ -182,12 +182,18 @@ describe("the Socket Mode transport", () => {
     expect(statuses[1]).toEqual({ state: "error", error: expect.stringContaining("Slack 拒绝了连接（invalid_auth）") });
   });
 
-  // 2026-11-02：应用没有订阅用户事件时连上了也收不到事件。第一个事件报给 host.received，设置页据此提醒。
-  it("reports the first event of every connection, and not the envelopes that are not events", async () => {
+  // 2026-11-02：应用没有订阅用户事件时连上了也收不到事件。第一个用户本人能看到的事件报给 host.received，设置页据此提醒。
+  it("reports the first event the user can see on every connection, not other envelopes or other installers' events", async () => {
     start();
     await connected();
     slack.socket()!.envelope("interactive", { type: "block_actions" });
     await vi.waitFor(() => expect(slack.acks).toHaveLength(1));
+    expect(received).toBe(0);
+    // 别人也装了这个应用：他们能看到、用户本人看不到的事件不算（不能让它把「收不到事件」的提醒清掉）。
+    slack.push(slack.seenBy(slack.dm("U0LI", "周末的排班换一下？", { channel: "D0ZHANGLI" }), ["U0ZHANG"]));
+    await vi.waitFor(() => expect(slack.acks).toHaveLength(2));
+    await vi.waitFor(() => expect(logs.join("\n")).toContain("dropped a Slack event"));
+    expect(kinds()).toEqual([]);
     expect(received).toBe(0);
     slack.push(slack.dm("U0ZHANG", "第一条"));
     slack.push(slack.dm("U0ZHANG", "第二条"));
