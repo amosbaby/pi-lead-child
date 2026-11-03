@@ -250,6 +250,8 @@ export class FakeSlack {
   // 用 cookie 换会话（GET /auth）成功了几次。
   sessionSignIns = 0;
   sessionLive = true;
+  // 会话换到的工作区子域名。Enterprise Grid 下它和工作区网址的主机不一样，测试可以改它。
+  sessionDomain = "home";
   // 会话方式的 Web API 收到的方法名（不含令牌和 cookie）。
   readonly sessionCalls: string[] = [];
   private readonly now: () => Date;
@@ -705,7 +707,7 @@ export class FakeSlack {
       return Response.json({
         teams: {
           [this.teamId]: {
-            id: this.teamId, name: "Home", domain: "home", url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, token: FAKE_SLACK_SESSION_TOKEN,
+            id: this.teamId, name: "Home", domain: this.sessionDomain, url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, token: FAKE_SLACK_SESSION_TOKEN,
           },
         },
       });

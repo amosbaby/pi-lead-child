@@ -1,6 +1,6 @@
 // 在 Slack 里打开（2026-11-03）：会话卡上的「在 Slack 中打开」、交给 Lead 的消息事件、Lead 翻的对话列表，都带一个 https 地址，
 // 点了去 Slack 里这条消息所在的地方（thread 里的回复打开那个 thread，私信打开那条私信）。
-// 地址由 Slack 插件按 chat.getPermalink 的格式拼（不调接口）；工作区的网址来自 auth.test 的 url（会话方式来自会话的 domain），
+// 地址由 Slack 插件按 chat.getPermalink 的格式拼（不调接口）；工作区的网址来自 auth.test 的 url（会话方式来自会话的 apiBase，没有时按 domain 拼），
 // 记进事件，daemon 重启、Slack 没连上时照样拼得出。hub 只认 https 的地址，插件给了别的协议、出了错时当作没有。
 // 真的 SQLite、真的 Slack 来源插件、假的 Slack。编号都是编的。
 import { join } from "node:path";
@@ -81,6 +81,19 @@ describe("the plugin's link for an event payload, in both connection modes", () 
     await app.resolveCredential!({ [SLACK_APP_TOKEN_ENV]: FAKE_SLACK_APP_TOKEN, [SLACK_USER_TOKEN_ENV]: FAKE_SLACK_TOKEN }, () => {});
     expect(app.link!(payload)).toBe("https://home.slack.com/archives/C0PROJ/p1700000005000200?thread_ts=1700000000.000100&cid=C0PROJ");
 
+    const session = createSlackChannelAdapter({
+      api: slack.api, connection: "session",
+      session: { network: { fetch: slack.sessionFetch, createWebSocket: slack.createSessionSocket, maxHttpRetries: 0 } },
+    });
+    await session.resolveCredential!({ [SLACK_SESSION_COOKIE_ENV]: FAKE_SLACK_SESSION_COOKIE }, () => {});
+    expect(session.link!(payload)).toBe("https://home.slack.com/archives/C0PROJ/p1700000005000200?thread_ts=1700000000.000100&cid=C0PROJ");
+    await session.transport?.stop();
+  });
+
+  // Enterprise Grid（评审，2026-11-03）：工作区网址的主机不一定是 <domain>.slack.com。会话带着完整的网址，用它。
+  it("uses the session's workspace URL, not one built from its domain", async () => {
+    const slack = new FakeSlack();
+    slack.sessionDomain = "acme-grid";
     const session = createSlackChannelAdapter({
       api: slack.api, connection: "session",
       session: { network: { fetch: slack.sessionFetch, createWebSocket: slack.createSessionSocket, maxHttpRetries: 0 } },
