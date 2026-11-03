@@ -5,7 +5,7 @@
 //   - 检查：请求里没给的用现在的补上；来源插件回的文字里带了密钥也去掉；有一项没过 ok 就是 false；等太久算没过；
 //   - 保存：只写请求里给的（去掉首尾空白）；检查没过不写；删除只删保险库里的；
 //   - 收不到事件：存了令牌以后第一次连上起满 30 分钟、这次连接至少 2 分钟、还没收到事件才提醒（假时钟）；断线、出错不从头算；
-//     收到过一次以后不再提醒（重启以后也不）；不是设置页存的令牌不提醒；重新保存从头等；停机清掉定时器；
+//     收到过一次以后不再提醒（重启以后也不）；不是设置页存的令牌不提醒；重新保存、换回不用登录的方式从头等；停机清掉定时器；
 //   - 建应用的链接超过契约的长度时不给。
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -292,6 +292,26 @@ describe("a source that connects but receives no events", () => {
     vi.advanceTimersByTime(3 * 60 * MINUTE);
     expect(settings.list()[0]).toMatchObject({ status: "connected", noEventsWarning: null });
     mode = "app";
+    expect(settings.list()[0]!.noEventsWarning).toBe("Check the event subscriptions");
+  });
+
+  // 用浏览器会话连了几个小时再换回应用：那几个小时应用的令牌没在用，从换回以后第一次连上重新算 30 分钟。
+  it("starts counting again after the user switches back to a connection without a sign-in", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
+    let mode = "session";
+    const connection = {
+      modes: ["app", "session"], mode: () => mode, needsSignIn: (name: string) => name === "session", writesSwitch: () => false,
+    } as unknown as ChannelAdapter["connection"];
+    const settings = setup({ connection });
+    expect((await settings.save("fake", { [ONE]: SAVED, [TWO]: "fake-two-value" })).ok).toBe(true);
+    connect(settings);
+    vi.advanceTimersByTime(3 * 60 * MINUTE);
+    await settings.useMode("fake", "app");
+    mode = "app";
+    connect(settings);
+    vi.advanceTimersByTime(29 * MINUTE);
+    expect(settings.list()[0]!.noEventsWarning).toBeNull();
+    vi.advanceTimersByTime(1 * MINUTE);
     expect(settings.list()[0]!.noEventsWarning).toBe("Check the event subscriptions");
   });
 
