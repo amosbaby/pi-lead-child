@@ -368,7 +368,7 @@ export class FakeSlack {
     switch (method) {
       case "auth.test":
         return {
-          ok: true, user_id: this.self.id, user: "me", team_id: this.teamId, team: "Home",
+          ok: true, url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, user: "me", team_id: this.teamId, team: "Home",
           response_metadata: { scopes: [...this.scopes] },
         };
       case "files.info": {
