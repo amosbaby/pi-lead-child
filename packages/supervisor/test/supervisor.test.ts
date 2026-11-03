@@ -10,11 +10,13 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { supervisorAvailable, supervisorListening, supervisorRequest } from "../src/client.js";
 import type { SupervisorStatus } from "../src/protocol.js";
 import {
-  autoStartRefusal, daemonStderrTail, DEFAULT_DAEMON_READY_TIMEOUT_MS, explicitStartRefusal, itemsBlockingMaintenance, pruneRestartBackups,
+  autoStartRefusal, daemonStderrTail, explicitStartRefusal, itemsBlockingMaintenance, pruneRestartBackups,
   startingDaemonVerdict, startSupervisor, type SupervisorHandle,
 } from "../src/server.js";
 import { loadSupervisorState } from "../src/state.js";
-import { daemonReadyTimeoutMs, ENSURE_RUNNING_MARGIN_MS, ensureRunningTimeoutMs } from "../src/daemon-ready-timeout.js";
+import {
+  DEFAULT_DAEMON_READY_TIMEOUT_MS, daemonReadyTimeoutMs, ENSURE_RUNNING_MARGIN_MS, ensureRunningTimeoutMs,
+} from "../src/daemon-ready-timeout.js";
 import { writeBuildProvenance } from "../src/deploy/readiness.js";
 import { backupSqlite } from "../src/deploy/backup.js";
 import { setTimeout as delay } from "node:timers/promises";

@@ -66,8 +66,6 @@ export class DeployRefusedError extends Error {
   }
 }
 
-export { DEFAULT_DAEMON_READY_TIMEOUT_MS };
-
 export type StartingDaemonVerdict = "ready" | "exited" | "timed_out" | "starting";
 
 // 决策边界：一个已经启动、还没回答 status 的 daemon，要不要接着等。
