@@ -212,8 +212,10 @@ describe("Lead sends nothing by itself when auto-handling is off", () => {
     const before = slack.sent().length;
     clock = new Date(clock.getTime() + 3 * 60_000);
     await expect(reply(channels, fix.cardId, "修好了，你再试试。"))
-      .rejects.toMatchObject({ code: "invalid_action", message: expect.stringMatching(/自动代你处理关着.*notify_user/u) });
+      .rejects.toMatchObject({ code: "invalid_action", message: expect.stringMatching(/自动代你处理关着.*notify_user.*不带 event/u) });
     expect(slack.sent()).toHaveLength(before);
+    // 带上这条消息事件推给用户走不通：那张卡已经结束了。
+    expect(() => channels.leadNotify(fix.event, { note: "想告诉 Ethan 修好了", draft: "修好了，你再试试。" })).toThrow(/已经结束/u);
   });
 
   it("keeps Lead's reply on the card in a conversation that is going on: the exemption needs the switch on", async () => {
@@ -253,11 +255,23 @@ describe("Lead sends nothing by itself when auto-handling is off", () => {
     await autoHandling(false);
     await expect(channels.leadDispatch(pr.event, {
       summary: "评审这个 PR", intent: "code_review", pullRequest: { owner: "acme", repo: "orders", number: 12 },
-    })).rejects.toThrow(/只能派只读的咨询或者进度/u);
+    })).rejects.toThrow(/自动代你处理关着：只能派只读的咨询或者进度/u);
     await channels.leadDispatch(pr.event, { summary: "看看这个 PR 改了什么", intent: "knowledge" });
     expect(dispatcher.requests).toMatchObject([{ intent: "knowledge" }]);
     await channels.idle();
     expect(slack.sent()).toEqual([]);
+  });
+
+  it("only dispatches read-only work for an old message without a handbook conclusion once the switch is off", async () => {
+    const channels = hub();
+    const pr = await receive(channels, slack.dm("U0PART", "麻烦帮忙看下这个 PR https://github.com/acme/orders/pull/12"));
+    // 交接说明以前的消息事件：没有起作用的那一句，只有意图。
+    db.prepare("UPDATE events SET payload = json_remove(payload, '$.ceiling.situation', '$.ceiling.final') WHERE seq = ?").run(pr.event);
+    await autoHandling(false);
+    await expect(channels.leadDispatch(pr.event, {
+      summary: "评审这个 PR", intent: "code_review", pullRequest: { owner: "acme", repo: "orders", number: 12 },
+    })).rejects.toThrow(/自动代你处理关着：只能派只读的咨询或者进度/u);
+    expect(dispatcher.requests).toEqual([]);
   });
 
   it("still sends what the user sends in their own turn", async () => {

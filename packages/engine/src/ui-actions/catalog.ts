@@ -445,6 +445,7 @@ const CHANNEL_CARD_ACTIONS = {
     permission: "user_only", external: true, defaultReason: "卡上的事在别处做完了",
     hint: "用户让你做卡上的事，你在别处做完了（例如照对方说的私信了别人）：卡结束，note 写做了什么。"
       + "缺省在对方的消息上回 ✅，让对方知道收到并照做了；emoji 换一个（来源里的名字，例如 +1），react=false 不回。"
+      + "「自动代你处理」关着时，不在用户这一轮里的只结束卡，不回表情。"
       + "在卡的这个对话里回复过对方时不回表情（回复就是回应）。",
   }),
 } satisfies Record<ChannelCardAction, UiActionDefinition<ChannelCardTarget, ChannelCardActionInput>>;
@@ -491,7 +492,7 @@ const CHANNEL_CONVERSATION_ACTIONS = {
       + "原样发，不加署名；words=assistant：text 是你组织的话，在用户这一轮里开头带「confirmed by 用户」的署名，别的轮次带「auto-reply」的署名。"
       + "对象不明确（例如同名的人）时先问用户。这个对话里有等用户的卡时，卡跟着结束（已回复，不在用户这一轮里时留撤回窗口）。"
       + "发不发、发什么由你判断：系统不再检验。「自动代你处理」关着时，不在用户这一轮里的不发：有等用户的卡时放到卡上等用户点发送，"
-      + "没有时被拒绝，改用 notify_user。"
+      + "没有时被拒绝，改用 notify_user（不带 event）。"
       + "这条消息做的是另一个对话里那张卡上的事（例如对方让你转告别人）时，cardId 填那张卡：卡结束，在对方的消息上回 ✅。"
       + "对方在要涉密信息时，refusal=true 用固定的话拒绝（text 只能是那句固定的话；授权表允许时才发，外部客户、外部共享的对话不发）。"
       + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就对它用 channel_card 的 handled。",
