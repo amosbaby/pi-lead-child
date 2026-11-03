@@ -14,7 +14,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { CHANNEL_HANDBOOK_DEFAULTS, MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { getChannelCard, listEvents, openDb, type Db } from "@pi-lead-child/store";
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, runUiAction, type ChannelHubOptions } from "../src/index.js";
+import {
+  CHANNEL_HANDLING_PURPOSE, ChannelHub, ChannelRegistry, createSlackChannelAdapter, runUiAction, type ChannelHubOptions,
+} from "../src/index.js";
 import { agentTaskResult, cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel, type ScriptedSmartModel } from "../testing/index.js";
 
 let db: Db;
@@ -275,5 +277,24 @@ describe("Lead does nothing outward by itself when auto-handling is off", () => 
     expect(slack.sent()).toEqual([]);
     expect(getChannelCard(db, yi.cardId)).toMatchObject({ state: "open" });
     expect(listEvents(db, { kind: "channel.task.finished" })).toMatchObject([{ level: "tell", payload: { handedBack: true, messageEvent: event } }]);
+  });
+
+  it("does not send 「正在处理」 when the switch is turned off while the notice is still being worded", async () => {
+    const model = jev();
+    let worded!: () => void;
+    const wording = new Promise<void>((resolve) => { worded = resolve; });
+    const channels = hub({
+      ...model,
+      decide: async (state, questions, options) => {
+        if (options?.purpose === CHANNEL_HANDLING_PURPOSE) await wording;
+        return model.decide(state, questions, options);
+      },
+    });
+    const yi = await receive(channels, slack.dm("U0ETHAN", "orders 今天上线了吗？"));
+    await channels.leadDispatch(messageEventOf(yi.cardId), { summary: "查 orders 今天有没有上线", intent: "progress" });
+    await autoHandling(false);
+    worded();
+    await channels.idle();
+    expect(slack.sent()).toEqual([]);
   });
 });

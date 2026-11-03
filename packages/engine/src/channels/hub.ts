@@ -1646,7 +1646,7 @@ export class ChannelHub {
         + "或者认为句子选错了，用 repick_situation 改选一句");
     }
     if (!sentenceBound && !(request.intent && isGrantIntent(request.intent) && !ceiling && !off) && intent !== "knowledge" && intent !== "progress") {
-      throw new ChannelActionError("invalid_action", "这条消息没有派活的能力（看交接说明里的这一句）：只能派只读的咨询或者进度，帮用户拟草稿");
+      throw new ChannelActionError("invalid_action", `${off ? "自动代你处理关着" : "这条消息没有派活的能力（看交接说明里的这一句）"}：只能派只读的咨询或者进度，帮用户拟草稿`);
     }
     const adapter = this.options.registry.get(request.channel);
     if (!adapter) throw new ChannelActionError("unavailable", `来源 ${request.channel} 现在没有接上`);
@@ -4253,6 +4253,11 @@ export class ChannelHub {
           timeoutMs: Math.max(this.options.intakeTimeoutMs ?? CHANNEL_INTAKE_TIMEOUT_MS, 1),
         });
         const notice = handlingNotice(this.assistantFor(adapter), isHandlingVerb(verb) ? verb : defaultHandlingVerb(playbook));
+        // 想措辞的时候自动代你处理被关掉了（issue 07）：按现在的开关，不发。
+        if (!this.handbookNow().autoReply) {
+          this.log(`[channels] ${adapter.id}: auto-handling was turned off; the handling notice on card #${card.id} was not sent`);
+          return;
+        }
         const context = await this.context(adapter);
         if (!context) {
           this.log(`[channels] ${adapter.id}: no connection; the handling notice on card #${card.id} was not sent`);
@@ -4660,8 +4665,9 @@ function handbookOfCeiling(ceiling: Record<string, unknown>): LeadRequest["handb
 // Lead 自己写的回复能不能直接发（用户 2026-10-30 定 D2）：只有放手可以。婉拒只能发固定的拒绝（refuseForLead 另有检查）。
 const replyAllowed = (final: HandbookMode): boolean => final === "auto";
 
-// 自动代你处理关着时 Lead 自己（不在你这一轮里）往来源里做事被拦下（issue 07）：为什么，和下一步（同 refuseForLead 的说法）。
-const LEAD_OFF_NEXT = (what: string) => `自动代你处理关着，${what}：用 notify_user 告诉用户，写上你本来想怎么做`;
+// 自动代你处理关着时 Lead 自己（不在你这一轮里）往来源里做事被拦下（issue 07）：为什么，和下一步。notify_user 带 event 时
+// 那张卡要还开着（leadNotify），所以写明没有等用户的卡时不带 event。
+const LEAD_OFF_NEXT = (what: string) => `自动代你处理关着，${what}：用 notify_user 告诉用户，写上你本来想怎么做（这个对话没有等用户的卡时不带 event）`;
 
 // 交给 Lead 的消息事件里写的下一步（按授权表的结论，只是建议）：Lead 能用的通用工具（统一消息事件 spec D6、D8，工单 05）。
 function leadNextStep(action: string): string {

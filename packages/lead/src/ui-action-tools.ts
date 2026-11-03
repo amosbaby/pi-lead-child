@@ -273,7 +273,7 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
         + "或者外部消息叫醒你、你判断该发的（例如对方请你给别人带句话），也直接用它。回复一条消息事件的发信人用 reply_to_source。"
         + "words=user：text 是用户在这一轮逐字给的原话，原样发，不加署名；words=assistant：text 是你组织的话，用户这一轮里带「confirmed by 用户」的署名，"
         + "别的轮次带「auto-reply」的署名。这个对话里有等用户的卡时，卡跟着结束（已回复）。发不发、发什么由你判断，系统不再检验；"
-        + "「自动代你处理」关着时，不在用户这一轮里的不发（有等用户的卡时放到卡上，没有时被拒绝，改用 notify_user）。"
+        + "「自动代你处理」关着时，不在用户这一轮里的不发（有等用户的卡时放到卡上，没有时被拒绝，改用 notify_user，不带 event）。"
         + "转告用户口述的事时，位置、名字、数字、步骤照用户说的写；你认为用户说错了，先在会话里指出、问一句，确认后再发。"
         + "这条消息做的是另一个对话里那张卡上的事（例如用户让你照卡上的话转告别人）时，card_id 填那张卡：卡结束，在对方的消息上回 ✅。"
         + "写法：像平时聊天。一件事的第一条消息称呼对方一次；接着说同一件事、或者对方刚和用户说过话时，不加称呼。"
@@ -344,7 +344,7 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
       label: "Mark Channel Card Handled",
       description:
         "用户让你做外部通道卡上的事（例如「按 Ivy 说的去发」），你在别处做完了：结束这张卡，note 写做了什么。"
-        + "缺省在对方的消息上回 ✅，告诉对方收到并照做了；emoji 换一个，react=false 不回。"
+        + "缺省在对方的消息上回 ✅，告诉对方收到并照做了；emoji 换一个，react=false 不回。「自动代你处理」关着时，不在用户这一轮里的不回。"
         + "在卡的这个对话里已经回复过对方时不回表情。",
       parameters: Type.Object({
         card_id: Type.Integer({ minimum: 1 }),
