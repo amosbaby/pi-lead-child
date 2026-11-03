@@ -8,7 +8,8 @@
 //     都没有时这次运行结束；
 //   · steer、followUp 只是入队；clearQueue 取出并清空队列（只还回文字，图片跟着丢掉）；
 //   · prompt、steer、followUp 带的图片和那条消息一起送进上下文（消息的 content 里文字后面跟着图片块，和 pi 一样）；
-//   · abort()：中断正在等的回答，发 stopReason=aborted 的 message_end，等这次运行结束才返回。
+//   · abort()：中断正在等的回答，发 stopReason=aborted 的 message_end，等这次运行结束才返回。正在跑的工具不打断：
+//     这一批工具做完以后才以 aborted 结束（pi 等正在跑的工具做完）。
 // script 决定每一次调模型的回答。回答可以先说一段、等一个 Promise（测试在这时发消息）、再接着说。
 
 export interface FakeCall {
@@ -39,12 +40,20 @@ export interface FakeReply {
   // 说的话。字符串之间可以夹 Promise：说到这里先等它。
   say?: string | Array<string | Promise<unknown>>;
   // 说完以后调的工具（每个一次）。调了工具的回答不是最后的回答。
-  tools?: string[];
+  tools?: Array<string | FakeTool>;
   // 这次调模型以这个错误结束（stopReason=error），这次运行也结束。
   error?: string;
   // 上下文满了（pi 的溢出恢复）：回答被截成空的（stopReason=length，没有内容），pi 接着做一次溢出压缩，
   // 压缩以这个 errorMessage 失败，这次运行结束（2026-10-28 的停摆）。
   cutOff?: string;
+}
+
+// 带参数、要跑一会儿的工具调用。until：工具做到它 resolve 才结束；和 pi 一样，中断不打断正在跑的工具，
+// 这一批工具做完以后这次运行才以 aborted 结束。
+export interface FakeTool {
+  name: string;
+  args?: Record<string, unknown>;
+  until?: Promise<unknown>;
 }
 
 export type FakeScript = (call: FakeCall) => FakeReply | Promise<FakeReply>;
@@ -78,6 +87,8 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
   const withImages = (text: string, images: FakeImage[] | undefined) => { if (images?.length) imagesOf.set(text, images); };
   let abortRun: (() => void) | null = null;
   let running: Promise<void> | null = null;
+  // 会话被中断的次数（daemon 调 abort()）。
+  let aborts = 0;
   let deps: any = {};
   const emit = (event: unknown) => { for (const listener of [...listeners]) listener(event); };
 
@@ -103,7 +114,8 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
 
   async function run(text: string): Promise<void> {
     let abortNow!: () => void;
-    const aborted = new Promise<"aborted">((resolve) => { abortNow = () => resolve("aborted"); });
+    let abortedNow = false;
+    const aborted = new Promise<"aborted">((resolve) => { abortNow = () => { abortedNow = true; resolve("aborted"); }; });
     abortRun = abortNow;
     const end = (stopReason: "aborted" | "error", errorMessage?: string) => emit({
       type: "message_end",
@@ -141,22 +153,25 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
           return;
         }
       }
-      const tools = reply.tools ?? [];
+      const tools = (reply.tools ?? []).map((tool): FakeTool => (typeof tool === "string" ? { name: tool } : tool));
       emit({
         type: "message_end",
         message: {
           role: "assistant", stopReason: tools.length ? "toolUse" : "stop",
           content: [
             ...(said ? [{ type: "text", text: said }] : []),
-            ...tools.map((name, n) => ({ type: "toolCall", id: `call-${calls.length}-${n}`, name, arguments: {} })),
+            ...tools.map((tool, n) => ({ type: "toolCall", id: `call-${calls.length}-${n}`, name: tool.name, arguments: tool.args ?? {} })),
           ],
         },
       });
-      for (const [n, name] of tools.entries()) {
+      for (const [n, tool] of tools.entries()) {
         const toolCallId = `call-${calls.length}-${n}`;
-        emit({ type: "tool_execution_start", toolCallId, toolName: name, args: {} });
-        emit({ type: "tool_execution_end", toolCallId, toolName: name, args: {}, result: { content: [{ type: "text", text: "ok" }] }, isError: false });
+        const args = tool.args ?? {};
+        emit({ type: "tool_execution_start", toolCallId, toolName: tool.name, args });
+        if (tool.until) await tool.until;
+        emit({ type: "tool_execution_end", toolCallId, toolName: tool.name, args, result: { content: [{ type: "text", text: "ok" }] }, isError: false });
       }
+      if (abortedNow) { end("aborted"); return; }
       const steered = takeSteering();
       if (steered.length) { deliver(steered); continue; }
       if (tools.length) continue;
@@ -217,6 +232,7 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
           },
         } : {}),
         async abort() {
+          aborts += 1;
           abortRun?.();
           await running;
         },
@@ -236,6 +252,8 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
     queued: () => ({ steering: [...steering], followUp: [...followUps] }),
     // daemon 交给会话工厂的依赖（currentTurnId……）。
     deps: () => deps,
+    // daemon 中断了几次会话。
+    aborts: () => aborts,
   };
 }
 

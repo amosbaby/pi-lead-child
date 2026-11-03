@@ -27,8 +27,9 @@ import {
 } from "@pi-lead-child/store";
 import { listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice } from "@pi-lead-child/store";
 import {
-  describeWatchSchedule, ensureRepositoryCheckout, HOST_COMMAND_LIMITS, hostCommandInputOf, isLiveUserTurn, parseRepositorySpec,
-  recordTicketRepository, workspaceRepository,
+  checkRepositoryAccess, describeWatchSchedule, findRepositoryCheckout, HOST_COMMAND_LIMITS, hostCommandInputOf, isLiveUserTurn,
+  parseRepositorySpec, recordTicketRepository, recordTicketRepositoryClone, startRepositoryClone, workspaceRepository,
+  type RepositoryCheckout,
 } from "@pi-lead-child/engine";
 import { EXTERNAL_TURN_WATCH_REFUSAL, handsBlockedInTurn, leadScratchDir } from "./hands.js";
 import { addNotification, getNotification, listNotifications, markNotificationDelivered, type NotificationState } from "@pi-lead-child/store";
@@ -115,7 +116,7 @@ import {
 } from "@pi-lead-child/engine";
 import { setAutoPullRequest, workspaceOfItem } from "@pi-lead-child/engine";
 import {
-  integrateIsolatedWorkspace, provisionWorkspace, requestSharedWorkspace,
+  integrateIsolatedWorkspace, provisionWorkspace, provisionWorkspaceAsync, requestSharedWorkspace,
   runWorkspaceRefusal, setPullRequestReviewTarget,
 } from "@pi-lead-child/engine";
 import { listWorkspaces, resolveWorkspace } from "@pi-lead-child/store";
@@ -1582,7 +1583,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         }
         // 隔离 worktree 从一个已登记的来源工作区切出：还没有时先把工单的 workdir 登记成来源（不动文件）。
         if (!resolveWorkspace(db, params.item_id)) provisionWorkspace(db, { itemId: params.item_id, mode: "shared" });
-        return text(JSON.stringify(provisionWorkspace(db, {
+        return text(JSON.stringify(await provisionWorkspaceAsync(db, {
           itemId: params.item_id, mode: "isolated", path: params.path, branchHint: params.branch_hint,
         })));
       },
@@ -1873,8 +1874,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         workdir: Type.Optional(Type.String()),
         repository: Type.Optional(Type.String({
           description: "要改的 GitHub 仓库，写 owner/name（例如 Acme/returns-skills）。本机有它的 checkout 就用，"
-            + "没有时系统在沙箱外 clone 一份（用户的 git 凭证），workdir 不用给。给了 workdir 时，它要在这个仓库里。"
-            + "交付以后只往这个仓库开 PR。",
+            + "没有时系统先确认连得上，再在沙箱外后台 clone 一份（用户的 git 凭证），建单不等 clone，执行者等 clone 完再开始；"
+            + "workdir 不用给。给了 workdir 时，它要在这个仓库里。交付以后只往这个仓库开 PR。",
         })),
         priority: Type.Optional(Type.Union(PRIORITIES.map((p) => Type.Literal(p)))),
         project: Type.Optional(Type.String({ description: "所属项目/分组标签" })),
@@ -2035,15 +2036,25 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         const criteria = template?.criteria ?? normalizeCriterionTexts(params.acceptance_criteria ?? []);
         const brief = template?.brief ?? params.brief;
         // 写明了要改的仓库：本机没有 checkout 就由 daemon 在沙箱外 clone（engine 的 repository-checkout.ts，2026-10-29）。
+        // 建单不等 clone（2026-11-03）：先用 ls-remote 确认连得上，clone 在后台跑，执行者开跑前等它。
         const repository = params.repository ? parseRepositorySpec(params.repository) : null;
         if (params.repository && !repository) throw new Error(`认不出仓库 ${params.repository}：写 owner/name，例如 Acme/returns-skills`);
-        const checkout = repository ? await ensureRepositoryCheckout(db, repository) : null;
+        const found = repository ? await findRepositoryCheckout(db, repository) : null;
+        let clone: { path: string; done: Promise<RepositoryCheckout> } | null = null;
+        if (repository && !found && !params.workdir) {
+          await checkRepositoryAccess(db, repository);
+          clone = await startRepositoryClone(db, repository);
+        }
+        let checkout: (RepositoryCheckout & { cloning?: boolean }) | null = found
+          ? { path: found, cloned: false }
+          : clone ? { path: clone.path, cloned: true, cloning: true } : null;
         if (repository && params.workdir) {
           const top = await gitRunLead(["rev-parse", "--show-toplevel"], params.workdir);
           const actual = top ? await workspaceRepository(top) : null;
           if (actual !== repository.key) {
             throw new Error(`workdir ${params.workdir} 在 ${actual ?? "没有 origin 的目录"}，不是 ${repository.key}。不给 workdir，系统会找到或 clone 这个仓库。`);
           }
+          checkout ??= { path: top!, cloned: false };
         }
         const given = params.workdir ?? checkout?.path ?? template?.workdir;
         if (given) assertExternalChildWorkdir(deps.dataDir, given);
@@ -2092,6 +2103,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             });
           }
           if (repository && checkout) recordTicketRepository(db, createdId, repository, checkout);
+          if (repository && clone) recordTicketRepositoryClone(db, createdId, repository, clone.done);
           if (params.draft_pr === false) {
             setAutoPullRequest(db, createdId, false, { actor: "lead", reason: "建单时用户说先别提 PR" });
           } else if (params.light) {
@@ -2172,10 +2184,13 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           ? `\n注意：verification=${created.verification_policy}，系统不会自动派核查；选的核查员只在之后手动派核查（ticket_action 的 request_review）时用。`
           : "";
         const verificationText = created ? `\n${verificationLine(deps, created)}${noAutomaticReview}` : "";
+        const cloneText = clone && repository
+          ? `\n仓库 ${repository.owner}/${repository.name} 本机没有，正在后台 clone。照常 spawn_child：执行者等 clone 完再开始；clone 失败时 Run 会失败并写明原因。`
+          : "";
         return text(
           (stage === "draft"
             ? `created task #${id}（draft，等用户确认后才会执行）${relationText}${templateText}${criteriaText}`
-            : `created task #${id}（${stage}，已可执行，无需确认）${relationText}${templateText}${criteriaText}`) + verificationText,
+            : `created task #${id}（${stage}，已可执行，无需确认）${relationText}${templateText}${criteriaText}`) + verificationText + cloneText,
         );
       },
     }),

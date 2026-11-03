@@ -10,7 +10,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createDispatcher } from "@pi-lead-child/engine";
+import { createDispatcher, updateDesignPreferences } from "@pi-lead-child/engine";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { startDaemon } from "../src/server.js";
 import { openDb, type Db } from "@pi-lead-child/store";
@@ -64,6 +64,8 @@ describe("runtime acceptance: rework exhaustion reaches the user over the wire",
 
     // ── 起始状态：一张执行已结束、停在 review、等待独立核查的工单 ──
     const seed = openDb(dbPath);
+    // 断言写的是核查状态的中文原文（2026-11-03 起按界面语言写，缺省英文）。
+    updateDesignPreferences(seed, { request: { locale: "zh" }, caller: { kind: "user" } });
     const itemId = createItem(seed, {
       title: "[#72 runtime] rework exhaustion reaches the user",
       brief: "reproduce the #66 rework-exhaustion path end to end",

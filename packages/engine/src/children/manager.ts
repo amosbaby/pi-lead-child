@@ -464,7 +464,8 @@ async function runItemLifecycle(
   if (!run || run.item_id !== itemId) throw new Error(`run #${runId} does not belong to item #${itemId}`);
   // 记下这次实际按什么用途跑，daemon 重启后接管时读回（effectiveRunPurpose）。
   if (!adopt) recordEffectiveRunPurpose(db, { itemId, runId, purpose, stored: run.purpose });
-  // PR 评审的临时检出要 fetch：Run 建好以后再等它（workspace-policy.ts）。失败时这个 Run 按宿主出错记下。
+  // PR 评审的临时检出要 fetch，新的隔离 worktree 要检出：Run 建好以后再等它（workspace-policy.ts），检出时 daemon 照常干别的。
+  // 失败时这个 Run 按宿主出错记下。
   if (preparation.checkout) workspace = await preparation.checkout(runId);
   if (workspace && run.workspace_id === null) {
     attachWorkspaceToRun(db, { runId, workspaceId: workspace.id });
@@ -479,7 +480,7 @@ async function runItemLifecycle(
   // blocker 按工单状态判断；这之前 await 一次，它会把正在重派的工单当成阻塞，多补一条 blocker。
   if (!adopt && purpose !== "lookup") {
     const fetched = await fetchOrigin(workspace?.path ?? item.workdir);
-    if (fetched.fetched && workspace) workspace = refreshFreshWorktree(db, workspace) ?? workspace;
+    if (fetched.fetched && workspace) workspace = (await refreshFreshWorktree(db, workspace)) ?? workspace;
   }
   const dataDir = opts.dataDir ?? dirname(dirname(opts.sessionDir));
   // 已知密钥的值（2026-10-19 审查）：child 继承 daemon 的全部环境，`env | grep` 会把它们打进事件。

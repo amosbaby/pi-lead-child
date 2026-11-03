@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createItem, getWorkspace, openDb } from "@pi-lead-child/store";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import {
   chooseWorktreeBase, fetchOrigin, originDefaultBranch, refreshFreshWorktree, resetFetchThrottleForTests,
 } from "../src/coordinator/workspace-remote.js";
@@ -92,14 +92,14 @@ describe("chooseWorktreeBase", () => {
   });
 });
 
-// worktree 在建 Run 时同步切（用上一次 fetch 的 origin），fetch 在建 Run 之后（daemon 重启接管孤儿时不能先 await）。
+// worktree 用上一次 fetch 的 origin 切，fetch 在建 Run 之后（daemon 重启接管孤儿时不能先 await）。
 // 新切的、还没有提交的 worktree 在 fetch 以后快进到最新的 origin，基线跟着改。
 describe("refreshFreshWorktree", () => {
   function worktree() {
     const { user, colleague } = repos();
     const db = openDb(join(tempDir("plc-remote-db-"), "plc.db"));
     const itemId = createItem(db, { title: "t", brief: "b", createdBy: "lead", workdir: user });
-    const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     const latest = commit(colleague, "b.txt");
     git(colleague, "push", "-q", "origin", "master");
     return { db, user, workspace, latest };
@@ -108,7 +108,7 @@ describe("refreshFreshWorktree", () => {
   it("moves a fresh worktree and its base to origin's new head after the fetch", async () => {
     const { db, user, workspace, latest } = worktree();
     await fetchOrigin(user, { force: true });
-    expect(refreshFreshWorktree(db, workspace)).toMatchObject({ base_ref: latest });
+    expect(await refreshFreshWorktree(db, workspace)).toMatchObject({ base_ref: latest });
     expect(git(workspace.path, "rev-parse", "HEAD")).toBe(latest);
     expect(getWorkspace(db, workspace.id)!.base_ref).toBe(latest);
   });
@@ -117,7 +117,7 @@ describe("refreshFreshWorktree", () => {
     const { db, user, workspace } = worktree();
     commit(workspace.path, "mine.txt");
     await fetchOrigin(user, { force: true });
-    expect(refreshFreshWorktree(db, workspace)).toBeNull();
+    expect(await refreshFreshWorktree(db, workspace)).toBeNull();
     expect(getWorkspace(db, workspace.id)!.base_ref).toBe(workspace.base_ref);
   });
 });

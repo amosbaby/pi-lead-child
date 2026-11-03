@@ -113,7 +113,10 @@ export function OwnerActionCard({ eventId, text, time }: { eventId: string; text
   const outcome = view ? ownerActionOutcome(view, locale) : null;
   const onBehalf = view ? isOnBehalfOwnerActionSource(view.source) : false;
   // 只记录的操作（来自扫码配对的手机）没有「不是我」。还没读到时先给按钮。
-  const disownable = view ? view.disownable : true;
+  // 代做的操作只撤这次操作、不作废凭证：撤不回的（undo.possible 是 none，例如子 agent 已经发到 GitHub 的 review）
+  // 点了也什么都不会变，不给「撤销」，在浮层里写为什么撤不了（P5.8，2026-11-03 截图）。
+  const undoable = !(onBehalf && view?.undo.possible === 'none');
+  const disownable = (view ? view.disownable : true) && undoable;
   const words = cardWords(m, onBehalf);
 
   const disown = async () => {
@@ -150,7 +153,8 @@ export function OwnerActionCard({ eventId, text, time }: { eventId: string; text
   } else if (onBehalf && view) {
     line = (
       <Annotation
-        text={m.leadDid(leadName, summary)}
+        // 摘要自己写了是谁做的（engine 的 byLead「Fairy 代你…」、子 agent 的「A sub-agent that Fairy sent…」），照原样写。
+        text={summary}
         done={outcome && view.disowned ? `${clock(view.disowned.at)} ${revertWords(m, view.disowned.revert.status)}` : null}
         {...(disownable && !outcome ? { action: press } : {})}
         details={[
@@ -158,7 +162,9 @@ export function OwnerActionCard({ eventId, text, time }: { eventId: string; text
           // 撤回以后：结果和原因放在浮层里，注脚还是一行，会话列表不变高。
           outcome
             ? { label: m.result, value: <Text testID={`owner-action-outcome-${eventId}`} size="meta">{[outcome.headline, outcome.detail].filter(Boolean).join(' ')}</Text> }
-            : { label: m.afterUndo, value: view.undo.note || m.afterUndoDefault },
+            : undoable
+              ? { label: m.afterUndo, value: view.undo.note || m.afterUndoDefault }
+              : { label: m.cannotUndo, value: view.undo.note },
           { label: m.notYou, value: m.notYouHint },
         ]}
       />

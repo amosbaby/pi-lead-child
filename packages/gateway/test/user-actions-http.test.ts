@@ -411,7 +411,7 @@ describe("user control-plane actions over HTTP", () => {
         ticket: { reviewState?: { label: string; canRequestReview?: boolean } } | null;
       };
       expect(body).toMatchObject({ ticketId: itemId, deliveryRunId });
-      expect(body.ticket?.reviewState).toMatchObject({ label: "独立核查排队中", reviewProgress: "queued", canRequestReview: false });
+      expect(body.ticket?.reviewState).toMatchObject({ label: "Independent review queued", reviewProgress: "queued", canRequestReview: false });
       expect(db.prepare("SELECT role, trigger, state FROM dispatch_requests WHERE id=?").get(body.dispatchRequestId))
         .toEqual({ role: "reviewer", trigger: "user-review", state: "pending" });
 

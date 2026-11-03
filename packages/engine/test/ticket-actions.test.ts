@@ -19,7 +19,7 @@ import {
 } from "@pi-lead-child/store";
 import { liveChildren } from "../src/children/manager.js";
 import { updateDesignPreferences } from "../src/design-preferences.js";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import {
   listLeadTicketActions, listTicketActions, runTicketAction, TICKET_ACTIONS, ticketActionCatalogText, TicketActionError,
   type TicketActionCaller,
@@ -92,7 +92,7 @@ function deliveredCodeTicket(): number {
   git(repo, "commit", "-qm", "base");
   const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
   transition(db, { itemId, to: "active", actor: "system", reason: "start" });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   mkdirSync(join(workspace.path, "docs"));
   writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n");
   git(workspace.path, "add", "-A");

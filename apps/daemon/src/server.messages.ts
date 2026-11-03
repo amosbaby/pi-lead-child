@@ -41,6 +41,12 @@ export const serverMessages = defineMessages({
       cannotSwitchWhileRunning: "This Lead session cannot change the model while it runs",
       switchFailed: (wanted: string, current: string) => `Cannot change to ${wanted}. ${current} is still in use`,
     },
+    // /stop：daemon 对这条命令的回答，以及停下的那一轮末尾加的一句。
+    stop: {
+      stopped: (name: string) => `Stopped the turn that ${name} was running.`,
+      idle: (name: string) => `${name} is not running a turn now. There is nothing to stop.`,
+      note: "Stopped with /stop.",
+    },
   },
   zh: {
     outage: {
@@ -74,6 +80,11 @@ export const serverMessages = defineMessages({
     model: {
       cannotSwitchWhileRunning: "这个 Lead 会话不能在运行中换模型",
       switchFailed: (wanted, current) => `换不到 ${wanted}，还在用 ${current}`,
+    },
+    stop: {
+      stopped: (name) => `已停下 ${name} 正在进行的一轮。`,
+      idle: (name) => `${name} 现在没有在进行的一轮，不需要停。`,
+      note: "已用 /stop 停下。",
     },
   },
 });

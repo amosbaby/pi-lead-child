@@ -1,12 +1,14 @@
 // 工单要改的仓库（2026-10-29）：本机有 checkout 就用，没有时 daemon 在沙箱外 clone。#161 要改 returns-skills，本机没有，
 // 执行者在沙箱里 clone 不了，卡了两次。
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { openDb, type Db } from "@pi-lead-child/store";
-import { ensureRepositoryCheckout, parseRepositorySpec } from "../src/coordinator/repository-checkout.js";
+import {
+  checkRepositoryAccess, ensureRepositoryCheckout, parseRepositorySpec, startRepositoryClone,
+} from "../src/coordinator/repository-checkout.js";
 
 let db: Db;
 let home: string;
@@ -72,8 +74,40 @@ describe("ensureRepositoryCheckout", () => {
     expect(await ensureRepositoryCheckout(db, parseRepositorySpec("acme/returns-skills")!, { home })).toEqual({ path: result.path, cloned: false });
   });
 
-  it("says why when the clone fails", async () => {
+  it("says why when the clone fails, and leaves nothing behind", async () => {
     fakeGithub("present");
     await expect(ensureRepositoryCheckout(db, parseRepositorySpec("acme/missing")!, { home })).rejects.toThrow(/clone acme\/missing 失败/);
+    // clone 先进临时目录：失败时目标和临时目录都不留。
+    expect(readdirSync(join(home, "Workspace", "acme"))).toEqual([]);
+  });
+
+  // 2026-11-03：建单不再等 clone，执行者开跑前又要等同一个仓库。两边要等同一次 clone，不能各 clone 一份。
+  it("lets two callers that need the same repository share one clone", async () => {
+    fakeGithub("demo");
+    const spec = parseRepositorySpec("acme/demo")!;
+    const [first, second] = await Promise.all([
+      ensureRepositoryCheckout(db, spec, { home }), ensureRepositoryCheckout(db, spec, { home }),
+    ]);
+    expect(first).toEqual({ path: join(home, "Workspace", "acme", "demo"), cloned: true });
+    expect(second).toEqual(first);
+    expect(readdirSync(join(home, "Workspace", "acme"))).toEqual(["demo"]);
+  });
+
+  it("starts a clone in the background and says at once where it goes", async () => {
+    fakeGithub("demo");
+    const started = await startRepositoryClone(db, parseRepositorySpec("acme/demo")!, { home });
+    expect(started.path).toBe(join(home, "Workspace", "acme", "demo"));
+    await expect(started.done).resolves.toEqual({ path: started.path, cloned: true });
+    expect(existsSync(join(started.path, "SKILL.md"))).toBe(true);
+  });
+});
+
+describe("checkRepositoryAccess", () => {
+  it("passes for a repository it can read and says why for one it cannot", async () => {
+    fakeGithub("demo");
+    await expect(checkRepositoryAccess(db, parseRepositorySpec("acme/demo")!, { home })).resolves.toBeUndefined();
+    await expect(checkRepositoryAccess(db, parseRepositorySpec("acme/missing")!, { home }))
+      .rejects.toThrow(/连不上 acme\/missing，或者没有读它的权限：/);
+    expect(existsSync(join(home, "Workspace", "acme", "demo"))).toBe(false);
   });
 });

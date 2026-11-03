@@ -206,7 +206,7 @@ describe("an owner action Lead did for the user", () => {
     expect(text.body).not.toContain("不是我");
   });
 
-  it("words a sub-agent's write as done under the ticket's grant, with the link, and undoable without revoking anything", async () => {
+  it("words a sub-agent's write as done under the ticket's grant, with the link, and says it cannot be undone here", async () => {
     const { isOnBehalfOwnerActionSource, ownerActionAlertText } = await import("../src/owner-actions.ts");
     expect(isOnBehalfOwnerActionSource({ client: "agent" })).toBe(true);
     const text = ownerActionAlertText({
@@ -219,7 +219,9 @@ describe("an owner action Lead did for the user", () => {
     });
     expect(text.body).toContain("Jarvis 派的子 agent 按工单 #12「slack 代码 review」的权限清单做的。");
     expect(text.body).toContain("链接：https://github.com/Acme/x/pull/101");
-    expect(text.body).toContain("点「撤销」");
+    // 2026-11-03：已经发到外部服务的写操作撤不回（undo 是 none），推送不再请你点「撤销」。
+    expect(text.body).toContain("这里撤不回");
+    expect(text.body).not.toContain("点「撤销」");
     expect(text.body).not.toContain("不是我");
   });
 

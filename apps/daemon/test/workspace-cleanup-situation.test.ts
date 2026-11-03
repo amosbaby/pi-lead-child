@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createItem, openDb } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { abandonIsolatedWorkspace, prepareRunWorkspace, sweepWorkspaces } from "@pi-lead-child/engine";
+import { abandonIsolatedWorkspace, prepareRunWorkspaceNowForTesting, sweepWorkspaces } from "@pi-lead-child/engine";
 import { createLeadInput } from "../src/lead-input.js";
 
 function git(cwd: string, ...args: string[]): string {
@@ -25,9 +25,9 @@ describe("workspace cleanup in Lead's situation", () => {
     const input = createLeadInput({ db });
 
     const clean = createItem(db, { title: "nothing changed", brief: "b", createdBy: "lead", workdir: repo });
-    const cleanWorktree = prepareRunWorkspace(db, clean, { role: "executor", purpose: "execution" }).workspace!;
+    const cleanWorktree = prepareRunWorkspaceNowForTesting(db, clean, { role: "executor", purpose: "execution" }).workspace!;
     const changed = createItem(db, { title: "has a commit", brief: "b", createdBy: "lead", workdir: repo });
-    const changedWorktree = prepareRunWorkspace(db, changed, { role: "executor", purpose: "execution" }).workspace!;
+    const changedWorktree = prepareRunWorkspaceNowForTesting(db, changed, { role: "executor", purpose: "execution" }).workspace!;
     writeFileSync(join(changedWorktree.path, "feature.txt"), "feature\n");
     git(changedWorktree.path, "add", "feature.txt");
     git(changedWorktree.path, "commit", "-qm", "feature");

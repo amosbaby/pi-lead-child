@@ -217,14 +217,14 @@ describe("user-requested rework dispatch", () => {
     const service = createControlPlaneService(db, { runtime });
 
     expect(service.getItem(noVerdict)?.ticket.reviewState)
-      .toMatchObject({ state: "independent_review", label: "等待独立核查" });
+      .toMatchObject({ state: "independent_review", label: "Waiting for independent review" });
     expect(service.getItem(conflict.itemId)?.ticket.reviewState)
-      .toMatchObject({ state: "evidence_conflict", label: "证据冲突，等待用户决策" });
+      .toMatchObject({ state: "evidence_conflict", label: "The evidence conflicts. You need to decide" });
     expect(service.getItem(keyword.itemId)?.ticket.reviewState)
-      .toMatchObject({ state: "review_failed", label: "核查不通过，等你决定" });
+      .toMatchObject({ state: "review_failed", label: "Review failed. You need to decide" });
     expect(service.getItem(requirement.itemId)?.ticket.reviewState)
-      .toMatchObject({ state: "review_failed", label: "核查不通过，核查员要你决定：需求变了" });
+      .toMatchObject({ state: "review_failed", label: "Review failed. The reviewer asks you to decide: the requirement changed" });
     expect(service.getItem(passed.itemId)?.ticket.reviewState)
-      .toMatchObject({ state: "review_passed", label: "核查通过，等待验收" });
+      .toMatchObject({ state: "review_passed", label: "Review passed. Waiting for acceptance" });
   });
 });

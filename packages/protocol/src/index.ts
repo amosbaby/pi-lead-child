@@ -1240,6 +1240,7 @@ export * from "./lead-installs.ts";
 export * from "./runtime-settings.ts";
 export * from "./lead-profile.ts";
 export * from "./lead-avatar.ts";
+export * from "./lead-stop.ts";
 export * from "./design-preferences.ts";
 export * from "./i18n.ts";
 export * from "./reply-style.ts";

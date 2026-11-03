@@ -83,8 +83,7 @@ export const ownerActionMessages = defineMessages({
       },
       "connection.agent_write": {
         label: "A sub-agent writes to an external service for you",
-        undoNote: "The write already went to the external service. If the connection can undo it (for example, a review that is not submitted), the system undoes it. "
-          + "If not, you get a link to change or delete it there.",
+        undoNote: "The write is already on the external service. It cannot be undone here. Change or delete it there.",
       },
       "workspace.release": {
         label: "Release a work folder",
@@ -137,7 +136,8 @@ export const ownerActionMessages = defineMessages({
       `${leadName} did this for you in the conversation. Only this action is undone. The credential is not revoked. `
       + "If you did not say that, go to Settings → Paired devices and revoke that device.",
     agentDid: (lead: string, credential: string) => `A sub-agent from ${lead} did this with the permission list of ${credential}.`,
-    agentUndo: "To undo it, click \"Undo\". The system undoes what it can. For what already went to an external service, you get a link to change or delete it there.",
+    agentUndo: "It cannot be undone here. Use the link to change or delete it on the external service.",
+    undoNoteWithLink: (note: string, link: string) => `${note} Link: ${link}`,
     leadDid: (lead: string, credential: string, origin: string, bindingId: number) =>
       `${lead} did this for you in the conversation. That turn came from: ${credential} (${origin}, #${bindingId})`,
     leadUndo: (lead: string) =>
@@ -183,7 +183,7 @@ export const ownerActionMessages = defineMessages({
       "run.grant": { label: "放宽子 agent 的权限", undoNote: "这次加上的规则从清单里删掉，子 agent 下一次调用就用不了它们。用新权限已经做了的写操作不会撤回。" },
       "connection.agent_write": {
         label: "子 agent 代你写外部服务",
-        undoNote: "写入已经发到外部服务。连接能撤回的（例如还没提交的 review）由系统撤回；不能撤回的给出链接，请你在那边改或删。",
+        undoNote: "写入已经发到外部服务，这里撤不回。请到那边改或删。",
       },
       "workspace.release": { label: "释放工作区", undoNote: "工作区已经释放，无法撤回。" },
       "workspace.cleanup": { label: "清理工作区", undoNote: "工作区的文件已经删除，无法撤回。" },
@@ -209,7 +209,8 @@ export const ownerActionMessages = defineMessages({
     onBehalfUndoCredentialNote: (leadName) =>
       `这是 ${leadName} 在对话里代你做的：只撤销了这次操作，没有作废凭证。如果那句话不是你说的，请到「设置 → 已配对设备」撤销那台设备。`,
     agentDid: (lead, credential) => `${lead} 派的子 agent 按${credential}的权限清单做的。`,
-    agentUndo: "要撤回？点「撤销」：能撤回的系统撤回；已经发到外部服务的，给你链接去那边改或删。",
+    agentUndo: "这里撤不回。请用链接到外部服务上改或删。",
+    undoNoteWithLink: (note, link) => `${note}链接：${link}`,
     leadDid: (lead, credential, origin, bindingId) => `${lead} 在对话里代你做的。那一轮来自：${credential}（${origin}，#${bindingId}）`,
     leadUndo: (lead) => `${lead} 理解错了？点「撤销」：撤销这次操作，不作废凭证。如果那句话不是你说的，请到「设置 → 已配对设备」撤销那台设备。`,
     fromThisComputer: "来自这台电脑",
