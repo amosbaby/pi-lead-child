@@ -15,7 +15,8 @@ import {
   redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
 import {
-  buildDaemonDist, deployReadiness, discardStagedBuild, promoteStagedBuild, readBuildProvenance, stagingDistDir, type DeployReadiness,
+  buildDaemonDist, cliDistDir, deployReadiness, discardStagedBuild, promoteStagedBuild, readBuildProvenance, stagedCliDir, stagingDistDir,
+  type DeployReadiness,
 } from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
 import { DEFAULT_DAEMON_READY_TIMEOUT_MS } from "./daemon-ready-timeout.js";
@@ -55,7 +56,8 @@ export interface SupervisorOptions {
   deployment?: { root: string; distDir: string } | null;
   // 维护前的数据库备份（缺省是 deploy/backup.ts 的 backupSqlite，有时限）。测试用它模拟一次很慢的备份。
   backupDatabase?: (source: string, destination: string) => Promise<void>;
-  // 维护前从 HEAD 构建 dist 到 outdir（暂存目录；缺省是 deploy/readiness.ts 的 buildDaemonDist）。测试用它代替真的构建。
+  // 维护前从 HEAD 构建 dist 到 outdir（暂存目录；缺省是 deploy/readiness.ts 的 buildDaemonDist）。plc 的 cli 构建到
+  // stagedCliDir（outdir 里的 cli/）。测试用它代替真的构建。
   buildDist?: (root: string, outdir: string, signal: AbortSignal) => Promise<void>;
 }
 
@@ -552,7 +554,9 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
           let kind: MaintenanceFailureKind = "build_failed";
           buildAbort = new AbortController();
           try {
-            await (opts.buildDist ?? ((r, outdir, signal) => buildDaemonDist(r, { outdir, signal })))(root, staging, buildAbort.signal);
+            await (opts.buildDist ?? ((r, outdir, signal) => buildDaemonDist(r, { outdir, cliOutdir: stagedCliDir(distDir), signal })))(
+              root, staging, buildAbort.signal,
+            );
           } catch (error: any) {
             failure = `从 HEAD 重新构建失败（${redactKnownValues(redactSecretText(String(error?.message ?? error)), secretEnvValues(process.env))}）`;
           } finally {
@@ -600,9 +604,14 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
         }
       }
       daemonDown = true;
-      // 备份好了：把暂存的构建换进 dist，再停机。
+      // 备份好了：把暂存的构建（daemon 和 plc 的 cli）换进去，再停机。换不进去时已经换回原来的构建，daemon 不停。
       if (stagedBuild && opts.deployment) {
-        promoteStagedBuild(opts.deployment.distDir);
+        try {
+          promoteStagedBuild(opts.deployment.distDir, cliDistDir(opts.deployment.root));
+        } catch (error: any) {
+          refuseBeforeStop(request, `${error.message}。daemon 没有停，还在跑原来的构建。`, "swap_failed");
+          return;
+        }
         stagedBuild = false;
         readinessCache = null;
         log(`maintenance ${request.id}: swapped the staged build into ${opts.deployment.distDir}`);

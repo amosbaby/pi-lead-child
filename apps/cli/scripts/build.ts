@@ -6,7 +6,10 @@ import { dirname, join } from "node:path";
 import { build } from "esbuild";
 import { packageSource, workspaceDir } from "@pi-lead-child/core";
 
-const outdir = join(workspaceDir("cli"), "dist");
+// --outdir：supervisor 维护时构建到暂存目录（daemon 的 dist/.next/cli），备份成功以后和 daemon 一起换进来（2026-11-03 三审）。
+const outdirArg = process.argv.indexOf("--outdir");
+const outdir = outdirArg > 0 ? process.argv[outdirArg + 1] : join(workspaceDir("cli"), "dist");
+if (!outdir) throw new Error("--outdir needs a directory");
 const result = await build({
   entryPoints: { cli: packageSource("cli", "cli.ts") },
   outdir,

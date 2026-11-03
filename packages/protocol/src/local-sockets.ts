@@ -175,7 +175,7 @@ export interface MaintenanceRequest {
   failureKind?: MaintenanceFailureKind;
 }
 
-export type MaintenanceFailureKind = "build_failed" | "build_mismatch" | "backup_failed" | "deploy_refused";
+export type MaintenanceFailureKind = "build_failed" | "build_mismatch" | "backup_failed" | "deploy_refused" | "swap_failed";
 
 /** supervisor 支持重启前备份（request_maintenance 的 backup）。旧版本的 status 里没有它。 */
 export const SUPERVISOR_FEATURE_MAINTENANCE_BACKUP = "maintenance_backup";

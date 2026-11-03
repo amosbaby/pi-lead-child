@@ -5329,6 +5329,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     build_mismatch: "构建出来的不是请求时的 HEAD（构建期间 HEAD 变了）",
     backup_failed: "停机前备份数据库失败",
     deploy_refused: "停机前复查部署闸门没有通过",
+    swap_failed: "停机前把新构建换进 dist 失败",
   };
   async function reportMaintenanceFailure(maintenanceId: string): Promise<void> {
     try {

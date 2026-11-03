@@ -8,13 +8,13 @@
 //     崩溃后的自动拉起不拦截，只记警告（supervisor 的 spawnDaemon）。
 //   · 主 checkout 干净，dist 却没有构建记录、构建时有改动，或者构建的 commit 是 HEAD 的祖先、HEAD 已经往前走了
 //     （2026-11-02：修复合并后重启，跑的还是旧 dist）：维护在停机之前先从 HEAD 构建（buildDaemonDist），构建失败就不停机。
-//     构建到暂存目录 dist/.next，备份成功、停机之前才换进 dist（promoteStagedBuild）。
+//     构建到暂存目录 dist/.next（plc 的 cli 在 dist/.next/cli），备份成功、停机之前才和 daemon 一起换进去（promoteStagedBuild）。
 //     dist 来自别的分支、commit 不在仓库里、git 说不清的，照旧拒绝，不自动构建。
 // 「没提交的改动」只看会进构建的代码：packages/、apps/ 下的改动和没被忽略的新文件，以及仓库根目录下的文件
 // （package.json、package-lock.json、tsconfig.json 这类）。不算的：docs/、artifacts/、.scratch/、.claude/（它们不进 dist，
 // 而且有的测试会改写 artifacts/ 里的证据文件），以及测试文件（test/ 目录下的、*.test.* 和 *.spec.*）。
 import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 
 export const BUILD_INFO_FILE = "build-info.json";
@@ -138,14 +138,70 @@ export function discardStagedBuild(distDir: string): void {
   rmSync(stagingDistDir(distDir), { recursive: true, force: true });
 }
 
-/** 把暂存的构建换进 dist：先删旧的构建记录，逐个改名（同一个文件系统，每个都是原子的），构建记录最后。dist/web 不动。 */
-export function promoteStagedBuild(distDir: string): void {
+// plc 的 cli 也构建到暂存目录（三审 2026-11-03：以前直接写进 apps/cli/dist，daemon 构建失败时 cli 已经是新的）。
+// 放在 dist/.next/cli：和 daemon 的暂存构建一起丢、一起换。
+const STAGED_CLI = "cli";
+export function stagedCliDir(distDir: string): string {
+  return join(stagingDistDir(distDir), STAGED_CLI);
+}
+
+// plc 的 cli.mjs 所在的目录（apps/cli/scripts/build.ts 缺省的输出目录）。
+export function cliDistDir(root: string): string {
+  return join(root, "apps", "cli", "dist");
+}
+
+/**
+ * 把暂存的构建换进 dist（daemon）和 cliDir（plc 的 cli）：逐个改名（同一个文件系统，每个都是原子的），daemon 的构建记录最后。
+ * dist/web 不动。被换下的旧文件先挪进 dist/.prev-*；中途出错就按相反的顺序挪回去，旧 cli 和旧 daemon 都留在原处，然后抛出。
+ */
+export function promoteStagedBuild(distDir: string, cliDir: string): void {
   const staging = stagingDistDir(distDir);
-  clearBuildProvenance(distDir);
-  for (const name of readdirSync(staging)) {
-    if (name !== BUILD_INFO_FILE) renameSync(join(staging, name), join(distDir, name));
+  const cliStaging = stagedCliDir(distDir);
+  const cliFiles = existsSync(cliStaging) ? readdirSync(cliStaging) : [];
+  const moves = [
+    ...readdirSync(staging).filter((name) => name !== BUILD_INFO_FILE && name !== STAGED_CLI)
+      .map((name) => ({ from: join(staging, name), to: join(distDir, name) })),
+    ...cliFiles.map((name) => ({ from: join(cliStaging, name), to: join(cliDir, name) })),
+  ];
+  if (cliFiles.length) mkdirSync(cliDir, { recursive: true });
+  const previous = mkdtempSync(join(distDir, ".prev-"));
+  const info = join(distDir, BUILD_INFO_FILE);
+  const savedInfo = join(previous, BUILD_INFO_FILE);
+  // 旧的构建记录最先挪走：换到一半进程被杀，闸门看到的是「没有记录」，不是一份旧的、看起来干净的记录。
+  const hadInfo = existsSync(info);
+  if (hadInfo) renameSync(info, savedInfo);
+  const done: { from: string; to: string; saved: string | null }[] = [];
+  try {
+    moves.forEach(({ from, to }, index) => {
+      const saved = existsSync(to) ? join(previous, String(index)) : null;
+      if (saved) renameSync(to, saved);
+      done.push({ from, to, saved });
+      renameSync(from, to);
+    });
+    renameSync(join(staging, BUILD_INFO_FILE), info);
+  } catch (error) {
+    // 按相反的顺序挪回去：新文件回暂存目录，旧文件回原处。挪不回去的留在 previous 里，写进错误。
+    const stuck: string[] = [];
+    for (const { from, to, saved } of done.reverse()) {
+      try {
+        if (!existsSync(from)) renameSync(to, from);
+        if (saved) renameSync(saved, to);
+      } catch {
+        stuck.push(to);
+      }
+    }
+    try {
+      if (hadInfo) renameSync(savedInfo, info);
+    } catch {
+      stuck.push(info);
+    }
+    if (!stuck.length) rmSync(previous, { recursive: true, force: true });
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(stuck.length
+      ? `把暂存的构建换进 dist 失败（${message}），这几个文件没能换回去，旧的在 ${previous}：${stuck.join("、")}`
+      : `把暂存的构建换进 dist 失败（${message}），已经换回原来的构建`);
   }
-  renameSync(join(staging, BUILD_INFO_FILE), join(distDir, BUILD_INFO_FILE));
+  rmSync(previous, { recursive: true, force: true });
   discardStagedBuild(distDir);
 }
 
@@ -227,6 +283,8 @@ const BUILD_ENV_KEYS = ["PATH", "HOME", "TMPDIR", "USER", "LANG"];
 export interface BuildDistOptions {
   // daemon 的产物写到哪里。缺省是 dist（scripts/build.ts 的 distDir()）；维护时是暂存目录。
   outdir?: string;
+  // plc 的 cli 写到哪里。缺省是 apps/cli/dist；维护时是暂存目录里的 cli/（stagedCliDir）。
+  cliOutdir?: string;
   // supervisor 停下时取消构建。
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -240,7 +298,8 @@ export interface BuildDistOptions {
 export async function buildDaemonDist(root: string, options: BuildDistOptions = {}): Promise<void> {
   for (const app of ["cli", "daemon"]) {
     if (options.signal?.aborted) throw new Error(`apps/${app} 构建被取消`);
-    const args = app === "daemon" && options.outdir ? ["--outdir", options.outdir] : [];
+    const outdir = app === "daemon" ? options.outdir : options.cliOutdir;
+    const args = outdir ? ["--outdir", outdir] : [];
     await runBuildScript(join(root, "apps", app), app, args, options);
   }
 }

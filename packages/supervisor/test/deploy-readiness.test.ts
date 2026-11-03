@@ -2,11 +2,12 @@
 // 没提交的代码部署上线了。supervisor 的维护入口按这里的判断拒绝（supervisor.test.ts 测入口本身）。
 import { beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  buildDaemonDist, deployReadiness, gitFailureKind, writeBuildProvenance, type GitExec,
+  buildDaemonDist, deployReadiness, gitFailureKind, promoteStagedBuild, stagedCliDir, stagingDistDir, writeBuildProvenance,
+  type GitExec,
 } from "../src/deploy/readiness.js";
 
 let checkout: string;
@@ -262,10 +263,13 @@ describe("building dist for maintenance", () => {
   }, 30_000);
 
   // 二审 2026-11-02：维护时构建到暂存目录，备份成功以后才换进 dist。
-  it("builds the daemon into the given outdir", async () => {
-    const root = fakeRoot({ daemon: `import { writeFileSync } from "node:fs"; writeFileSync("../../argv.json", JSON.stringify(process.argv.slice(2)));` });
-    await buildDaemonDist(root, { outdir: "/tmp/plc-staged-example" });
-    expect(JSON.parse(readFileSync(join(root, "argv.json"), "utf8"))).toEqual(["--outdir", "/tmp/plc-staged-example"]);
+  // 三审 2026-11-03：cli 也是。以前 cli 直接写进 apps/cli/dist，daemon 构建失败时 cli 已经是新的、daemon 还是旧的。
+  it("builds the daemon and the cli into the given outdirs", async () => {
+    const recordArgv = (app: string) => `import { writeFileSync } from "node:fs"; writeFileSync("../../${app}-argv.json", JSON.stringify(process.argv.slice(2)));`;
+    const root = fakeRoot({ cli: recordArgv("cli"), daemon: recordArgv("daemon") });
+    await buildDaemonDist(root, { outdir: "/tmp/plc-staged-example", cliOutdir: "/tmp/plc-staged-example/cli" });
+    expect(JSON.parse(readFileSync(join(root, "daemon-argv.json"), "utf8"))).toEqual(["--outdir", "/tmp/plc-staged-example"]);
+    expect(JSON.parse(readFileSync(join(root, "cli-argv.json"), "utf8"))).toEqual(["--outdir", "/tmp/plc-staged-example/cli"]);
   }, 60_000);
 
   it("stops at once when it is cancelled", async () => {
@@ -276,4 +280,51 @@ describe("building dist for maintenance", () => {
     await expect(buildDaemonDist(root, { signal: abort.signal, killGraceMs: 500 })).rejects.toThrow("取消");
     expect(Date.now() - started).toBeLessThan(10_000);
   }, 30_000);
+});
+
+// 维护时把暂存的构建换进去（server.ts 的 executeMaintenance，备份成功、停机之前）。
+describe("swapping the staged build in", () => {
+  function staged(): { distDir: string; cliDir: string } {
+    const root = tempDir("plc-promote-");
+    const distDir = join(root, "apps", "daemon", "dist");
+    const cliDir = join(root, "apps", "cli", "dist");
+    mkdirSync(join(distDir, "web"), { recursive: true });
+    mkdirSync(cliDir, { recursive: true });
+    writeFileSync(join(distDir, "coordinatord.mjs"), "// old daemon\n");
+    writeFileSync(join(distDir, "build-info.json"), "old\n");
+    writeFileSync(join(distDir, "web", "index.html"), "web\n");
+    writeFileSync(join(cliDir, "cli.mjs"), "// old cli\n");
+    mkdirSync(stagedCliDir(distDir), { recursive: true });
+    writeFileSync(join(stagingDistDir(distDir), "coordinatord.mjs"), "// new daemon\n");
+    writeFileSync(join(stagingDistDir(distDir), "build-info.json"), "new\n");
+    writeFileSync(join(stagedCliDir(distDir), "cli.mjs"), "// new cli\n");
+    return { distDir, cliDir };
+  }
+
+  it("swaps the daemon and the cli in together, and leaves dist/web alone", () => {
+    const { distDir, cliDir } = staged();
+    promoteStagedBuild(distDir, cliDir);
+    expect(readFileSync(join(distDir, "coordinatord.mjs"), "utf8")).toBe("// new daemon\n");
+    expect(readFileSync(join(distDir, "build-info.json"), "utf8")).toBe("new\n");
+    expect(readFileSync(join(cliDir, "cli.mjs"), "utf8")).toBe("// new cli\n");
+    expect(readFileSync(join(distDir, "web", "index.html"), "utf8")).toBe("web\n");
+    expect(readdirSync(distDir).sort()).toEqual(["build-info.json", "coordinatord.mjs", "web"]);
+  });
+
+  // 三审 2026-11-03：换到一半出错（这里是 cli 的目录不让写：daemon 已经换进去了），旧 cli 和旧 daemon 都要留在原处。
+  it("puts the old daemon and the old cli back when the swap fails halfway", () => {
+    const { distDir, cliDir } = staged();
+    chmodSync(cliDir, 0o555);
+    try {
+      expect(() => promoteStagedBuild(distDir, cliDir)).toThrow("已经换回原来的构建");
+    } finally {
+      chmodSync(cliDir, 0o755);
+    }
+    expect(readFileSync(join(distDir, "coordinatord.mjs"), "utf8")).toBe("// old daemon\n");
+    expect(readFileSync(join(distDir, "build-info.json"), "utf8")).toBe("old\n");
+    expect(readFileSync(join(cliDir, "cli.mjs"), "utf8")).toBe("// old cli\n");
+    expect(readdirSync(distDir).filter((name) => name.startsWith(".prev-"))).toEqual([]);
+    // 暂存的构建还在，调用方（refuseBeforeStop）丢掉它。
+    expect(existsSync(join(stagingDistDir(distDir), "coordinatord.mjs"))).toBe(true);
+  });
 });
