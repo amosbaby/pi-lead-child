@@ -49,7 +49,7 @@ Every UI control that calls the backend is one operation with two entry points: 
   - Low cost: Lead sets the timer, and the system tells the user.
   - Higher cost: the system keeps the timer and returns a confirm card. The user decides on it (`timer_request.resolve`, `user_direct`).
   - The request asks to change rules: the system refuses and gives the reason.
-  - A timer with external origin wakes an external turn: rule changes are refused. Lead's own outbound text goes out on Lead's judgment in every turn, signed auto-reply; it gets no confidence check and no draft card (user, 2026-10-29: "我期望它就能自己做判断").
+  - A timer with external origin wakes an external turn: rule changes are refused. Lead's own outbound text goes out on Lead's judgment in every turn, signed auto-reply; it gets no confidence check and no draft card (user, 2026-10-29: "我期望它就能自己做判断"), unless auto-handling (自动代你处理) is off: then nothing Lead does outside the user's own turn goes out, and a reply waits on the card for the user to send.
   - A follow-up set in the user's own turn records it, and the turn it wakes counts as the user's turn (`timer:<inbox id>`). That turn is not the live-user exception for rule changes.
   - The reminder list shows who asked for an external timer. The user can cancel it (`timer.cancel`). Cancels, edits and confirm-card answers become calibration samples.
   - See `packages/lead/src/turn-origin.ts` and `packages/engine/src/ui-actions/timers.ts`.
