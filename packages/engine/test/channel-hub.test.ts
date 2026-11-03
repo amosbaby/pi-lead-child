@@ -388,8 +388,13 @@ describe("the authority table decides what the channel does", () => {
       .toEqual([":robot_face: Paimon (Assistant) · auto-reply for 我\n抱歉，这涉及个人或公司的敏感信息，我这边不方便提供。"]);
     expect(pushes).toEqual([]);
     expect(listEvents(db, { kind: "channel.authority.decided" })).toMatchObject([{ level: "record", payload: { action: "refuse", intent: "knowledge" } }]);
+    // 2026-11-03 截图：这句话在「Lead 动态」里给你看。以前写死中文，用了「授权表」这类内部的词，还写着
+    // 「10:10 前可以撤回」，过了那个时间还挂在那里。现在按你选的语言写（缺省英文），撤回留给消息卡上的倒计时。
     expect(listEvents(db, { kind: "channel.reply.auto_sent" })).toMatchObject([{
-      payload: { category: "refusal", order: { id: "channel.authority", version: 1 }, summary: expect.stringContaining("按授权表代你拒绝了张三") },
+      payload: {
+        category: "refusal", order: { id: "channel.authority", version: 1 },
+        summary: "Declined 张三 for you with the fixed words: the question asked for confidential information",
+      },
     }]);
     // 没有起草：拒绝的话是固定的。
     expect(card.draft).toBeNull();

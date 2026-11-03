@@ -244,7 +244,9 @@ describe('an action Lead did for the user in conversation', () => {
     // 2026-10-27 画布「代你操作」状态 1–4：右对齐的注脚「Paimon 据此…」，点「撤销」原地换成确认，撤销以后原句划掉。
     await vi.waitFor(() => expect(screen.getByTestId(`owner-action-card-disown-${EVENT_ID}`).textContent).toBe('Undo'));
     const card = screen.getByTestId(`owner-action-card-${EVENT_ID}`);
-    expect(card.textContent).toContain('did this for you: Lead 代你确认了工单 #5「登录页」');
+    // 摘要自己写了是谁做的（engine 的 byLead）：卡上照原样写，不再套一层「Paimon did this for you:」（2026-11-03 截图）。
+    expect(card.textContent).toContain('Lead 代你确认了工单 #5「登录页」');
+    expect(card.textContent).not.toContain('did this for you');
     fireEvent.click(screen.getByTestId(`owner-action-card-disown-${EVENT_ID}`));
     expect(card.textContent).toContain('Undo "Lead 代你确认了工单 #5「登录页」"? The credential stays valid.');
     expect(card.textContent).not.toMatch(/revoke the credential that sent it/);
@@ -299,6 +301,44 @@ describe('an action Lead did for the user in conversation', () => {
     expect(screen.getByText('Undo this action? Your credential stays valid.')).toBeTruthy();
     fireEvent.click(screen.getByTestId('owner-action-undo-confirm-42'));
     expect(onDisown).toHaveBeenCalledWith(EVENT_ID, 42);
+  });
+});
+
+// 2026-11-03 截图：子 agent 在 GitHub 上提交的 review，卡上写成「Fairy did this for you: A sub-agent that Fairy sent
+// did this for you: …」，还给了「Undo」。可这次写入已经在 GitHub 上了，撤销只会回一个链接（网关的 revertAgentWrite）。
+describe('a write a sub-agent made to an external service', () => {
+  const AGENT_SUMMARY = 'A sub-agent that Paimon sent did this for you: Submitted a review (COMMENT) on Acme/x#101';
+  const AGENT_TEXT = `${AGENT_SUMMARY}\nA sub-agent from Paimon did this with the permission list of Ticket #12.\nLink: https://github.com/Acme/x/pull/101`;
+  const NOTE = 'The write is already on the external service. It cannot be undone here. Change or delete it there. Link: https://github.com/Acme/x/pull/101';
+  const agentView = () => view({
+    action: 'connection.agent_write', summary: AGENT_SUMMARY,
+    credential: { bindingId: 0, kind: 'agent', name: 'Ticket #12', origin: 'unknown', active: false },
+    source: { client: 'agent', deviceName: 'Ticket #12', loopback: false, fromThisMachine: true },
+    undo: { possible: 'none', note: NOTE },
+  });
+
+  it('says it once and offers no undo that cannot undo anything', async () => {
+    const getOwnerAction = vi.fn(async () => agentView());
+    const runtime = createCompanionStateRuntime({
+      client: { getOwnerAction } as unknown as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    runtime.control.setState({ phase: 'ready', connectionState: 'connected' });
+    renderUI(
+      <CompanionRuntimeProvider runtime={runtime}>
+        <OwnerActionCard eventId={EVENT_ID} text={AGENT_TEXT} time="11:23" />
+      </CompanionRuntimeProvider>,
+    );
+    await vi.waitFor(() => expect(getOwnerAction).toHaveBeenCalled());
+    const card = await screen.findByTestId(`owner-action-card-${EVENT_ID}`);
+    await vi.waitFor(() => expect(card.textContent).toContain(AGENT_SUMMARY));
+    expect(card.textContent!.split('did this for you')).toHaveLength(2);
+    expect(screen.queryByTestId(`owner-action-card-disown-${EVENT_ID}`)).toBeNull();
+    // 为什么撤不了、去哪里改：在注脚点开的浮层里。
+    fireEvent.click(within(card).getByRole('button', { name: /, expand$/ }));
+    expect(await screen.findByText(NOTE)).toBeTruthy();
+    expect(screen.getByText('Cannot undo')).toBeTruthy();
   });
 });
 

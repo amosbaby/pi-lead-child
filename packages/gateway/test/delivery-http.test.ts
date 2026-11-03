@@ -12,7 +12,7 @@ import {
   createItem, createPairing, createRun, getItem, insertOutcomeSnapshot, normalizeOutcomePayload, openDb, transition, updateRun,
   type Db,
 } from "@pi-lead-child/store";
-import { createAgentToolHandlers, liveChildren, prepareRunWorkspace } from "@pi-lead-child/engine";
+import { createAgentToolHandlers, liveChildren, prepareRunWorkspaceNowForTesting } from "@pi-lead-child/engine";
 import {
   TicketDeliveriesResponseSchema, TicketDeliveryResponseSchema, TicketDeliverySnapshotResponseSchema,
 } from "@pi-lead-child/protocol";
@@ -69,7 +69,7 @@ async function token(base: string, scopes: string[]) {
 function deliveredTicket(): number {
   const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
   transition(db, { itemId, to: "active", actor: "system", reason: "start" });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   mkdirSync(join(workspace.path, "docs"));
   writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n");
   git(workspace.path, "add", "-A");
@@ -231,7 +231,7 @@ describe("the delivery snapshot routes", () => {
   async function deliverThroughTheTool(): Promise<{ itemId: number; runId: number; worktree: string; branch: string }> {
     const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
     transition(db, { itemId, to: "active", actor: "system", reason: "start" });
-    const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     mkdirSync(join(workspace.path, "docs"));
     writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n");
     git(workspace.path, "add", "-A");

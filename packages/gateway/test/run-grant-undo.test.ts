@@ -6,8 +6,8 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { runTicketAction } from "@pi-lead-child/engine";
 import { checkGrantCall, computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS } from "@pi-lead-child/protocol";
 import {
-  createCliBinding, createItem, createPairing, createRun, getRunGrant, insertRunGrant, listRunGrantChanges, openDb, recordOwnerAction,
-  redeemPairingById, updateRun,
+  createCliBinding, createItem, createPairing, createRun, getRunGrant, insertRunGrant, listRunGrantChanges, openDb, ownerActionView,
+  recordOwnerAction, redeemPairingById, updateRun,
   type Db, type EventRecord,
 } from "@pi-lead-child/store";
 import { disownOwnerAction, revertOwnerAction } from "../src/owner-actions.js";
@@ -70,6 +70,11 @@ describe("undoing a widened grant", () => {
       credential: { id: 0, kind: "agent", display_name: "工单 #1", origin: "unknown" },
       source: { client: "agent", deviceName: "工单 #1", loopback: false, fromThisMachine: true },
     }).event;
+    // 2026-11-03 截图：卡上给了「Undo」，点了什么都不会变。现在说明撤不回，并给出去哪里改的地址。
+    expect(ownerActionView(db, event.eventId)!.undo).toEqual({
+      possible: "none",
+      note: `The write is already on the external service. It cannot be undone here. Change or delete it there. Link: ${url}`,
+    });
     expect(await revertOwnerAction(deps(), event, "测试")).toEqual({ status: "executed", message: expect.stringContaining(url) });
     const { pairingId } = createPairing(db, { name: "我的手机", kind: "companion", origin: "web_invitation" });
     const phone = redeemPairingById(db, pairingId, { peerIsThisMachine: false }).binding;

@@ -27,7 +27,7 @@ import type { Artifact, ArtifactAvailability } from "@pi-lead-child/core";
 
 const MAX_ARTIFACTS_PER_CHECKPOINT = 20;
 const MAX_ARTIFACTS_PER_ITEM = 200;
-const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
+export const MAX_ARTIFACT_BYTES = 25 * 1024 * 1024;
 const MAX_ITEM_ARTIFACT_BYTES = 250 * 1024 * 1024;
 const COPY_BUFFER_BYTES = 1024 * 1024;
 const NO_FOLLOW = constants.O_NOFOLLOW ?? 0;

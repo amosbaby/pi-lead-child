@@ -118,19 +118,24 @@ export function worktreeBaseBranch(db: Db, workspace: Pick<Workspace, "id" | "ow
 
 /**
  * 新切的 worktree 还没有自己的提交、也没有改动时，快进到 fetch 之后的 origin/<基线分支>，基线跟着改（delivery 的文件列表按它算）。
- * worktree 是在建 Run 时同步切的，用的是上一次 fetch 的 origin；fetch 在建 Run 之后（children/manager.ts），所以这里补一步。
+ * worktree 是用上一次 fetch 的 origin 切的；fetch 在建 Run 之后（children/manager.ts），所以这里补一步。
  * 有提交、有改动、基线分支没记、或者 origin 不是基线的后代时不动。返回更新后的工作区；没动时为 null。
+ * 快进会改很多文件，所以 git 在子进程里跑，不占住 daemon（2026-11-03）。
  */
-export function refreshFreshWorktree(db: Db, workspace: Workspace): Workspace | null {
+export async function refreshFreshWorktree(db: Db, workspace: Workspace): Promise<Workspace | null> {
   if (!workspace.git_worktree || workspace.mode !== "isolated" || !workspace.base_ref || !existsSync(workspace.path)) return null;
   const branch = worktreeBaseBranch(db, workspace);
   if (!branch) return null;
-  const remoteRef = syncGit(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`], workspace.path);
+  const read = async (args: string[]): Promise<string | null> => {
+    const result = await gitRun(args, workspace.path);
+    return result.ok ? result.stdout.trim() : null;
+  };
+  const remoteRef = await read(["rev-parse", "--verify", "--quiet", `refs/remotes/origin/${branch}`]);
   if (!remoteRef || remoteRef === workspace.base_ref) return null;
-  if (syncGit(["rev-list", "--count", `${workspace.base_ref}..HEAD`], workspace.path) !== "0") return null;
-  if (syncGit(["status", "--porcelain"], workspace.path) !== "") return null;
-  if (syncGit(["merge-base", "--is-ancestor", workspace.base_ref, remoteRef], workspace.path) === null) return null;
-  if (syncGit(["merge", "--ff-only", "--quiet", remoteRef], workspace.path) === null) return null;
+  if (await read(["rev-list", "--count", `${workspace.base_ref}..HEAD`]) !== "0") return null;
+  if (await read(["status", "--porcelain"]) !== "") return null;
+  if (await read(["merge-base", "--is-ancestor", workspace.base_ref, remoteRef]) === null) return null;
+  if (await read(["merge", "--ff-only", "--quiet", remoteRef]) === null) return null;
   db.prepare("UPDATE workspaces SET base_ref=? WHERE id=?").run(remoteRef, workspace.id);
   recordWorktreeBase(db, workspace, { ref: remoteRef, branch });
   return getWorkspace(db, workspace.id) ?? null;

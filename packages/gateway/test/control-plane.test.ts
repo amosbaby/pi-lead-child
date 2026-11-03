@@ -1184,15 +1184,27 @@ describe("control-plane snapshots", () => {
     const service = createControlPlaneService(db, { runtime: () => runtime() });
     expect(service.getItem(itemId)?.ticket.reviewState).toMatchObject({
       state: "independent_review",
-      label: "等待独立核查",
+      label: "Waiting for independent review",
     });
 
     const reviewerRunId = createRun(db, { itemId, role: "reviewer", purpose: "review", runtime: "codex" });
     updateRun(db, reviewerRunId, { state: "running" });
     expect(service.getItem(itemId)?.ticket.reviewState).toMatchObject({
       state: "independent_review",
-      label: "独立核查中",
+      label: "Independent review running",
+      reason: "The independent review is running.",
     });
+  });
+
+  // 2026-11-03 截图：英文界面里，会话的工单卡写着「等待用户验收」，旁边几张写「In progress」。
+  // 核查状态的标签和原因以前写死中文；现在和执行状态一样，读的时候按你选的语言现算。
+  it("words the review state in the language you chose", () => {
+    const itemId = createItem(db, { title: "accept it", brief: "b", createdBy: "system", verificationPolicy: "user" });
+    db.prepare("UPDATE items SET stage='review' WHERE id=?").run(itemId);
+    const service = createControlPlaneService(db, { runtime: () => runtime() });
+    expect(service.getItem(itemId)?.ticket.reviewState).toMatchObject({ state: "waiting_user", label: "Waiting for your acceptance" });
+    updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
+    expect(service.getItem(itemId)?.ticket.reviewState).toMatchObject({ state: "waiting_user", label: "等你验收" });
   });
 
   it("does not attach unrelated interventions when a card page has no intervention cards", () => {

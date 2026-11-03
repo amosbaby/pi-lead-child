@@ -143,9 +143,13 @@ describe("coordinator workspace provisioning", () => {
     expect(snapshot).toMatchObject({ version: 1, workspaceId: isolated.id, head });
     const bundlePath = join(dir, "recovered.bundle");
     writeFileSync(bundlePath, Buffer.from(snapshot.bundle, "base64"));
+    // The bundle holds only the branch's own commits (#188). It applies on top of the base history.
     const restored = join(dir, "restored");
-    execFileSync("git", ["clone", "-q", bundlePath, restored]);
-    expect(readFileSync(join(restored, "result.txt"), "utf8")).toBe("retain this output\n");
+    const baseBranch = execFileSync("git", ["-C", repoDir, "branch", "--show-current"], { encoding: "utf8" }).trim();
+    execFileSync("git", ["clone", "-q", "--no-local", "--single-branch", "--branch", baseBranch, repoDir, restored]);
+    expect(() => execFileSync("git", ["-C", restored, "cat-file", "-e", head], { stdio: "ignore" })).toThrow();
+    execFileSync("git", ["-C", restored, "fetch", "-q", bundlePath, "HEAD:refs/heads/restored"]);
+    expect(execFileSync("git", ["-C", restored, "show", "restored:result.txt"], { encoding: "utf8" })).toBe("retain this output\n");
     expect(db.prepare("SELECT stage FROM items WHERE id=?").get(itemId)).toEqual({ stage: "done" });
   });
 

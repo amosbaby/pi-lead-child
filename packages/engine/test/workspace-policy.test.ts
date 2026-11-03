@@ -16,6 +16,7 @@ import {
   prepareRunWorkspace, requestSharedWorkspace, setDeploymentRepositoriesForTesting, setPullRequestReviewTarget,
 } from "../src/coordinator/workspace-policy.js";
 import { sweepWorkspaces } from "../src/coordinator/workspace.js";
+import { parseRepositorySpec, recordTicketRepository, startRepositoryClone } from "../src/coordinator/repository-checkout.js";
 
 let db: Db;
 let dir: string;
@@ -213,6 +214,120 @@ describe("the system decides that a ticket is a coding ticket", () => {
     expect(request.workdir).toBe(plain);
     expect(getItem(db, itemId)?.workflow_kind).toBe("generic");
     expect(decisions(itemId).at(-1)).toMatchObject({ coding: false, mode: "shared", facts: { gitRepository: null } });
+  });
+});
+
+// 2026-11-03：一张大仓库（6,863 个文件）工单开跑时，git worktree add 在 daemon 的主线程上同步跑了约 19 秒。
+// 这段时间 Slack 收不到 pong，判定连接已断；Companion 网页端也掉线重连；Lead 的 spawn_child 一直等着。
+describe("preparing a new worktree does not stop the daemon", () => {
+  let savedPath: string | undefined;
+  afterEach(() => {
+    if (savedPath !== undefined) process.env.PATH = savedPath;
+    savedPath = undefined;
+  });
+
+  // PATH 上放一个 git 替身：git worktree add 先等一下，像大仓库的检出；别的命令直接交给真的 git。
+  // wait 是秒数，或者一个文件：等到测试写出这个文件（最多 10 秒）。
+  function slowWorktreeAdd(wait: number | string): void {
+    const real = execFileSync("/usr/bin/which", ["git"], { encoding: "utf8" }).trim();
+    const bin = join(dir, "slow-git-bin");
+    mkdirSync(bin, { recursive: true });
+    const pause = typeof wait === "number"
+      ? `sleep ${wait}`
+      : `n=0; while [ ! -f "${wait}" ] && [ $n -lt 100 ]; do sleep 0.1; n=$((n + 1)); done`;
+    writeFileSync(join(bin, "git"), [
+      "#!/bin/sh",
+      `case " $* " in *" worktree add "*) ${pause} ;; esac`,
+      `exec "${real}" "$@"`,
+      "",
+    ].join("\n"));
+    chmodSync(join(bin, "git"), 0o755);
+    savedPath = process.env.PATH;
+    process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+  }
+
+  it("creates the Run at once and builds the worktree while the daemon keeps working", async () => {
+    // 检出等一个文件，文件由这个进程的定时器写：事件循环停住时（以前的同步检出）它写不出来，检出要等满 10 秒。
+    const release = join(dir, "release-worktree-add");
+    slowWorktreeAdd(release);
+    const itemId = genericTicket();
+    const pending = run(itemId);
+    // runItem 同步做完的部分（spawn_child 等的就是它）里已经有 Run，还没有检出。
+    const [created] = db.prepare("SELECT id FROM runs WHERE item_id=?").all(itemId) as Array<{ id: number }>;
+    expect(created).toBeDefined();
+    expect(listWorkspaces(db, { ownerItemId: itemId }).some((w) => w.mode === "isolated" && w.state === "active")).toBe(false);
+    setTimeout(() => writeFileSync(release, ""), 50);
+    const { runId, request } = await pending;
+    expect(runId).toBe(created!.id);
+    const workspace = getWorkspace(db, getRun(db, runId)!.workspace_id!)!;
+    expect(workspace).toMatchObject({ mode: "isolated", state: "active", path: request.workdir });
+    expect(readFileSync(join(repo, "source.txt"), "utf8")).toBe("base\n");
+  });
+
+  // 子工单和父工单的 workdir 相同时用同一个 worktree（设计 §4 第 2 行）。检出不再挡住别的事以后，Lead 一口气派出的两张
+  // 工单会同时准备它：后一个不能把前一个正在建的 worktree 当成失败。
+  it("lets two tickets that share one worktree start together", async () => {
+    slowWorktreeAdd(0.8);
+    const parent = genericTicket();
+    const child = createItem(db, { title: "part", brief: "b", createdBy: "lead", workdir: repo, parentItemId: parent });
+    const [first, second] = await Promise.all([run(parent), run(child)]);
+    expect(second.request.workdir).toBe(first.request.workdir);
+    const isolated = listWorkspaces(db, { ownerItemId: parent }).filter((w) => w.mode === "isolated");
+    expect(isolated).toHaveLength(1);
+    expect(isolated[0]!.state).not.toBe("failed");
+  });
+});
+
+// 2026-11-03：建单不再等 clone。工单写明的仓库本机还没有时，执行者的 Run 开跑前等后台的 clone，再从它切隔离 worktree。
+describe("a ticket whose repository is not on this Mac yet", () => {
+  let home: string;
+  let saved: { home?: string; gitConfig?: string };
+  beforeEach(() => {
+    home = join(dir, "home");
+    saved = { home: process.env.HOME, gitConfig: process.env.GIT_CONFIG_GLOBAL };
+    process.env.HOME = home;
+  });
+  afterEach(() => {
+    for (const [key, value] of [["HOME", saved.home], ["GIT_CONFIG_GLOBAL", saved.gitConfig]] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  // 一个本地的 bare 仓库，假装是 https://github.com/acme/demo：git 的 insteadOf 把地址换成它。
+  function fakeGithub(): void {
+    const bare = join(dir, "github", "acme", "demo.git");
+    mkdirSync(join(dir, "github", "acme"), { recursive: true });
+    execFileSync("git", ["clone", "-q", "--bare", repo, bare]);
+    const config = join(dir, "gitconfig");
+    writeFileSync(config, `[url "${join(dir, "github", "acme")}/"]\n\tinsteadOf = https://github.com/acme/\n`);
+    process.env.GIT_CONFIG_GLOBAL = config;
+  }
+
+  function ticketFor(path: string): number {
+    const itemId = createItem(db, { title: "bump the base image", brief: "b", createdBy: "lead", workdir: path });
+    recordTicketRepository(db, itemId, parseRepositorySpec("acme/demo")!, { path, cloned: true, cloning: true });
+    return itemId;
+  }
+
+  it("starts the run after the background clone, in a worktree of the clone", async () => {
+    fakeGithub();
+    const started = await startRepositoryClone(db, parseRepositorySpec("acme/demo")!);
+    const itemId = ticketFor(started.path);
+    const { request } = await run(itemId);
+    expect(started.path).toBe(join(home, "Workspace", "acme", "demo"));
+    expect(request.workdir.startsWith(`${realpathSync(started.path)}.plc-workspaces`)).toBe(true);
+    expect(readFileSync(join(started.path, "source.txt"), "utf8")).toBe("base\n");
+    expect(decisions(itemId).at(-1)).toMatchObject({ coding: true, mode: "isolated", facts: { gitRepository: realpathSync(started.path) } });
+  });
+
+  it("clones again before the run when the background clone was lost, as after a daemon restart", async () => {
+    fakeGithub();
+    const path = join(home, "Workspace", "acme", "demo");
+    const itemId = ticketFor(path);
+    const { request } = await run(itemId);
+    expect(existsSync(join(path, "source.txt"))).toBe(true);
+    expect(request.workdir.startsWith(`${realpathSync(path)}.plc-workspaces`)).toBe(true);
   });
 });
 

@@ -24,8 +24,11 @@ import {
 import { projectRoot } from "@pi-lead-child/core";
 import type { Actor, Item, RunPurpose, Workspace } from "@pi-lead-child/core";
 import {
-  disposeCheckout, isDisposableCheckout, provisionWorkspace, removeCheckoutFiles, workspaceRootFor,
+  disposeCheckout, isDisposableCheckout, provisionWorkspace, provisionWorkspaceAsync, removeCheckoutFiles, workspaceRootFor,
+  type ProvisionWorkspaceInput,
 } from "./workspace.js";
+
+import { cloneTicketRepository, ticketRepositoryToClone, type RepositorySpec } from "./repository-checkout.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -65,6 +68,8 @@ export interface RunWorkspacePlan {
   sharedReason?: string;
   pullRequest?: PullRequestTarget;
   refusal?: string;
+  // 工单写明的仓库本机还没有（在后台 clone，或者那次 clone 丢了）：准备工作区时先等它 clone 完。
+  repository?: RepositorySpec;
 }
 
 // 还不存在的路径按它最近的已存在的上级目录解析（真实路径），再接上剩下的部分。
@@ -166,6 +171,11 @@ export function planRunWorkspace(
   const resolved = resolveWorkspace(db, item.id)?.workspace ?? null;
   const writes = input.role === "executor" && WRITING_PURPOSES.includes(input.purpose);
   const workdir = resolved?.path ?? item.workdir ?? null;
+  const repository = !resolved && writes ? ticketRepositoryToClone(db, item) : null;
+  if (repository) {
+    const facts: RunWorkspaceFacts = { role: input.role, purpose: input.purpose, writes, workdir, gitRepository: null, deploymentRepository: false };
+    return { coding: true, mode: "isolated", facts, workspace: null, ready: false, repository };
+  }
   const gitRepository = resolved?.repo_root ? realpathOr(resolved.repo_root) : gitTop(workdir);
   const facts: RunWorkspaceFacts = {
     role: input.role, purpose: input.purpose, writes, workdir, gitRepository,
@@ -267,15 +277,23 @@ function discardableFailedWorktree(workspace: Workspace): boolean {
   try { return readdirSync(path).every((name) => name === ".git"); } catch { return false; }
 }
 
-function removeFailedWorktree(workspace: Workspace): void {
+async function removeFailedWorktree(workspace: Workspace): Promise<void> {
   const repo = workspace.repo_root!;
-  if (existsSync(workspace.path)) {
-    try { execFileSync("git", ["-C", repo, "worktree", "remove", "--force", workspace.path], { stdio: "ignore", timeout: 30_000 }); } catch { /* 没有登记 */ }
-    if (existsSync(workspace.path) && dirname(realpathOr(workspace.path)) === realpathOr(workspaceRootFor(repo))) {
-      rmSync(workspace.path, { recursive: true, force: true });
-    }
-  } else {
-    try { execFileSync("git", ["-C", repo, "worktree", "remove", "--force", workspace.path], { stdio: "ignore", timeout: 30_000 }); } catch { /* 没有登记 */ }
+  try { await execFileAsync("git", ["-C", repo, "worktree", "remove", "--force", workspace.path], { timeout: 30_000 }); } catch { /* 没有登记 */ }
+  if (existsSync(workspace.path) && dirname(realpathOr(workspace.path)) === realpathOr(workspaceRootFor(repo))) {
+    rmSync(workspace.path, { recursive: true, force: true });
+  }
+  if (workspace.branch?.startsWith("plc/")) {
+    try { await execFileAsync("git", ["-C", repo, "branch", "-D", workspace.branch], { timeout: 10_000 }); } catch { /* 保留 */ }
+  }
+}
+
+// 同上，同步做（prepareRunWorkspaceNowForTesting 用）。
+function removeFailedWorktreeNow(workspace: Workspace): void {
+  const repo = workspace.repo_root!;
+  try { execFileSync("git", ["-C", repo, "worktree", "remove", "--force", workspace.path], { stdio: "ignore", timeout: 30_000 }); } catch { /* 没有登记 */ }
+  if (existsSync(workspace.path) && dirname(realpathOr(workspace.path)) === realpathOr(workspaceRootFor(repo))) {
+    rmSync(workspace.path, { recursive: true, force: true });
   }
   if (workspace.branch?.startsWith("plc/")) {
     try { execFileSync("git", ["-C", repo, "branch", "-D", workspace.branch], { stdio: "ignore", timeout: 10_000 }); } catch { /* 保留 */ }
@@ -323,16 +341,32 @@ function markCoding(db: Db, item: Item): void {
 export interface RunWorkspacePreparation {
   // 这次 Run 用的工作区。null 且没有 checkout：这张工单没有工作区，由调用方照旧处理。
   workspace: Workspace | null;
-  // PR 评审：临时检出要 fetch，是异步的。调用方建好 Run 以后再等它，再把 Run 绑上去。
+  // 要碰磁盘的检出（PR 评审的临时检出要 fetch，新的隔离 worktree 要 git worktree add），是异步的。
+  // 调用方建好 Run 以后再等它，再把 Run 绑上去。
   checkout?: (runId: number) => Promise<Workspace>;
 }
 
 /**
- * 判定并准备这次 Run 的工作区。runItem 在建 Run、改 stage 之前调用。除了 PR 的临时检出都是同步的：
- * 调用方（例如 daemon 重启后的自动重派）依赖 runItem 同步建出 Run。
+ * 判定并准备这次 Run 的工作区。runItem 在建 Run、改 stage 之前调用。判定和库里的事是同步的：
+ * 调用方（例如 daemon 重启后的自动重派）依赖 runItem 同步建出 Run。要碰磁盘的检出（PR 的临时检出、新的隔离 worktree）
+ * 放进 checkout，Run 建好以后再等它（2026-11-03：大仓库的 git worktree add 同步跑了约 19 秒，daemon 停住）。
  */
 export function prepareRunWorkspace(
   db: Db, itemId: number, input: { role: "executor" | "reviewer"; purpose: RunPurpose; runId?: number },
+): RunWorkspacePreparation {
+  return prepareRunWorkspaceWith(db, itemId, input, "deferred");
+}
+
+/** 测试用：新的隔离 worktree 当场同步检出，返回的 workspace 就是它（2026-11-03 以前的做法）。daemon 不用它。 */
+export function prepareRunWorkspaceNowForTesting(
+  db: Db, itemId: number, input: { role: "executor" | "reviewer"; purpose: RunPurpose; runId?: number },
+): RunWorkspacePreparation {
+  return prepareRunWorkspaceWith(db, itemId, input, "now");
+}
+
+function prepareRunWorkspaceWith(
+  db: Db, itemId: number, input: { role: "executor" | "reviewer"; purpose: RunPurpose; runId?: number },
+  worktree: "deferred" | "now",
 ): RunWorkspacePreparation {
   const item = getItem(db, itemId);
   if (!item) throw new Error(`item ${itemId} not found`);
@@ -353,32 +387,37 @@ export function prepareRunWorkspace(
     };
   }
   let workspace = plan.workspace;
-  if (!plan.ready) {
-    // 隔离 worktree 从用户 checkout 的当前 commit 切出，归来源工作区的主人所有：子工单和父工单用同一个（设计 §4 第 2 行）。
-    // 还没有来源工作区时，先把用户的 checkout 登记成来源（不动任何文件），主人是 workdir 相同的最近的祖先。
-    let resolved = resolveWorkspace(db, itemId);
-    if (resolved?.workspace.mode === "isolated" && resolved.workspace.state === "failed") {
-      const failed = resolved.workspace;
-      // discardableFailedWorktree 已经确认分支还停在起点，-D 只删一个没有任何 commit 的分支。
-      removeFailedWorktree(failed);
-      transitionWorkspace(db, failed.id, "cleaning");
-      transitionWorkspace(db, failed.id, "cleaned");
-      transitionWorkspace(db, failed.id, "archived");
-      addActivity(db, {
-        itemId: failed.owner_item_id, actor: "system", kind: "decision",
-        payload: { decision: "workspace_failed_discarded", workspaceId: failed.id, path: failed.path },
-      });
-      resolved = resolveWorkspace(db, itemId);
+  if (!plan.ready && worktree === "deferred") {
+    return {
+      workspace: null,
+      checkout: async () => {
+        let ticket = item;
+        let decided = plan;
+        if (plan.repository) {
+          ticket = await cloneTicketRepository(db, item, plan.repository);
+          decided = planRunWorkspace(db, ticket, input);
+          if (decided.mode !== "isolated" || decided.ready || decided.repository) {
+            recordDecision(db, ticket, decided, null, input.runId);
+            throw new Error(decided.refusal ?? `${plan.repository.owner}/${plan.repository.name} 已经 clone 好，但工作区的判定是 ${decided.mode}，不是新的隔离 worktree`);
+          }
+        }
+        const failed = failedIsolatedWorkspace(db, ticket.id);
+        if (failed) {
+          await removeFailedWorktree(failed);
+          archiveFailedWorktree(db, failed);
+        }
+        const isolated = await provisionWorkspaceAsync(db, isolatedWorkspaceInput(db, ticket, input.runId));
+        recordDecision(db, ticket, decided, isolated, input.runId);
+        return isolated;
+      },
+    };
+  } else if (!plan.ready) {
+    const failed = failedIsolatedWorkspace(db, item.id);
+    if (failed) {
+      removeFailedWorktreeNow(failed);
+      archiveFailedWorktree(db, failed);
     }
-    let ownerId = resolved?.ownerItemId ?? sameWorkdirOwner(db, item).id;
-    let source = resolved?.workspace ?? provisionWorkspace(db, { itemId: ownerId, mode: "shared" });
-    if (source.mode === "shared" && (source.state === "failed" || source.state === "blocked")) {
-      source = provisionWorkspace(db, { itemId: source.owner_item_id, mode: "shared" });
-      ownerId = source.owner_item_id;
-    }
-    workspace = provisionWorkspace(db, {
-      itemId: ownerId, mode: "isolated", sourceWorkspaceId: source.id, ...(input.runId ? { sourceRunId: input.runId } : {}),
-    });
+    workspace = provisionWorkspace(db, isolatedWorkspaceInput(db, item, input.runId));
   } else if (workspace?.state === "pending_integration") {
     // 工单结束了、正在等合并决定的 worktree，又来了一个 Run（例如工单对话）：先回到 idle 让它用，
     // Run 结束后清理扫描重新判断要不要合并。
@@ -386,6 +425,38 @@ export function prepareRunWorkspace(
   }
   recordDecision(db, item, plan, workspace, input.runId);
   return { workspace };
+}
+
+// 上一次没建成、可以作废的隔离 worktree（planRunWorkspace 已经用 discardableFailedWorktree 确认过：
+// 分支还停在起点，删分支只删一个没有任何 commit 的分支）。
+function failedIsolatedWorkspace(db: Db, itemId: number): Workspace | null {
+  const resolved = resolveWorkspace(db, itemId)?.workspace;
+  return resolved?.mode === "isolated" && resolved.state === "failed" ? resolved : null;
+}
+
+function archiveFailedWorktree(db: Db, failed: Workspace): void {
+  // 同时开跑的另一个 Run 可能已经作废了它。
+  if (getWorkspace(db, failed.id)?.state !== "failed") return;
+  transitionWorkspace(db, failed.id, "cleaning");
+  transitionWorkspace(db, failed.id, "cleaned");
+  transitionWorkspace(db, failed.id, "archived");
+  addActivity(db, {
+    itemId: failed.owner_item_id, actor: "system", kind: "decision",
+    payload: { decision: "workspace_failed_discarded", workspaceId: failed.id, path: failed.path },
+  });
+}
+
+// 隔离 worktree 从用户 checkout 的当前 commit 切出，归来源工作区的主人所有：子工单和父工单用同一个（设计 §4 第 2 行）。
+// 还没有来源工作区时，先把用户的 checkout 登记成来源（不动任何文件），主人是 workdir 相同的最近的祖先。
+function isolatedWorkspaceInput(db: Db, item: Item, sourceRunId: number | undefined): ProvisionWorkspaceInput {
+  const resolved = resolveWorkspace(db, item.id);
+  let ownerId = resolved?.ownerItemId ?? sameWorkdirOwner(db, item).id;
+  let source = resolved?.workspace ?? provisionWorkspace(db, { itemId: ownerId, mode: "shared" });
+  if (source.mode === "shared" && (source.state === "failed" || source.state === "blocked")) {
+    source = provisionWorkspace(db, { itemId: source.owner_item_id, mode: "shared" });
+    ownerId = source.owner_item_id;
+  }
+  return { itemId: ownerId, mode: "isolated", sourceWorkspaceId: source.id, ...(sourceRunId ? { sourceRunId } : {}) };
 }
 
 /**

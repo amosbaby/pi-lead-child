@@ -1,9 +1,9 @@
 // 子 agent 经连接中心做的写操作记进动作层（landing.md C3）。连接中心每做成一次写操作就调一次 recordAgentWrite：
 //   - 每一次都在工单上记一条活动（agent_write）：Lead 派的子 agent 代你做的，凭的是这个 Run 的权限清单（哪一条规则）。
 //   - 别人看得到的（例如提交了的 review、发出的评论）另记一条主人操作 connection.agent_write：daemon 的 owner-actions
-//     那一步直接推给你（不经过 Lead），卡上有「撤销」。没提交的 pending review 这类别人看不到的只记活动。
-// 主人操作没有配对凭证：凭证编号写 0，名字写那张工单；来源是 agent。「撤销」只撤这次操作，不作废任何凭证
-// （protocol 的 isOnBehalfOwnerActionSource）。已经发到外部服务的写操作撤不回，撤销时给出链接（网关的 owner-actions.ts）。
+//     那一步直接推给你（不经过 Lead）。没提交的 pending review 这类别人看不到的只记活动。
+// 主人操作没有配对凭证：凭证编号写 0，名字写那张工单；来源是 agent（protocol 的 isOnBehalfOwnerActionSource）。
+// 它已经在外部服务上了，撤不回（undo 是 none，2026-11-03）：会话卡不给「撤销」，说明里给出链接，请你去那边改或删。
 import type { AgentConnectionWrite } from "@pi-lead-child/connections";
 import { addActivity, getItem, getLocale, itemLabel, leadDisplayName, recordOwnerAction, type Db } from "@pi-lead-child/store";
 import { agentWriteMessages } from "./agent-writes.messages.js";

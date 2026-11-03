@@ -48,6 +48,7 @@ import { createLeadSmartModel } from "./smart-model.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
+import { redLineGateExtension } from "./red-line.js";
 import { TurnEvidence } from "./credibility/evidence.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
@@ -209,6 +210,8 @@ export async function createLeadSession(opts: {
   // PLC 自己的 skill 目录（<数据目录>/skills，2026-11-02）：Lead 用操作层装的 skill 在这里。find_skill 每次现扫它，
   // 装完、卸完马上生效，不重载会话（重载会关掉并重建全部扩展，而安装就发生在 Lead 自己的一次工具调用里）。
   installedSkillsDir?: string;
+  // 红线以后这一轮能用的工具（red-line.ts，用户 2026-11-03）；没有限制时为 null。daemon 给。
+  toolGate?: () => ReadonlySet<string> | null;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean;
@@ -394,6 +397,11 @@ export async function createLeadSession(opts: {
           log: (line) => console.error(line),
         }),
       },
+      // 红灯（red-line.ts）：daemon 停下超时的一轮、叫 Lead 交接以后，这一轮只能用交接的工具。
+      ...(opts.toolGate ? [{
+        name: "plc-red-line", hidden: true,
+        factory: redLineGateExtension(opts.toolGate, (line) => console.error(line)),
+      }] : []),
       // 交接说明管建编码工单（自动代你处理方案 B，issue 04，handbook-guard.ts）：外部消息叫醒的一轮里看这一句有没有改代码的能力。
       {
         name: "plc-handbook-guard", hidden: true,

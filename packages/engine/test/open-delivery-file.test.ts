@@ -20,7 +20,7 @@ import {
   DeliveryError, mergeDelivery, openDeliveryPullRequest, ticketDelivery, type PullRequestRunner,
 } from "../src/coordinator/delivery.js";
 import type { FileOpenApp, FileOpener } from "../src/coordinator/file-opener.js";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import {
   listLeadTicketActions, listTicketActions, runTicketAction, TicketActionError, type TicketActionCaller,
 } from "../src/ticket-actions/index.js";
@@ -72,7 +72,7 @@ function fakeOpener(supported = true) {
 // 一张交付了的写代码工单。write 在隔离 worktree 里写文件，然后提交，登记成果，工单进 review。
 function deliveredCode(write: (worktree: string) => void = () => {}): { itemId: number; worktree: string } {
   const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   mkdirSync(join(workspace.path, "docs"));
   writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n");
   write(workspace.path);

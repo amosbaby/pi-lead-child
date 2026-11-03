@@ -9,7 +9,7 @@ import {
   transition, updateRun, type Db,
 } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import { createAgentToolHandlers } from "../src/agent-tools/definitions.js";
 import { ticketDeliveries, ticketDelivery, ticketDeliveryFile, ticketDeliverySnapshot } from "../src/coordinator/delivery.js";
 import {
@@ -72,7 +72,7 @@ async function deliver(itemId: number, runId: number, outcome: Outcome): Promise
 function codingTicket(): { itemId: number; worktree: string; workspaceId: number } {
   const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
   transition(db, { itemId, to: "active", actor: "system", reason: "start" });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   return { itemId, worktree: workspace.path, workspaceId: workspace.id };
 }
 

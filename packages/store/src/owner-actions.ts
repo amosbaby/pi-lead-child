@@ -408,7 +408,13 @@ export function ownerActionView(db: Db, eventId: string): OwnerActionDto | null 
     },
     delivery,
     performedAt: found.performed.occurredAt,
-    undo: { possible: definition?.undo ?? "none", note: definition ? ownerActionUndoNote(definition.id, locale, leadName) : "" },
+    undo: {
+      possible: definition?.undo ?? "none",
+      // 子 agent 的写操作撤不回：说明后面接上外部服务上看得到它的地址，告诉你去哪里改。
+      note: definition
+        ? ownerActionUndoNote(definition.id, locale, leadName, definition.byAgent ? text(record(payload.undo).url) || null : null)
+        : "",
+    },
     disownable: delivery === "push" && disowned === null,
     disowned,
   };

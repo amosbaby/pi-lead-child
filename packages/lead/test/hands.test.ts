@@ -13,6 +13,7 @@ import { resetSandboxForTests } from "@pi-lead-child/engine";
 import { credentialGuardExtension } from "../src/credential-guard.js";
 import {
   EXTERNAL_TURN_HANDS_REFUSAL, handsBlockedInTurn, leadHandsExtension, leadScratchDir, leadWritableRoots, leadWriteRefusal,
+  type LeadHandsOptions,
 } from "../src/hands.js";
 import type { LeadTurnOrigin } from "../src/turn-origin.js";
 
@@ -23,7 +24,9 @@ const call = (name: string, args: Record<string, unknown>): Step =>
 
 interface ToolEvent { type: string; toolName: string; parentToolCallId?: string; isError?: boolean; text: string }
 
-async function leadLikeSession(dataDir: string, steps: Step[], origin: () => LeadTurnOrigin) {
+async function leadLikeSession(
+  dataDir: string, steps: Step[], origin: () => LeadTurnOrigin, hands: Pick<LeadHandsOptions, "bashTimeoutSeconds"> = {},
+) {
   const faux = fauxProvider({ provider: "plc-hands-test", api: "plc-hands-test-api" });
   faux.setResponses([...steps, fauxAssistantMessage("好了。")]);
   const agentDir = join(dataDir, "agent");
@@ -37,7 +40,7 @@ async function leadLikeSession(dataDir: string, steps: Step[], origin: () => Lea
       { name: "codemode", factory: createCodemodeExtension() },
       { name: "provider", factory: (pi) => pi.registerProvider(faux.provider) },
       { name: "plc-credential-guard", factory: credentialGuardExtension({ cwd: dataDir, secretValues: () => [] }) },
-      { name: "plc-hands", factory: leadHandsExtension({ db, dataDir, turnOrigin: origin }) },
+      { name: "plc-hands", factory: leadHandsExtension({ db, dataDir, turnOrigin: origin, ...hands }) },
     ],
   });
   await loader.reload();
@@ -162,6 +165,21 @@ describe.runIf(supported)("Lead's hands in a pi session", () => {
     expect(readFileSync(join(scratch, "a.txt"), "utf8").trim()).toBe("hi");
     expect(ends[1]?.isError).toBe(true);
     expect(existsSync(outside)).toBe(false);
+  }, 90_000);
+
+  // 2026-11-03：Lead 的一条 grep -r 扫进几十个工作树的 node_modules，没有时限，这一轮停在 Running 15 分钟。
+  it("stops a bash command that gives no timeout at the default limit, and keeps a timeout the model gives", async () => {
+    const dir = tempDir("plc-hands-");
+    const events = await leadLikeSession(dir, [
+      call("bash", { command: "sleep 8; echo too-late" }),
+      call("bash", { command: "sleep 2; echo in-time", timeout: 6 }),
+    ], userTurn, { bashTimeoutSeconds: 1 });
+    const ends = events.filter((e) => e.type === "end" && e.toolName === "bash");
+    expect(ends[0]?.isError).toBe(true);
+    expect(ends[0]?.text).toContain("Command timed out after 1 seconds");
+    expect(ends[0]?.text).not.toContain("too-late");
+    expect(ends[1]?.isError).toBeFalsy();
+    expect(ends[1]?.text).toContain("in-time");
   }, 90_000);
 
   it("runs bash in a turn that only read connection results", async () => {
