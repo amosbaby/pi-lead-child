@@ -2928,6 +2928,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       still = (await refreshProviders(retrying ? [...missingProviders] : undefined)) ?? [];
     } catch (error: any) {
       log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
+      // 还缺目录的照旧按退避再拉：抛错的可能只是这一次（例如 config.json 正被手改）。
+      if (missingProviders.size) retryLeadProviders(attempt);
       return false;
     }
     const current = parseLeadModelSpec(appliedLeadModel).provider;

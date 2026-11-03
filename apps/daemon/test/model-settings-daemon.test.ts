@@ -209,6 +209,26 @@ describe("settings → models through the gateway", () => {
     expect(refreshes).toBe(3);
   });
 
+  // 审阅：重拉本身抛错（例如 config.json 正被手改、读不出来）以后，以前不再排下一次，那个服务商一直按缺省注册。
+  it("keeps retrying a missing catalog after a refresh that threw", async () => {
+    vi.stubEnv("PLC_LEAD_PROVIDER_RETRY_MS", "30");
+    const lead = stubLead();
+    const factory = lead.factory;
+    let refreshes = 0;
+    lead.factory = async () => ({
+      ...(await factory()),
+      providersUnavailable: ["vibeproxy"],
+      refreshProviders: async () => {
+        refreshes += 1;
+        if (refreshes === 1) throw new Error("config.json is not valid JSON");
+        return [];
+      },
+    });
+    await start(lead);
+    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]), { timeout: 10_000 });
+    expect(refreshes).toBe(2);
+  });
+
   // 第二轮审阅：重拉时只拉还缺目录的服务商（拉得到目录的不再拉，一次抖动不会把它换成缺省的注册）；
   // 正在用的模型的服务商拉到了就再挂，不等一直坏着的备用服务商。
   it("re-registers only the providers still missing a catalog, and rebinds once the one in use is back", async () => {
