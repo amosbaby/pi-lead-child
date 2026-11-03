@@ -94,7 +94,8 @@ describe("the Slack settings", () => {
     expect(slackSetupUrl("x".repeat(CHANNEL_SETUP_URL_MAX))).toBe("https://api.slack.com/apps");
   });
 
-  // 连上了却收不到事件时的提醒：说清在哪里订阅哪 4 个用户事件、User Token Scopes 要哪些，重装、重存令牌，怎样验证。
+  // 连上了却收不到事件时的提醒：没人发消息时可以忽略；否则在哪里订阅哪 4 个用户事件、User Token Scopes 要哪些，重装、重存令牌，
+  // 共享应用时的 authorizations:read，怎样验证。
   it("says where to subscribe the user events and add the user scopes when no events come in", () => {
     const settings = settingsOf(createSlackChannelAdapter({ api: new FakeSlack().api }));
     for (const locale of ["en", "zh"] as const) {
@@ -105,8 +106,17 @@ describe("the Slack settings", () => {
       }
       expect(text.length).toBeLessThanOrEqual(1_000);
     }
-    expect(settings.noEventsWarning!("en")).toContain("send yourself a direct message");
-    expect(settings.noEventsWarning!("zh")).toContain("给自己发一条私信");
+    // 判不出是少了设置还是没人发消息（PR #2 审阅）：先说没人发消息时可以忽略。
+    expect(settings.noEventsWarning!("en")).toContain("If nobody messaged you or posted in your channels in that time");
+    expect(settings.noEventsWarning!("zh")).toContain("如果这段时间没人给你发消息、你所在的频道里也没人说话");
+    expect(settings.noEventsWarning!("en")).not.toContain("probably");
+    expect(settings.noEventsWarning!("zh")).not.toContain("多半");
+    // 别人也装了这个应用时，App-Level Token 缺 authorizations:read 会把用户能看到的消息也丢掉（visibleToUser）。
+    expect(settings.noEventsWarning!("en")).toContain("If others also installed this app, the App-Level Token needs authorizations:read");
+    expect(settings.noEventsWarning!("zh")).toContain("别人也装了这个应用时，App-Level Token 还要有 authorizations:read");
+    // 验证用别人发来的私信：给自己发私信会不会推 message.im 没有确认过。
+    expect(settings.noEventsWarning!("en")).toContain("ask someone to send you a direct message");
+    expect(settings.noEventsWarning!("zh")).toContain("请别人在 Slack 里给你发一条私信");
     // 收到任何一个事件提醒就消失：说清楚，免得只订了频道消息时以为私信也好了。
     expect(settings.noEventsWarning!("en")).toContain("goes away after any one event comes in");
     expect(settings.noEventsWarning!("zh")).toContain("收到任何一个事件后这条提醒就会消失");
