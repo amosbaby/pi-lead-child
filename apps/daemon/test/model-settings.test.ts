@@ -7,13 +7,13 @@ import { join } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { envConfigPath, loadPlcConfig, writePlcConfig } from "@pi-lead-child/core";
 import { Vault } from "@pi-lead-child/connections";
-import { loadLeadModelConfig, resolveLeadApiKey } from "@pi-lead-child/lead";
+import { loadLeadModelConfig, registerLeadProviders, resolveLeadApiKey, setLeadProviderKeySource } from "@pi-lead-child/lead";
 import { UiActionError, updateDesignPreferences } from "@pi-lead-child/engine";
 import { ModelSettingsDtoSchema } from "@pi-lead-child/protocol";
 import { openDb } from "@pi-lead-child/store";
 import { Value } from "typebox/value";
 import { loadDecisionModels } from "../src/decision-models.js";
-import { ModelSettings } from "../src/model-settings.js";
+import { connectLeadProviderKeys, ModelSettings, providerSecretName } from "../src/model-settings.js";
 import { SealedSecrets } from "../src/sealed-secrets.js";
 
 const DAY = 86_400;
@@ -21,6 +21,7 @@ let instances: ModelSettings[] = [];
 afterEach(() => {
   for (const instance of instances) instance.stop();
   instances = [];
+  setLeadProviderKeySource(null);
 });
 
 // vibeproxy 的普通目录：Anthropic 的模型带 created（秒），antigravity 的没有。没有详细目录。
@@ -196,6 +197,34 @@ describe("ModelSettings: the brain", () => {
       "invalid_input",
     );
     expect(loadPlcConfig(t.dataDir).lead?.providers).not.toHaveProperty("corp");
+  });
+});
+
+// 工单 #181：daemon 在建 ModelSettings 之前就接上保险库（connectLeadProviderKeys），Lead 启动时第一次注册服务商、拉目录就带着 key。
+describe("connectLeadProviderKeys: the settings-page key before ModelSettings exists", () => {
+  it("gives the stored key to the first provider registration and catalog request, and only for the host it was stored for", async () => {
+    const dataDir = tempDir("plc-model-settings-");
+    const db = openDb(join(dataDir, "plc.db"));
+    const vault = new Vault(randomBytes(32));
+    writePlcConfig({ lead: { providers: { gateway: { baseUrl: "https://gateway.example.com/v1", api: "openai-completions", discover: true } }, models: ["gateway/m1"] } }, dataDir);
+    new SealedSecrets<string>(db, vault).set(providerSecretName("gateway"), { value: "sk-vault-0123456789", host: "gateway.example.com" });
+    const config = loadLeadModelConfig(dataDir);
+    expect(config.providers.gateway!.apiKey).toBeUndefined();
+
+    connectLeadProviderKeys(db, vault, () => {});
+    const auth: Array<string | null> = [];
+    const fetchImpl = (async (_input: string | URL, init?: RequestInit) => {
+      auth.push((init?.headers as Record<string, string> | undefined)?.Authorization ?? null);
+      return new Response(JSON.stringify({ data: [{ id: "m1" }] }), { status: 200 });
+    }) as typeof fetch;
+    const registered: Record<string, string | undefined> = {};
+    const runtime = { registerProvider: (name: string, input: { apiKey?: string }) => { registered[name] = input.apiKey; } };
+    await registerLeadProviders(runtime as never, config, {}, fetchImpl);
+    expect(registered).toEqual({ gateway: "sk-vault-0123456789" });
+    expect([...new Set(auth)]).toEqual(["Bearer sk-vault-0123456789"]);
+    // key 只发给存它时的主机。
+    expect(resolveLeadApiKey({ ...config.providers.gateway!, baseUrl: "https://other.example.com/v1" }, {}, "gateway")).toBeUndefined();
+    db.close();
   });
 });
 

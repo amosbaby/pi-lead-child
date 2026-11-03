@@ -46,7 +46,7 @@ import {
   DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch, type UserActionRequest,
 } from "@pi-lead-child/protocol";
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
-import { ModelSettings } from "./model-settings.js";
+import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerMessage } from "@pi-lead-child/engine";
@@ -2363,6 +2363,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 保险库：连接的令牌和记忆的密钥都用它加密（packages/connections 的 vault）。hindsight-main 用同一个密钥。
   const vault = lazyVault(opts.connections?.keySource
     ?? (testDaemon ? fileKeySource(join(opts.dataDir, "connections.key")) : defaultKeySource(join(opts.dataDir, "connections.key"))));
+  // 设置页存的服务商 key（设置 → 模型）。要在建记忆服务和 Lead 的会话之前接上：它们启动时就注册服务商、拉目录（工单 #181）。
+  connectLeadProviderKeys(db, vault, log);
   const connections = new ConnectionHub({
     db,
     vault,

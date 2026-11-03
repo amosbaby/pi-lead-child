@@ -38,6 +38,28 @@ export function providerSecretName(name: string): string {
   return `lead.provider.${name}`;
 }
 
+/** 页面存的服务商 key：保险库里的那一个，只在它绑定的主机和服务商现在的地址一样时给。没有或解不开时是 null。 */
+export function storedProviderKey(
+  secrets: SealedSecrets<string>, log: (line: string) => void, name: string, provider: Pick<LeadProviderConfig, "baseUrl">,
+): { value: string; host: string } | null {
+  let stored;
+  try {
+    stored = secrets.get(providerSecretName(name));
+  } catch (error) {
+    log(`[models] provider key for ${name} cannot be opened: ${error instanceof Error ? error.name : "Error"}`);
+    return null;
+  }
+  const host = serviceUrlHost(provider.baseUrl);
+  return stored && host && stored.host === host ? { value: stored.value, host } : null;
+}
+
+// Lead 的会话、查找会话、Hindsight 的 LLM 取服务商的 key 时先问保险库。daemon 建好保险库以后、建记忆服务和 Lead 的会话之前
+// 就要接上：Lead 启动时第一次注册服务商、拉目录用的就是它（工单 #181）。只要 db 和保险库，不等 ModelSettings。
+export function connectLeadProviderKeys(db: Db, vault: SecretVault, log: (line: string) => void): void {
+  const secrets = new SealedSecrets<string>(db, vault);
+  setLeadProviderKeySource((name, provider) => storedProviderKey(secrets, log, name, provider)?.value ?? null);
+}
+
 export interface ModelSettingsBrain {
   // Lead 正在用的模型（provider/id，可能带推理强度）。
   current(): string;
@@ -107,8 +129,8 @@ export class ModelSettings implements ModelSettingsService {
 
   constructor(private readonly options: ModelSettingsOptions) {
     this.secrets = new SealedSecrets<string>(options.db, options.vault);
-    // Lead 的会话、查找会话、Hindsight 的 LLM 取服务商的 key 时先问这里：页面存的、绑定现在主机的那一个。
-    setLeadProviderKeySource((name, provider) => this.storedProviderKey(name, provider)?.value ?? null);
+    // daemon 启动时已经接上（connectLeadProviderKeys）。单独用 ModelSettings 时（测试）在这里接上，效果一样。
+    connectLeadProviderKeys(options.db, options.vault, options.log);
   }
 
   // 用户现在选的界面语言：设置页直接显示这里返回的摘要、说明和错误。
@@ -135,15 +157,7 @@ export class ModelSettings implements ModelSettingsService {
   }
 
   private storedProviderKey(name: string, provider: Pick<LeadProviderConfig, "baseUrl">): { value: string; host: string } | null {
-    let stored;
-    try {
-      stored = this.secrets.get(providerSecretName(name));
-    } catch (error) {
-      this.options.log(`[models] provider key for ${name} cannot be opened: ${error instanceof Error ? error.name : "Error"}`);
-      return null;
-    }
-    const host = serviceUrlHost(provider.baseUrl);
-    return stored && host && stored.host === host ? { value: stored.value, host } : null;
+    return storedProviderKey(this.secrets, this.options.log, name, provider);
   }
 
   private providerKey(name: string, provider: LeadProviderConfig): { set: boolean; source: ModelKeySource; host: string | null } {
