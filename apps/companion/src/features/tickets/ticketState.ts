@@ -18,6 +18,8 @@ import {
 
 import { leadNameNow } from '@/state/leadName';
 
+import { deliveryNumber, type DeliveryNumbers } from './deliveryNumbers';
+import { runFactsMessages } from './runFacts.messages';
 import { durationWords, type TicketRunProgress } from './ticketChatStatus';
 import { ticketStateMessages } from './ticketState.messages';
 
@@ -54,10 +56,12 @@ export type TicketStateInput = {
   timing?: { statusDurationMs?: number | null } | null;
   /** 阻塞的工单：最新那条阻塞记录说明了原因。 */
   blocker?: { title: string; summary: string } | null;
-  /** 用户已经处理了介入请求，工单还停在 blocked，等 child 或 Lead 重新上报。 */
+  /** 用户已经处理了介入请求，工单还停在 blocked，等执行者或 Lead 重新上报。 */
   awaitingAfterIntervention?: boolean;
   /** 正在跑的那次 Run（ticketChatStatus）。核查 Run 准备太久时，状态卡要说出来，不能写「正在进行」。 */
   liveRun?: TicketRunProgress | null;
+  /** 每次交付是第几次（deliveryNumbers.ts）。不给时交付写成「最新的交付」。 */
+  deliveryNumbers?: DeliveryNumbers;
   /** Lead 的名字（useLeadName）。不给时读最近一次取到的名字（leadNameNow）。 */
   leadName?: string;
   /** 界面语言。不给时按英文。 */
@@ -65,8 +69,6 @@ export type TicketStateInput = {
 };
 
 type ReviewState = NonNullable<Ticket['reviewState']>;
-
-const VERDICT_TEXT = { pass: 'PASS', fail: 'FAIL' } as const;
 
 // 核查自动化只在出结论的那一笔事务里跑一次（delegated-review.ts 的 applyReviewAutomation）：
 // FAIL 时要么打回 active 并派返工，要么停手；PASS 时要么直接结单，要么停手。所以工单还停在
@@ -89,26 +91,28 @@ function deliveryRunOf(review: ReviewState, outcome: KernelOutcomeSnapshotResour
   return review.deliveryRunId ?? outcome?.latest?.executorAttemptId ?? null;
 }
 
+// 文字里的交付写「第 N 次交付」，不写执行记录的编号（设计规范 P14.6）。
+function deliveryNumberOf(review: ReviewState, input: TicketStateInput): number | null {
+  return deliveryNumber(input.deliveryNumbers, deliveryRunOf(review, input.outcome));
+}
+
 function reviewFacts(
   review: ReviewState,
   input: TicketStateInput,
   options: { reviewing: boolean },
 ): { label: string; value: string }[] {
-  const delivery = deliveryRunOf(review, input.outcome);
-  const snapshot = input.outcome?.latest && input.outcome.latest.executorAttemptId === delivery ? input.outcome.latest : null;
+  const delivery = deliveryNumberOf(review, input);
   const budget = budgetUsed(review);
-  const superseded = supersededReviewText(review, input.locale ?? 'en');
+  const superseded = supersededReviewText(review, input.locale ?? 'en', input.deliveryNumbers);
   const stayed = formatCompactElapsed(input.timing?.statusDurationMs);
   const m = messagesOf(input);
   return [
-    ...(delivery === null ? [] : [{
-      label: m.facts.latestDelivery,
-      value: snapshot ? m.facts.deliveryWithSnapshot(delivery, snapshot.id) : `Run #${delivery}`,
-    }]),
+    // 没有序号的交付不单列一行：「最新交付：最新的交付」不告诉用户任何事。
+    ...(delivery === null ? [] : [{ label: m.facts.latestDelivery, value: m.facts.deliveryNumber(delivery) }]),
     {
       label: m.facts.review,
       value: review.reviewerAttemptId !== null
-        ? `Run #${review.reviewerAttemptId} · ${review.verdict ? VERDICT_TEXT[review.verdict] : m.facts.verdictUnknown}`
+        ? review.verdict ? m.facts.verdict[review.verdict] : m.facts.verdictUnknown
         : review.reviewProgress
           ? m.progress[review.reviewProgress]
           : options.reviewing
@@ -123,9 +127,8 @@ function reviewFacts(
 
 // 用户发起的返工不占 Lead 的返工额度（2026-10-13 用户确认）；有额度时把这一点说出来。
 function reworkConsequence(review: ReviewState, input: TicketStateInput): string {
-  const delivery = deliveryRunOf(review, input.outcome);
   const m = messagesOf(input);
-  const base = m.rework.base(delivery);
+  const base = deliveryRunOf(review, input.outcome) === null ? m.rework.again : m.rework.base(deliveryNumberOf(review, input));
   const leadName = input.leadName ?? leadNameNow();
   return budgetUsed(review) ? m.rework.own(base, leadName) : m.rework.plain(base);
 }
@@ -143,7 +146,7 @@ function reviewOptions(
     requestReviewConsequence?: string;
   },
 ): TicketOptionPresentation[] {
-  const delivery = deliveryRunOf(review, input.outcome);
+  const delivery = deliveryNumberOf(review, input);
   const m = messagesOf(input);
   const options: TicketOptionPresentation[] = [];
   if (copy.requestReview) {
@@ -182,7 +185,7 @@ function reviewOptions(
 
 function reviewPresentation(input: TicketStateInput, review: ReviewState): TicketStatePresentation {
   const { ticket } = input;
-  const delivery = deliveryRunOf(review, input.outcome);
+  const delivery = deliveryNumberOf(review, input);
   const m = messagesOf(input);
   const NO_AUTOMATION = m.noAutomation;
   const skipReview = { label: m.skipReview, consequence: m.skipReviewConsequence, tone: 'danger' as const };
@@ -283,7 +286,7 @@ function reviewPresentation(input: TicketStateInput, review: ReviewState): Ticke
       };
     }
     default: {
-      // independent_review：核查在跑、已排队、排队但被挂起，或交付的 child 还在收尾。
+      // independent_review：核查在跑、已排队、排队但被挂起，或交付的执行者还在收尾。
       const progress = review.reviewProgress ?? null;
       const stalled = input.liveRun?.purpose === 'review' && input.liveRun.stalled ? input.liveRun : null;
       if (stalled) {
@@ -291,7 +294,7 @@ function reviewPresentation(input: TicketStateInput, review: ReviewState): Ticke
         return {
           chip: m.stalled.chip,
           tone: 'attention',
-          headline: m.stalled.headline(stalled.runId, durationWords(stalled.elapsedMs, input.locale ?? 'en')),
+          headline: m.stalled.headline(durationWords(stalled.elapsedMs, input.locale ?? 'en')),
           why: m.stalled.why,
           facts: reviewFacts(review, input, { reviewing: true }),
           options: reviewOptions(input, review, { complete: skipReview }),
@@ -310,9 +313,9 @@ function reviewPresentation(input: TicketStateInput, review: ReviewState): Ticke
           chip: m.runInFlight.chip,
           tone: 'info',
           headline: live?.purpose === 'conversation'
-            ? m.runInFlight.conversation(live.runId)
+            ? m.runInFlight.conversation
             : live
-              ? m.runInFlight.live(live.runId)
+              ? m.runInFlight.live(runFactsMessages(input.locale ?? 'en').work[live.purpose])
               : m.runInFlight.unknown,
           why: m.runInFlight.why,
           facts: reviewFacts(review, input, { reviewing: false }),

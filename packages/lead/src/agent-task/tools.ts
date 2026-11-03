@@ -8,7 +8,7 @@
 import { Type } from "typebox";
 import { Value } from "typebox/value";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import type { RunReadContent } from "@pi-lead-child/connections";
+import { numberedGithubFile, type RunReadContent } from "@pi-lead-child/connections";
 import { AgentTaskResultSchema, type AgentTaskResult, type RunGrant } from "@pi-lead-child/protocol";
 import { untrusted } from "../lookup/tools.js";
 
@@ -143,7 +143,10 @@ export function createAgentTaskTools(input: {
         } catch (error) {
           return refusal(`${note}${params.connection}.${params.tool} 没有调成${errorText(error)}`);
         }
-        const { body, clipped } = clip(result.text);
+        // GitHub 的文件带上行号，出处照着写（local 的 read_file 本来就带）。
+        const shown = params.connection === "github" && params.tool === "get_file_contents" && !result.isError
+          ? numberedGithubFile(result.text) : result.text;
+        const { body, clipped } = clip(shown);
         const header = `${note}${params.connection}.${params.tool}${result.isError ? " 返回了错误" : ""}${result.truncated || clipped ? "（结果太长，截断了）" : ""}`;
         return { ...text(`${header}\n${untrusted(`${params.connection}.${params.tool}`, body)}`, { connection: params.connection, tool: params.tool }),
           ...(result.isError ? { isError: true } : {}) };

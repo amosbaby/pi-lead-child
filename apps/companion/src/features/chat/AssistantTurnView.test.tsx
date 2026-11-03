@@ -228,14 +228,14 @@ describe('the provenance under a reply', () => {
           renderReply={(reply) => <Text testID="reply">{reply}</Text>} />
       </CompanionRuntimeProvider>,
     );
-    expect(screen.getByText('Source: Events of Run #87')).toBeTruthy();
+    expect(screen.getByText('Source: Execution records')).toBeTruthy();
     view.unmount();
     renderUI(
       <CompanionRuntimeProvider runtime={runtime}>
         <AssistantTurnView messageId={ASSISTANT} messageState="completed" renderReply={(reply) => <Text testID="reply">{reply}</Text>} />
       </CompanionRuntimeProvider>,
     );
-    expect(screen.queryByText('Source: Events of Run #87')).toBeNull();
+    expect(screen.queryByText('Source: Execution records')).toBeNull();
   });
 
   // 2026-10-16 用户要求：标签可以点开，看 Lead 依据的具体工单、通知或事件；点一张工单就打开它。

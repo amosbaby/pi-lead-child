@@ -18,6 +18,8 @@
 //     resolveCredential 用 auth.test 认出用户本人（编号和工作区），users.info 取用户的名字（accountName）。
 //     推来的 HTTP 请求按 Slack 的签名规则校验（x-slack-signature = v0=HMAC-SHA256(signing secret, "v0:<timestamp>:<body>")，
 //     时间戳 5 分钟以内）。
+//     浏览器会话方式（channels.slack.connection 是 "session"，2026-11-02）：只要网页版 Slack 的会话 cookie。Web API 和传输都经过
+//     gabriel-slack（slack-session.ts、slack-session-transport.ts）；网页版的消息帧换成和 Events API 一样的投递，交给同一个 parse。
 //   - 身份：消息的投递编号是 <频道>:<ts>（改消息、删消息另加后缀）。Slack 重发时 ts 不变；重连以后补拉到的消息也是同一个编号，
 //     所以同一条消息只记一次。
 //   - 对象键：slack:<频道>:<线程>。私信里不在线程中的消息是 slack:<频道>:main（整段私信是一个对话）。
@@ -41,17 +43,20 @@
 // Web API 的真实实现在 slack-web-api.ts，Socket Mode 的传输在 slack-socket.ts，都用 Slack 官方的 SDK。测试用假的 Slack。
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Type } from "typebox";
-import { SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
-import { normalizeSlackEmojiCode, SLACK_BYLINE_EMOJI_DEFAULT, type SenderTrust } from "@pi-lead-child/protocol";
+import { SLACK_APP_TOKEN_ENV, SLACK_SESSION_COOKIE_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
+import { normalizeSlackEmojiCode, plainObjectLinks, SLACK_BYLINE_EMOJI_DEFAULT, type SenderTrust } from "@pi-lead-child/protocol";
 import type { SystemStandingOrderSeed } from "@pi-lead-child/store";
 import { channelInboundPayload } from "../payload.js";
 import { ChannelFileNotFoundError, ChannelTargetGoneError } from "../types.js";
 import type {
-  ChannelAdapter, ChannelAdapterContext, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential, ChannelDelivery,
-  ChannelFile, ChannelHistoryMessage, ChannelHistoryRequest, ChannelInbound, ChannelMarkLookup, ChannelMemorySpec, ChannelOutboundRequest, ChannelOutboundResult,
-  ChannelTransportContext, ChannelTransportDeliver,
+  ChannelAdapter, ChannelAdapterContext, ChannelConnectionControl, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential,
+  ChannelDelivery, ChannelFile, ChannelHistoryMessage, ChannelHistoryRequest, ChannelInbound, ChannelMarkLookup, ChannelMemorySpec,
+  ChannelOutboundRequest, ChannelOutboundResult, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver,
 } from "../types.js";
-import { createSlackSettings } from "./slack-settings.js";
+import { createSlackSessionSettings, createSlackSettings } from "./slack-settings.js";
+import { createSlackSessionWebApi, SLACK_SESSION_COOKIE_PREFIX, SlackSessions, type SlackSessionNetwork } from "./slack-session.js";
+import { signInToSlack, type SlackSignInOptions } from "./slack-session-login.js";
+import { createSlackSessionTransport, type SlackSessionTransportOptions } from "./slack-session-transport.js";
 import { createSlackSocketTransport, type SlackSocketOptions } from "./slack-socket.js";
 import { scrubSlackText, SLACK_FILES_HOST, slackFileUrlAllowed, type SlackWebApi } from "./slack-web-api.js";
 
@@ -143,10 +148,11 @@ export function slackDisclosureBlocks(parts: { byline: string; body: string | nu
 }
 
 // 一行里不在行内代码中的部分换成 mrkdwn。顺序要紧：列表的「* 」先换成「• 」，单星号的斜体先换成 _x_，再换双星号的粗体。
+// 指向 App 里对象的链接（plc:card/N，P14.7）在 Slack 里打不开，先换成链接的文字。
 function slackInlineMrkdwn(text: string): string {
   return text.split(/(`[^`\n]+`)/u).map((part, index) => {
     if (index % 2 === 1) return part;
-    return part
+    return plainObjectLinks(part)
       .replace(/!?\[([^\]\n]+)\]\((\S+?)\)/gu, "<$2|$1>")
       .replace(/(?<![*\w])\*(?![\s*])([^*\n]+?)(?<!\s)\*(?![*\w])/gu, "_$1_")
       .replace(/(\*\*|__)(?!\s)(.+?)(?<!\s)\1/gu, "*$2*")
@@ -211,6 +217,16 @@ function slackOutgoing(text: string, parts: ChannelOutboundRequest["parts"]): { 
 
 /** Slack 通道要的两个 daemon 专用密钥（core 的 SLACK_APP_TOKEN_ENV、SLACK_USER_TOKEN_ENV）。 */
 export const SLACK_SECRET_NAMES = [SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV] as const;
+/** 浏览器会话方式要的 daemon 专用密钥：会话 cookie（core 的 SLACK_SESSION_COOKIE_ENV）。 */
+export const SLACK_SESSION_SECRET_NAMES = [SLACK_SESSION_COOKIE_ENV] as const;
+
+/** Slack 的连接方式：Slack 应用（官方接口）或浏览器会话（网页版的非官方接口）。 */
+export type SlackConnection = "app" | "session";
+
+/** 这种连接方式要的密钥名。 */
+export function slackSecretNames(connection: SlackConnection = "app"): readonly string[] {
+  return connection === "session" ? SLACK_SESSION_SECRET_NAMES : SLACK_SECRET_NAMES;
+}
 
 export const SLACK_EVENT_KINDS = {
   dm: "slack.dm.received",
@@ -231,8 +247,17 @@ export interface SlackChannelOptions {
   // 签名的时间戳最多差多久。缺省 5 分钟（Slack 的建议）。
   maxSignatureAgeMs?: number;
   now?: () => Date;
-  // Socket Mode 的传输。给了才有 transport（生产入口给；只测解析和出站的测试不给）。
+  // Socket Mode 的传输。给了才有 transport（生产入口给；只测解析和出站的测试不给）。只用于 Slack 应用方式。
   socket?: SlackSocketOptions;
+  // 连接方式（2026-11-02）。缺省是 "app"：Slack 应用，两个令牌（SLACK_SECRET_NAMES）。"session"：浏览器会话，网页版 Slack 的
+  // 会话 cookie（SLACK_SESSION_SECRET_NAMES），Web API 和传输都经过 gabriel-slack。函数是 daemon 给的现在的值（设置页选的 >
+  // config.json 的 channels.slack.connection，builtin.ts）：换了方式以后，daemon 重连这个来源，auth.secrets、settings、传输跟着换。
+  connection?: SlackConnection | (() => SlackConnection);
+  // 浏览器会话方式下「允许 Lead 代你发消息」（设置页的开关，缺省关，2026-11-02）。关着时这种方式下不往 Slack 写任何东西。
+  // Slack 应用方式不看它。
+  sessionWrites?: () => boolean;
+  // 浏览器会话方式的网络（测试注入假的 Slack）、传输和登录窗口。给了才有会话方式的传输。
+  session?: SlackSessionTransportOptions & { network?: SlackSessionNetwork; signIn?: Omit<SlackSignInOptions, "network"> };
   // 对话的名字和外部共享状态缓存多久。缺省 10 分钟。
   conversationTtlMs?: number;
   // 订阅：这个频道下多久以内有过道就算订阅。缺省 14 天（spec D12）。
@@ -559,6 +584,8 @@ interface ConversationInfo {
   externalShared: boolean | null;
   // 私信（im）的对方。用户发给自己的私信，对方就是用户本人。不是私信、问不到时是 null。
   user: string | null;
+  // 对话的类型，和 Events API 的 channel_type 一样：im、mpim、group（私有频道）、channel。问不到时是 null。
+  type: string | null;
   at: number;
 }
 
@@ -640,6 +667,17 @@ export function slackMessageText(message: SlackMessage): string {
   const attachments = Array.isArray(message.attachments) ? message.attachments.flatMap(attachmentText) : [];
   const body = [...blocks, ...attachments].map((part) => part.trim()).filter(Boolean).join("\n").slice(0, MESSAGE_TEXT_MAX);
   return [body, ...files].filter(Boolean).join("\n");
+}
+
+/**
+ * 消息里只有附带的文件（最多再 @ 几个人）：hub 的收件判断只看得到文件的标记行，敏感信息的分数没有依据（2026-11-02：
+ * 一张截图被判成「要你的私人数据」）。删掉的文件不算。
+ */
+export function slackAttachmentsOnly(message: SlackMessage): boolean {
+  const files = Array.isArray(message.files) ? message.files.filter((file) => isRecord(file) && file.mode !== "tombstone") : [];
+  if (!files.length) return false;
+  const text = typeof message.text === "string" ? message.text.replace(/<@[A-Z0-9]+>/g, "") : "";
+  return text.trim() === "";
 }
 
 // Slack 正文里的标记（https://docs.slack.dev/messaging/formatting-message-text）：<@U…> 提到一个人，<#C…|名字> 一个频道，
@@ -731,8 +769,26 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   const excluded = slackMemoryExclusion(options.memory?.exclude);
   const names = new Map<string, string>();
   const conversations = new Map<string, ConversationInfo>();
-  // 用户本人所在的工作区：auth.test 或者投递的 team_id 告诉我们。补拉的消息靠它认出外部的人。
+  // 用户本人所在的工作区：auth.test（会话方式是换好的会话）或者投递的 team_id 告诉我们。补拉的消息靠它认出外部的人。
   let homeTeam: string | null = null;
+  // 连接方式。浏览器会话方式下，Web API 经过会话（SlackSessions），其余的代码两种方式一样。
+  const mode = (): SlackConnection => ((typeof options.connection === "function" ? options.connection() : options.connection) === "session"
+    ? "session" : "app");
+  const sessions = new SlackSessions(options.session?.network);
+  const sessionWeb = createSlackSessionWebApi(sessions);
+  const web: SlackWebApi = {
+    call: (method, args, token) => (mode() === "session" ? sessionWeb : options.api).call(method, args, token),
+    download: (url, token, maxBytes) => {
+      const current = mode() === "session" ? sessionWeb : options.api;
+      if (!current.download) throw new Error("这个 Slack 客户端不能下载文件");
+      return current.download(url, token, maxBytes);
+    },
+  };
+  // 浏览器会话方式下「代你发消息」关着时的原因。能写时是 null。
+  const writesBlocked = (): string | null => (mode() === "session" && options.sessionWrites?.() !== true
+    ? "Slack 用的是浏览器会话，「允许 Lead 代你发消息」关着：Lead 只读，不往 Slack 发任何东西。草稿留在卡上，"
+      + "用户可以自己在 Slack 里发，或者在设置 → 消息通道 → Slack 里打开这个开关。"
+    : null);
   // 系统自己发出去的消息（频道:ts），和正在发的（按频道）。Slack 推回来的 message 事件里带不带 metadata，文档没有写明
   // （conversations.history 加 include_all_metadata 时一定带）。2026-10-21 真实的 Slack 推回来时带了，这里是退路：
   // 认不出 metadata 时按 ts 认，推回来的那一条和发出去的 ts 一样。
@@ -793,7 +849,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   async function loadCustomEmoji(context: ChannelAdapterContext): Promise<Map<string, string> | ChannelMarkLookup> {
     let result: Record<string, unknown>;
     try {
-      result = await options.api.call("emoji.list", {}, context.credential.token);
+      result = await web.call("emoji.list", {}, context.credential.token);
     } catch (error) {
       return { status: "unavailable", reason: `问 Slack 失败：${scrubSlackText(errorText(error), [context.credential.token])}` };
     }
@@ -845,7 +901,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   }
 
   async function api(method: string, args: Record<string, unknown>, context: ChannelAdapterContext): Promise<Record<string, unknown>> {
-    const result = await options.api.call(method, args, context.credential.token);
+    const result = await web.call(method, args, context.credential.token);
     if (result.ok !== true) throw new Error(`slack ${method}: ${isString(result.error) ? result.error : "not ok"}`);
     return result;
   }
@@ -942,20 +998,28 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       const result = await api("conversations.info", { channel: id }, context);
       const channel = result.channel as {
         name?: string; is_ext_shared?: boolean; is_shared?: boolean; is_pending_ext_shared?: boolean; user?: string;
+        is_im?: boolean; is_mpim?: boolean; is_private?: boolean;
       } | undefined;
       const info: ConversationInfo = {
         label: isString(channel?.name) ? `#${channel.name}` : id,
         name: isString(channel?.name) ? channel.name : null,
         externalShared: channel?.is_ext_shared === true || channel?.is_shared === true || channel?.is_pending_ext_shared === true,
         user: isString(channel?.user) ? channel.user : null,
+        type: !channel ? null : channel.is_im ? "im" : channel.is_mpim ? "mpim" : channel.is_private ? "group" : "channel",
         at: now().getTime(),
       };
       conversations.set(id, info);
       return info;
     } catch (error) {
       context.log(`conversations.info failed for ${id}: ${errorText(error)}`);
-      return cached ?? { label: id, name: null, externalShared: null, user: null, at: 0 };
+      return cached ?? { label: id, name: null, externalShared: null, user: null, type: null, at: 0 };
     }
+  }
+
+  // 对话的类型（网页版的消息帧里没有 channel_type）。D 开头的是私信；别的问 conversations.info，问不到时当作频道。
+  async function channelTypeOf(id: string, context: ChannelAdapterContext): Promise<string> {
+    if (id.startsWith("D")) return "im";
+    return (await conversation(id, context)).type ?? "channel";
   }
 
   function trustOf(message: SlackMessage, envelope: SlackEnvelope): SenderTrust {
@@ -1006,6 +1070,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       fields: {
         channelId: input.channel, channelType: input.channelType, ts: input.ts, threadTs: place.thread, echo: input.echo,
         externalShared: info.externalShared, channelName: info.name,
+        ...(slackAttachmentsOnly(input.message) ? { attachmentsOnly: true } : {}),
       },
       ...(input.amends ? { amends: input.amends } : {}),
       ...(input.follows ? { follows: true } : {}),
@@ -1096,7 +1161,43 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     }, context)];
   }
 
+  // 浏览器会话方式：用会话 cookie 换出会话（用户本人、工作区）。凭据的 token 是 cookie 本身：它是调来源接口的根凭据，
+  // 出站的报错和日志都按它去掉。会话令牌只在 GabrielCore 里。
+  async function resolveSessionCredential(
+    current: SlackSessions, secrets: Readonly<Record<string, string>>, log: (line: string) => void,
+  ): Promise<ChannelCredential | null> {
+    const cookie = secrets[SLACK_SESSION_COOKIE_ENV]?.trim();
+    if (!cookie?.startsWith(SLACK_SESSION_COOKIE_PREFIX)) {
+      log(`${SLACK_SESSION_COOKIE_ENV} is not a Slack session cookie (it should start with ${SLACK_SESSION_COOKIE_PREFIX})`);
+      return null;
+    }
+    let identity;
+    try {
+      identity = (await current.open(cookie, (line) => log(line))).identity;
+    } catch (error) {
+      log(scrubSlackText(errorText(error), [cookie]));
+      return null;
+    }
+    homeTeam = identity.teamId;
+    let accountName: string | undefined;
+    try {
+      const info = await web.call("users.info", { user: identity.userId }, cookie);
+      const user = info.user as { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } } | undefined;
+      accountName = [user?.real_name, user?.profile?.real_name, user?.profile?.display_name, user?.name].find(isString);
+    } catch (error) {
+      log(`users.info failed for the user: ${scrubSlackText(errorText(error), [cookie])}`);
+    }
+    return {
+      token: cookie, account: identity.userId, ...(accountName ? { accountName } : {}),
+      team: { id: identity.teamId, name: identity.teamName ?? identity.teamId },
+      secrets: { [SLACK_SESSION_COOKIE_ENV]: cookie },
+    };
+  }
+
   async function resolveCredential(secrets: Readonly<Record<string, string>>, log: (line: string) => void): Promise<ChannelCredential | null> {
+    if (mode() === "session") return resolveSessionCredential(sessions, secrets, log);
+    // 换回了 Slack 应用：浏览器会话不再用，关掉它的连接。
+    sessions.close();
     const appToken = secrets[SLACK_APP_TOKEN_ENV];
     const userToken = secrets[SLACK_USER_TOKEN_ENV];
     if (!appToken?.startsWith("xapp-")) {
@@ -1178,13 +1279,63 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     }
   }
 
-  const transport = options.socket
+  // 网页版的消息帧换成和 Events API 一样的投递，交给同一个 parse。帧里没有 channel_type：按频道编号和 conversations.info 补；
+  // 外层的 team_id 是用户本人的工作区。不加 authorizations：会话本来就是用户本人的，共享应用的过滤（visibleToUser）直接放行。
+  async function sessionDelivery(frame: Record<string, unknown>, context: ChannelAdapterContext): Promise<ChannelDelivery | null> {
+    if (frame.type !== "message" || !isString(frame.channel)) return null;
+    const channelType = await channelTypeOf(frame.channel, context);
+    const event = { ...frame, channel_type: channelType };
+    return {
+      headers: {}, transport: "socket",
+      body: JSON.stringify({ type: "event_callback", ...(homeTeam ? { team_id: homeTeam } : {}), event_time: Math.floor(now().getTime() / 1000), event }),
+    };
+  }
+
+  // 两种方式各有自己的传输。daemon 换了方式以后先 stop 再 start：start 时按现在的方式选一个。
+  const socketTransport = options.socket
     ? createSlackSocketTransport({
       options: options.socket,
       appToken: (context) => context.credential.secrets?.[SLACK_APP_TOKEN_ENV] ?? null,
       afterReconnect: catchUp,
     })
     : undefined;
+  const sessionTransport = options.session
+    ? createSlackSessionTransport({ options: options.session, sessions, toDelivery: sessionDelivery, afterReconnect: catchUp })
+    : undefined;
+  let activeTransport: ChannelTransport | undefined;
+  const transport: ChannelTransport | undefined = socketTransport || sessionTransport
+    ? {
+      start(host, deliver) {
+        activeTransport = mode() === "session" ? sessionTransport : socketTransport;
+        if (activeTransport) activeTransport.start(host, deliver);
+        else host.status?.({ state: "error", error: "这种连接方式在这里没有接上传输" });
+      },
+      async stop() {
+        const stopping = activeTransport;
+        activeTransport = undefined;
+        await stopping?.stop();
+      },
+    }
+    : undefined;
+
+  const appSettings = createSlackSettings({
+    api: options.api,
+    ...(options.ownerName !== undefined ? { ownerName: options.ownerName } : {}),
+    ...(options.assistantName !== undefined ? { assistantName: options.assistantName } : {}),
+  });
+  const sessionSettings = createSlackSessionSettings({ ...(options.session?.network ? { network: options.session.network } : {}) });
+  const connection: ChannelConnectionControl = {
+    modes: ["app", "session"],
+    mode,
+    settingsFor: (name) => (name === "session" ? sessionSettings : appSettings),
+    needsSignIn: (name) => name === "session",
+    async signIn(name, context) {
+      if (name !== "session") throw new Error(`Slack 的 ${name} 方式不用登录`);
+      const cookie = await signInToSlack({ ...options.session?.signIn, ...(options.session?.network ? { network: options.session.network } : {}) }, context);
+      return { [SLACK_SESSION_COOKIE_ENV]: cookie };
+    },
+    writesSwitch: (name) => name === "session",
+  };
 
   // 找系统用这个幂等键发过的消息。
   async function findSent(target: Record<string, string>, key: string, context: ChannelAdapterContext): Promise<string | null> {
@@ -1220,8 +1371,20 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     id: SLACK_SOURCE,
     label: "Slack",
     kind: "conversation",
-    auth: { connectionProvider: "slack", secrets: SLACK_SECRET_NAMES },
-    capabilities: { reply: true, retract: true, edit: true, react: true, history: true },
+    // 每次读时按现在的连接方式算（daemon 换了方式以后，下一次取凭据就用新的密钥名）。
+    auth: {
+      connectionProvider: "slack",
+      get secrets() {
+        return slackSecretNames(mode());
+      },
+    },
+    // 浏览器会话方式下「代你发消息」关着时，写的几项都是 false（hub、卡片、Lead 的工具按它判断），原因见 writesBlocked。
+    get capabilities() {
+      const writes = writesBlocked() === null;
+      return { reply: writes, retract: writes, edit: writes, react: writes, history: true };
+    },
+    writesBlocked,
+    connection,
     eventKinds: [
       kind(SLACK_EVENT_KINDS.dm, "别人在 Slack 里给用户发了私信（或者在用户在的群聊里发了消息）。"),
       kind(SLACK_EVENT_KINDS.mention, "别人在 Slack 的频道里提到了用户。"),
@@ -1240,11 +1403,9 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     },
     lookupDisclosureMark,
     resolveCredential,
-    settings: createSlackSettings({
-      api: options.api,
-      ...(options.ownerName !== undefined ? { ownerName: options.ownerName } : {}),
-      ...(options.assistantName !== undefined ? { assistantName: options.assistantName } : {}),
-    }),
+    get settings() {
+      return mode() === "session" ? sessionSettings : appSettings;
+    },
     ...(transport ? { transport } : {}),
 
     verify(delivery: ChannelDelivery, context: ChannelAdapterContext): boolean {
@@ -1430,7 +1591,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     // 消息附带的文件（2026-11-02）：files.info 问下载地址，再带用户令牌下载。要 files:read（可选的权限，缺了只是看不到文件）。
     async readFile(ref: string, readOptions: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelFile> {
       if (!SLACK_FILE_ID.test(ref)) throw new ChannelFileNotFoundError(`不是 Slack 的文件编号：${ref}`);
-      const result = await options.api.call("files.info", { file: ref }, context.credential.token);
+      const result = await web.call("files.info", { file: ref }, context.credential.token);
       if (result.ok !== true) {
         const error = isString(result.error) ? result.error : "not ok";
         if (error === "file_not_found" || error === "file_deleted") throw new ChannelFileNotFoundError(`Slack 里没有这个文件：${ref}（${error}）`);
@@ -1446,8 +1607,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (!slackFileUrlAllowed(url)) throw new Error(`这个文件的下载地址不在 ${SLACK_FILES_HOST} 上，不带令牌去下载`);
       const size = typeof file.size === "number" ? file.size : 0;
       if (size > readOptions.maxBytes) throw new Error(`文件有 ${size} 字节，超过了上限 ${readOptions.maxBytes} 字节`);
-      if (!options.api.download) throw new Error("这个 Slack 客户端不能下载文件");
-      const data = await options.api.download(url, context.credential.token, readOptions.maxBytes);
+      if (!web.download) throw new Error("这个 Slack 客户端不能下载文件");
+      const data = await web.download(url, context.credential.token, readOptions.maxBytes);
       return {
         id: `${SLACK_SOURCE}:${ref}`,
         name: isString(file.name) ? file.name : ref,
@@ -1462,7 +1623,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (!isString(channel)) throw new Error("slack: the target has no channel");
       if (request.action === "retract") {
         if (!isString(request.target.ts)) throw new Error("slack: nothing to retract (no ts)");
-        const result = await options.api.call("chat.delete", { channel, ts: request.target.ts }, context.credential.token);
+        const result = await web.call("chat.delete", { channel, ts: request.target.ts }, context.credential.token);
         if (result.ok === true) return { remoteRef: { channel, ts: request.target.ts }, duplicate: false };
         // 已经删掉了：重复调用是安全的。
         if (result.error === "message_not_found") return { remoteRef: { channel, ts: request.target.ts }, duplicate: true };
@@ -1471,7 +1632,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (request.action === "unreact") {
         if (!isString(request.target.ts)) throw new Error("slack: nothing to unreact (no ts)");
         if (!isString(request.emoji) || !SLACK_EMOJI_NAME.test(request.emoji)) throw new Error("slack: removing a reaction needs an emoji name");
-        const result = await options.api.call(
+        const result = await web.call(
           "reactions.remove", { channel, timestamp: request.target.ts, name: request.emoji }, context.credential.token,
         );
         if (result.ok === true) return { remoteRef: { channel, ts: request.target.ts, emoji: request.emoji }, duplicate: false };
@@ -1482,7 +1643,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (request.action === "react") {
         if (!isString(request.target.ts)) throw new Error("slack: nothing to react to (no ts)");
         if (!isString(request.emoji) || !SLACK_EMOJI_NAME.test(request.emoji)) throw new Error("slack: the reaction needs an emoji name");
-        const result = await options.api.call(
+        const result = await web.call(
           "reactions.add", { channel, timestamp: request.target.ts, name: request.emoji }, context.credential.token,
         );
         if (result.ok === true) return { remoteRef: { channel, ts: request.target.ts, emoji: request.emoji }, duplicate: false };
@@ -1495,7 +1656,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (request.action === "edit") {
         if (!isString(request.target.ts)) throw new Error("slack: nothing to edit (no ts)");
         // 同样的内容改两次结果一样，所以改写本身是幂等的。不带署名的样式时清掉原来的 blocks（不传时 Slack 会留着旧的）。
-        const result = await options.api.call("chat.update", {
+        const result = await web.call("chat.update", {
           channel, ts: request.target.ts, text: outgoing.text,
           blocks: outgoing.parts ? slackDisclosureBlocks(outgoing.parts) : [],
         }, context.credential.token);

@@ -4,8 +4,8 @@ import { defineMessages } from '@/i18n';
 export const railMessages = defineMessages({
   en: {
     views: { conversation: 'Conversation', inbox: 'Inbox', tickets: 'Tickets', projects: 'Projects', agenda: 'Agenda' },
-    runsRunning: (n: number) => (n === 1 ? '1 Run is running' : `${n} Runs are running`),
-    noRunsRunning: 'No Run is running',
+    runsRunning: (n: number) => (n === 1 ? '1 ticket is running' : `${n} tickets are running`),
+    noRunsRunning: 'No ticket is running',
     settings: 'Settings',
     searchPlaceholder: 'Search title, number, project',
     searchLabel: 'Search tickets',
@@ -18,8 +18,8 @@ export const railMessages = defineMessages({
   },
   zh: {
     views: { conversation: '对话', inbox: '收件箱', tickets: '工单', projects: '项目', agenda: '日程' },
-    runsRunning: (n) => `${n} 个 Run 在跑`,
-    noRunsRunning: '没有 Run 在跑',
+    runsRunning: (n) => `${n} 张工单在执行`,
+    noRunsRunning: '没有工单在执行',
     settings: '设置',
     searchPlaceholder: '搜索标题、编号、项目',
     searchLabel: '搜索工单',

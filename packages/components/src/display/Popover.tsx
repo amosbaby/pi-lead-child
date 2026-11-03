@@ -24,7 +24,20 @@ export type PopoverProps = {
   testID?: string;
 };
 
-type Anchor = { x: number; y: number; width: number; height: number };
+// 浮层对着的位置（窗口坐标）：触发它的那个东西的方框。
+export type PopoverAnchor = { x: number; y: number; width: number; height: number };
+
+export type PopoverPanelProps = {
+  /** 浮层对着的位置。null 时浮层关着。 */
+  anchor: PopoverAnchor | null;
+  onClose: () => void;
+  /** 读屏的说法；没有 title 时也是标题。 */
+  label: string;
+  title?: string;
+  children: ReactNode | ((close: () => void) => ReactNode);
+  width?: number;
+  testID?: string;
+};
 
 const GAP = 6;
 const EDGE = 8;
@@ -33,11 +46,8 @@ const MAX_HEIGHT = 420;
 // 点开以后看详情的小浮层。宽屏时浮在触发按钮下面（下面放不下就放上面）；手机宽度时是从底部升起的面板。
 // 点外面、按 Esc（web）或返回键（Android）关闭。用 React Native 的 Modal：web 上渲染到 body，不被滚动区裁掉。
 export function Popover({ label, trigger, title, children, width = 360, testID }: PopoverProps) {
-  const m = useMessages(displayMessages);
   const anchorRef = useRef<View>(null);
-  const [anchor, setAnchor] = useState<Anchor | null>(null);
-  const breakpoint = useBreakpoint();
-  const sheet = !breakpoint.tablet;
+  const [anchor, setAnchor] = useState<PopoverAnchor | null>(null);
   const open = anchor !== null;
   const close = useCallback(() => setAnchor(null), []);
   const show = useCallback(() => {
@@ -48,18 +58,6 @@ export function Popover({ label, trigger, title, children, width = 360, testID }
       setAnchor({ x: EDGE, y: EDGE, width: 0, height: 0 });
     }
   }, []);
-
-  const panelWidth = Math.min(width, breakpoint.width - EDGE * 2);
-  const below = anchor ? breakpoint.height - (anchor.y + anchor.height + GAP) - EDGE : 0;
-  const above = anchor ? anchor.y - GAP - EDGE : 0;
-  const placeBelow = below >= Math.min(MAX_HEIGHT, 240) || below >= above;
-  const maxHeight = Math.max(160, Math.min(MAX_HEIGHT, placeBelow ? below : above));
-  const left = anchor ? Math.max(EDGE, Math.min(anchor.x, breakpoint.width - panelWidth - EDGE)) : EDGE;
-  const position = sheet || !anchor
-    ? styles.sheet
-    : placeBelow
-      ? { position: 'absolute' as const, left, top: anchor.y + anchor.height + GAP, width: panelWidth }
-      : { position: 'absolute' as const, left, bottom: breakpoint.height - anchor.y + GAP, width: panelWidth };
 
   return (
     <>
@@ -77,6 +75,35 @@ export function Popover({ label, trigger, title, children, width = 360, testID }
           {trigger}
         </Pressable>
       </View>
+      <PopoverPanel anchor={anchor} onClose={close} label={label} title={title} width={width} testID={testID}>
+        {children}
+      </PopoverPanel>
+    </>
+  );
+}
+
+// Popover 的浮层本身，由调用方决定什么时候打开、对着哪里。文字里的链接用它（MarkdownMessage 的对象链接，P14.7）：
+// 触发它的是一段文字，不是一个按钮。
+export function PopoverPanel({ anchor, onClose, label, title, children, width = 360, testID }: PopoverPanelProps) {
+  const m = useMessages(displayMessages);
+  const breakpoint = useBreakpoint();
+  const sheet = !breakpoint.tablet;
+  const open = anchor !== null;
+  const close = onClose;
+  const panelWidth = Math.min(width, breakpoint.width - EDGE * 2);
+  const below = anchor ? breakpoint.height - (anchor.y + anchor.height + GAP) - EDGE : 0;
+  const above = anchor ? anchor.y - GAP - EDGE : 0;
+  const placeBelow = below >= Math.min(MAX_HEIGHT, 240) || below >= above;
+  const maxHeight = Math.max(160, Math.min(MAX_HEIGHT, placeBelow ? below : above));
+  const left = anchor ? Math.max(EDGE, Math.min(anchor.x, breakpoint.width - panelWidth - EDGE)) : EDGE;
+  const position = sheet || !anchor
+    ? styles.sheet
+    : placeBelow
+      ? { position: 'absolute' as const, left, top: anchor.y + anchor.height + GAP, width: panelWidth }
+      : { position: 'absolute' as const, left, bottom: breakpoint.height - anchor.y + GAP, width: panelWidth };
+
+  return (
+    <>
       {/* web 上不播动画：浮层点开就出现（react-native-web 的 Modal 要等动画结束事件才卸载）。 */}
       <Modal
         transparent

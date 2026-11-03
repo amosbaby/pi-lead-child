@@ -40,11 +40,26 @@ export function leadCompactionInstructions(level: keyof typeof LEAD_COMPACTION_B
     "只留后面还要用的事：正在做的事和它的下一步、没解决的问题、用户的偏好和决定、在等的事。",
     "工单、提醒、跟进、笔记写编号和一句话。细节已经在工单、笔记和事件日志里，不抄原文。",
     "做完了、不再影响后面的事删掉。上一份摘要里的内容也按这个标准删减，不要原样保留。",
+    CAPABILITY_RULE,
   ];
   if (level === "strict") {
     lines.unshift(`上一次按 ${LEAD_COMPACTION_BUDGETS.normal} 字写，写到了输出上限。这一次更严：`);
   }
   return lines.join("\n");
+}
+
+// 能力不写成规则（2026-11-02）：「pending 的检查会拦 APPROVE」「不能改 Slack 消息」这样的旧结论一次次被抄进新摘要，
+// 代码早改了，Lead 还照着拒绝用户。
+const CAPABILITY_RULE = "「做不到」「会被拦」「没有权限」这类判断不写成规则：工具和规则随部署改变。要记就写成带时间的事实，"
+  + "例如「11-02 15:15 查过，那时没有改消息的操作」，并写明以后以调用的结果为准。上一份摘要里这样写成规则的，改成这种写法或者删掉。";
+
+/** pi 自己触发的压缩（上下文快满了）的要求：没有长度预算，只有删减的标准和能力不写成规则（compaction-chunks.ts 用它）。 */
+export function leadAutoCompactionInstructions(): string {
+  return [
+    "只留后面还要用的事：正在做的事和它的下一步、没解决的问题、用户的偏好和决定、在等的事。",
+    "做完了、不再影响后面的事删掉。上一份摘要里的内容也按这个标准删减，不要原样保留。",
+    CAPABILITY_RULE,
+  ].join("\n");
 }
 
 /** pi 的摘要写到输出上限时的错误（compaction.ts：「generation hit the token cap and the summary is incomplete」）。 */

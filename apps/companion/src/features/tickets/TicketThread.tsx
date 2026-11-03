@@ -29,6 +29,7 @@ import {
 } from '@/features/workspace/model';
 import { runtimeDisplayName } from '@/features/workspace/runtimeNames';
 
+import type { DeliveryNumbers } from './deliveryNumbers';
 import { InterventionPanel } from './InterventionPanel';
 import type { LegacyTicketAction, LegacyTicketActionId } from './legacyTicketActions';
 import type { TicketLogRunPresentation } from './LogTimeline';
@@ -174,6 +175,8 @@ export type TicketThreadProps = {
   executionPlan?: TicketExecutionPlan | null;
   /** 这次交付（工作区的分支、合没合并）。 */
   delivery?: TicketDelivery | null;
+  /** 每次交付是第几次（deliveryNumbers.ts）。文字里的交付写「第 N 次交付」，不写执行记录的编号。 */
+  deliveryNumbers?: DeliveryNumbers;
   facts?: TicketDetailFacts | null;
   executor?: RunProfilePresentation | null;
   /** 不要求独立核查的工单没有核查员（null）。 */
@@ -279,6 +282,7 @@ export function TicketThread({
   acceptanceCriteria = null,
   executionPlan,
   delivery = null,
+  deliveryNumbers,
   facts = null,
   executor = null,
   reviewer = null,
@@ -328,6 +332,7 @@ export function TicketThread({
     timing,
     blocker: blockerCheckpoint ? { title: blockerCheckpoint.title, summary: blockerCheckpoint.summary } : null,
     liveRun,
+    ...(deliveryNumbers ? { deliveryNumbers } : {}),
     leadName,
     locale,
   });
@@ -700,14 +705,13 @@ export function TicketThread({
               key={attempt.id}
               testID={`ticket-run-${attempt.id}`}
               divider={index > 0}
-              id={`#${attempt.id}`}
               title={attempt.purposeLabel}
               meta={`· ${runChoice(attempt)}`}
               badge={{ label: attempt.result, tone: RUN_TONE[attempt.resultTone] }}
               detail={runDetail(attempt, m, locale)}
               detailMono
               onPress={openRecords}
-              accessibilityLabel={m.runRecords(attempt.id)}
+              accessibilityLabel={m.runRecords(attempt.purposeLabel, clockText(attempt.startedAt, undefined, locale))}
             />
           ))}
         </Section>
@@ -934,6 +938,7 @@ export function TicketThread({
             runFacts={runFacts}
             pow={pow}
             outcome={outcome}
+            deliveryNumbers={deliveryNumbers}
             attempts={attempts}
             logs={logs}
             logRuns={logRuns}

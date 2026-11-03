@@ -130,4 +130,10 @@ describe("Markdown to Slack mrkdwn", () => {
       "行内 `**不动**` 的代码",
     ].join("\n"));
   });
+
+  // App 里的对象链接（P14.7）在 Slack 里打不开：只留链接的文字，不变成一个坏掉的 <plc:…|…>。
+  it("turns links to App objects into their words", () => {
+    expect(slackMrkdwnFromMarkdown("回 [Ethan 的私信](plc:card/134) 的草稿放好了，见 [文档](https://doc.test/a)"))
+      .toBe("回 Ethan 的私信 的草稿放好了，见 <https://doc.test/a|文档>");
+  });
 });

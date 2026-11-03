@@ -137,6 +137,8 @@ export interface CompactionChunksOptions {
   log?: (line: string) => void;
   // 测试换掉真正的摘要调用。
   summarize?: typeof generateSummaryWithUsage;
+  // pi 自己触发的压缩（没有 customInstructions）也要带上的要求（compaction-settings.ts 的 leadAutoCompactionInstructions）。
+  instructions?: string;
 }
 
 /**
@@ -153,10 +155,15 @@ export async function compactInChunks(
   const messages = [...preparation.messagesToSummarize, ...(preparation.isSplitTurn ? preparation.turnPrefixMessages : [])];
   const budget = chunkTokenBudget(model.contextWindow, preparation.settings.reserveTokens);
   const tokens = messages.reduce((total, message) => total + messageTokens(message), 0);
-  if (tokens <= budget) return undefined;
+  // pi 自己触发的压缩不带要求（customInstructions 是空的）：有要给它的要求时由这里来写，放得进一次请求也一样。
+  const instructions = event.customInstructions ?? options.instructions;
+  const ours = event.customInstructions === undefined && options.instructions !== undefined;
+  if (tokens <= budget && !ours) return undefined;
 
-  const chunks = planCompactionChunks(messages, budget);
-  options.log?.(`[lead] compaction: the history is about ${tokens} tokens, over ${budget} per request; summarizing it in ${chunks.length} parts`);
+  const chunks = tokens <= budget ? [messages] : planCompactionChunks(messages, budget);
+  if (chunks.length > 1) {
+    options.log?.(`[lead] compaction: the history is about ${tokens} tokens, over ${budget} per request; summarizing it in ${chunks.length} parts`);
+  }
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   const resolved = auth as { apiKey?: string; headers?: Record<string, string>; baseUrl?: string };
   const requestModel = resolved.baseUrl ? { ...model, baseUrl: resolved.baseUrl } : model;
@@ -166,7 +173,7 @@ export async function compactInChunks(
   for (const [index, chunk] of chunks.entries()) {
     if (event.signal.aborted) throw new Error("Compaction cancelled");
     const result = await summarize(
-      chunk, requestModel, preparation.settings.reserveTokens, resolved.apiKey, resolved.headers, event.signal, event.customInstructions, summary,
+      chunk, requestModel, preparation.settings.reserveTokens, resolved.apiKey, resolved.headers, event.signal, instructions, summary,
     );
     summary = result.text;
     usage = addUsage(usage, result.usage);

@@ -18,8 +18,8 @@ export const checkpointMessages = defineMessages({
     messageFrom: (identity: string, time: string) => `Message from ${identity}${time ? ` · ${time}` : ''}`,
     authorizationRecordedTitle: 'Authorization recorded. Waiting for the run state.',
     authorizationStillBlocked: (leadName: string) =>
-      `The authorization is recorded, but the ticket is still blocked. Waiting for the child or ${leadName} to report the result again.`,
-    authorizationContinues: 'The authorization is recorded. The child continues the work.',
+      `The authorization is recorded, but the ticket is still blocked. Waiting for the executor or ${leadName} to report the result again.`,
+    authorizationContinues: 'The authorization is recorded. The executor continues the work.',
   },
   zh: {
     kind: {
@@ -36,7 +36,7 @@ export const checkpointMessages = defineMessages({
     systemUpdate: (time) => `系统更新${time ? ` · ${time}` : ''}`,
     messageFrom: (identity, time) => `来自 ${identity} 的消息${time ? ` · ${time}` : ''}`,
     authorizationRecordedTitle: '授权已记录，等待执行状态确认',
-    authorizationStillBlocked: (leadName) => `授权已经记录，但工单仍处于阻塞；等待 child/${leadName} 重新上报执行结果。`,
-    authorizationContinues: '授权已经记录，child 正在继续执行。',
+    authorizationStillBlocked: (leadName) => `授权已经记录，但工单仍处于阻塞；等待执行者或 ${leadName} 重新上报执行结果。`,
+    authorizationContinues: '授权已经记录，执行者正在继续执行。',
   },
 });

@@ -11,6 +11,7 @@ import {
   type TicketActionPresentation,
 } from '@/features/workspace/model';
 
+import type { DeliveryNumbers } from './deliveryNumbers';
 import type { TicketRunProgress } from './ticketChatStatus';
 import { ticketStatePresentation, type TicketOptionPresentation, type TicketStatePresentation } from './ticketState';
 import { ticketStateMessages } from './ticketState.messages';
@@ -60,6 +61,8 @@ export type TicketDecisionInput = {
   timing?: { statusDurationMs?: number | null } | null;
   awaitingAfterIntervention?: boolean;
   liveRun?: TicketRunProgress | null;
+  /** 每次交付是第几次（deliveryNumbers.ts）。收件箱没有，交付写成「最新的交付」。 */
+  deliveryNumbers?: DeliveryNumbers;
   /** Lead 的名字（useLeadName）。不给时读最近一次取到的名字。 */
   leadName?: string;
   /** 界面语言。 */
@@ -76,6 +79,7 @@ export function ticketDecision(input: TicketDecisionInput): TicketStatePresentat
     blocker: input.blocker ?? null,
     awaitingAfterIntervention: input.awaitingAfterIntervention ?? false,
     liveRun: input.liveRun ?? null,
+    ...(input.deliveryNumbers ? { deliveryNumbers: input.deliveryNumbers } : {}),
     ...(input.leadName !== undefined ? { leadName: input.leadName } : {}),
     locale,
   });

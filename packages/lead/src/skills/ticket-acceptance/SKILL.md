@@ -31,4 +31,4 @@ description: 工单进 review、核查结论回来、要决定自己验收还是
 
 ## 4. 记下依据
 
-- record_decision 和 ticket_action 的 complete 会附上这一轮你实际读过的文件和工具结果，包括你在沙箱里用 bash 跑的命令。你自己跑过的（例如在 worktree 里跑了测试），理由里写清楚跑了什么、结果是什么；转述子 agent 的，写「转述 Run #N 的核查报告：……」。没跑过的不要写「实地核验」「实测」。
+- record_decision 和 ticket_action 的 complete 会附上这一轮你实际读过的文件和工具结果，包括你在沙箱里用 bash 跑的命令。你自己跑过的（例如在 worktree 里跑了测试），理由里写清楚跑了什么、结果是什么；转述核查员的，写「转述核查员的报告：……」。没跑过的不要写「实地核验」「实测」。

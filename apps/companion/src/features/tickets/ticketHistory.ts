@@ -5,6 +5,7 @@ import type { AttemptEntity } from '@/state/types';
 import { decisionLabel } from './decisionLabels';
 import { timeLabel } from './timeLabels';
 import { runOutcome, type RunFacts, type RunOutcomeTone } from './runFacts';
+import { runFactsMessages } from './runFacts.messages';
 import { ticketHistoryMessages } from './ticketHistory.messages';
 
 export type LifecyclePresentation = {
@@ -78,12 +79,18 @@ export function buildLifecyclePresentation(input: {
   detail?: TicketDetail;
   activities: ActivityDto[];
   leadName: string;
+  /** 每次 Run 是做什么的（buildRunFacts）。开始、失败的那一行写「核查开始」「执行失败」，不写 Run 的编号（设计规范 P14.6）。 */
+  facts?: ReadonlyMap<number, Pick<RunFacts, 'purpose'>>;
   /** 界面语言。不给时按英文。 */
   locale?: Locale;
 }): LifecyclePresentation[] {
   const { leadName } = input;
   const locale = input.locale ?? 'en';
   const m = ticketHistoryMessages(locale);
+  const purposes = runFactsMessages(locale).purpose;
+  const purposeOf = (attemptId: number | null) => purposes[
+    (attemptId === null ? undefined : input.facts?.get(attemptId)?.purpose) ?? 'execution'
+  ];
   const items: LifecyclePresentation[] = [];
   if (input.detail) {
     items.push({
@@ -129,7 +136,7 @@ export function buildLifecyclePresentation(input: {
       const effort = text(activity.payload.effort);
       items.push({
         id: `activity:${activity.id}`,
-        title: m.runStarting(activity.attemptId),
+        title: m.runStarting(purposeOf(activity.attemptId)),
         createdAt: activity.createdAt,
         actor: actorLabel(activity.actor, leadName, locale),
         reason: [runtime, model, effort ? `effort ${effort}` : null].filter(Boolean).join(' · ') || null,
@@ -139,7 +146,7 @@ export function buildLifecyclePresentation(input: {
     } else if (activity.kind === 'crash') {
       items.push({
         id: `activity:${activity.id}`,
-        title: m.runFailed(activity.attemptId),
+        title: m.runFailed(purposeOf(activity.attemptId)),
         createdAt: activity.createdAt,
         actor: actorLabel(activity.actor, leadName, locale),
         reason: decisionReason(activity.payload, locale),

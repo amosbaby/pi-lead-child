@@ -7,11 +7,13 @@
 //   - PUT 先检查，全过才保存并重连，回新的 DTO；没过回 400，error.details 是检查结果（ChannelSecretsTestResult）。
 //   - DELETE 只删保险库里的，回新的 DTO（Keychain 或环境变量里还有时，DTO 的 origin 说明，界面据此提示）。
 //   - PUT、DELETE 是主人操作（channel.credentials）：保存了、删掉了密钥时记一次。
+//   - GET /v1/channels/settings/:source/connection 用 tickets:view：有几种连接方式的来源现在用哪种（2026-11-02）。
 // 请求体（密钥的值）不进任何日志，也不回显：响应里只有名字、有没有、从哪里来。
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "typebox/value";
 import {
   ChannelSecretsRequestSchema,
+  type ChannelConnectionDto,
   type ChannelSecretsTestResult,
   type ChannelSettingsResponse,
   type ChannelSourceSettingsDto,
@@ -50,6 +52,8 @@ export interface ChannelSettingsService {
     status: "reverted" | "changed" | "unknown";
     source: ChannelSourceSettingsView | null;
   }>;
+  // 有几种连接方式的来源现在的连接方式（2026-11-02）。只有一种方式、或者没有这个来源时是 null。
+  connection?(source: string): ChannelConnectionDto | null;
 }
 
 export class ChannelSettingsError extends Error {
@@ -87,6 +91,7 @@ export interface ChannelSettingsRouteContext {
 
 const BASE = "/v1/channels/settings";
 const SOURCE_PATH = /^\/v1\/channels\/settings\/([^/]+)(\/test)?$/;
+const CONNECTION_PATH = /^\/v1\/channels\/settings\/([^/]+)\/connection$/;
 const STATUS: Record<ChannelSettingsError["code"], number> = { invalid_request: 400, not_found: 404, unavailable: 503 };
 const HTTP_CODE: Record<number, string> = { 400: "invalid_request", 403: "forbidden", 404: "not_found", 503: "internal_error" };
 
@@ -109,6 +114,31 @@ export async function handleChannelSettingsRoute(ctx: ChannelSettingsRouteContex
     }
     const editable = ctx.editableHere();
     ctx.json(200, { sources: ctx.service.list().map((source) => ({ ...source, editable })) } satisfies ChannelSettingsResponse);
+    return true;
+  }
+
+  // 连接方式（2026-11-02）：只读。改动走通用的操作入口（channel_connection）。
+  const connection = CONNECTION_PATH.exec(url.pathname);
+  if (connection) {
+    if (req.method !== "GET") return false;
+    ctx.requireAuth("tickets:view");
+    if (!ctx.service) {
+      unavailable();
+      return true;
+    }
+    let source: string;
+    try {
+      source = decodeURIComponent(connection[1]!);
+    } catch {
+      fail(404, "not_found", m.channelNotFound);
+      return true;
+    }
+    const dto = ctx.service.connection?.(source) ?? null;
+    if (!dto) {
+      fail(404, "not_found", m.channelNotFound);
+      return true;
+    }
+    ctx.json(200, dto satisfies ChannelConnectionDto);
     return true;
   }
 

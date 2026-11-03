@@ -30,6 +30,7 @@ import { dnsProbe, NetworkMonitor, type NetworkProbe } from "./network.js";
 import { DEFAULT_MODEL_CATALOG_REFRESH_MS, startModelCatalogWatch } from "./model-catalog-watch.js";
 import { recordRunFinished, recordRunFinishedAtTerminalEvent } from "./run-finished.js";
 import { recordConnectionAttention } from "./connection-attention.js";
+import { installedSkillsDir, leadInstallServices } from "./lead-installs.js";
 import { startTriageShadow, type TriageShadowDaemonOptions } from "./triage-shadow.js";
 import { loadChannelsConfig, startChannelMemory, startChannels, stopChannels, type ChannelDaemonOptions } from "./channels.js";
 import { ChannelSettings } from "./channel-settings.js";
@@ -43,7 +44,7 @@ import {
   CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, EVENT_SOURCES, LEAD_QUEUE_RESOURCE, type GrantLocalRepo, type LeadQueue,
 } from "@pi-lead-child/protocol";
 import {
-  DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type UserActionRequest,
+  DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch, type UserActionRequest,
 } from "@pi-lead-child/protocol";
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
 import { ModelSettings, providerKeySource } from "./model-settings.js";
@@ -65,7 +66,7 @@ import {
 import { createTicketReplyActionsJudge, type TicketReplyActionsJudge } from "./ticket-reply-actions.js";
 import {
   acceptRunningChildren, CHANNEL_TASK_CALLBACK, conversationWorkspaceChecksSettled, deliverySnapshotsSettled, detachRunningChildren, effectiveRunPurpose,
-  killIdleChildren, liveChildren, UiActionError, type DecisionModelCredentials, type FollowUpEntry, type LeadModelService, type UiActionServices,
+  killIdleChildren, liveChildren, UiActionError, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
 import { appendBody, getItem, transition } from "@pi-lead-child/store";
@@ -84,7 +85,8 @@ import { repairMissingBlockerAlerts } from "@pi-lead-child/store";
 import { pendingApprovals, getApproval, isStandingOrderProposal, pendingApprovalLine } from "@pi-lead-child/store";
 import { blockerHasConversationRecord } from "@pi-lead-child/store";
 import { recordLeadTurnResponding, type EventRecord, type ReminderPush } from "@pi-lead-child/store";
-import { createWatchdog } from "@pi-lead-child/engine";
+import { createWatchdog, UI_ACTIONS } from "@pi-lead-child/engine";
+import { leadCapabilityNotice, recordLeadCapabilities } from "./lead-capabilities.js";
 import { agentConnectionHost, setAgentConnectionHost, type AgentConnectionHost } from "@pi-lead-child/engine";
 import { createScheduler } from "@pi-lead-child/engine";
 import {
@@ -107,6 +109,7 @@ import {
   LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
   partialUiSurface,
   PRESENCE_IDLE_MS, QUIET_REPLY, redactAndCap, redactSecretText, userFacingBacklogText,
+  plainObjectLinks,
   stripQuietReply,
   SYSTEM_TURN_ORIGINS,
   isOnBehalfOwnerActionNotification, isOwnerActionNotificationKind, ownerActionRecordText, ownerActionRefOfNotification, ownerActionTurnId,
@@ -560,6 +563,8 @@ export interface DaemonOpts {
   // 连接（ConnectionHub）的测试注入：假厂商的 fetch、保险库密钥、gh。缺省：真实 daemon 用 Keychain 和本机的 gh；
   // 注入了 sessionFactory 的测试用数据目录里的密钥文件，没有 gh。
   connections?: { fetch?: FetchLike; keySource?: VaultKeySource; gh?: GhTokenSource; tickMs?: number };
+  // Lead 自己装 MCP 和 skill（lead-installs.ts）。测试换掉查 npm、PyPI、GitHub 的 fetch，本地 MCP 不经过 npx、uvx 直接跑给的命令。
+  installs?: { fetch?: InstallFetch; localCommand?: (launch: LocalMcpLaunch) => { executable: string; args: string[] } };
   // 账本写入守卫的核对间隔（缺省 60 秒）和 config.json 的核对间隔（缺省 15 秒）。测试调短。
   ledgerGuardCheckMs?: number;
   configWatchMs?: number;
@@ -601,6 +606,23 @@ function defaultDesktopNotifier(): (text: string) => void {
       `display notification ${JSON.stringify(text)} with title "pi-lead-child"`,
     ], () => { /* 非 macOS / 失败静默 */ });
   };
+}
+
+// Lead 自己发起的一轮里攒着的话和工具调用（见 startDaemon 里 systemTurnBuffer 的说明）。
+type SystemTurnBuffer = {
+  text: string;
+  toolEvents: Array<{ event: any; textOffset: number }>;
+  lastToolOffset: number;
+  drewSurface: boolean;
+};
+
+// 系统回合里要写进会话的话。最后一次工具调用之后的回答是 NO_REPLY 时，这一轮没有要告诉用户的话：
+// 工具调用之前那几句也是 Lead 写给自己的（2026-11-02：9 天里 84 轮这样的话出现在会话里，例如
+// 「这是 4M token 预算告警，按约定记 no_action，不打扰用户。」，没有一句是在对用户说）。画了卡片的一轮例外。
+function systemTurnSpokenText(buffer: SystemTurnBuffer): string {
+  const answer = buffer.text.slice(buffer.lastToolOffset);
+  if (!buffer.drewSurface && /\bNO_REPLY\b/iu.test(answer) && stripQuietReply(answer) === "") return "";
+  return stripQuietReply(buffer.text);
 }
 
 type DaemonHandle = {
@@ -867,7 +889,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   //   · 回合结束时有要告诉用户的话；
   //   · 失败了（会话里一张失败卡片）。整理笔记例外：还没有要告诉用户的话时，失败也不落成。
   // 攒着的工具调用记下它开始时已经说了多少字（textOffset），落成一轮时位置不变。
-  let systemTurnBuffer: { text: string; toolEvents: Array<{ event: any; textOffset: number }> } | null = null;
+  // lastToolOffset：最后一次工具调用开始时说了多少字，它后面的字是这一轮最后的回答。drewSurface：这一轮画过卡片。
+  let systemTurnBuffer: SystemTurnBuffer | null = null;
   // 落成系统回合时复用的旧轮次（同一条通知的重试只留一轮）。
   let pendingSystemReuseTurnId: string | null = null;
   // 这一轮为哪几件事单独开（工单 07：一条到点的提醒）。落成会话里的一轮时记下 lead.turn_responding，
@@ -1689,6 +1712,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const now = Date.now();
     if (last && (last.key === key || now - last.at < 100)) return;
     // render_ui 会改变用户看到的东西：系统回合在这一刻落成（和改变外部状态的工具一样）。
+    if (systemTurnBuffer && !pendingSteerSink) systemTurnBuffer.drewSurface = true;
     if (!activeChannelTurn && systemTurnBuffer && !pendingSteerSink) materializeBufferedSystemTurn(systemTurnBuffer);
     if (!activeChannelTurn) return;
     streamedSurfaces.set(block.id, { key, at: now });
@@ -1885,7 +1909,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const buffer = systemTurnBuffer;
     if (!buffer) return;
     systemTurnBuffer = null;
-    const text = stripQuietReply(buffer.text);
+    const text = systemTurnSpokenText(buffer);
     if (text || options.force) materializeBufferedSystemTurn(buffer);
     if (activeChannelTurn && text) publishTurnText(activeChannelTurn, text);
   }
@@ -2382,6 +2406,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     log,
     // 本地仓库的读取（带清单的 Run）不能碰助手自己的数据目录。
     localDeniedRoots: [opts.dataDir],
+    // 本地 MCP 的进程在 <数据目录>/mcp/<连接编号> 里跑（2026-11-02）。
+    localMcpDir: join(opts.dataDir, "mcp"),
+    ...(opts.installs?.localCommand ? { localCommand: opts.installs.localCommand } : {}),
     // 子 agent 经连接中心的写操作记进动作层（agent-writes.ts）：别人看得到的推给你，能撤销。
     onAgentWrite: (write) => {
       recordAgentWrite(db, write);
@@ -2441,6 +2468,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     },
     // Jarvis 模式：要告诉你的事先交给 Lead（connection-attention.ts：说明带着要用户做的事，授权失效时登记等待）。
     onAttention: (event) => recordConnectionAttention(db, event, log),
+  });
+  // Lead 自己装 MCP 和 skill（2026-11-02）：操作层经过它调连接中心、写 PLC 的 skill 目录。
+  uiActionServices.installs = leadInstallServices({
+    hub: connections, dataDir: opts.dataDir, ...(opts.installs?.fetch ? { fetch: opts.installs.fetch } : {}),
   });
   if (opts.relaxConnectionWrites) {
     const relaxed = connections.relaxWritePolicyOnce();
@@ -2642,6 +2673,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     dataDir: opts.dataDir, dbPath: opts.dbPath, db,
     onCompactionProgress: (progress: CompactionProgress) => compactionProgress(progress),
     ...(opts.skillDirs ? { skillDirs: opts.skillDirs } : {}),
+    // PLC 自己的 skill 目录：Lead 装的 skill 在这里，find_skill 每次现扫（2026-11-02）。
+    installedSkillsDir: installedSkillsDir(opts.dataDir),
     childPi: opts.childPi,
     onChildDone, onChildEvent, runtimeRegistry,
     // 批量取消闸门按轮次计数（LEAD_CANCEL_BATCH_LIMIT）。用户回一句话就是新的一轮，
@@ -2725,6 +2758,21 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }),
   });
   log(`lead ready (model=${modelName}, session=${session.sessionId})`);
+  // 部署改了 Lead 能用的工具或操作时，下一轮告诉它一次（lead-capabilities.ts，2026-11-02）。
+  let capabilityNotice: string | null = null;
+  try {
+    // 真的 pi 会话有 getAllTools；测试的假会话没有，只比界面操作。
+    const listed = (session as { getAllTools?: () => Array<{ name: string }> }).getAllTools;
+    const tools = typeof listed === "function" ? listed.call(session).map((tool) => tool.name) : [];
+    const actions = Object.entries(UI_ACTIONS).flatMap(([target, defined]) => Object.keys(defined).map((id) => `${target}.${id}`));
+    const change = recordLeadCapabilities(db, [...tools, ...actions]);
+    if (change) {
+      capabilityNotice = leadCapabilityNotice(change);
+      log(`lead capabilities changed: +${change.added.length} -${change.removed.length}`);
+    }
+  } catch (error) {
+    log(`could not compare Lead's capabilities with the last start: ${String(error)}`);
+  }
   // 工单回复下面的动作按钮由 Lead 会话的 SmartModel 判断（ticket-reply-actions.ts）。会话没有给出 SmartModel 时不判断。
   replyActionsJudge = createTicketReplyActionsJudge({
     db,
@@ -3131,6 +3179,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       } else if (!pendingSteerSink && systemTurnBuffer) {
         const buffer = systemTurnBuffer;
         handled = true;
+        buffer.lastToolOffset = buffer.text.length;
+        if (event.toolName === "render_ui") buffer.drewSurface = true;
         if (!activeChannelTurn && LEAD_QUIET_TOOLS.has(String(event.toolName))) {
           // 只读、笔记工具先攒着：这一轮最后可能不落成。
           buffer.toolEvents.push({ event, textOffset: buffer.text.length });
@@ -3719,7 +3769,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pendingSystemOrigin = options.system ?? null;
     pendingSystemReuseTurnId = options.system ? options.reuseTurnId ?? null : null;
     pendingSystemRespondsTo = null;
-    systemTurnBuffer = options.system ? { text: "", toolEvents: [] } : null;
+    systemTurnBuffer = options.system ? { text: "", toolEvents: [], lastToolOffset: 0, drewSurface: false } : null;
     systemEntryThisTurn = null;
     streamingMessageText = "";
     activeTurnError = null;
@@ -3754,6 +3804,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
       const clock = leadSystemEvent("clock", `当前时间：${localIso(new Date())}，时区 ${tz}`);
       let coreBlock = "";
+      const capabilityBlock = capabilityNotice ? leadSystemEvent("system", capabilityNotice) : "";
+      capabilityNotice = null;
       if (coreMemoryDirty) {
         const refresh = coreMemoryRefreshPrefix(db);
         coreBlock = refresh ? leadSystemEvent("core_memory", refresh) : "";
@@ -3765,7 +3817,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 当前局面（spec D7）放在这一轮输入的开头，不放进系统提示（系统提示一变，整段对话的提示缓存就失效了）。
       // 整理笔记是内部回合，不给：积压的事等下一轮普通的 Lead 回合。
       const situation = options.system === SYSTEM_TURN_ORIGINS.precipitate ? "" : situationBlock();
-      const full = [clock, presence, situation, coreBlock, delivered?.text ?? "", body].filter(Boolean).join("\n\n");
+      const full = [clock, presence, situation, capabilityBlock, coreBlock, delivered?.text ?? "", body].filter(Boolean).join("\n\n");
       // 上一次自动压缩失败了：先压缩，再调模型（recoverLeadContext）。放在取事件之后：失败时这一轮带着事件失败，
       // 游标不动，按退避再叫醒（leadWakeRetry），不会马上又开一轮、又压缩一次。
       await recoverLeadContext();
@@ -3853,7 +3905,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn
-        && stripQuietReply(systemTurnBuffer?.text ?? "") === "";
+        && (systemTurnBuffer ? systemTurnSpokenText(systemTurnBuffer) : "") === "";
       const contextFull = classifyLeadModelError(error) === "context";
       if (quietNotes || ((networkFailure || interrupted || contextFull) && options.system && !activeChannelTurn)) {
         pendingSystemOrigin = null;
@@ -4289,6 +4341,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     owner: (message) => acceptChannelOwnerMessage(message),
   });
   channelHub = startedChannels?.hub ?? null;
+  // 来源的连接方式（设置 → 消息通道，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道设置在通道接好以后才认得来源。
+  if (startedChannels) uiActionServices.channelConnections = channelSettings;
   // 外部消息卡的动作交给操作层（engine 的 ui-actions/ 的 channel_card）：页面的按钮和 Lead 代用户回复用同一个对象
   // （用户 2026-10-23）。通道在 Lead 会话之后才建好，所以在这里补上。
   if (channelHub) {
@@ -4303,6 +4357,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // Lead 代用户直接往一个对话里发消息、回表情，不经过卡片（用户 2026-10-23、10-26）。等你的卡跟着结束；发完给 Lead 还开着的卡自查。
     uiActionServices.channelMessages = {
       canSend: (source) => hub.canSendMessage(source),
+      blockedReason: (source) => hub.writesBlocked(source),
       send: (conversationId, input) => hub.sendMessage(conversationId, input),
       react: (conversationId, input) => hub.react(conversationId, input),
       edit: (conversationId, input) => hub.editMessage(conversationId, input),
@@ -4547,17 +4602,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // 先记已送达，再推送：记不上（库被锁、磁盘满）就不推，下一拍再来。反过来的话，记账抛错时通知已经推出去了，
         // 下一拍又推一遍（发布评审：Lead 信任修复留下的一项）。
         markNotificationDelivered(db, notice.id, "fallback");
+        // 桌面和 Slack 打不开 App 里的对象链接（P14.7）：只留链接的文字。
+        const title = plainObjectLinks(notice.title);
         // 转达的是审批：Slack 里带批准按钮。
         const approvalId = /^approval:(\d+):lead-notice$/.exec(notice.dedup_key ?? "")?.[1];
         const approval = approvalId ? pendingApprovals(db).find((candidate) => candidate.id === Number(approvalId)) : undefined;
         if (approval && !isStandingOrderProposal(approval) && aishAdapter?.connected && lastAishOrigin) {
           void aishAdapter.requestApproval(lastAishOrigin.channelId, lastAishOrigin.threadTs, {
-            approvalId: String(approval.id), tool: approval.tool, description: `${notice.title}${notice.body ? `\n${notice.body}` : ""}`,
+            approvalId: String(approval.id), tool: approval.tool, description: `${title}${notice.body ? `\n${plainObjectLinks(notice.body)}` : ""}`,
           }).catch((e: any) => log(`[approval] aish request failed: ${e.message}`));
         } else {
-          aishNotify(`🔔 ${notice.title}`);
+          aishNotify(`🔔 ${title}`);
         }
-        notifyDesktop(notice.title);
+        notifyDesktop(title);
       }
     });
     // 给用户的即时通知（提醒、要他登录或付费、等他验收……）：表是事实，由 Lead 决定怎样告诉用户（Jarvis 模式）。

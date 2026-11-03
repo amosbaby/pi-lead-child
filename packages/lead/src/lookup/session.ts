@@ -101,6 +101,10 @@ export async function createIsolatedLookupSession(input: {
   };
 }
 
+// 代查和子 agent 一条回复的最大输出。Lead 是 16384；评审 agent 常在一次调用里写整份评审，16384 不够（2026-11-02 Run #222、#223）。
+// 目录说的更小时用目录的。
+export const LOOKUP_MAX_OUTPUT_TOKENS = 32_000;
+
 /**
  * daemon 用的会话工厂：ModelRuntime 建一次，代查之间复用（工单 04：每次新建要跑一次模型发现）。登记 Lead 的 provider
  * （config.json），模型按 SmartModel 的选法：PLC_SMART_MODEL，否则配置里最新的 haiku，否则 Lead 自己的模型。
@@ -121,7 +125,8 @@ export function createLookupSessionFactory(input: {
     const modelRuntime = await ModelRuntime.create({
       allowModelNetwork: false, refreshOnCreate: false, ...(input.authPath ? { authPath: input.authPath } : {}),
     });
-    for (const note of (await registerLeadProviders(modelRuntime, config, env)).notes) input.log?.(`[lookup] ${note}`);
+    const { notes } = await registerLeadProviders(modelRuntime, config, env, fetch, { maxOutputTokens: LOOKUP_MAX_OUTPUT_TOKENS });
+    for (const note of notes) input.log?.(`[lookup] ${note}`);
     const choice = selectSmartModelSpec({
       env,
       configuredSpecs: configuredLeadModelSpecs(config, (provider) => modelRuntime.getModels(provider).map((model) => model.id)),

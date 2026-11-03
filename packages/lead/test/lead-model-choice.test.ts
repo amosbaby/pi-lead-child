@@ -411,7 +411,7 @@ describe("cancelling a follow-up", () => {
     await tool("follow_up").execute("t", { at: "2020-01-01T00:00:00+08:00", note: "看 #66 的最终报告", ticket_id: itemId });
     const [followUp] = listInbox(db, {});
     const result = await tool("cancel_follow_up").execute("t", { follow_up_id: followUp!.id, reason: "最终报告已经出来，已告诉用户" });
-    expect(result.content[0].text).toContain(`#${followUp!.id}`);
+    expect(result.content[0].text).toContain(`follow_up_id=${followUp!.id}`);
     const [after] = listInbox(db, {});
     expect(after!.state).toBe("consumed");
     expect(JSON.parse(after!.payload).disposition).toMatchObject({ kind: "cancelled", reason: "最终报告已经出来，已告诉用户" });

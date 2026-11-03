@@ -76,6 +76,7 @@ export * from "./lead-profile.js";
 export * from "./lead-avatar.js";
 export * from "./design-preferences.js";
 export * from "./reply-style.js";
+export * from "./channel-connections.js";
 export * from "./security-alerts.js";
 export * from "./reminder-occurrence.js";
 export * from "./reminders.js";

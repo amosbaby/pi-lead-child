@@ -8,21 +8,32 @@
 //   3. 状态：每个来源在内存里记 status、lastError、lastConnectedAt、account、missingScopes。channels.ts 在传输连上、断开、
 //      连不上时报来（onSourceStatus）。变了就推 snapshot.required（resource channel-settings）。
 //   4. 「不是我」（网关的 owner-actions.ts）：保险库里这个来源的密钥还是那次保存的版本时，删掉并热重连。
+//   5. 连接方式（2026-11-02，有几种方式的来源，ChannelAdapter.connection）：操作层的 channel_connection 经过这里。
+//      - 登录：打开来源的登录窗口（不等它），用户登录以后按那种方式的检查试一次，全过才存进保险库、记下换到这种方式、热重连。
+//        同一时间一个来源只有一个登录窗口；取消、超时、窗口关掉都记成登录的结果，设置页和 Lead 都看得到。
+//      - 换回不用登录的方式：记下来，热重连。
+//      - 「代你往来源里写」开关：只记下来，马上生效（来源每次写之前读它）。
+//      选的方式和开关存在 store 的 channel-connections.ts。
 // 密钥的值不进日志、事件、错误和响应：检查结果、状态里的错误都先把这次涉及的密钥原样换掉，再按通用规则脱敏。
 import { createHash } from "node:crypto";
 import { channelSecretVaultName } from "@pi-lead-child/core";
 import type { SecretVault } from "@pi-lead-child/connections";
-import type { ChannelAdapter } from "@pi-lead-child/engine";
+import {
+  ChannelSignInError, UiActionError,
+  type ChannelAdapter, type ChannelConnectionControl, type ChannelConnectionService, type ChannelConnectionState, type ChannelSettingsSpec,
+  type ChannelSignInFailure,
+} from "@pi-lead-child/engine";
 import { ChannelSettingsError, type ChannelSettingsService, type ChannelSourceSettingsView } from "@pi-lead-child/gateway";
 import {
   redactSecretText,
+  type ChannelConnectionDto,
   type ChannelSecretCheck,
   type ChannelSecretOrigin,
   type ChannelSecretsTestResult,
   type ChannelSourceAccount,
   type ChannelSourceStatus,
 } from "@pi-lead-child/protocol";
-import { getLocale, type Db } from "@pi-lead-child/store";
+import { getChannelConnection, getLocale, setChannelConnectionMode, setChannelWrites, type Db } from "@pi-lead-child/store";
 import { channelSettingsMessages } from "./channel-settings.messages.js";
 import type { ChannelSourceStatusUpdate } from "./channels.js";
 import { SealedSecrets } from "./sealed-secrets.js";
@@ -42,7 +53,11 @@ export interface ChannelSettingsOptions {
   now?: () => Date;
   // 一次检查最多等多久。缺省 30 秒（Web API 自己有超时和重试，这里再兜一层）。
   testTimeoutMs?: number;
+  // 登录窗口最多开多久（设置页显示的剩余时间；来源自己也按这个时长关窗口）。缺省 5 分钟。
+  signInWindowMs?: number;
 }
+
+type SignInState = NonNullable<ChannelConnectionState["signIn"]>;
 
 interface SourceState {
   status: ChannelSourceStatus;
@@ -54,9 +69,18 @@ interface SourceState {
 }
 
 const DEFAULT_TEST_TIMEOUT_MS = 30_000;
+const DEFAULT_SIGN_IN_WINDOW_MS = 5 * 60_000;
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const SIGN_IN_FAILURES = new Set<string>(["cancelled", "window_closed", "timed_out", "no_browser", "checks_failed", "failed"]);
+
+// 登录没有成功的原因：来源抛的 ChannelSignInError 带着它（按名字认：engine 在测试里可能加载两份）。别的错误都是 failed。
+function signInFailureOf(error: unknown): ChannelSignInFailure {
+  const code = error instanceof Error && error.name === "ChannelSignInError" ? (error as { code?: unknown }).code : null;
+  return typeof code === "string" && SIGN_IN_FAILURES.has(code) ? code as ChannelSignInFailure : "failed";
 }
 
 /** 去掉文字里的这些值（4 个字符以上的），再按通用的规则脱敏。 */
@@ -79,9 +103,11 @@ function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
   ]).finally(() => clearTimeout(timer));
 }
 
-export class ChannelSettings implements ChannelSettingsService {
+export class ChannelSettings implements ChannelSettingsService, ChannelConnectionService {
   private readonly sealed: SealedSecrets;
   private readonly states = new Map<string, SourceState>();
+  // 每个来源最近一次登录，和还在等时取消它用的 AbortController。
+  private readonly signIns = new Map<string, { state: SignInState; controller: AbortController | null }>();
   private readonly unreadable = new Set<string>();
   private sources: { adapters: () => readonly ChannelAdapter[]; reload: (source: string) => Promise<void> } | null = null;
   private queue: Promise<unknown> = Promise.resolve();
@@ -136,7 +162,7 @@ export class ChannelSettings implements ChannelSettingsService {
 
   // ── 状态 ──────────────────────────────────────────────────────────────────────────
 
-  private state(source: string): SourceState {
+  private sourceState(source: string): SourceState {
     let state = this.states.get(source);
     if (!state) {
       state = { status: "not_configured", lastError: null, lastConnectedAt: null, account: null, missingScopes: [] };
@@ -147,7 +173,7 @@ export class ChannelSettings implements ChannelSettingsService {
 
   // 改状态；变了就通知客户端。
   private change(source: string, mutate: (state: SourceState) => void): void {
-    const state = this.state(source);
+    const state = this.sourceState(source);
     const before = JSON.stringify(state);
     mutate(state);
     if (JSON.stringify(state) !== before) this.options.publish?.();
@@ -176,7 +202,10 @@ export class ChannelSettings implements ChannelSettingsService {
           return;
         case "error":
           state.status = "error";
-          state.lastError = this.scrubFor(source, update.error).slice(0, 500) || this.m().cannotConnect;
+          // 登录失效有固定的说法，按用户现在的语言写；别的错误照来源的原话。
+          state.lastError = update.reason === "signed_out"
+            ? this.m().signedOut
+            : this.scrubFor(source, update.error).slice(0, 500) || this.m().cannotConnect;
           return;
       }
     });
@@ -207,7 +236,7 @@ export class ChannelSettings implements ChannelSettingsService {
 
   private view(adapter: ChannelAdapter): ChannelSourceSettingsView {
     const settings = adapter.settings!;
-    const state = this.state(adapter.id);
+    const state = this.sourceState(adapter.id);
     return {
       source: adapter.id,
       label: adapter.label.slice(0, 60),
@@ -255,7 +284,9 @@ export class ChannelSettings implements ChannelSettingsService {
     return { merged, current };
   }
 
-  private async runTest(adapter: ChannelAdapter, secrets: Readonly<Record<string, string>>): Promise<ChannelSecretsTestResult> {
+  private async runTest(
+    adapter: ChannelAdapter, secrets: Readonly<Record<string, string>>, spec: ChannelSettingsSpec = adapter.settings!,
+  ): Promise<ChannelSecretsTestResult> {
     const values = Object.values(secrets);
     const scrub = (text: string) => scrubSecretValues(text, values);
     const log = (line: string) => this.options.log(`[channel-settings] ${adapter.id}: ${scrub(line)}`);
@@ -263,7 +294,7 @@ export class ChannelSettings implements ChannelSettingsService {
     const m = this.m();
     let result: ChannelSecretsTestResult;
     try {
-      result = await withTimeout(adapter.settings!.test(secrets, { log }), timeoutMs);
+      result = await withTimeout(spec.test(secrets, { log }), timeoutMs);
     } catch (error) {
       const detail = error instanceof TestTimeout
         ? m.timedOut(adapter.label, Math.round(timeoutMs / 1000))
@@ -360,6 +391,142 @@ export class ChannelSettings implements ChannelSettingsService {
       this.options.publish?.();
       return { status: "reverted" as const, source: this.view(adapter) };
     });
+  }
+
+  // ── 连接方式 ──────────────────────────────────────────────────────────────────────
+
+  private connectionOf(source: string): { adapter: ChannelAdapter; control: ChannelConnectionControl } {
+    const adapter = this.adapter(source);
+    if (!adapter.connection) throw new UiActionError("not_found", this.m().noConnectionModes(adapter.label));
+    return { adapter, control: adapter.connection };
+  }
+
+  state(source: string): ChannelConnectionState | null {
+    const adapter = this.settingsAdapters().find((candidate) => candidate.id === source);
+    const control = adapter?.connection;
+    if (!adapter || !control) return null;
+    const mode = control.mode();
+    return {
+      source, label: adapter.label.slice(0, 60), mode,
+      modes: control.modes.map((name) => ({ mode: name, needsSignIn: control.needsSignIn(name), writesSwitch: control.writesSwitch(name) })),
+      writes: control.writesSwitch(mode) ? getChannelConnection(this.options.db, source).writes : null,
+      writesBlocked: adapter.writesBlocked?.() ?? null,
+      signIn: this.signIns.get(source)?.state ?? null,
+    };
+  }
+
+  /** 设置页读的连接方式（GET /v1/channels/settings/:source/connection）：没有给 Lead 的原因和日志里的错误。 */
+  connection(source: string): ChannelConnectionDto | null {
+    const state = this.state(source);
+    if (!state) return null;
+    const signIn = state.signIn;
+    return {
+      source: state.source, mode: state.mode, modes: state.modes, writes: state.writes,
+      signIn: signIn
+        ? { mode: signIn.mode, state: signIn.state, startedAt: signIn.startedAt, expiresAt: signIn.expiresAt, code: signIn.code }
+        : null,
+    };
+  }
+
+  private settle(source: string, update: Pick<SignInState, "state" | "code" | "error">): void {
+    const known = this.signIns.get(source);
+    if (!known) return;
+    this.signIns.set(source, { state: { ...known.state, ...update, expiresAt: null }, controller: null });
+    this.options.publish?.();
+  }
+
+  signIn(source: string, mode: string): ChannelConnectionState {
+    const { adapter, control } = this.connectionOf(source);
+    const m = this.m();
+    if (!control.modes.includes(mode)) throw new UiActionError("invalid_input", m.unknownMode(adapter.label, mode));
+    if (!control.needsSignIn(mode)) throw new UiActionError("invalid_input", m.modeNoSignIn(mode));
+    if (this.signIns.get(source)?.state.state === "waiting") throw new UiActionError("unavailable", m.signInWaiting);
+    const controller = new AbortController();
+    const started = this.now();
+    const windowMs = this.options.signInWindowMs ?? DEFAULT_SIGN_IN_WINDOW_MS;
+    this.signIns.set(source, {
+      state: {
+        mode, state: "waiting", startedAt: started.toISOString(), expiresAt: new Date(started.getTime() + windowMs).toISOString(),
+        code: null, error: null,
+      },
+      controller,
+    });
+    this.options.publish?.();
+    const log = (line: string) => this.options.log(`[channel-settings] ${source}: ${redactSecretText(line)}`);
+    log(`opening the sign-in window for the ${mode} connection`);
+    void (async () => {
+      let secrets: Readonly<Record<string, string>>;
+      try {
+        secrets = await control.signIn(mode, { log, signal: controller.signal });
+      } catch (error) {
+        const cancelled = controller.signal.aborted;
+        log(`sign-in ${cancelled ? "cancelled" : "failed"}: ${errorText(error)}`);
+        this.settle(source, {
+          state: cancelled ? "cancelled" : "failed", code: cancelled ? "cancelled" : signInFailureOf(error),
+          error: redactSecretText(errorText(error)).slice(0, 300),
+        });
+        return;
+      }
+      const values = Object.values(secrets);
+      try {
+        await this.serial(async () => {
+          const spec = control.settingsFor(mode);
+          const declared = spec.secrets.map((item) => item.name);
+          const merged = Object.fromEntries(declared.flatMap((name) => (secrets[name]?.trim() ? [[name, secrets[name]!.trim()]] : [])));
+          const result = await this.runTest(adapter, merged, spec);
+          if (!result.ok) {
+            throw new ChannelSignInError("checks_failed",
+              m.signInChecksFailed(result.checks.filter((item) => !item.pass).map((item) => `${item.label}（${item.detail}）`).join("；")));
+          }
+          for (const [name, value] of Object.entries(merged)) this.sealed.set(channelSecretVaultName(name), { value, host: null });
+          setChannelConnectionMode(this.options.db, source, mode);
+          this.change(source, (state) => {
+            state.account = result.account;
+            state.missingScopes = [...result.missingScopes];
+          });
+          log(`signed in; saved ${Object.keys(merged).join(", ")} to the vault, switched to the ${mode} connection; reconnecting`);
+          await this.reload(adapter);
+        });
+        this.settle(source, { state: "done", code: null, error: null });
+      } catch (error) {
+        const text = scrubSecretValues(errorText(error), values).slice(0, 500);
+        log(`sign-in not saved: ${text}`);
+        this.settle(source, { state: "failed", code: signInFailureOf(error), error: text });
+      }
+    })();
+    return this.state(source)!;
+  }
+
+  cancelSignIn(source: string): ChannelConnectionState {
+    this.connectionOf(source);
+    const known = this.signIns.get(source);
+    if (known?.state.state !== "waiting" || !known.controller) throw new UiActionError("unavailable", this.m().noSignInWaiting);
+    known.controller.abort();
+    return this.state(source)!;
+  }
+
+  async useMode(source: string, mode: string): Promise<ChannelConnectionState> {
+    const { adapter, control } = this.connectionOf(source);
+    const m = this.m();
+    if (!control.modes.includes(mode)) throw new UiActionError("invalid_input", m.unknownMode(adapter.label, mode));
+    if (control.needsSignIn(mode)) throw new UiActionError("invalid_input", m.modeNeedsSignIn(mode));
+    await this.serial(async () => {
+      if (control.mode() === mode) return;
+      setChannelConnectionMode(this.options.db, source, mode);
+      this.options.log(`[channel-settings] ${source}: switched to the ${mode} connection; reconnecting`);
+      await this.reload(adapter);
+    });
+    this.options.publish?.();
+    return this.state(source)!;
+  }
+
+  setWrites(source: string, allowed: boolean): ChannelConnectionState {
+    const { control } = this.connectionOf(source);
+    if (!control.writesSwitch(control.mode())) throw new UiActionError("unavailable", this.m().noWritesSwitch);
+    setChannelWrites(this.options.db, source, allowed);
+    this.options.log(`[channel-settings] ${source}: sending on the user's behalf is ${allowed ? "allowed" : "off"}`);
+    this.options.publish?.();
+    return this.state(source)!;
   }
 }
 

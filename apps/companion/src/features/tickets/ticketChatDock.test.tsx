@@ -70,13 +70,13 @@ describe('the ticket chat dock', () => {
   it('shows the latest reply as plain text while collapsed, with the composer', () => {
     renderDock();
     const preview = screen.getByTestId('ticket-chat-preview');
-    expect(preview.textContent).toContain('Executor agent · ');
+    expect(preview.textContent).toContain('Executor · ');
     expect(preview.textContent).toContain('我建议派一次新的核查，把 typecheck / build 补齐。');
     expect(within(screen.getByTestId('ticket-chat-dock')).getByRole('textbox')).toBeTruthy();
     // 2026-10-15 方案 A：说明写清楚消息会去哪里。没有 Run 在跑时开一个对话 Run。
     // （以前写「发给 #66 的执行 agent · child #87 · 每条消息开一次对话 Run」：#87 其实是核查 agent，运行中也不会开对话 Run。）
     expect(screen.getByTestId('ticket-chat-identity').textContent)
-      .toBe('To the agent of #66 · Starts a conversation Run. The ticket state does not change.');
+      .toBe('To the agent of #66 · Starts a new conversation. The ticket state does not change.');
   });
 
   it('marks a reply that arrived after the last one you saw', () => {
@@ -99,11 +99,11 @@ describe('the ticket chat dock', () => {
   it('regression #66: says a run that has been starting for minutes may be stuck', () => {
     renderDock({
       liveRun: {
-        runId: 73, purpose: 'review', label: '核查 Run #73 · 正在准备', phase: 'starting', elapsedMs: 13 * 60_000, stalled: true,
+        runId: 73, purpose: 'review', label: '核查 · 正在准备', phase: 'starting', elapsedMs: 13 * 60_000, stalled: true,
       },
     });
     const row = screen.getByTestId('ticket-chat-live-run');
-    expect(row.textContent).toContain('核查 Run #73 · 正在准备');
+    expect(row.textContent).toContain('核查 · 正在准备');
     expect(row.textContent).toContain('13 min so far');
     expect(row.textContent).toContain('It can be stuck.');
   });
@@ -267,7 +267,7 @@ describe('the ticket chat composer', () => {
   it('sends a progress question to the agent, with no answerer and no switch', () => {
     const { onSendMessage } = renderDock({ chatResume: resume });
     type('现在进展怎么样');
-    expect(screen.getByTestId('ticket-chat-identity').textContent).toBe('To the reviewer agent of #66 · Continues the session of Run #73. The ticket state does not change.');
+    expect(screen.getByTestId('ticket-chat-identity').textContent).toBe('To the reviewer of #66 · Continues the last session. The ticket state does not change.');
     expect(screen.queryByText(/由 Lead 回答/)).toBeNull();
     expect(screen.queryByText('改问 Lead')).toBeNull();
     expect(screen.queryByText('改问执行者')).toBeNull();

@@ -21,9 +21,16 @@
 // 装了这个应用的人（Events API 的 authorizations）：和真的 Slack 一样，一个事件只发一次，authorizations 里只写一个能看到它的人，
 // 完整名单用 event_context 调 apps.event.authorizations.list（只认 App-Level Token，要 authorizations:read，可以分页）。
 // 缺省只有用户本人能看到；seenBy 改成别的装了这个应用的人（例如共用一个应用的同事）。
+// 浏览器会话（网页版 Slack 的协议，2026-11-02）：sessionFetch 和 createSessionSocket 注入 gabriel-slack 的 GabrielCore。
+//   - 换令牌：GET https://app.slack.com/auth（Cookie 头带 d=<会话 cookie>）。cookie 对时回工作区、用户和会话令牌（xoxc-），
+//     不对或者会话结束了（endSession）时和真的 Slack 一样回跳转到登录页。
+//   - 工作区 Web API：POST https://home.slack.com/api/<method>，表单里带会话令牌，Cookie 头带 cookie。两个都对才认，
+//     方法和 api 一样。
+//   - WebSocket：地址里带会话令牌，请求头带 cookie。连上以后发 hello；回 ping；sessionPush 把一次投递里的消息当成网页版的
+//     消息帧发过去（没有 channel_type，没有外层的 envelope）；sessionReconnectUrl 发 reconnect_url；dropSession 断线。
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { SLACK_APP_TOKEN_ENV } from "@pi-lead-child/core";
+import { SLACK_APP_TOKEN_ENV, SLACK_SESSION_COOKIE_ENV } from "@pi-lead-child/core";
 import type {
   ChannelCredential, ChannelDelivery, SlackFetch, SlackSocketClient, SlackSocketClientFactory, SlackSocketEvent, SlackWebApi,
 } from "../../src/index.js";
@@ -95,6 +102,11 @@ export const FAKE_SLACK_TOKEN = "xoxp-fake-sentinel-token-7f3a9c";
 export const FAKE_SLACK_SIGNING_SECRET = "fake-slack-signing-secret-91be0d";
 export const FAKE_SLACK_APP_TOKEN = "xapp-1-AFAKE-sentinel-app-token-5d2e81";
 export const FAKE_SLACK_BOT_TOKEN = "xoxb-fake-sentinel-bot-token-3c9e1a";
+// 浏览器会话的 cookie 和用它换出的会话令牌。和别的哨兵值一样不能出现在日志、事件和卡片里。
+export const FAKE_SLACK_SESSION_COOKIE = "xoxd-fake-sentinel-session-cookie-4b7e2a";
+export const FAKE_SLACK_SESSION_TOKEN = "xoxc-fake-sentinel-session-token-8d1f3c";
+// 网页版的工作区地址（会话方式的 Web API 发到这里）。
+export const FAKE_SLACK_WORKSPACE_URL = "https://home.slack.com/";
 // Slack 通道的应用清单要的用户权限（.scratch/slack-takeover/setup.md）。
 export const FAKE_SLACK_USER_SCOPES: readonly string[] = [
   "channels:history", "groups:history", "im:history", "mpim:history",
@@ -160,6 +172,48 @@ export class FakeSocketModeClient extends EventEmitter implements SlackSocketCli
   }
 }
 
+/** 假的网页版 WebSocket（gabriel-slack 的 WebSocketLike：ws 包的那几个方法）。 */
+export class FakeSessionSocket extends EventEmitter {
+  readyState = 0;
+  // 客户端发上来的帧（ping 之类）。
+  readonly sent: Array<Record<string, unknown>> = [];
+
+  constructor(private readonly slack: FakeSlack, readonly url: string, readonly headers: Readonly<Record<string, string>>) {
+    super();
+  }
+
+  send(data: string): void {
+    const frame = JSON.parse(data) as Record<string, unknown>;
+    this.sent.push(frame);
+    // 和真的连接一样，回答晚一拍到：客户端发完以后才开始等 reply_to。
+    if (frame.type === "ping" && typeof frame.id === "number") {
+      const id = frame.id;
+      setTimeout(() => {
+        if (this.readyState === 1) this.frame({ type: "pong", reply_to: id });
+      }, 0);
+    }
+  }
+
+  close(code = 1000): void {
+    if (this.readyState === 3) return;
+    this.readyState = 3;
+    queueMicrotask(() => this.emit("close", code, ""));
+  }
+
+  /** 发一个帧给客户端。 */
+  frame(frame: Record<string, unknown>): void {
+    if (this.readyState !== 1) throw new Error("the fake session socket is not open");
+    this.emit("message", JSON.stringify(frame));
+  }
+
+  open(): void {
+    this.readyState = 1;
+    this.emit("open");
+    this.frame({ type: "hello", fast_reconnect: false });
+    this.slack.sessionConnections += 1;
+  }
+}
+
 export class FakeSlack {
   readonly teamId: string;
   readonly self: { id: string; name: string };
@@ -189,6 +243,15 @@ export class FakeSlack {
   readonly timeline: string[] = [];
   connections = 0;
   nextEnvelope = 1;
+  // 浏览器会话：会话方式的凭据、建过的 WebSocket、连上过几次、会话还在不在（endSession 结束它）。
+  readonly sessionCredential: ChannelCredential;
+  readonly sessionSockets: FakeSessionSocket[] = [];
+  sessionConnections = 0;
+  // 用 cookie 换会话（GET /auth）成功了几次。
+  sessionSignIns = 0;
+  sessionLive = true;
+  // 会话方式的 Web API 收到的方法名（不含令牌和 cookie）。
+  readonly sessionCalls: string[] = [];
   private readonly now: () => Date;
   private nextEvent = 1;
   // 每个事件的 event_context → 装了这个应用、能看到它的人（apps.event.authorizations.list 的回答）。
@@ -223,6 +286,10 @@ export class FakeSlack {
       account: this.self.id,
       accountName: this.self.name,
       secrets: { [SLACK_APP_TOKEN_ENV]: this.appToken },
+    };
+    this.sessionCredential = {
+      token: FAKE_SLACK_SESSION_COOKIE, account: this.self.id, accountName: this.self.name,
+      secrets: { [SLACK_SESSION_COOKIE_ENV]: FAKE_SLACK_SESSION_COOKIE },
     };
     this.now = options.now ?? (() => new Date());
   }
@@ -547,6 +614,11 @@ export class FakeSlack {
     this.failures.set("chat.postMessage", `401 for token ${this.credential.token} (secret ${this.credential.signingSecret}, app ${this.appToken})`);
   }
 
+  /** 下一次 chat.postMessage 失败，报错的文字里带着会话 cookie 和会话令牌（浏览器会话方式下的不小心的客户端库）。 */
+  failNextPostEchoingSession(): void {
+    this.failures.set("chat.postMessage", `401 for cookie d=${FAKE_SLACK_SESSION_COOKIE} (token ${FAKE_SLACK_SESSION_TOKEN})`);
+  }
+
   /** 下一次调用这个方法时网络出错。 */
   failNext(method: string, message: string): void {
     this.failures.set(method, message);
@@ -614,6 +686,107 @@ export class FakeSlack {
 
   takeSocketFailure(): string | undefined {
     return this.socketFailures.shift();
+  }
+
+  // ── 浏览器会话（网页版协议）──────────────────────────────────────────────────────
+
+  private sessionCookieOk(cookieHeader: string | null): boolean {
+    return this.sessionLive && cookieHeader === `d=${FAKE_SLACK_SESSION_COOKIE}`;
+  }
+
+  /** 网页版的 HTTP 替身：换令牌和工作区 Web API。 */
+  readonly sessionFetch = (async (url: string | URL, init?: { headers?: unknown; body?: unknown; method?: string }) => {
+    const target = new URL(String(url));
+    const headers = new Headers(init?.headers as HeadersInit | undefined);
+    const cookieOk = this.sessionCookieOk(headers.get("cookie"));
+    if (target.origin === "https://app.slack.com" && target.pathname === "/auth") {
+      if (!cookieOk) return new Response("", { status: 302, headers: { location: "https://slack.com/signin" } });
+      this.sessionSignIns += 1;
+      return Response.json({
+        teams: {
+          [this.teamId]: {
+            id: this.teamId, name: "Home", domain: "home", url: FAKE_SLACK_WORKSPACE_URL, user_id: this.self.id, token: FAKE_SLACK_SESSION_TOKEN,
+          },
+        },
+      });
+    }
+    if (`${target.origin}/` === FAKE_SLACK_WORKSPACE_URL && target.pathname.startsWith("/api/")) {
+      const method = target.pathname.slice("/api/".length);
+      const fields: Record<string, unknown> = {};
+      const body = init?.body;
+      const entries: Iterable<[string, unknown]> = body instanceof FormData ? body.entries()
+        : body instanceof URLSearchParams ? body.entries() : new URLSearchParams(typeof body === "string" ? body : "").entries();
+      for (const [key, value] of entries) {
+        const text = String(value);
+        fields[key] = text.startsWith("{") || text.startsWith("[") ? JSON.parse(text) : text;
+      }
+      const { token, ...args } = fields;
+      for (const key of Object.keys(args)) if (key.startsWith("_x_")) delete args[key];
+      if (!cookieOk || token !== FAKE_SLACK_SESSION_TOKEN) return Response.json({ ok: false, error: "invalid_auth" });
+      this.sessionCalls.push(method);
+      const result = await this.handle(method, args, this.credential.token);
+      const { response_metadata: _scopes, ...rest } = result;
+      return Response.json(rest);
+    }
+    if (target.origin === "https://files.slack.com") {
+      this.downloads.push(target.toString());
+      const file = [...this.files.values()].find((candidate) => candidate.url === target.toString());
+      if (!file) return new Response("not found", { status: 404 });
+      if (!cookieOk || headers.get("authorization") !== `Bearer ${FAKE_SLACK_SESSION_TOKEN}`) {
+        return new Response("<!DOCTYPE html><title>Slack</title>", { status: 200, headers: { "content-type": "text/html; charset=utf-8" } });
+      }
+      return new Response(Buffer.from(file.data), {
+        status: 200, headers: { "content-type": file.mimetype, "content-length": String(file.data.byteLength) },
+      });
+    }
+    return new Response("not found", { status: 404 });
+  }) as typeof globalThis.fetch;
+
+  /** 网页版 WebSocket 的替身（gabriel-slack 的 createWebSocket）。令牌或 cookie 不对时握手被拒（401）。 */
+  readonly createSessionSocket = (url: string, headers: Record<string, string>): FakeSessionSocket => {
+    const socket = new FakeSessionSocket(this, url, headers);
+    this.sessionSockets.push(socket);
+    const token = new URL(url).searchParams.get("token");
+    const ok = this.sessionCookieOk(headers.Cookie ?? null) && token === FAKE_SLACK_SESSION_TOKEN;
+    setTimeout(() => {
+      if (socket.readyState === 3) return;
+      if (!ok) {
+        socket.emit("unexpected-response", {}, { statusCode: 401, headers: {} });
+        return;
+      }
+      socket.open();
+    }, 0);
+    return socket;
+  };
+
+  /** 现在连着的网页版 WebSocket。 */
+  sessionSocket(): FakeSessionSocket | undefined {
+    return this.sessionSockets.filter((socket) => socket.readyState === 1).at(-1);
+  }
+
+  /** 把一次投递里的消息当成网页版的消息帧发给连着的客户端：没有 channel_type，没有外层的 envelope。 */
+  sessionPush(delivery: ChannelDelivery): void {
+    const socket = this.sessionSocket();
+    if (!socket) throw new Error("no session socket is connected");
+    const { channel_type: _type, ...event } = (JSON.parse(delivery.body) as { event: Record<string, unknown> }).event;
+    socket.frame(event);
+  }
+
+  /** Slack 给客户端一个快速重连的地址。 */
+  sessionReconnectUrl(url: string): void {
+    this.sessionSocket()?.frame({ type: "reconnect_url", url });
+  }
+
+  /** 网页版的连接断了。 */
+  dropSession(): void {
+    this.sessionSocket()?.close(1006);
+  }
+
+  /** 会话结束了（例如 SSO 过期、用户在 Slack 里登出了所有设备）：cookie 换不出令牌，令牌也不认了。 */
+  endSession(): void {
+    this.sessionLive = false;
+    const socket = this.sessionSocket();
+    if (socket) socket.frame({ type: "error", error: { msg: "invalid_auth", code: 1 } });
   }
 
   // ── 投递（Events API）──────────────────────────────────────────────────────────────

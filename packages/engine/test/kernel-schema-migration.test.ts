@@ -1035,8 +1035,9 @@ describe("schema version", () => {
     // v60（2026-10-29，Hindsight 为主的记忆）：memory_sync、memory_invalidations（store/test/memory-sync-migration.test.ts）。
     // v61（2026-10-30，自定义控件）：widgets（store/test/widgets-migration.test.ts）。
     // v62（2026-10-30，控件的数据源）：widget_sources（store/test/widgets-migration.test.ts）。
-    expect(LATEST_SCHEMA_VERSION).toBe(62);
-    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 62 });
+    // v63（2026-11-02，Lead 自己装本地 MCP）：connections.launch_json（store/test/connection-launch-migration.test.ts）。
+    expect(LATEST_SCHEMA_VERSION).toBe(63);
+    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 63 });
   });
 });
 

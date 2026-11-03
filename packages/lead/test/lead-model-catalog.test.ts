@@ -134,7 +134,7 @@ describe("the Lead model catalog", () => {
       fetched.push(new URL(String(input)).port);
       throw new Error("fetch failed");
     };
-    const result = await registerLeadProviders(runtime, twoProviders, {}, failing as typeof fetch, new Set(["spare"]));
+    const result = await registerLeadProviders(runtime, twoProviders, {}, failing as typeof fetch, { only: new Set(["spare"]) });
     expect(registered).toEqual(["spare"]);
     expect(fetched.every((port) => port === "8318")).toBe(true);
     expect(result.unavailable.map((entry) => entry.provider)).toEqual(["spare"]);
@@ -166,6 +166,22 @@ describe("the Lead model catalog", () => {
     expect(shouldCompact(480_000, lead.contextWindow, DEFAULT_COMPACTION_SETTINGS)).toBe(false);
     expect(shouldCompact(490_000, lead.contextWindow, DEFAULT_COMPACTION_SETTINGS)).toBe(true);
     expect(PRECIPITATE_RATIO * lead.contextWindow).toBeLessThan(lead.contextWindow - DEFAULT_COMPACTION_SETTINGS.reserveTokens);
+  });
+
+  // 2026-11-02：子 agent 在一次调用里写整份评审，写满 16384 就被截断（Run #222、#223）。子 agent 的会话另起一个 ModelRuntime，
+  // 按目录给的上限注册，只是不超过它要的值；Lead 的会话照旧 16384。
+  it("registers a larger output limit when asked, still capped by the catalog", async () => {
+    const registered: Array<{ id: string; maxTokens: number }> = [];
+    await registerLeadProviders(
+      { registerProvider(_name: string, input: { models?: typeof registered }) { registered.push(...(input.models ?? [])); } } as never,
+      config(["vibeproxy/as4/claude-sonnet-5(high)"]),
+      {},
+      vibeproxy as typeof fetch,
+      { maxOutputTokens: 32_000 },
+    );
+    const limit = (id: string) => registered.find((model) => model.id === id)?.maxTokens;
+    expect(limit("as4/claude-sonnet-5(high)")).toBe(32_000);
+    expect(limit("gemini-3.8-flash-high")).toBe(8_192);
   });
 
   it("accepts an effort the model supports and refuses one it does not, naming the choices", async () => {

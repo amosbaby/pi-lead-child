@@ -29,6 +29,17 @@ const NEGATED_REPO = /(?:^|[\s(])-repo:/i;
 // get_file_contents 在文件内容前面加一句状态，例如「successfully downloaded text file (SHA: 1a2b…)」，再空一行。
 const FILE_PREAMBLE = /^successfully downloaded[^\n]*\n\n/i;
 const FILE_SHA = /\(SHA:\s*([0-9a-f]{7,64})\)/i;
+
+/**
+ * 给子 agent 看的 GitHub 文件带上行号（「行号\t内容」，和 local 的 read_file 一样）。行号和读取记录（observe）一样，从状态那句和空行
+ * 以后的第 1 行算。子 agent 以前只能自己数行，常差一两行，出处核实就判它对不上（2026-11-02）。不是文件内容（目录、错误）时原样返回。
+ */
+export function numberedGithubFile(text: string): string {
+  const preamble = FILE_PREAMBLE.exec(text);
+  if (!preamble) return text;
+  const lines = text.slice(preamble[0].length).split(/\r?\n/);
+  return `${preamble[0]}${lines.map((line, index) => `${String(index + 1).padStart(6)}\t${line}`).join("\n")}`;
+}
 const COMMIT_SHA = /^[0-9a-f]{7,64}$/i;
 const GITHUB_LINK = /^https:\/\/github\.com\/[^\s<>|"]{1,400}$/;
 

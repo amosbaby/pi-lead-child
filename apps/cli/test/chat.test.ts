@@ -48,6 +48,18 @@ describe("ChatRenderer", () => {
     expect(r.prompts()).toBe(1);
   });
 
+  // App 里的对象链接（设计规范 P14.7）在终端里点不了：只印链接的文字。链接被拆在几段里流过来也一样。
+  it("prints the words of a link to an App object, even when it streams in pieces", () => {
+    const r = renderer();
+    r.chat.event(event("lead.turn.started", { mode: "started" }));
+    for (const delta of ["回 [Ethan 的", "私信](plc:ca", "rd/134) 的草稿放好了，", "见 [文档](https://doc.test/a)。[注"]) {
+      r.chat.event(event("lead.message.delta", { delta }));
+    }
+    r.chat.event(event("lead.message.completed", { text: "" }));
+    expect(r.text()).toContain("回 Ethan 的私信 的草稿放好了，见 [文档](https://doc.test/a)。[注");
+    expect(r.text()).not.toContain("plc:");
+  });
+
   // generative UI spec D8：命令行画不了卡片，打印 Lead 写的 fallback_text，不打印节点表。
   it("prints a card's fallback text instead of its node list", () => {
     const r = renderer();

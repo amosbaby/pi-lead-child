@@ -4,6 +4,7 @@ import { useState } from 'react';
 
 import { useLocale, useMessages } from '@/i18n';
 
+import type { DeliveryNumbers } from './deliveryNumbers';
 import { buildEvidencePresentation, type EvidenceRow, type EvidenceState } from './ticketEvidence';
 import { ticketRecordsMessages } from './ticketRecords.messages';
 
@@ -47,7 +48,12 @@ function EvidenceRows({ rows }: { rows: EvidenceRow[] }) {
 
 // 验收证据：最新交付的证据在上面，更早 Run 的条目按 Run 折叠在下面（F6）。
 // 条目状态只用数据里的状态；不再用正则把 agent 的借口改判成"环境限制"（F7）。
-export function PowPanel({ pow, outcome }: { pow: KernelTicketPow | null; outcome?: KernelOutcomeSnapshotResource | null }) {
+export function PowPanel({ pow, outcome, deliveryNumbers }: {
+  pow: KernelTicketPow | null;
+  outcome?: KernelOutcomeSnapshotResource | null;
+  /** 每次交付是第几次（deliveryNumbers.ts）。 */
+  deliveryNumbers?: DeliveryNumbers;
+}) {
   const locale = useLocale();
   const m = useMessages(ticketRecordsMessages);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -59,7 +65,7 @@ export function PowPanel({ pow, outcome }: { pow: KernelTicketPow | null; outcom
       </Column>
     );
   }
-  const evidence = buildEvidencePresentation(pow, outcome, locale);
+  const evidence = buildEvidencePresentation(pow, outcome, locale, deliveryNumbers);
   const colors = SUMMARY_COLORS[evidence.summary.tone];
   return (
     <Column testID="pow-panel">

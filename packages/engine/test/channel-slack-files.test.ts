@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { getEvent, openDb, type Db } from "@pi-lead-child/store";
-import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, createSlackWebApi, slackMessageText } from "../src/index.js";
+import { ChannelHub, ChannelRegistry, createSlackChannelAdapter, createSlackWebApi, slackAttachmentsOnly, slackMessageText } from "../src/index.js";
 import { FAKE_SLACK_USER_SCOPES, FakeSlack } from "../testing/index.js";
 
 // 一个 1×1 的 PNG。
@@ -91,6 +91,16 @@ describe("the file markers in a Slack message", () => {
         { id: "F04", mode: "hidden_by_limit" },
       ],
     })).toBe("两个附件\n[图片 a.png，文件编号 slack:F01]\n[文件 spec.pdf，application/pdf，文件编号 slack:F02]\n[文件 看不到：超出了工作区的存储上限]");
+  });
+
+  // 2026-11-02：只有截图的消息，收件判断只看得到文件的标记，被判成「要你的私人数据」。hub 按这个标记不让敏感分数进底线。
+  it("tells a message that is only files (and mentions) from one with words", () => {
+    const shot = { id: "F01", name: "a.png", mimetype: "image/png" };
+    expect(slackAttachmentsOnly({ text: "", files: [shot] })).toBe(true);
+    expect(slackAttachmentsOnly({ text: " <@U0DAVE>  ", files: [shot] })).toBe(true);
+    expect(slackAttachmentsOnly({ text: "<@U0DAVE> 看下这个报错", files: [shot] })).toBe(false);
+    expect(slackAttachmentsOnly({ text: "", files: [{ id: "F02", mode: "tombstone" }] })).toBe(false);
+    expect(slackAttachmentsOnly({ text: "" })).toBe(false);
   });
 });
 

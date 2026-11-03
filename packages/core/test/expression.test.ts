@@ -39,7 +39,10 @@ describe("expression section", () => {
     const usable = EXPRESSION_SECTION.slice(EXPRESSION_SECTION.indexOf("### 可用："), EXPRESSION_SECTION.indexOf("### 按信息的形状选形式"));
     expect(usable).toContain("不编造。");
     expect(usable).toContain("如实写验证。");
-    expect(usable).toContain("证据要能定位：工单写 #编号，Run 写 Run #编号，代码写 `路径:行号`");
+    expect(usable).toContain("证据要能定位：工单写 #编号，代码写 `路径:行号`");
+    // 2026-11-02：系统内部的编号（Run、外来消息卡……）不写给用户看（设计规范 P14.6）。
+    expect(EXPRESSION_SECTION).toContain("不写系统内部的记录编号");
+    expect(usable).not.toContain("Run #编号");
   });
 
   // 用户要求：画图维持现状（代码块里的字符画），不引导模型写 Mermaid。App 不渲染 Mermaid。

@@ -24,6 +24,8 @@ export function useTicketRef(ticketId: number) {
     title: ticket ? ticketDisplayTitle(ticket) : resource?.state === 'error' ? m.loadFailed : m.loading,
     status: ticket?.statusLabel ?? null,
     needs: summary ? ticketNeedsUser(summary) : false,
+    // 取不到这张工单（列表里没有，详情也读不到）。文字里的工单链接这时只显示文字（P14.8）。
+    missing: !summary && resource?.state === 'error',
     label: reminder ? m.reminder(ticketId) : m.ticket(ticketId),
     open: () => (reminder ? openAgenda() : openTicket(ticketId)),
   };

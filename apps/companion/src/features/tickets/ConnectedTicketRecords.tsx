@@ -23,6 +23,7 @@ export function ConnectedTicketRecords({ ticket }: { ticket: Ticket }) {
       runFacts={model.runFacts}
       pow={model.pow}
       outcome={model.outcome}
+      deliveryNumbers={model.deliveryNumbers}
       attempts={model.attempts}
       logs={model.logs}
       logRuns={model.logRuns}

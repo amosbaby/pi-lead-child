@@ -19,7 +19,7 @@ export type TicketRecordsProps = Pick<
   TicketThreadProps,
   | 'ticket' | 'checkpoints' | 'checkpointResource' | 'interventions' | 'interventionCommandStates'
   | 'onResolveIntervention' | 'resolutionError' | 'onRetryCheckpoints' | 'onOpenTicket' | 'runFacts'
-  | 'pow' | 'outcome' | 'attempts' | 'logs' | 'logRuns' | 'lifecycle' | 'executionResource' | 'onRetryExecution'
+  | 'pow' | 'outcome' | 'deliveryNumbers' | 'attempts' | 'logs' | 'logRuns' | 'lifecycle' | 'executionResource' | 'onRetryExecution'
   | 'artifacts' | 'artifactCapability' | 'artifactDownloadStates' | 'onDownloadArtifact' | 'onCancelArtifactDownload'
 > & {
   onClose: () => void;
@@ -42,6 +42,7 @@ export function TicketRecords({
   runFacts,
   pow = null,
   outcome = null,
+  deliveryNumbers,
   attempts = [],
   logs = [],
   logRuns = [],
@@ -59,7 +60,7 @@ export function TicketRecords({
   const locale = useLocale();
   const m = useMessages(ticketRecordsMessages);
   const [tab, setTab] = useState<TicketRecordsTab>('evidence');
-  const evidence = buildEvidencePresentation(pow, outcome, locale);
+  const evidence = buildEvidencePresentation(pow, outcome, locale, deliveryNumbers);
   // 产物的空状态（还在读、不支持、没有）和以前的产物页签同一个说法。
   const artifactState = buildTicketDetailPresentation(ticket, {
     timing: { elapsedMs: ticket.elapsedMs },
@@ -71,7 +72,7 @@ export function TicketRecords({
   const options: { value: TicketRecordsTab; label: string }[] = [
     { value: 'evidence', label: m.tabs.evidence(evidence.needsAttention) },
     { value: 'progress', label: m.tabs.progress(checkpoints.length) },
-    { value: 'runs', label: attempts.length > 0 ? `Run ${attempts.length}` : 'Run' },
+    { value: 'runs', label: m.tabs.runs(attempts.length) },
     { value: 'lifecycle', label: m.tabs.lifecycle },
     { value: 'artifacts', label: m.tabs.artifacts(artifacts.length) },
   ];
@@ -111,7 +112,7 @@ export function TicketRecords({
           {resolutionError ? (
             <Text role="alert" size="secondary" weight="medium" tone="danger-dark">{resolutionError}</Text>
           ) : null}
-          {tab === 'evidence' ? <PowPanel pow={pow} outcome={outcome} /> : null}
+          {tab === 'evidence' ? <PowPanel pow={pow} outcome={outcome} deliveryNumbers={deliveryNumbers} /> : null}
           {tab === 'progress' ? (
             <CheckpointFeed
               checkpoints={checkpoints}

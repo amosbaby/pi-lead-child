@@ -5,6 +5,7 @@ import {
 import { createContext, useContext, useMemo } from 'react';
 
 import { MarkdownInlineText } from './MarkdownInlineText';
+import { ObjectLinksAllowed } from './ObjectLink';
 import { parseMarkdownMessage, type MarkdownBlock, type MarkdownInline } from './markdownModel';
 
 // 把 Lead 的 Markdown 回复渲染成组件库的文字和块。解析见 markdownModel.ts。主会话和工单对话都用它。
@@ -20,8 +21,10 @@ import { parseMarkdownMessage, type MarkdownBlock, type MarkdownInline } from '.
 //   · 代码块浅灰底、细边、圆角，右上角是复制按钮；行内代码是浅灰的小圆角块；分隔线是一条细线。
 // 卡片里来自 Lead 或 child 的自由文本（介入卡的回答、说明）也用它（2026-10-26）：传卡片正文的 size 和 tone，
 // 结论句只加粗、不加大。
-export function MarkdownMessage({ markdown, size = 'message-body', tone = 'default', breaks = false }: {
+export function MarkdownMessage({ markdown, size = 'message-body', tone = 'default', breaks = false, objectLinks = true }: {
   markdown: string;
+  /** 认不认指向 App 里对象的链接（plc:ticket/N、plc:card/N，P14.7）。外来的原文（Slack）传 false。 */
+  objectLinks?: boolean;
   /** 段落里的单个换行当真的换行。外部来源（Slack）的原文用，Lead 的回复不用。 */
   breaks?: boolean;
   /** 正文的语义字号。会话回复是 message-body，卡片里用卡片正文的字号。 */
@@ -32,9 +35,11 @@ export function MarkdownMessage({ markdown, size = 'message-body', tone = 'defau
 
   return (
     <BodySize.Provider value={size}>
-      <Box testID="markdown-message" w="100%">
-        <MarkdownBlocks blocks={blocks} top tone={tone} />
-      </Box>
+      <ObjectLinksAllowed.Provider value={objectLinks}>
+        <Box testID="markdown-message" w="100%">
+          <MarkdownBlocks blocks={blocks} top tone={tone} />
+        </Box>
+      </ObjectLinksAllowed.Provider>
     </BodySize.Provider>
   );
 }

@@ -18,6 +18,7 @@ import type {
   ChannelPolicyReplayResult,
   ChannelPolicyTestRequest,
   ChannelPolicyTestResult,
+  ChannelConnectionDto,
   ChannelSecretsTestResult,
   ChannelSourceSettingsDto,
   ReplyStyleDto,
@@ -72,6 +73,7 @@ import type {
   Scope,
   StartConnectionResponse,
   TicketReviewerInfo,
+  DeliverySummary,
   TicketReviewRequest,
   UserItemActionId,
   WorkspaceControlActionId,
@@ -201,7 +203,7 @@ export type CompanionTransport = Pick<
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences'
-  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets'
+  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection'
   | 'getChannelPolicy' | 'updateChannelPolicy' | 'testChannelPolicy' | 'replayChannelPolicy'
   | 'getChannelHandbook' | 'updateChannelHandbook' | 'rehearseChannelHandbook' | 'proposeChannelHandbookSituation'
   | 'getChannelHandbookSuggestions' | 'acceptChannelHandbookSuggestion' | 'dismissChannelHandbookSuggestion'
@@ -210,7 +212,7 @@ export type CompanionTransport = Pick<
   | 'ruleChangeConfirmation' | 'resolveRuleChangeConfirmation'
   | 'timerRequest' | 'resolveTimerRequest' | 'externalTimers' | 'watchTimers' | 'cancelTimer'
   | 'getOwnerAction' | 'disownOwnerAction'
-  | 'getTicketReviewer'
+  | 'getTicketReviewer' | 'getTicketDeliveries'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
   | 'getChatImage'
   | 'getLeadModels' | 'switchLeadModel'
@@ -730,6 +732,14 @@ export class CompanionStateRuntime {
     const read = this.dependencies.client.getTicketReviewer;
     if (typeof read !== 'function') throw new Error('this connection cannot read the ticket reviewer');
     return read.call(this.dependencies.client, ticketId, signal);
+  }
+
+  // 这张工单每一次交付的序号（GET /v1/tickets/:id/deliveries）。工单详情用它把交付写成「第 N 次交付」（设计规范 P14.6）。
+  // 不缓存，工单变了以后再读一次。旧 daemon 没有这个接口时报错，界面写「最新的交付」。
+  async getTicketDeliveries(ticketId: number, signal?: AbortSignal): Promise<DeliverySummary[]> {
+    const read = this.dependencies.client.getTicketDeliveries;
+    if (typeof read !== 'function') throw new Error('this connection cannot read the ticket deliveries');
+    return read.call(this.dependencies.client, ticketId, signal ? { signal } : {});
   }
 
   async performWorkspaceAction(
@@ -1464,6 +1474,12 @@ export class CompanionStateRuntime {
 
   async clearChannelSecrets(source: string): Promise<ChannelSourceSettingsDto> {
     return this.upsertChannelSource(await this.channelSettingsClient('clearChannelSecrets')(source));
+  }
+
+  // 有几种连接方式的来源现在的连接方式（2026-11-02，Slack 的 Slack 应用和浏览器会话）。面板自己保存读到的结果；
+  // 改动走 performUiAction('channel_connection', …)，改完再读一次。只有一种方式的来源回 404（面板不显示这一块）。
+  async channelConnection(source: string, signal?: AbortSignal): Promise<ChannelConnectionDto> {
+    return this.channelSettingsClient('getChannelConnection')(source, signal);
   }
 
   // 设置 → 消息通道 → 自动代你处理（2026-10-23）：开关、授权表和信心模型的参数。面板自己保存读到的结果，改完用响应替换。
@@ -2777,7 +2793,7 @@ type MemoryClientMethod =
   | 'getDesignPreferences' | 'updateDesignPreferences';
 
 type ChannelSettingsClientMethod =
-  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets'
+  | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection'
   | 'getChannelPolicy' | 'updateChannelPolicy' | 'testChannelPolicy' | 'replayChannelPolicy'
   | 'getChannelHandbook' | 'updateChannelHandbook' | 'rehearseChannelHandbook' | 'proposeChannelHandbookSituation'
   | 'getChannelHandbookSuggestions' | 'acceptChannelHandbookSuggestion' | 'dismissChannelHandbookSuggestion'

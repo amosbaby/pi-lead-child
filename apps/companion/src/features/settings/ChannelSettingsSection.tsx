@@ -2,15 +2,16 @@ import {
   Badge, Button, Card, CodeBlock, Column, Link, Row, ServiceMark, Text, TextField, canCopyText, copyText,
   type BadgeTone, type ServiceMarkService,
 } from '@pi-lead-child/components';
-import type { ChannelSecretSetting, ChannelSecretsTestResult, ChannelSourceSettingsDto } from '@pi-lead-child/protocol';
+import type { ChannelConnectionDto, ChannelSecretSetting, ChannelSecretsTestResult, ChannelSourceSettingsDto } from '@pi-lead-child/protocol';
 import { ChannelSecretsRejectedError } from '@pi-lead-child/client';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { useLocale, useMessages } from '@/i18n';
 import { useCompanionRuntime } from '@/state/CompanionStateProvider';
 import { useChannelSettings, useConnectionPhase, useLeadName } from '@/state/hooks';
 import { RESOURCE_KEYS } from '@/state/types';
 
+import { ChannelConnectionBlock, ChannelWritesSwitch, useChannelConnection } from './ChannelConnection';
 import { channelsMessages } from './channels.messages';
 import {
   canDisconnect, channelErrorText, channelStatusView, checkRows, emptySecretForm,
@@ -67,6 +68,12 @@ export function ChannelSettingsSection() {
 function ChannelSourceCard({ source }: { source: ChannelSourceSettingsDto }) {
   const id = source.source;
   const status = channelStatusView(source, useLocale());
+  // 有几种连接方式的来源（2026-11-02）：头部下面是连接方式。选了要登录的方式、正在登录时不画填密钥的表单；
+  // 现在用的是要登录的方式时，换成会话那一块（没有粘贴的入口）。
+  const connectionView = useChannelConnection(source);
+  const connection = connectionView.connection;
+  const signingIn = Boolean(connectionView.picked) || connection?.signIn?.state === 'waiting';
+  const signedInMode = connection?.modes.find((item) => item.mode === connection.mode && item.needsSignIn) ? connection : null;
   return (
     <Card testID={`channel-${id}`} rounded="xl" p="page-card" gap="card-section">
       <Row items="center" gap="side-item">
@@ -77,9 +84,124 @@ function ChannelSourceCard({ source }: { source: ChannelSourceSettingsDto }) {
         </Column>
         <Badge testID={`channel-${id}-status`} label={status.label} tone={STATUS_TONE[status.tone]} dot size="sm" />
       </Row>
-      {source.missingScopes.length ? <MissingScopes id={id} scopes={source.missingScopes} /> : null}
-      {source.editable ? <SecretsForm source={source} /> : <ReadOnlySecrets source={source} />}
+      <ChannelConnectionBlock source={source} view={connectionView} />
+      {source.missingScopes.length && !signedInMode ? <MissingScopes id={id} scopes={source.missingScopes} /> : null}
+      {!source.editable ? <ReadOnlySecrets source={source} />
+        : signingIn ? null
+        : signedInMode ? (
+          <SessionForm source={source} connection={signedInMode} reload={connectionView.reload}>
+            <ChannelWritesSwitch source={source} view={connectionView} />
+          </SessionForm>
+        )
+        : <SecretsForm source={source} />}
     </Card>
+  );
+}
+
+// 现在用的是要登录的连接方式（例如 Slack 的浏览器会话）：会话存在哪里、令牌不存；测试、重新登录、断开。
+// 会话失效（来源报错）时，「重新登录」是主按钮，旁边可以改用不用登录的方式。
+// children：会话那几行和按钮之间的东西（「代你发消息」开关）。
+function SessionForm({ source, connection, reload, children }: {
+  source: ChannelSourceSettingsDto; connection: ChannelConnectionDto; reload: () => void; children?: ReactNode;
+}) {
+  const runtime = useCompanionRuntime();
+  const leadName = useLeadName();
+  const locale = useLocale();
+  const m = channelsMessages(locale);
+  const id = source.source;
+  const [pending, setPending] = useState<'test' | 'action' | 'clear' | null>(null);
+  const [message, setMessage] = useState<Message | null>(null);
+  const [checks, setChecks] = useState<ChannelSecretsTestResult | null>(null);
+  const [confirmDisconnect, setConfirmDisconnect] = useState(false);
+  const ended = source.status === 'error';
+  const fallback = connection.modes.find((item) => !item.needsSignIn);
+  const run = (kind: 'action' | 'clear', work: () => Promise<unknown>, done?: string) => {
+    setPending(kind);
+    setMessage(null);
+    setChecks(null);
+    work()
+      .then(() => {
+        reload();
+        if (done) setMessage({ text: done, error: false });
+      })
+      .catch((reason: unknown) => setMessage({ text: channelErrorText(reason, leadName, locale), error: true }))
+      .finally(() => setPending(null));
+  };
+  const test = () => {
+    setPending('test');
+    setMessage(null);
+    setChecks(null);
+    runtime.testChannelSecrets(id, {})
+      .then((result) => {
+        setChecks(result);
+        setMessage({ text: testSummary(result, locale), error: !result.ok });
+      })
+      .catch((reason: unknown) => setMessage({ text: channelErrorText(reason, leadName, locale), error: true }))
+      .finally(() => setPending(null));
+  };
+  const signInAgain = () => run('action', () => runtime.performUiAction('channel_connection', id, 'sign_in', { input: { mode: connection.mode } }));
+  return (
+    <Column testID={`channel-${id}-session`} gap="form-field">
+      <Column gap="card-row">
+        {source.secrets.map((secret) => (
+          <Row key={secret.name} testID={`channel-${id}-session-secret`} items="center" gap="inline-item">
+            <Text flex={1} minW={0} size="label" weight="semibold">{m.sessionLabel}</Text>
+            <Text size="label" tone={secret.present ? 'success-dark' : 'muted'}>{secretStateText(secret, locale)}</Text>
+          </Row>
+        ))}
+        <Row items="center" gap="inline-item">
+          <Text flex={1} minW={0} size="label" weight="semibold">{m.tokenLabel}</Text>
+          <Text size="label" tone="secondary">{m.tokenNote}</Text>
+        </Row>
+      </Column>
+      {children}
+      <Row items="center" gap="actions" flexWrap="wrap">
+        {ended ? (
+          <>
+            <Button testID={`channel-${id}-session-sign-in`} label={m.signInAgain} size="sm" disabled={pending !== null} onPress={signInAgain} />
+            {fallback ? (
+              <Button
+                testID={`channel-${id}-session-use-fallback`}
+                label={m.useMode(m.modeName(id, fallback.mode))}
+                variant="outline"
+                tone="neutral"
+                size="sm"
+                disabled={pending !== null}
+                onPress={() => run('action', () => runtime.performUiAction('channel_connection', id, 'use_mode', { input: { mode: fallback.mode } }))}
+              />
+            ) : null}
+          </>
+        ) : (
+          <>
+            <Button testID={`channel-${id}-session-test`} label={m.test} variant="outline" tone="neutral" size="sm" disabled={pending !== null} onPress={test} />
+            <Button testID={`channel-${id}-session-sign-in`} label={m.signInAgain} variant="outline" tone="neutral" size="sm" disabled={pending !== null} onPress={signInAgain} />
+          </>
+        )}
+        {canDisconnect(source) && !confirmDisconnect ? (
+          <Button testID={`channel-${id}-disconnect-start`} label={m.disconnect} variant="ghost" tone="danger" size="sm" disabled={pending !== null} onPress={() => setConfirmDisconnect(true)} />
+        ) : null}
+      </Row>
+      {canDisconnect(source) && confirmDisconnect ? (
+        <Row testID={`channel-${id}-disconnect-confirm`} items="center" gap="actions" flexWrap="wrap">
+          <Text size="body" tone="secondary">{m.disconnectConfirm}</Text>
+          <Button
+            testID={`channel-${id}-disconnect`}
+            label={m.disconnect}
+            variant="outline"
+            tone="danger"
+            size="sm"
+            disabled={pending !== null}
+            onPress={() => {
+              setConfirmDisconnect(false);
+              run('clear', () => runtime.clearChannelSecrets(id), m.disconnected);
+            }}
+          />
+          <Button label={m.cancel} variant="ghost" tone="neutral" size="sm" onPress={() => setConfirmDisconnect(false)} />
+        </Row>
+      ) : null}
+      {message ? <Text testID={`channel-${id}-message`} size="note" tone={message.error ? 'danger-dark' : 'secondary'}>{message.text}</Text> : null}
+      {checks ? <CheckList id={id} result={checks} /> : null}
+    </Column>
   );
 }
 

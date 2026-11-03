@@ -39,7 +39,7 @@ describe("Lead note tools over NotesMemory with Hindsight as the primary backend
     const saved = text(await tool(tools, "save_note").execute("t1", {
       title: "沟通偏好", content: "先给结论，再给细节", tags: ["style"], kind: "preference",
     }));
-    const id = Number(/#(\d+)/.exec(saved)![1]);
+    const id = Number(/note_id=(\d+)/.exec(saved)![1]);
     expect(getNote(db, id)?.content).toBe("先给结论，再给细节");
     await settle();
     const fact = hindsight.factsOf(`note-${id}`)[0]!;
@@ -81,7 +81,7 @@ describe("Lead note tools over NotesMemory with Hindsight as the primary backend
   it("invalidates and restores one fact with invalidate_memory, and explains an observation cannot be invalidated", async () => {
     const { hindsight, tools, settle } = await setup();
     const saved = text(await tool(tools, "save_note").execute("t1", { title: "住址", content: "杭州", tags: [], kind: "fact" }));
-    const id = Number(/#(\d+)/.exec(saved)![1]);
+    const id = Number(/note_id=(\d+)/.exec(saved)![1]);
     await settle();
     const fact = hindsight.factsOf(`note-${id}`)[0]!;
     // 和 perform_action 的 memory_fact 是同一个操作（2026-10-29）。
@@ -102,8 +102,8 @@ describe("Lead note tools over NotesMemory with Hindsight as the primary backend
   // 「弹确认卡干什么？」：只拒绝，不带确认卡，不存待确认的操作，Hindsight 不改。外部来源的不挡。
   it("refuses to invalidate the user's own facts in a turn that read external text, with no confirm card, but not outside ones", async () => {
     const { db, hindsight, tools, settle, origin } = await setup();
-    const own = Number(/#(\d+)/.exec(text(await tool(tools, "save_note").execute("t1", { title: "沟通偏好", content: "先给结论", tags: [], kind: "fact" })))![1]);
-    const outside = Number(/#(\d+)/.exec(text(await tool(tools, "save_note").execute("t1", {
+    const own = Number(/note_id=(\d+)/.exec(text(await tool(tools, "save_note").execute("t1", { title: "沟通偏好", content: "先给结论", tags: [], kind: "fact" })))![1]);
+    const outside = Number(/note_id=(\d+)/.exec(text(await tool(tools, "save_note").execute("t1", {
       title: "Ivy 说的", content: "Ivy 说用户下周出差", tags: ["slack", "slack:C1:main"], kind: "fact",
     })))![1]);
     await settle();

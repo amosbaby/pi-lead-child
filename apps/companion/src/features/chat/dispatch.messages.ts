@@ -16,7 +16,7 @@ export const dispatchMessages = defineMessages({
     hideProgress: (ticketId: number) => `Hide the progress of #${ticketId}`,
     fresh: (count: number) => `${count} new`,
     count: (count: number) => (count === 1 ? '1 update' : `${count} updates`),
-    noReport: 'The child has not reported yet.',
+    noReport: 'The executor has not reported yet.',
     keyOnly: 'Only key updates show here. The ticket details have the full record.',
   },
   zh: {
@@ -33,7 +33,7 @@ export const dispatchMessages = defineMessages({
     hideProgress: (ticketId) => `收起 #${ticketId} 的进展`,
     fresh: (count) => `${count} 条新`,
     count: (count) => `${count} 条`,
-    noReport: 'child 还没有汇报。',
+    noReport: '执行者还没有汇报。',
     keyOnly: '只显示关键更新。完整记录在工单详情里。',
   },
 });

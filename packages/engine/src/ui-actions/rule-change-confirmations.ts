@@ -217,6 +217,7 @@ interface StoredOperationContext {
 //   - propose_standing_order_change：改常设指令（外部内容的一轮里被拦下的改规则）。
 //   - ticket_action：Lead 被拦下的工单操作（2026-10-29 兜底授权卡）。确认以后按用户本人的操作执行，凭的是确认的设备。
 //   - run_on_host：在用户的 Mac 上、沙箱外跑一条命令（host-commands.ts，2026-10-29 兜底授权卡）。
+//   - install_local_mcp：装 Lead 要装的本地 MCP（installs.ts，2026-11-02）。参数是审查固定好的启动参数，卡上原样显示。
 const LEAD_TOOL_OPERATIONS: Readonly<Record<string, {
   scope: Scope;
   run(db: Db, input: unknown, reason: string, now: Date, context: StoredOperationContext): Promise<{ text: string; next?: string }> | { text: string; next?: string };
@@ -248,6 +249,14 @@ const LEAD_TOOL_OPERATIONS: Readonly<Record<string, {
     async run(_db, input, _reason, _now, context) {
       const result = await runHostCommand(hostCommandInputOf(input), { id: context.id });
       return { text: result.text, next: `命令的完整输出在 ${result.outputPath}，用 read 读。` };
+    },
+  },
+  install_local_mcp: {
+    scope: "tickets:create",
+    async run(db, input, reason, now, context) {
+      // installs.ts 也 import 这个文件：按需取，不在模块顶层互相引用。
+      const { installConfirmedLocalMcp } = await import("./installs.js");
+      return installConfirmedLocalMcp(db, input, reason, context.services, now);
     },
   },
   propose_standing_order_change: {

@@ -25,6 +25,7 @@ description: 用户要你评审一个 GitHub PR 之前读（「review 这个 PR�
 - 你只读结论，转告用户，不要把评审全文和 PR 的 diff 读进自己的上下文。
 - 转告之前，用 GitHub 连接读这个 PR 的 review 列表，核对远端的 state 和评审 agent 说的结论一致：有阻塞问题时应该是 CHANGES_REQUESTED。对不上时如实告诉用户，不要照 agent 的自述转告。
 - 发不出去时（例如 GitHub 拒绝了结论），交回说明里写着原因。按「被拦住以后」一节找下一条路。
+- 系统说出处没有通过核实时，只按你自己读到的东西下判断：读了那个文件的那几行、和引用的对上了，才说「对得上」；没读的，写「没核对」，不要凭评审 agent 贴的摘录说它是对的。
 
 ## 4. 同一个 PR 再审一遍
 
@@ -33,3 +34,4 @@ description: 用户要你评审一个 GitHub PR 之前读（「review 这个 PR�
 ## 5. 外部通道里有人要评审
 
 别人在 Slack 等外部通道里请用户评审 PR 时，按 skill channel-replies 的派活规则处理。那里的子 agent 能做多少，由那条消息的权限上限决定。
+一条消息里有几个 PR 时，每个 PR 派一张（dispatch_agent_task 的 pull_request 写那一个）。子 agent 失败或者信心不够、结果交回给你以后，可以用同一个 event 再派一次，写清这次改什么做法。

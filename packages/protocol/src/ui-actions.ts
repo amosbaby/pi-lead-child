@@ -22,6 +22,7 @@ import {
 } from "./model-settings.ts";
 import { SetSummaryModelRequestSchema, SummaryModelSlotRequestSchema } from "./memory-hindsight.ts";
 import { CoreMemoryUpdateRequestSchema } from "./core-memory.ts";
+import { AddLocalMcpRequestSchema, AddRemoteMcpRequestSchema, InstallSkillRequestSchema } from "./lead-installs.ts";
 import { ReminderRescheduleRequestSchema } from "./reminders.ts";
 import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from "./reply-style.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
@@ -82,11 +83,17 @@ export const ActionPermissionSchema = Type.Union([
 //   setup_hint  会话里一张建议去配某项设置的卡（首次启动引导，2026-10-30，.scratch/onboarding）。编号是卡的编号（hintId）。
 //   widget_board  视图面板（会话顶栏右边的入口，2026-10-30，widgets.ts）：建控件、排顺序、视图改名。编号只有 widgets。
 //   widget  一个自定义控件（视图面板里的一块）：改（包括移到别的视图）、删。编号是控件的编号（GET /v1/widgets 的 id）。
+//   channel_connection  一个来源的连接方式（设置 → 消息通道，2026-11-02，例如 Slack 的 Slack 应用和浏览器会话）：登录、
+//     换回某种方式、「代你往来源里写」开关。编号是来源，例如 slack。
+//   connections  连接的清单（设置 → 连接，2026-11-02，lead-installs.ts）：加远程 MCP、本地 MCP。编号只有 connections。
+//   connection  一个连接：请用户授权、断开。编号是连接的 key（GET /v1/connections 的 key，例如 notion、custom-3）。
+//   skills  PLC 自己的 skill 目录（~/.pi-lead-child/skills，2026-11-02）：从 GitHub 装一个。编号只有 skills。
+//   skill  PLC 装的一个 skill：卸载。编号是 skill 的名字。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
-  "widget_board", "widget",
+  "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -95,6 +102,8 @@ export function isUiActionTargetType(value: string): value is UiActionTargetType
 }
 
 const Empty = StrictObject({});
+// 来源的连接方式的名字（例如 app、session）。
+const ConnectionMode = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" });
 // 外部消息卡的动作都可以带「看到的版本」：卡已经变了时拒绝，免得按旧的样子做决定（页面的按钮带它，Lead 可以不带）。
 const CardVersion = { expectedVersion: Type.Optional(Type.Integer({ minimum: 1 })) };
 const CardOnly = StrictObject(CardVersion);
@@ -325,6 +334,39 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     refresh: Empty,
     // 删掉这个控件。删了不能恢复：要带 confirm: true（页面在按钮上就地确认）。
     delete: StrictObject({ confirm: Type.Optional(Type.Literal(true)) }),
+  },
+  // 设置 → 消息通道里一个来源的连接方式（2026-11-02）。方式的名字由来源定义，例如 Slack 的 app 和 session。
+  channel_connection: {
+    // 打开登录窗口，用户自己登录这种方式；登录成功、检查通过以后才换到它。只有你本人能做。
+    sign_in: StrictObject({ mode: ConnectionMode }),
+    // 关掉正在等的登录窗口。
+    cancel_sign_in: Empty,
+    // 换回一种不用登录的方式（例如 Slack 应用）。
+    use_mode: StrictObject({ mode: ConnectionMode }),
+    // 打开「代你往来源里写」：这种方式下 Lead 可以代你发消息、改消息、回表情。只有你本人能做。
+    allow_writes: Empty,
+    // 关掉「代你往来源里写」：Lead 只读，草稿留在卡上。
+    block_writes: Empty,
+  },
+  connections: {
+    // 加一个远程 MCP（https 地址）。要授权时结果里带授权卡，用户授权完叫醒 Lead。
+    add_remote: AddRemoteMcpRequestSchema,
+    // 加一个本地 MCP（npm 或 PyPI 的包，用 npx、uvx 在本机起进程）。先审查；Lead 调用时用户在确认卡上点了才装。
+    add_local: AddLocalMcpRequestSchema,
+  },
+  connection: {
+    // 请用户授权（或者重新授权）。Lead 调用时只拿到授权卡；用户调用时开始授权流程。
+    authorize: Empty,
+    // 断开：吊销令牌、停掉本地进程。自定义的连接（远程、本地 MCP）断开以后不再列出。
+    disconnect: Empty,
+  },
+  skills: {
+    // 从 GitHub 仓库的一个 commit 装一个 skill：先做安全检查，装完马上能用 find_skill 找到。
+    install: InstallSkillRequestSchema,
+  },
+  skill: {
+    // 卸载 PLC 装的这个 skill：删掉它的目录。
+    uninstall: Empty,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

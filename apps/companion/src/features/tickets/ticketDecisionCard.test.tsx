@@ -3,7 +3,7 @@
 // 回归（复核 P1-9）：回复问「你要我现在就发起这次独立核查吗？」，回复下面的按钮和底部操作栏走同一个入口。
 // 回复在问哪几个动作由 daemon 的快模型判断，结果在这一轮的 replyActions 里（2026-10-19）。
 import type { ConversationTurn, KernelIntervention } from '@pi-lead-child/protocol';
-import { fireEvent, screen, within } from '@testing-library/react';
+import { fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { renderWorkbenchWithTicket, setViewportWidth, ticket66, ticketAction, ticketDelivery } from '../../../test/workbench';
@@ -41,6 +41,21 @@ function bar() {
 }
 
 describe('the bottom action bar', () => {
+  // 设计规范 P14.6（用户 2026-11-02）：「Run #49」是系统内部的记录编号，用户在界面上找不到。
+  // 底部栏写「第 2 次交付」，序号来自交付列表；读不到交付列表时写「最新的交付」。
+  it('names the delivery by its number from the delivery list, never by the run number', async () => {
+    renderWorkbenchWithTicket(waitingForReview(), { actions: reviewActions(), deliveries: [{ attemptId: 49, sequence: 2 }] });
+
+    await waitFor(() => expect(bar().textContent).toContain('Delivery 2 has no independent review yet.'));
+    expect(screen.getByTestId('ticket-thread').textContent).not.toMatch(/Run #\d|#49\b/);
+  });
+
+  it('says the latest delivery when the connection cannot read the delivery list', () => {
+    renderWorkbenchWithTicket(waitingForReview(), { actions: reviewActions() });
+
+    expect(bar().textContent).toContain('The latest delivery has no independent review yet.');
+  });
+
   it('places the review actions and takes their availability from the action list', () => {
     renderWorkbenchWithTicket(waitingForReview(), {
       actions: [

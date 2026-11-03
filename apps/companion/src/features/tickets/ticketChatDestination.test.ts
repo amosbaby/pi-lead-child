@@ -6,26 +6,26 @@ import { describe, expect, it } from 'vitest';
 import { ticketChatDestination, tokenEstimateText } from './ticketChatStatus';
 
 const run = (purpose: 'execution' | 'review' | 'conversation') => ({
-  runId: 87, purpose, label: '核查 Run #87 · 正在核查', phase: 'running' as const, elapsedMs: 60_000, stalled: false,
+  runId: 87, purpose, label: '核查 · 正在核查', phase: 'running' as const, elapsedMs: 60_000, stalled: false,
 });
 
 describe('where a ticket message goes', () => {
   it('queues for a running Codex or Claude Code run and says so', () => {
     expect(ticketChatDestination({ ticketDisplayId: '66', liveRun: run('review'), runtimeName: 'codex' })).toEqual({
-      hint: 'The reviewer agent is running · Codex cannot take messages during a run. Your message waits and goes to the agent after the run.',
-      placeholder: 'Ask the reviewer agent, or add requirements',
+      hint: 'The reviewer is running · Codex cannot take messages while it works. Your message waits and goes to it when it ends.',
+      placeholder: 'Ask the reviewer, or add requirements',
       cost: null,
     });
   });
 
   it('goes straight into a running Pi run', () => {
     expect(ticketChatDestination({ ticketDisplayId: '66', liveRun: run('execution'), runtimeName: 'pi' }).hint)
-      .toBe('The executor agent is running · Your message goes into its current work');
+      .toBe('The executor is running · Your message goes into its current work');
   });
 
   it('opens a conversation run when nothing runs', () => {
     expect(ticketChatDestination({ ticketDisplayId: '66', liveRun: null, runtimeName: 'codex' })).toEqual({
-      hint: 'To the agent of #66 · Starts a conversation Run. The ticket state does not change.',
+      hint: 'To the agent of #66 · Starts a new conversation. The ticket state does not change.',
       placeholder: 'Ask the agent of this ticket, or add requirements',
       cost: null,
     });
@@ -40,8 +40,8 @@ describe('resuming an ended session', () => {
 
   it('says which session it resumes and what it may cost', () => {
     expect(ticketChatDestination(base)).toEqual({
-      hint: 'To the reviewer agent of #77 · Continues the session of Run #73. The ticket state does not change.',
-      placeholder: 'Ask the reviewer agent, or add requirements',
+      hint: 'To the reviewer of #77 · Continues the last session. The ticket state does not change.',
+      placeholder: 'Ask the reviewer, or add requirements',
       cost: 'Estimated cost: about 456K tokens (from the last usage of this session)',
     });
   });
@@ -52,13 +52,13 @@ describe('resuming an ended session', () => {
 
   it('goes to a running agent without a cost', () => {
     expect(ticketChatDestination({ ...base, liveRun: run('execution'), runtimeName: 'pi' })).toEqual({
-      hint: 'The executor agent is running · Your message goes into its current work', placeholder: 'Ask the executor agent, or add requirements', cost: null,
+      hint: 'The executor is running · Your message goes into its current work', placeholder: 'Ask the executor, or add requirements', cost: null,
     });
   });
 
   it('opens a new conversation run when there is no session to resume', () => {
     expect(ticketChatDestination({ ...base, resume: null })).toMatchObject({
-      hint: 'To the agent of #77 · Starts a conversation Run. The ticket state does not change.', cost: null,
+      hint: 'To the agent of #77 · Starts a new conversation. The ticket state does not change.', cost: null,
     });
   });
 
@@ -72,6 +72,6 @@ describe('resuming an ended session', () => {
     expect(tokenEstimateText(456_000, 'zh')).toBe('约 45.6 万 token');
     expect(tokenEstimateText(5_860_000, 'zh')).toBe('约 586 万 token');
     expect(tokenEstimateText(8_200, 'zh')).toBe('约 8,200 token');
-    expect(ticketChatDestination({ ...base, locale: 'zh' }).hint).toBe('发给 #77 的核查 agent · 续接 Run #73 的会话，不改变工单状态');
+    expect(ticketChatDestination({ ...base, locale: 'zh' }).hint).toBe('发给 #77 的核查员 · 接着上一次的会话，不改变工单状态');
   });
 });

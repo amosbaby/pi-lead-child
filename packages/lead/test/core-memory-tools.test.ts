@@ -28,7 +28,7 @@ describe("save_note and update_note on core memory", () => {
   it("records Lead's update of a preference and tells the user in Lead activity, with an undo button", async () => {
     const id = saveNote(db, { title: "沟通偏好", content: "先给结论", tags: [], kind: "preference" });
     const result = await tool("update_note").execute("t", { note_id: id, content: "只给结论，最多三句", reason: "用户 10-29 说「再短一点」" });
-    expect(result.content[0].text).toMatch(/^note #\d+ updated（常驻偏好的改动 #1：系统已经在 Lead 动态里告诉用户，带撤销，不用另外问）$/);
+    expect(result.content[0].text).toMatch(/^笔记已更新（note_id=\d+）（常驻偏好的改动 #1：系统已经在 Lead 动态里告诉用户，带撤销，不用另外问）$/);
     expect(getNote(db, id)?.content).toBe("只给结论，最多三句");
     expect(changes()).toEqual([{ noteId: id, action: "update", actor: "lead", reason: "用户 10-29 说「再短一点」" }]);
     const [event] = coreEvents();
@@ -43,7 +43,7 @@ describe("save_note and update_note on core memory", () => {
     expect(coreEvents().at(-1)!.payload).toMatchObject({ action: "create", summary: "Paimon 新加了常驻偏好「称呼」：「叫我 Bo」。依据：用户自我介绍。" });
     // 别的类别照旧：不记改动，不进 Lead 动态。
     const fact = await tool("save_note").execute("t", { title: "时区", content: "上海", tags: [], kind: "fact" });
-    expect(fact.content[0].text).toMatch(/^note #\d+ saved$/);
+    expect(fact.content[0].text).toMatch(/^笔记已保存（note_id=\d+）$/);
     expect(changes()).toHaveLength(2);
   });
 

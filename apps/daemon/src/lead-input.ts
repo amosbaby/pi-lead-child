@@ -28,7 +28,7 @@ import {
 } from "@pi-lead-child/store";
 import {
   COMPONENT_CALL_KINDS, CONNECTION_STATUS_CHANGED_KIND, CORE_MEMORY_CHANGED_KIND, DAEMON_STARTED_KIND, EVENT_SOURCES, LEAD_SELF_EVENT_KINDS,
-  LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, USER_REQUEST_EXPIRED_KIND,
+  LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, USER_REQUEST_EXPIRED_KIND,
   OWNER_ACTION_DISOWNED_KIND, OWNER_ACTION_PERFORMED_KIND, PUSHED_SECURITY_ALERT_KINDS, REMINDER_PUSHED_KIND,
   REMINDER_UNACKNOWLEDGED_KIND, reminderNeedsCheck, SYSTEM_TURN_ORIGINS, ticketNeedsUser, ticketNeedsUserLabel,
   TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX,
@@ -72,7 +72,9 @@ export function leadEventRoute(event: Pick<EventRecord, "kind" | "level"> & { pa
   // Lead 自己改的常驻偏好（core_memory.changed，2026-10-29）：是它自己做的，写下时就记成看过了，不用再告诉它。
   // 用户撤销了 Lead 的改动（actor 是 user）照常进当前局面：Lead 要知道用户不要这样改。
   // 事实失效（memory_fact.changed）同理。
-  if ((event.kind === CORE_MEMORY_CHANGED_KIND || event.kind === MEMORY_FACT_CHANGED_KIND) && event.payload?.actor === "lead") return "skip";
+  // Lead 自己装的能力（lead_install.changed，2026-11-02）同理；用户撤销 Lead 装的东西照常交给 Lead。
+  if ((event.kind === CORE_MEMORY_CHANGED_KIND || event.kind === MEMORY_FACT_CHANGED_KIND || event.kind === LEAD_INSTALL_CHANGED_KIND)
+    && event.payload?.actor === "lead") return "skip";
   // 直接推送的安全报警（security-alerts.ts，2026-10-19 审查）同理：系统直接推给用户，不取决于 Lead。
   // 改动可能就是 Lead 派出的 child 做的。Lead 要看时用 query_events。config.json 被手改（tell 级）照常交给 Lead。
   if (PUSHED_SECURITY_ALERTS.has(event.kind)) return "skip";

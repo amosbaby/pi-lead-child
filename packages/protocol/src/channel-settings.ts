@@ -101,3 +101,32 @@ export type ChannelSecretsTestResult = Static<typeof ChannelSecretsTestResultSch
 /** PUT、DELETE 的响应：这个来源现在的样子。 */
 export const ChannelSourceSettingsResponseSchema = StrictObject({ source: ChannelSourceSettingsDtoSchema });
 export type ChannelSourceSettingsResponse = Static<typeof ChannelSourceSettingsResponseSchema>;
+
+// ── 连接方式（2026-11-02）──────────────────────────────────────────────────────────
+// GET /v1/channels/settings/:source/connection：有几种连接方式的来源（例如 Slack 的 Slack 应用和浏览器会话）现在用哪种、
+// 能选哪些、「代你往来源里写」开关、最近一次登录。只有一种方式的来源回 404。改动走通用的操作入口
+// （POST /v1/actions/channel_connection/<来源>/<操作>），它的 result 也是这个形状。没有密钥。
+// 单独一个路由，不加进上面的 DTO：DTO 是严格的，旧的客户端见到多出的字段会整个丢掉。
+
+const ConnectionModeName = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" });
+
+export const CHANNEL_SIGN_IN_FAILURES = ["cancelled", "window_closed", "timed_out", "no_browser", "checks_failed", "failed"] as const;
+
+export const ChannelConnectionDtoSchema = StrictObject({
+  source: Type.String({ minLength: 1, maxLength: 60 }),
+  mode: ConnectionModeName,
+  modes: Type.Array(StrictObject({ mode: ConnectionModeName, needsSignIn: Type.Boolean(), writesSwitch: Type.Boolean() }), { maxItems: 8 }),
+  // 现在的方式要单独打开「代你往来源里写」时是开关的值，不需要时是 null。
+  writes: Nullable(Type.Boolean()),
+  signIn: Nullable(StrictObject({
+    mode: ConnectionModeName,
+    state: Type.Union([Type.Literal("waiting"), Type.Literal("done"), Type.Literal("failed"), Type.Literal("cancelled")]),
+    startedAt: Type.String({ maxLength: 40 }),
+    expiresAt: Nullable(Type.String({ maxLength: 40 })),
+    code: Nullable(Type.Union([
+      Type.Literal("cancelled"), Type.Literal("window_closed"), Type.Literal("timed_out"), Type.Literal("no_browser"),
+      Type.Literal("checks_failed"), Type.Literal("failed"),
+    ])),
+  })),
+});
+export type ChannelConnectionDto = Static<typeof ChannelConnectionDtoSchema>;

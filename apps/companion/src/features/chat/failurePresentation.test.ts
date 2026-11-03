@@ -253,19 +253,19 @@ describe('presentSystemCheckpoint', () => {
 
   it('says in Chinese that the run was reclaimed, and leaves it to Lead first', () => {
     expect(presentSystemCheckpoint(reclaimed)).toMatchObject({
-      text: '工单 #2 的 Run 在 daemon 重启时被收回 · Paimon 会判断要不要重新派发', needsUser: false, ok: false,
+      text: '后台服务重启，工单 #2 的执行停了 · Paimon 会判断要不要重新派发', needsUser: false, ok: false,
     });
     expect(presentSystemCheckpoint(reclaimed)!.details).toContain('Recover or redispatch the interrupted item.');
   });
 
   it('asks the user only when the ticket has a blocker for them, and says how it is now once it moved on', () => {
     expect(presentSystemCheckpoint(reclaimed, { escalated: true })).toMatchObject({ needsUser: true });
-    expect(presentSystemCheckpoint(reclaimed, { settled: true, nowLabel: '现在：进行中' })!.text).toBe('工单 #2 的 Run 在 daemon 重启时被收回 · 现在：进行中');
+    expect(presentSystemCheckpoint(reclaimed, { settled: true, nowLabel: '现在：进行中' })!.text).toBe('后台服务重启，工单 #2 的执行停了 · 现在：进行中');
   });
 
   it('marks a recovery as fine, and leaves agent checkpoints and requests alone', () => {
     const recovered = runFailure({ kind: 'progress', title: 'Run recovered after daemon restart', keyFacts: [] }, {});
-    expect(presentSystemCheckpoint(recovered)).toMatchObject({ ok: true, needsUser: false, text: '工单 #51 的 Run 被收回以后，系统接着派发了' });
+    expect(presentSystemCheckpoint(recovered)).toMatchObject({ ok: true, needsUser: false, text: '工单 #51 的执行在重启时停了，系统已经重新开始' });
     expect(presentSystemCheckpoint(runFailure({ source: 'agent_reported' }, {}))).toBeNull();
     expect(presentSystemCheckpoint(runFailure({ actionRef: { type: 'approval', id: 1 } }, {}))).toBeNull();
   });

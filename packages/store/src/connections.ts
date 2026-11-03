@@ -46,6 +46,8 @@ export interface ConnectionRow {
   connected_at: string | null;
   created_at: string;
   updated_at: string;
+  // 本地 MCP 的启动参数（v63，protocol 的 LocalMcpLaunch 的 JSON）。远程连接为 null。
+  launch_json: string | null;
 }
 
 export interface NewConnection {
@@ -55,6 +57,8 @@ export interface NewConnection {
   tokenSource: ConnectionTokenSource;
   roles?: ConnectionRole[];
   writePolicy?: ConnectionWritePolicy;
+  // 本地 MCP 的启动参数（JSON）。建的时候写，之后不改：它和 server_url 一起固定了包和版本。
+  launchJson?: string | null;
 }
 
 // 可以用 updateConnection 改的列。密文和版本号只能用 saveConnectionSecret 改（带版本比较），
@@ -83,11 +87,11 @@ export function insertConnection(db: Db, input: NewConnection, now = new Date().
   const writePolicy = input.writePolicy ?? "confirm";
   const id = db.transaction(() => {
     const inserted = Number(db.prepare(
-      `INSERT INTO connections (provider, label, server_url, token_source, status, roles, write_policy, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'disconnected', ?, ?, ?, ?)`,
+      `INSERT INTO connections (provider, label, server_url, token_source, status, roles, write_policy, created_at, updated_at, launch_json)
+       VALUES (?, ?, ?, ?, 'disconnected', ?, ?, ?, ?, ?)`,
     ).run(
       input.provider, input.label, input.serverUrl, input.tokenSource,
-      JSON.stringify(roles), writePolicy, now, now,
+      JSON.stringify(roles), writePolicy, now, now, input.launchJson ?? null,
     ).lastInsertRowid);
     addConnectionEvent(db, inserted, CONNECTION_CREATED_EVENT, JSON.stringify({ roles, writePolicy }), now);
     return inserted;
@@ -188,6 +192,20 @@ export interface ConnectionEventRow {
   kind: string;
   detail: string | null;
   at: string;
+}
+
+// 自定义连接的请求和撤回（2026-11-02，.scratch/lead-self-install）：Lead 或用户加了一个要授权的远程 MCP，行先建好、状态是
+// disconnected，记一条 requested，设置页和连接卡找得到它；没连上就撤回时记 removed，列表里不再显示。
+export const CONNECTION_REQUESTED_EVENT = "requested";
+export const CONNECTION_REMOVED_EVENT = "removed";
+
+/** 这一行是不是请求过、还没连上也没撤回（最近一条 requested、connected、disconnected、removed 是 requested）。 */
+export function connectionRequestPending(db: Db, connectionId: number): boolean {
+  const row = db.prepare(
+    `SELECT kind FROM connection_events WHERE connection_id = ? AND kind IN ('requested', 'connected', 'disconnected', 'removed')
+     ORDER BY id DESC LIMIT 1`,
+  ).get(connectionId) as { kind: string } | undefined;
+  return row?.kind === CONNECTION_REQUESTED_EVENT;
 }
 
 export function addConnectionEvent(db: Db, connectionId: number, kind: string, detail?: string | null, at = new Date().toISOString()): void {

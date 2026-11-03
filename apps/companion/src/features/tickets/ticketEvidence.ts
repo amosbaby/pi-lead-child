@@ -9,6 +9,7 @@
 // 按 Run 分组放进"历史证据"，并写明被哪次交付取代。条目的状态只用数据里的状态，不再猜。
 import type { KernelOutcomeSnapshotResource, KernelTicketPow, Locale } from '@pi-lead-child/protocol';
 
+import { deliveryNumber, type DeliveryNumbers } from './deliveryNumbers';
 import { ticketHistoryMessages } from './ticketHistory.messages';
 
 export type EvidenceState = 'passed' | 'failed' | 'pending' | 'not_run';
@@ -43,6 +44,8 @@ export function buildEvidencePresentation(
   pow: KernelTicketPow | null,
   outcome: KernelOutcomeSnapshotResource | null | undefined,
   locale: Locale = 'en',
+  /** 每次交付是第几次。标题写「第 N 次交付」，不写执行记录的编号（设计规范 P14.6）。 */
+  deliveryNumbers?: DeliveryNumbers,
 ): EvidencePresentation {
   const m = ticketHistoryMessages(locale).evidence;
   const row = (item: KernelTicketPow['items'][number]) => powRow(item, m.waiting);
@@ -79,7 +82,7 @@ export function buildEvidencePresentation(
     .sort(([left], [right]) => (right ?? 0) - (left ?? 0))
     .map(([attemptId, rows]): EvidenceGroup => ({
       attemptId,
-      title: m.historyTitle(attemptId, delivery),
+      title: m.historyTitle(attemptId === null, deliveryNumber(deliveryNumbers, attemptId), deliveryNumber(deliveryNumbers, delivery)),
       rows,
     }));
 
@@ -89,7 +92,7 @@ export function buildEvidencePresentation(
   );
   const open = counts.failed + counts.pending + counts.not_run;
   const summary = current.length === 0
-    ? { title: delivery === null ? m.none : m.noValidation(delivery), tone: 'muted' as const, mark: '·' as const }
+    ? { title: delivery === null ? m.none : m.noValidation(deliveryNumber(deliveryNumbers, delivery)), tone: 'muted' as const, mark: '·' as const }
     : {
         title: (['passed', 'failed', 'not_run', 'pending'] as const)
           .filter((state) => counts[state] > 0)
@@ -100,7 +103,7 @@ export function buildEvidencePresentation(
       };
   return {
     deliveryAttemptId: delivery,
-    currentTitle: delivery === null ? m.current : m.thisDelivery(delivery),
+    currentTitle: delivery === null ? m.current : m.thisDelivery(deliveryNumber(deliveryNumbers, delivery)),
     current,
     history,
     summary,

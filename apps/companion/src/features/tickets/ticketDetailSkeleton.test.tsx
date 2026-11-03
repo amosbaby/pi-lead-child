@@ -152,7 +152,10 @@ describe('the ticket detail skeleton', () => {
     for (const kind of ['task', 'criteria', 'info', 'execution', 'history']) expect(expanded(thread, kind)).toBe(true);
     expect(within(thread).getByTestId('ticket-section-delivery').textContent).toContain('Not delivered yet.');
     expect(within(thread).getByTestId('ticket-execution-now')).toBeTruthy();
-    expect(within(thread).getByTestId('ticket-run-118').textContent).toContain('#118');
+    // 设计规范 P14.6：执行记录的编号在界面上找不到，执行这一行不写它。
+    const run = within(thread).getByTestId('ticket-run-118');
+    expect(run.textContent).toContain('Execution');
+    expect(run.textContent).not.toContain('118');
   });
 
   it('opens the criteria and the delivery while the ticket waits for acceptance, and folds the brief and the execution', () => {
@@ -203,7 +206,7 @@ describe('the ticket detail skeleton', () => {
     expect(header('criteria')).toContain('Written by Paimon');
     expect(header('info')).toContain('System record');
     expect(within(thread).getByTestId('ticket-execution-usage').textContent).toContain('System record');
-    expect(within(thread).getByTestId('ticket-execution-plan').textContent).toContain('Executor agent report');
+    expect(within(thread).getByTestId('ticket-execution-plan').textContent).toContain('Executor report');
     expect(within(thread).getByTestId('ticket-execution-runs').textContent).toContain('System record');
     expect(within(thread).getByTestId('ticket-history-story').textContent).toContain('System record');
   });
@@ -265,7 +268,7 @@ describe('the ticket detail skeleton', () => {
   it('says so when the executing agent submitted no plan', () => {
     const thread = renderThread(summary({ stage: 'active', status: 'active' }), { executionPlan: null });
 
-    expect(within(thread).getByTestId('ticket-execution-plan').textContent).toContain('The executor agent did not submit a plan.');
+    expect(within(thread).getByTestId('ticket-execution-plan').textContent).toContain('The executor did not submit a plan.');
   });
 
   it('lets you confirm a criterion only when the action list allows it', () => {
@@ -444,7 +447,7 @@ describe('the ticket detail after the review', () => {
     });
     fireEvent.click(within(await openMore(thread)).getByTestId('ticket-bar-menu-widen_grant'));
 
-    expect(onPrefillChat).toHaveBeenCalledWith('Widen the permissions of the child agent of #102: ');
+    expect(onPrefillChat).toHaveBeenCalledWith('Widen the permissions of the executor of #102: ');
     expect(onRunAction).not.toHaveBeenCalled();
   });
 
@@ -586,7 +589,7 @@ describe('the ticket detail after the review', () => {
       const thread = renderThread(summary({ stage: 'active', status: 'active' }), { actions: [ticketAction('stop_run', { label: '停下' })], onRunAction });
       fireEvent.click(within(await openMore(thread)).getByTestId('ticket-bar-menu-stop_run'));
 
-      expect(within(thread).getByTestId('ticket-confirm').textContent).toContain('Stop the current run?');
+      expect(within(thread).getByTestId('ticket-confirm').textContent).toContain('Stop the current work?');
       fireEvent.click(within(within(thread).getByTestId('ticket-confirm')).getByText('停下'));
       expect(onRunAction).toHaveBeenCalledWith('stop_run', {});
     });
