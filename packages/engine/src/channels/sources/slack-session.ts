@@ -19,6 +19,8 @@ export interface SlackSessionIdentity {
   userId: string;
   teamId: string;
   teamName: string | null;
+  // 工作区的子域名（acme.slack.com 的 acme），拼消息的地址用。会话没给时是 null。
+  domain: string | null;
 }
 
 function errorText(error: unknown): string {
@@ -86,8 +88,8 @@ export class SlackSessions {
   }
 }
 
-function identityOf(session: { userId: string; teamId: string; teamName?: string }): SlackSessionIdentity {
-  return { userId: session.userId, teamId: session.teamId, teamName: session.teamName || null };
+function identityOf(session: { userId: string; teamId: string; teamName?: string; domain?: string }): SlackSessionIdentity {
+  return { userId: session.userId, teamId: session.teamId, teamName: session.teamName || null, domain: session.domain || null };
 }
 
 /** 会话方式的 SlackWebApi：经过现在的 GabrielCore 调。还没有会话时抛错。 */
