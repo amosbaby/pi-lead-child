@@ -91,7 +91,7 @@ export function liveRunProgress(
   return {
     runId: live.id,
     purpose,
-    label: `${m.purpose[purpose]} Run #${live.id} · ${phaseText}`,
+    label: `${m.purpose[purpose]} · ${phaseText}`,
     phase,
     elapsedMs,
     stalled: phase === 'starting' && elapsedMs > RUN_START_STALL_MS,
@@ -161,7 +161,7 @@ export function ticketChatDestination({ ticketDisplayId, liveRun, runtimeName, r
   if (resume) {
     const noun = m.role[resume.role];
     return {
-      hint: m.destination.resume(ticketDisplayId, noun, resume.attemptId),
+      hint: m.destination.resume(ticketDisplayId, noun),
       placeholder: m.destination.placeholder(noun),
       cost: resume.lastTokens === null
         ? m.destination.costUnknown

@@ -183,6 +183,7 @@ const WATCHES_MIGRATION_VERSION = 59;
 const MEMORY_SYNC_MIGRATION_VERSION = 60;
 const WIDGETS_MIGRATION_VERSION = 61;
 const WIDGET_SOURCES_MIGRATION_VERSION = 62;
+const CONNECTION_LAUNCH_MIGRATION_VERSION = 63;
 
 // v23 的列补齐必须发生在 exec(SCHEMA) 前：当前 DDL/索引会读取这些列，而 SQLite 的
 // CREATE TABLE IF NOT EXISTS 不会给既有表补列。跨字段的 reminder/workflow 约束由 SCHEMA
@@ -559,6 +560,17 @@ function migrateWidgetSources(db: Db): void {
     .run(WIDGET_SOURCES_MIGRATION_VERSION, "widget-sources-v1");
 }
 
+// v63：本地 MCP（.scratch/lead-self-install/spec.md D3）。connections 加一列 launch_json：npx、uvx 起进程的启动参数，
+// 远程连接为 NULL。只加列，不重建表：别的列和行原样保留，不回填。新库的列由 SCHEMA 建，这里跳过。
+function migrateConnectionLaunch(db: Db): void {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(CONNECTION_LAUNCH_MIGRATION_VERSION)) return;
+  db.transaction(() => {
+    addColumn(db, "connections", tableColumns(db, "connections"), "launch_json", "TEXT");
+    db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)")
+      .run(CONNECTION_LAUNCH_MIGRATION_VERSION, "connection-launch-v1");
+  })();
+}
+
 // v38：派发请求和 Run 加一列 effort。只加列，不重建表，已有的列和行原样保留。
 // v39：工单加一列显示用的短标题。只加列，不重建 items：别的列和行原样保留。
 // 它不是执行列，不进 C2 的 CHECK（提醒也可以有短标题）。
@@ -716,6 +728,7 @@ export function migrateDb(db: Db): void {
   migrateMemorySync(db);
   migrateWidgets(db);
   migrateWidgetSources(db);
+  migrateConnectionLaunch(db);
 }
 
 const ITEM_MODEL_MIGRATION_VERSION = 14;
@@ -727,7 +740,7 @@ const RELATION_EXECUTION_GATE_MIGRATION_VERSION = 19;
 const OUTCOME_SNAPSHOT_MIGRATION_VERSION = 20;
 const TICKET_AGENT_EXECUTION_CONTINUATION_MIGRATION_VERSION = 21;
 const OUTCOME_RECOVERY_SCOPE_MIGRATION_VERSION = 22;
-export const LATEST_SCHEMA_VERSION = WIDGET_SOURCES_MIGRATION_VERSION;
+export const LATEST_SCHEMA_VERSION = CONNECTION_LAUNCH_MIGRATION_VERSION;
 
 // 旧 status → 新 status。backlog 映射到 ready 而不是 draft：旧 backlog 是可以被直接派发的，
 // 映射到 draft 会让存量工单突然需要用户逐个确认，等于用迁移改变了既有行为。
@@ -1931,4 +1944,5 @@ export const SCHEMA_MIGRATION_VERSIONS: readonly number[] = [
   MEMORY_SYNC_MIGRATION_VERSION,
   WIDGETS_MIGRATION_VERSION,
   WIDGET_SOURCES_MIGRATION_VERSION,
+  CONNECTION_LAUNCH_MIGRATION_VERSION,
 ];

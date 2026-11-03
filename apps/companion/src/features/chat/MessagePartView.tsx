@@ -74,7 +74,7 @@ export function MessagePartView({
     <InfoRow
       icon="agent"
       label={`Agent ${part.state}`}
-      detail={[part.ticketId ? m.ticketNumber(part.ticketId) : null, part.attemptId ? `attempt #${part.attemptId}` : null].filter(Boolean).join(' · ') || m.stateUpdated}
+      detail={part.ticketId ? m.ticketNumber(part.ticketId) : m.stateUpdated}
     />
   );
 }

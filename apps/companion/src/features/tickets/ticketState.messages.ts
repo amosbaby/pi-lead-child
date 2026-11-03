@@ -1,7 +1,7 @@
 // 工单状态卡、决策卡和旧接口操作的文字（ticketState.ts、ticketDecision.ts、legacyTicketActions.ts）。
 import { defineMessages } from '@/i18n';
 
-/** 交付的名字：有 Run 编号时写「Run #49」，没有时写「最新的交付」。 */
+/** 第几次交付（deliveryNumbers.ts）。没有序号时是 null，文字写「最新的交付」（设计规范 P14.6）。 */
 type Delivery = number | null;
 
 export const ticketStateMessages = defineMessages({
@@ -10,11 +10,12 @@ export const ticketStateMessages = defineMessages({
     progress: { queued: 'Queued', suspended: 'Paused', running: 'In progress' },
     facts: {
       latestDelivery: 'Latest delivery',
-      deliveryWithSnapshot: (run: number, snapshot: number) => `Run #${run} · outcome snapshot #${snapshot}`,
+      deliveryNumber: (delivery: number) => `Delivery ${delivery}`,
       review: 'Independent review',
+      verdict: { pass: 'Passed', fail: 'Did not pass' },
       verdictUnknown: 'Verdict unknown',
       startsSoon: 'Starts soon',
-      notReviewed: (delivery: Delivery) => (delivery === null ? 'Not reviewed' : `Run #${delivery} is not reviewed`),
+      notReviewed: (delivery: Delivery) => (delivery === null ? 'Not reviewed' : `Delivery ${delivery} is not reviewed`),
       previousReview: 'Previous review',
       reworkBudget: 'Rework budget',
       budgetUsed: (used: number, max: number) => `${used}/${max} used`,
@@ -22,14 +23,17 @@ export const ticketStateMessages = defineMessages({
       stayedValue: (duration: string) => duration,
     },
     rework: {
-      base: (delivery: Delivery) => (delivery === null ? 'Run this ticket again' : `Continue the rework from the delivery of Run #${delivery}`),
+      again: 'Start this ticket again',
+      base: (delivery: Delivery) => (delivery === null
+        ? 'Continue the rework from the latest delivery'
+        : `Continue the rework from delivery ${delivery}`),
       own: (base: string, leadName: string) => `${base}. You started this rework, so it does not use the rework budget of ${leadName}.`,
       plain: (base: string) => `${base}.`,
     },
     requestReview: 'Request independent review',
     requestReviewConsequence: (delivery: Delivery) => (delivery === null
       ? 'An independent reviewer checks the latest delivery.'
-      : `An independent reviewer checks the result of Run #${delivery}.`),
+      : `An independent reviewer checks delivery ${delivery}.`),
     accept: 'Accept',
     acceptAnyway: 'Accept anyway',
     reworkManually: 'Rework manually',
@@ -44,13 +48,15 @@ export const ticketStateMessages = defineMessages({
       chip: 'Review not requested',
       headline: (delivery: Delivery) => (delivery === null
         ? 'The latest delivery has no independent review yet.'
-        : `Run #${delivery} is delivered, but it has no independent review yet.`),
+        : `Delivery ${delivery} has no independent review yet.`),
       why: (exhausted: boolean) => `The system does not request a review automatically. You decide the next step.${exhausted ? ' The rework budget is used up.' : ''}`,
       consequence: 'Close the ticket without a review verdict.',
     },
     exhausted: {
       chip: 'Stuck',
-      noOutcome: (delivery: Delivery) => `The last delivery (${delivery === null ? 'the latest delivery' : `Run #${delivery}`}) registered no outcome. Automation stopped.`,
+      noOutcome: (delivery: Delivery) => (delivery === null
+        ? 'The last delivery registered no outcome. Automation stopped.'
+        : `The last delivery (delivery ${delivery}) registered no outcome. Automation stopped.`),
       budgetUsedUp: 'The rework budget is used up. Automation stopped.',
       noOutcomeConsequence: 'The last delivery has no outcome to review. If you accept now, you close the ticket without evidence.',
       noPassConsequence: 'There is no passing review verdict. If you accept now, you close the ticket without passing evidence.',
@@ -64,22 +70,22 @@ export const ticketStateMessages = defineMessages({
     passed: { chip: 'Review passed', headline: 'The review passed. It waits for your acceptance.' },
     waitingUser: {
       chip: 'Waiting for acceptance',
-      headline: 'The run is complete. It waits for your acceptance.',
+      headline: 'The work is complete. It waits for your acceptance.',
       why: 'This ticket has no independent review. You decide if it is complete.',
-      requestReviewConsequence: (delivery: Delivery) => `An independent reviewer checks the result of ${delivery === null ? 'the latest delivery' : `Run #${delivery}`}. Until the verdict comes, you can still accept directly.`,
+      requestReviewConsequence: (delivery: Delivery) => `An independent reviewer checks ${delivery === null ? 'the latest delivery' : `delivery ${delivery}`}. Until the verdict comes, you can still accept directly.`,
     },
     stalled: {
       chip: 'Review did not start',
-      headline: (runId: number, duration: string) => `Review Run #${runId} is still preparing after ${duration}. It did not start.`,
+      headline: (duration: string) => `The review is still preparing after ${duration}. It did not start.`,
       why: 'A review usually starts in 10 seconds. It can be stuck.',
     },
     runInFlight: {
-      chip: 'Waiting for the Run to end',
-      conversation: (runId: number) => `Ticket conversation Run #${runId} is still answering. You can request an independent review after it answers.`,
-      live: (runId: number) => `Run #${runId} is still in progress. You can request an independent review after it ends.`,
-      unknown: 'A Run of this ticket is still in progress. You can request an independent review after it ends.',
-      why: 'No review starts while a Run is in progress: the review needs a workspace that does not change.',
-      automation: 'The state updates automatically after the Run ends.',
+      chip: 'Waiting for the work to end',
+      conversation: 'The ticket conversation is still answering. You can request an independent review after it answers.',
+      live: (work: string) => `The ${work} is still in progress. You can request an independent review after it ends.`,
+      unknown: 'Work on this ticket is still in progress. You can request an independent review after it ends.',
+      why: 'No review starts while work is in progress: the review needs a workspace that does not change.',
+      automation: 'The state updates automatically after the work ends.',
     },
     reviewing: {
       chipPaused: 'Review paused',
@@ -88,21 +94,21 @@ export const ticketStateMessages = defineMessages({
       running: 'The independent review is in progress.',
       queued: 'The independent review is queued. It waits to start.',
       paused: 'The independent review is queued, but it cannot start now.',
-      soon: 'The run is complete. The independent review starts soon.',
+      soon: 'The work is complete. The independent review starts soon.',
       automation: 'The state updates automatically after the review ends.',
     },
     pendingDecision: {
       headline: 'Waiting for your decision',
-      why: (leadName: string) => `First, answer the decision on this ticket. After you choose, ${leadName} or the agent continues.`,
+      why: (leadName: string) => `First, answer the decision on this ticket. After you choose, ${leadName} or the executor continues.`,
     },
     afterIntervention: {
-      label: 'Authorization is recorded. Waiting for the run state to confirm it.',
-      body: (leadName: string) => `The ticket is still blocked. Waiting for the child or ${leadName} to report the run result again.`,
+      label: 'Authorization is recorded. Waiting for the execution state to confirm it.',
+      body: (leadName: string) => `The ticket is still blocked. Waiting for the executor or ${leadName} to report the result again.`,
     },
     continueRestore: 'Continue restore',
     restartRework: 'Restart rework',
     legacyNotes: {
-      unconfirm: 'The ticket goes back to draft. It waits until you confirm the run again.',
+      unconfirm: 'The ticket goes back to draft. It waits until you confirm it again.',
       restore: 'After the restore, the ticket goes back to draft. It does not start automatically.',
       release: 'Return the isolated workspace. The changes stay on the branch.',
     },
@@ -112,11 +118,12 @@ export const ticketStateMessages = defineMessages({
     progress: { queued: '排队中', suspended: '已暂停', running: '进行中' },
     facts: {
       latestDelivery: '最新交付',
-      deliveryWithSnapshot: (run, snapshot) => `Run #${run} · 成果快照 #${snapshot}`,
+      deliveryNumber: (delivery) => `第 ${delivery} 次交付`,
       review: '独立核查',
+      verdict: { pass: '通过', fail: '不通过' },
       verdictUnknown: '结论未知',
       startsSoon: '即将开始',
-      notReviewed: (delivery) => (delivery === null ? '未核查' : `Run #${delivery} 未核查`),
+      notReviewed: (delivery) => (delivery === null ? '未核查' : `第 ${delivery} 次交付未核查`),
       previousReview: '上次核查',
       reworkBudget: '返工额度',
       budgetUsed: (used, max) => `${used}/${max} 已用`,
@@ -124,12 +131,13 @@ export const ticketStateMessages = defineMessages({
       stayedValue: (duration) => `${duration} 未变化`,
     },
     rework: {
-      base: (delivery) => (delivery === null ? '重新执行这张工单' : `从 Run #${delivery} 的交付继续返工`),
+      again: '重新执行这张工单',
+      base: (delivery) => (delivery === null ? '从最新的交付继续返工' : `从第 ${delivery} 次交付继续返工`),
       own: (base, leadName) => `${base}；这是你发起的返工，不占用 ${leadName} 的返工额度。`,
       plain: (base) => `${base}。`,
     },
     requestReview: '派发独立核查',
-    requestReviewConsequence: (delivery) => (delivery === null ? '派一个独立 reviewer 核查最新的交付。' : `派一个独立 reviewer 核查 Run #${delivery} 的成果。`),
+    requestReviewConsequence: (delivery) => (delivery === null ? '派一个独立核查员核查最新的交付。' : `派一个独立核查员核查第 ${delivery} 次交付。`),
     accept: '验收通过',
     acceptAnyway: '仍要验收通过',
     reworkManually: '手动返工',
@@ -142,13 +150,13 @@ export const ticketStateMessages = defineMessages({
     skipReviewConsequence: '独立核查尚未给出结论，现在验收等于跳过核查。',
     notRequested: {
       chip: '核查未派发',
-      headline: (delivery) => `${delivery === null ? '最新的交付' : `Run #${delivery}`} 已交付，但还没有被独立核查。`,
+      headline: (delivery) => `${delivery === null ? '最新的交付' : `第 ${delivery} 次交付`}还没有独立核查。`,
       why: (exhausted) => `系统不会自动派发核查，需要你决定下一步。${exhausted ? '返工额度已用完。' : ''}`,
       consequence: '没有核查结论就结单。',
     },
     exhausted: {
       chip: '卡住',
-      noOutcome: (delivery) => `最后一次交付（${delivery === null ? '最新的交付' : `Run #${delivery}`}）没有登记成果，自动化已停止。`,
+      noOutcome: (delivery) => `最后一次交付${delivery === null ? '' : `（第 ${delivery} 次）`}没有登记成果，自动化已停止。`,
       budgetUsedUp: '返工额度已用完，自动化已停止。',
       noOutcomeConsequence: '最后一次交付没有成果可核查，现在验收等于在没有证据的情况下结单。',
       noPassConsequence: '当前没有通过的核查结论，现在验收等于在没有通过证据的情况下结单。',
@@ -164,20 +172,20 @@ export const ticketStateMessages = defineMessages({
       chip: '待验收',
       headline: '执行已结束，等你验收。',
       why: '这张工单没有独立核查，由你判断是否完成。',
-      requestReviewConsequence: (delivery) => `派一个独立 reviewer 核查 ${delivery === null ? '最新的交付' : `Run #${delivery}`} 的成果；结论出来前你仍然可以直接验收。`,
+      requestReviewConsequence: (delivery) => `派一个独立核查员核查${delivery === null ? '最新的交付' : `第 ${delivery} 次交付`}；结论出来前你仍然可以直接验收。`,
     },
     stalled: {
       chip: '核查没有开始',
-      headline: (runId, duration) => `核查 Run #${runId} 准备了 ${duration}，还没有开始。`,
+      headline: (duration) => `核查准备了 ${duration}，还没有开始。`,
       why: '通常 10 秒内开始，这次可能卡住了。',
     },
     runInFlight: {
-      chip: '等 Run 结束',
-      conversation: (runId) => `工单对话 Run #${runId} 还在回答，答完才能派发独立核查。`,
-      live: (runId) => `Run #${runId} 还在进行，结束后才能派发独立核查。`,
-      unknown: '这张工单还有一个 Run 在进行，结束后才能派发独立核查。',
-      why: '有 Run 在进行时不派核查：核查要看一个不再变化的工作区。',
-      automation: 'Run 结束后状态会自动更新。',
+      chip: '等执行结束',
+      conversation: '工单对话还在回答，答完才能派发独立核查。',
+      live: (work) => `${work}还在进行，结束后才能派发独立核查。`,
+      unknown: '这张工单还有执行在进行，结束后才能派发独立核查。',
+      why: '有执行在进行时不派核查：核查要看一个不再变化的工作区。',
+      automation: '执行结束后状态会自动更新。',
     },
     reviewing: {
       chipPaused: '核查已暂停',
@@ -191,11 +199,11 @@ export const ticketStateMessages = defineMessages({
     },
     pendingDecision: {
       headline: '等你决定',
-      why: (leadName) => `先回答这张工单上的决定。你选完以后，${leadName} 或 agent 会接着做。`,
+      why: (leadName) => `先回答这张工单上的决定。你选完以后，${leadName} 或执行者会接着做。`,
     },
     afterIntervention: {
       label: '授权已记录，等待执行状态确认',
-      body: (leadName) => `当前工单仍处于阻塞；等待 child 或 ${leadName} 重新上报执行结果。`,
+      body: (leadName) => `当前工单仍处于阻塞；等待执行者或 ${leadName} 重新上报执行结果。`,
     },
     continueRestore: '继续恢复',
     restartRework: '重新启动返工',

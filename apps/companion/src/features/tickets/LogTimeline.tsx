@@ -135,7 +135,7 @@ export function RunLogGroups({ runs }: { runs: TicketLogRunPresentation[] }) {
             >
               <Row w="100%" items="center" gap="icon-label">
                 <Column minW={0} flex={1} items="flex-start" gap="text-stack">
-                  <Text size="card-title" weight="bold">{`Run #${run.id} · ${run.purposeLabel} · ${run.result}`}</Text>
+                  <Text size="card-title" weight="bold">{`${run.purposeLabel} · ${run.result}`}</Text>
                   <Text size="meta" mono tone="muted">
                     {m.runLogMeta(run.choice, timeRangeLabel(run.startedAt, run.endedAt, undefined, locale), run.logs.length)}
                   </Text>

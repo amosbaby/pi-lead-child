@@ -17,7 +17,7 @@ export const ticketChatMessages = defineMessages({
     stalled: 'It did not start after 1 minute. It usually starts in 10 seconds. It can be stuck.',
     collapse: 'Collapse',
     showAll: (size: string) => `Show full text · about ${size} characters`,
-    sender: { system: 'System', child: 'Executor agent' },
+    sender: { system: 'System', child: 'Executor' },
   },
   zh: {
     title: '工单对话',
@@ -34,6 +34,6 @@ export const ticketChatMessages = defineMessages({
     stalled: '超过 1 分钟还没开始。通常 10 秒内开始，可能卡住了。',
     collapse: '收起',
     showAll: (size) => `展开全文 · 约 ${size} 字`,
-    sender: { system: '系统', child: '执行 agent' },
+    sender: { system: '系统', child: '执行者' },
   },
 });

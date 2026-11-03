@@ -1,7 +1,11 @@
 import type { KernelOutcomeSnapshotResource, KernelTicketPow } from '@pi-lead-child/protocol';
 import { describe, expect, it } from 'vitest';
 
+import { deliveryNumbersOf } from './deliveryNumbers';
 import { buildEvidencePresentation } from './ticketEvidence';
+
+// #66 交付了两次：Run #42 是第 1 次，Run #49 是第 2 次。Run #45 没有交付。
+const deliveries = deliveryNumbersOf([{ attemptId: 42, sequence: 1 }, { attemptId: 49, sequence: 2 }]);
 
 // #66 的真实证据（DB 只读查询，2026-10-13）：Run #42 写了两条 failed（EPERM 借口）和四条 passed，
 // Run #45 写了两条 passed；最新交付 Run #49 没有 proof items，它的验证结果在成果快照 #2 里。
@@ -36,18 +40,19 @@ const outcome: KernelOutcomeSnapshotResource = {
 
 describe('evidence presentation', () => {
   it('regression #66: shows the latest delivery evidence and moves older runs into history', () => {
-    const evidence = buildEvidencePresentation(pow, outcome);
+    const evidence = buildEvidencePresentation(pow, outcome, 'en', deliveries);
 
-    expect(evidence.currentTitle).toBe('This delivery · Run #49');
+    expect(evidence.currentTitle).toBe('This delivery · delivery 2');
     expect(evidence.current).toEqual([
       { id: 'validation-0', label: './node_modules/.bin/vitest run', detail: 'Full root suite green: 158 files / 1238 tests passed', state: 'passed' },
       { id: 'validation-1', label: 'npm run typecheck', detail: 'Blocked: requires-approval', state: 'not_run' },
     ]);
     expect(evidence.history.map((group) => [group.title, group.rows.map((row) => row.state)])).toEqual([
-      ['Evidence of Run #45 · replaced by Run #49', ['passed']],
-      ['Evidence of Run #42 · replaced by Run #49', ['failed', 'passed', 'failed']],
+      ['Earlier evidence · replaced by delivery 2', ['passed']],
+      ['Evidence of delivery 1 · replaced by delivery 2', ['failed', 'passed', 'failed']],
     ]);
     expect(evidence.summary).toEqual({ title: '1 passed · 1 not run', tone: 'attention', mark: '!' });
+    expect(JSON.stringify(evidence)).not.toMatch(/Run #\d/);
   });
 
   it('never relabels a failed item as an environment limit', () => {
@@ -61,7 +66,9 @@ describe('evidence presentation', () => {
     expect(buildEvidencePresentation(null, { ...outcome, latest: { ...outcome.latest!, validations: [outcome.latest!.validations[0]!] } }).summary)
       .toEqual({ title: '1 passed', tone: 'passed', mark: '✓' });
     expect(buildEvidencePresentation({ ...pow, items: [], deliveryAttemptId: 49 }, null).summary)
-      .toEqual({ title: 'Run #49 registered no validation results', tone: 'muted', mark: '·' });
+      .toEqual({ title: 'The latest delivery registered no validation results', tone: 'muted', mark: '·' });
+    expect(buildEvidencePresentation({ ...pow, items: [], deliveryAttemptId: 49 }, null, 'zh', deliveries).summary.title)
+      .toBe('第 2 次交付没有登记验证结果');
   });
 
   // release review 4：reviewer 和对话 Run 报的条目属于它们之前那次交付。
@@ -76,10 +83,12 @@ describe('evidence presentation', () => {
     }, null);
 
     expect(evidence.current.map((row) => [row.id, row.state])).toEqual([['proof-regression', 'passed'], ['proof-manual', 'failed']]);
+    // 交付列表还没读到：不知道第几次交付，也不写执行记录的编号。
     expect(evidence.history.map((group) => group.title)).toEqual([
-      'Evidence of Run #45 · replaced by Run #49',
-      'Evidence of Run #42 · replaced by Run #49',
+      'Earlier evidence · replaced by the latest delivery',
+      'Earlier evidence · replaced by the latest delivery',
     ]);
+    expect(evidence.history.map((group) => group.attemptId)).toEqual([45, 42]);
     expect(evidence.needsAttention).toBe(true);
   });
 

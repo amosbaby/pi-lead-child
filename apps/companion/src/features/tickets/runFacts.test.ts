@@ -147,7 +147,7 @@ describe('why a run of ticket #66 did not deliver', () => {
       attempts,
       activities: [{ kind: 'crash', attemptId: 78, payload: { reason: 'daemon restart: orphaned run reclaimed', pid: null } }],
     });
-    expect(runFailureReason({ state: 'crashed', runtime: 'codex', model: 'gpt-5.5' }, reclaimed.get(78)!)).toBe('Run interrupted');
+    expect(runFailureReason({ state: 'crashed', runtime: 'codex', model: 'gpt-5.5' }, reclaimed.get(78)!)).toBe('Interrupted');
   });
 
   it('falls back to the crash text when the server could not classify the failure', () => {

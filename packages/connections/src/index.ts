@@ -7,6 +7,7 @@ export * from "./hub.js";
 export * from "./local-git.js";
 export * from "./local-repo.js";
 export * from "./mcp-client.js";
+export * from "./mcp-stdio.js";
 export * from "./oauth.js";
 export * from "./repo-paths.js";
 export * from "./run-reads.js";

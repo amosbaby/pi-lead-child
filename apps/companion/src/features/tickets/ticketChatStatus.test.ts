@@ -36,7 +36,7 @@ describe('the progress of the run in flight', () => {
 
   it('regression #66: says a review run that has been starting for minutes may be stuck', () => {
     const progress = liveRunProgress([reviewer], new Map(), at(13 * 60_000));
-    expect(progress).toMatchObject({ runId: 73, label: 'Review Run #73 · Preparing', phase: 'starting', stalled: true });
+    expect(progress).toMatchObject({ runId: 73, label: 'Review · Preparing', phase: 'starting', stalled: true });
     expect(elapsedText(progress!.elapsedMs)).toBe('13 min so far');
   });
 
@@ -46,7 +46,7 @@ describe('the progress of the run in flight', () => {
 
   it('names a running conversation as answering', () => {
     const chat = { id: 72, role: 'executor' as const, purpose: 'conversation' as const, state: 'running' as const, startedAt };
-    expect(liveRunProgress([chat], new Map(), at(20_000))).toMatchObject({ label: 'Conversation Run #72 · Answering', stalled: false });
+    expect(liveRunProgress([chat], new Map(), at(20_000))).toMatchObject({ label: 'Conversation · Answering', stalled: false });
   });
 
   it('takes the newest run when several are live, and none when all have ended', () => {

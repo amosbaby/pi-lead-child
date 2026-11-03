@@ -52,7 +52,8 @@ export function createSkillTools(deps: SkillToolDeps): ToolDefinition<any>[] {
       name: "find_skill",
       label: "Find Skill",
       description:
-        "找用户给 agent 装的 skill（~/.agents/skills、~/.claude/skills 这类）。它们不列在系统提示词里，你自带的 skill 照常列着。"
+        "找用户给 agent 装的 skill（~/.agents/skills、~/.claude/skills 这类）和你自己装进 PLC 的 skill 目录（~/.pi-lead-child/skills）的 skill。"
+        + "它们不列在系统提示词里，你自带的 skill 照常列着。"
         + "query 写这次要做的事（中文、英文都行），返回最相关的几个 skill 的名字、说明和 SKILL.md 的路径；不给 query 时返回全部的短目录。"
         + "找到以后用 read 读 SKILL.md 全文再照做；里面写的 Claude Code 专用工具（Skill、Agent、mcp__ 开头的）换成你有的工具。",
       parameters: Type.Object({

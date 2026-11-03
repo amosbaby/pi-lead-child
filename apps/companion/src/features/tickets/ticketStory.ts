@@ -14,6 +14,7 @@ import type { AttemptEntity } from '@/state/types';
 import { runtimeDisplayName } from '@/features/workspace/runtimeNames';
 
 import { REVIEW_REPORT_EVIDENCE_PREFIX, REVIEW_REPORT_VERDICT_PREFIX } from './activityKeys';
+import { deliveryNumber, type DeliveryNumbers } from './deliveryNumbers';
 import { runFailureReason, type RunFacts } from './runFacts';
 import { ticketHistoryMessages } from './ticketHistory.messages';
 
@@ -23,7 +24,7 @@ export type TicketStoryTone = 'success' | 'danger' | 'accent' | 'neutral';
 
 export type TicketStoryRun = {
   runId: number;
-  /** 「Run #44」 */
+  /** 「执行」「核查」。不写 Run 的编号（设计规范 P14.6）。 */
   title: string;
   /** 「模型满载」 */
   reason: string | null;
@@ -33,7 +34,7 @@ export type TicketStoryRun = {
 export type TicketStoryEntry = {
   key: string;
   tone: TicketStoryTone;
-  /** 「Run #42 交付」「5 次执行没有交付」「你授权 Lead 托管，发起返工」 */
+  /** 「第 2 次交付」「5 次执行没有交付」「你授权 Lead 托管，发起返工」 */
   title: string;
   /** 一句说明：核查报告的要点、失败的原因。 */
   detail: string | null;
@@ -51,6 +52,8 @@ export type TicketStoryInput = {
   attempts: readonly Pick<AttemptEntity, 'id' | 'state' | 'runtime' | 'model' | 'startedAt' | 'endedAt'>[];
   activities: readonly Pick<ActivityDto, 'id' | 'actor' | 'kind' | 'attemptId' | 'payload' | 'createdAt'>[];
   facts: ReadonlyMap<number, RunFacts>;
+  /** 每次交付是第几次（deliveryNumbers.ts）。没有序号的交付写「交付了成果」。 */
+  deliveryNumbers?: DeliveryNumbers;
   /** Lead 的名字（useLeadName）。 */
   leadName: string;
   /** 界面语言。不给时按英文。 */
@@ -81,13 +84,18 @@ export function buildTicketStory(input: TicketStoryInput): TicketStoryEntry[] {
     const at = attempt.endedAt ?? attempt.startedAt;
     const order = attempt.id;
     if (facts.purpose === 'execution' && facts.delivered) {
-      events.push(line({ key: `run:${attempt.id}`, tone: 'success', title: m.delivered(attempt.id), at }, order));
+      events.push(line({
+        key: `run:${attempt.id}`,
+        tone: 'success',
+        title: m.delivered(deliveryNumber(input.deliveryNumbers, attempt.id)),
+        at,
+      }, order));
     } else if (facts.purpose === 'review' && facts.verdict !== null) {
       const pass = facts.verdict === 'pass';
       events.push(line({
         key: `run:${attempt.id}`,
         tone: pass ? 'success' : 'danger',
-        title: m.reviewed(attempt.id, pass),
+        title: m.reviewed(pass),
         detail: reviewReportOf(input.activities, attempt.id),
         at,
       }, order));
@@ -95,7 +103,7 @@ export function buildTicketStory(input: TicketStoryInput): TicketStoryEntry[] {
       events.push({
         kind: 'failure',
         purpose: facts.purpose,
-        run: { runId: attempt.id, title: `Run #${attempt.id}`, reason: runFailureReason(attempt, facts, locale), at },
+        run: { runId: attempt.id, title: m.runTitle(facts.purpose === 'review'), reason: runFailureReason(attempt, facts, locale), at },
         order,
       });
     }
@@ -172,7 +180,7 @@ function groupFailures(events: StoryEvent[], m: StoryMessages): StoryLine[] {
       lines.push(line({
         key: `run:${first!.run.runId}`,
         tone: 'danger',
-        title: m.failedOne(review, first!.run.runId),
+        title: m.failedOne(review),
         detail: first!.run.reason,
         at: first!.run.at,
       }, first!.order));

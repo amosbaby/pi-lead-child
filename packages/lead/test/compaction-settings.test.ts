@@ -4,7 +4,8 @@
 import { SettingsManager } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
-  applyLeadCompactionReserve, isSummaryTokenCapError, LEAD_COMPACTION_BUDGETS, LEAD_COMPACTION_RESERVE_TOKENS, leadCompactionInstructions,
+  applyLeadCompactionReserve, isSummaryTokenCapError, LEAD_COMPACTION_BUDGETS, LEAD_COMPACTION_RESERVE_TOKENS, leadAutoCompactionInstructions,
+  leadCompactionInstructions,
 } from "../src/compaction-settings.js";
 
 describe("the Lead's compaction reserve", () => {
@@ -52,6 +53,14 @@ describe("the length budget of a compaction the daemon runs", () => {
     expect(LEAD_COMPACTION_BUDGETS.strict).toBeLessThan(LEAD_COMPACTION_BUDGETS.normal);
     // 上一份摘要也要按这个标准删：摘要变长的原因就是每次都原样并进上一份。
     expect(normal).toContain("上一份摘要");
+  });
+
+  it("tells every summary not to carry 'cannot' as a rule, since tools change with each deploy", () => {
+    for (const instructions of [leadCompactionInstructions("normal"), leadCompactionInstructions("strict"), leadAutoCompactionInstructions()]) {
+      expect(instructions).toContain("做不到");
+      expect(instructions).toContain("调用的结果为准");
+    }
+    expect(leadAutoCompactionInstructions()).not.toContain("字。");
   });
 
   it("knows the error pi gives when the summary hits the token cap", () => {

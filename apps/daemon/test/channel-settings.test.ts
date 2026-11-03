@@ -49,7 +49,7 @@ afterEach(() => {
   db.close();
 });
 
-function adapter(): ChannelAdapter {
+function adapter(connection?: ChannelAdapter["connection"]): ChannelAdapter {
   const settings: ChannelSettingsSpec = {
     secrets: [
       { name: ONE, label: "第一个", prefix: "fake-", hint: (locale) => (locale === "zh" ? "在这里生成" : "Generate it here") },
@@ -64,17 +64,17 @@ function adapter(): ChannelAdapter {
       return answer(secrets);
     },
   };
-  return { id: "fake", label: "Fake", auth: { connectionProvider: "fake", secrets: [ONE, TWO] }, settings } as unknown as ChannelAdapter;
+  return { id: "fake", label: "Fake", auth: { connectionProvider: "fake", secrets: [ONE, TWO] }, settings, connection } as unknown as ChannelAdapter;
 }
 
-function setup(options: { vault?: Vault; testTimeoutMs?: number } = {}) {
+function setup(options: { vault?: Vault; testTimeoutMs?: number; connection?: ChannelAdapter["connection"] } = {}) {
   const settings = new ChannelSettings({
     db, vault: options.vault ?? new Vault(randomBytes(32)), log: (line) => logs.push(line),
     env: (name) => env[name] ?? null, keychain: (name) => keychain[name] ?? null,
     publish: () => { publishes += 1; },
     ...(options.testTimeoutMs ? { testTimeoutMs: options.testTimeoutMs } : {}),
   });
-  const fake = adapter();
+  const fake = adapter(options.connection);
   settings.attach({ adapters: () => [fake], reload: async (source) => { reloads.push(source); } });
   return settings;
 }
@@ -276,6 +276,23 @@ describe("a source that connects but receives no events", () => {
     connect(restarted);
     vi.advanceTimersByTime(60 * MINUTE);
     expect(restarted.list()[0]!.noEventsWarning).toBeNull();
+  });
+
+  // 浏览器会话方式（要登录的方式）不走 Socket Mode，不报 received：存过应用令牌再换过去，也不该说没订阅事件。
+  it("does not warn while the source uses a connection that needs a sign-in", async () => {
+    vi.useFakeTimers({ now: new Date("2026-11-02T08:00:00.000Z"), toFake: ["Date", "setTimeout", "clearTimeout"] });
+    let mode = "app";
+    const connection = {
+      modes: ["app", "session"], mode: () => mode, needsSignIn: (name: string) => name === "session", writesSwitch: () => false,
+    } as unknown as ChannelAdapter["connection"];
+    const settings = setup({ connection });
+    expect((await settings.save("fake", { [ONE]: SAVED, [TWO]: "fake-two-value" })).ok).toBe(true);
+    mode = "session";
+    connect(settings);
+    vi.advanceTimersByTime(3 * 60 * MINUTE);
+    expect(settings.list()[0]).toMatchObject({ status: "connected", noEventsWarning: null });
+    mode = "app";
+    expect(settings.list()[0]!.noEventsWarning).toBe("Check the event subscriptions");
   });
 
   it("does not warn for tokens that the settings page did not save", () => {

@@ -1,5 +1,6 @@
 import type {
-  KernelIntervention, KernelInterventionRef, TicketActionId as TicketOperationId, TicketActionRunRequest, TicketReviewerInfo,
+  DeliverySummary, KernelIntervention, KernelInterventionRef, TicketActionId as TicketOperationId, TicketActionRunRequest,
+  TicketReviewerInfo,
 } from '@pi-lead-child/protocol';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -39,6 +40,7 @@ import {
 
 import type { ChildTicketPresentation, TicketLogPresentation, TicketThreadProps } from './TicketThread';
 import type { TicketLogRunPresentation } from './LogTimeline';
+import { deliveryNumbersOf } from './deliveryNumbers';
 import { legacyTicketActions, type LegacyTicketActionId } from './legacyTicketActions';
 import { reviewerStatus } from './ticketDetailSections';
 import {
@@ -237,19 +239,36 @@ export function useTicketDetailModel(
     });
   }, [ticketDetails, tickets, workbench?.childTicketIds]);
   const leadName = useLeadName();
-  const lifecycleItems = useMemo(() => buildLifecyclePresentation({
-    ticketId,
-    detail,
-    activities,
-    leadName,
-    locale,
-  }), [activities, detail, leadName, locale, ticketId]);
   const reviewState = tickets.find((item) => item.id === ticketId)?.reviewState ?? null;
   // 一次 Run 的用途和结论只算一次：执行尝试、运行日志和进展记录都读它（runFacts）。
   const runFacts = useMemo(
     () => buildRunFacts({ attempts, activities, review: reviewState }),
     [activities, attempts, reviewState],
   );
+  const lifecycleItems = useMemo(() => buildLifecyclePresentation({
+    ticketId,
+    detail,
+    activities,
+    leadName,
+    facts: runFacts,
+    locale,
+  }), [activities, detail, leadName, locale, runFacts, ticketId]);
+  // 交付写「第 N 次交付」（设计规范 P14.6）：序号来自交付列表（GET /v1/tickets/:id/deliveries）。
+  // 不放进工单快照：工单列表是严格校验的，加字段会让旧页面整张列表加载失败。工单变了再读一次；读不到时写「最新的交付」。
+  const [deliveryList, setDeliveryList] = useState<{ ticketId: number; deliveries: DeliverySummary[] } | null>(null);
+  const deliveriesKey = tickets.find((item) => item.id === ticketId)?.updatedAt ?? '';
+  useEffect(() => {
+    if (!connected) return undefined;
+    const controller = new AbortController();
+    runtime.getTicketDeliveries(ticketId, controller.signal)
+      .then((deliveries) => setDeliveryList({ ticketId, deliveries }))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [connected, deliveriesKey, runtime, ticketId]);
+  const deliveryNumbers = useMemo(() => deliveryNumbersOf(
+    deliveryList?.ticketId === ticketId ? deliveryList.deliveries : [],
+    acceptanceCriteria?.delivery ?? null,
+  ), [acceptanceCriteria?.delivery, deliveryList, ticketId]);
   const attemptItems = useMemo(() => buildAttemptPresentation(attempts, runFacts, locale), [attempts, locale, runFacts]);
   // 概览上的「经过」：每件事一行，连续的失败合成一行（复核 P1-2）。
   const story = useMemo(() => buildTicketStory({
@@ -257,9 +276,10 @@ export function useTicketDetailModel(
     attempts,
     activities,
     facts: runFacts,
+    deliveryNumbers,
     leadName,
     locale,
-  }), [activities, attempts, detail, leadName, locale, runFacts]);
+  }), [activities, attempts, deliveryNumbers, detail, leadName, locale, runFacts]);
   // 对话坞（方案 D）：展开状态和看过的最后一条消息放在工作区 store，会话里的回执能直接打开对话。
   const chatExpanded = useWorkspaceStore((state) => state.ticketChatExpandedId === ticketId);
   const chatSeenMessageId = useWorkspaceStore((state) => state.ticketChatSeenByTicket[ticketId] ?? null);
@@ -444,6 +464,7 @@ export function useTicketDetailModel(
     acceptanceCriteria,
     executionPlan,
     delivery,
+    deliveryNumbers,
     facts,
     executor,
     reviewer,

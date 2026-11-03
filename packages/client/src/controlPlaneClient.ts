@@ -34,6 +34,7 @@ import {
   type StartConnectionResponse,
 } from '@pi-lead-child/protocol';
 import {
+  ChannelConnectionDtoSchema, type ChannelConnectionDto,
   ChannelSecretsRequestSchema,
   ChannelSecretsTestResultSchema,
   ChannelSettingsResponseSchema,
@@ -1932,6 +1933,11 @@ export class ControlPlaneClient {
 
   async getChannelSettings(signal?: AbortSignal): Promise<ChannelSettingsResponse> {
     return this.request('/v1/channels/settings', ChannelSettingsResponseSchema, { signal });
+  }
+
+  // 有几种连接方式的来源现在的连接方式（2026-11-02）。只有一种方式的来源回 404。改动走 performUiAction('channel_connection', …)。
+  async getChannelConnection(source: string, signal?: AbortSignal): Promise<ChannelConnectionDto> {
+    return this.request(`${channelSourcePath(source)}/connection`, ChannelConnectionDtoSchema, { signal });
   }
 
   // 用这些密钥试一次，不保存。检查没过也是一个结果（ok 是 false）：

@@ -94,6 +94,48 @@ function platformResult(error: unknown): Record<string, unknown> | null {
   return { ...data, ok: false, error: typeof data.error === "string" ? data.error : "unknown_error" };
 }
 
+/**
+ * 读下载文件的回答（两种连接方式共用）：不是 2xx、回的是网页、超过 maxBytes 时抛错。
+ * 令牌不对或者缺 files:read 时，Slack 回 200 和登录网页。
+ */
+export async function readSlackFile(response: Response, maxBytes: number): Promise<Uint8Array> {
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new Error(`slack file download: HTTP ${response.status}`);
+  }
+  if ((response.headers.get("content-type") ?? "").startsWith("text/html")) {
+    await response.body?.cancel();
+    throw new Error("slack file download: Slack answered with a web page, not the file (the token may lack files:read)");
+  }
+  const tooLarge = () => new Error(`slack file download: the file is larger than ${maxBytes} bytes`);
+  if (Number(response.headers.get("content-length") ?? 0) > maxBytes) {
+    await response.body?.cancel();
+    throw tooLarge();
+  }
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  if (response.body) {
+    const reader = response.body.getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) {
+        await reader.cancel();
+        throw tooLarge();
+      }
+      chunks.push(value);
+    }
+  }
+  const data = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    data.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return data;
+}
+
 /** 真实的 SlackWebApi。 */
 // 令牌只放在 Authorization 头里。WebClient 的 apiCall 收到 options.token 时，除了放进头，还会把它原样留在表单请求体里；
 // apps.connections.open 不接受请求体里的令牌，一律回 invalid_auth（2026-10-21：设置页把用户的 App-Level Token 一直判成无效）。
@@ -127,39 +169,7 @@ export function createSlackWebApi(options: SlackWebApiOptions = {}): SlackWebApi
       } catch (error) {
         throw new Error(`slack file download: ${scrubSlackText(errorText(error), [token])}`);
       }
-      if (!response.ok) throw new Error(`slack file download: HTTP ${response.status}`);
-      // 令牌不对或者缺 files:read 时，Slack 回 200 和登录网页。
-      if ((response.headers.get("content-type") ?? "").startsWith("text/html")) {
-        await response.body?.cancel();
-        throw new Error("slack file download: Slack answered with a web page, not the file (the token may lack files:read)");
-      }
-      const tooLarge = () => new Error(`slack file download: the file is larger than ${maxBytes} bytes`);
-      if (Number(response.headers.get("content-length") ?? 0) > maxBytes) {
-        await response.body?.cancel();
-        throw tooLarge();
-      }
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      if (response.body) {
-        const reader = response.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > maxBytes) {
-            await reader.cancel();
-            throw tooLarge();
-          }
-          chunks.push(value);
-        }
-      }
-      const data = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks) {
-        data.set(chunk, offset);
-        offset += chunk.byteLength;
-      }
-      return data;
+      return readSlackFile(response, maxBytes);
     },
     async call(method, args, token) {
       try {

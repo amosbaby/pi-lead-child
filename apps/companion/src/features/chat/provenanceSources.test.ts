@@ -39,7 +39,7 @@ describe('the sources behind a reply', () => {
       truncated: false,
     });
     expect(run).toEqual({
-      label: 'Events of Run #49',
+      label: 'Execution records',
       sources: [{ kind: 'run', runId: 49 }, { kind: 'line', text: '10:01 运行 npm test' }, { kind: 'line', text: '10:02 失败：EPERM' }],
       truncated: false,
     });

@@ -1,11 +1,14 @@
 // 生命周期、执行尝试、关系（ticketHistory.ts），验收证据（ticketEvidence.ts），运行日志（ticketLogs.ts）和「经过」（ticketStory.ts）的文字。
 import { defineMessages } from '@/i18n';
 
+/** 第几次交付（deliveryNumbers.ts）。没有序号时是 null（设计规范 P14.6）。 */
+type Delivery = number | null;
+
 export const ticketHistoryMessages = defineMessages({
   en: {
-    actor: { user: 'User', child: 'Executor agent', system: 'System' },
+    actor: { user: 'User', child: 'Executor', system: 'System' },
     transition: {
-      draft: 'Waiting for confirmation', ready: 'Confirmed / ready', active: 'Started the run', blocked: 'Blocked',
+      draft: 'Waiting for confirmation', ready: 'Confirmed / ready', active: 'Started', blocked: 'Blocked',
       cancelled: 'Cancelled', review: 'Entered review', done: 'Done',
       scheduled: 'Scheduled', fired: 'Fired', acked: 'Acknowledged',
     } as Record<string, string>,
@@ -16,10 +19,11 @@ export const ticketHistoryMessages = defineMessages({
     transitionTitle: (label: string, from: string, to: string) => `${label} (${from} → ${to})`,
     noReason: 'No reason recorded',
     recordType: (id: string) => `Record type ${id}`,
-    runStarting: (runId: number | null) => (runId === null ? 'Run is starting' : `Run #${runId} is starting`),
-    runFailed: (runId: number | null) => (runId === null ? 'Run failed' : `Run #${runId} failed`),
+    /** purpose 是 runFacts 的用途词：Execution、Review、Conversation。 */
+    runStarting: (purpose: string) => `${purpose} started`,
+    runFailed: (purpose: string) => `${purpose} failed`,
     systemBlock: 'System block',
-    unknownRuntime: 'Unknown runtime',
+    unknownRuntime: 'Unknown executor',
     modelNotRecorded: 'Model not recorded',
     relationRevoked: 'Revoked',
     relationActive: 'Active',
@@ -60,11 +64,14 @@ export const ticketHistoryMessages = defineMessages({
     evidence: {
       counts: { passed: (n: number) => `${n} passed`, failed: (n: number) => `${n} failed`, pending: (n: number) => `${n} need evidence`, not_run: (n: number) => `${n} not run` },
       waiting: 'Waiting for new checkpoint evidence',
-      historyTitle: (attemptId: number | null, delivery: number | null) => `Evidence of ${attemptId === null ? 'the system record' : `Run #${attemptId}`} · replaced by Run #${delivery}`,
+      /** system：系统记录的条目，不属于哪一次交付。 */
+      historyTitle: (system: boolean, delivery: Delivery, current: Delivery) => `${system
+        ? 'Evidence of the system record'
+        : delivery === null ? 'Earlier evidence' : `Evidence of delivery ${delivery}`} · replaced by ${current === null ? 'the latest delivery' : `delivery ${current}`}`,
       none: 'No evidence to verify yet',
-      noValidation: (delivery: number) => `Run #${delivery} registered no validation results`,
+      noValidation: (delivery: Delivery) => `${delivery === null ? 'The latest delivery' : `Delivery ${delivery}`} registered no validation results`,
       current: 'Current evidence',
-      thisDelivery: (delivery: number) => `This delivery · Run #${delivery}`,
+      thisDelivery: (delivery: Delivery) => (delivery === null ? 'This delivery' : `This delivery · delivery ${delivery}`),
     },
     log: {
       fullCommand: 'Full command',
@@ -96,16 +103,16 @@ export const ticketHistoryMessages = defineMessages({
         request_approval: 'Request approval',
         request_decision: 'Request decision',
         restore_task_from_user_request: 'Restore task',
-        spawn_child: 'Start child',
+        spawn_child: 'Start an executor',
         submit_checkpoint: 'Submit progress record',
         ticket_update: 'Update ticket',
       } as Record<string, string>,
       events: {
         'message.completed': 'Agent output',
         'message.delta': 'Agent output part',
-        'run.completed': 'Run completed',
-        'run.failed': 'Run failed',
-        'run.started': 'Run started',
+        'run.completed': 'Completed',
+        'run.failed': 'Failed',
+        'run.started': 'Started',
         'runtime.stderr': 'Standard error',
         'session.updated': 'Session updated',
         'usage.updated': 'Token usage',
@@ -115,8 +122,8 @@ export const ticketHistoryMessages = defineMessages({
       delegated: (leadName: string) => `You delegated the ticket to ${leadName}`,
       reworkRequested: 'You requested rework',
       reviewRequested: 'You requested an independent review',
-      delivered: (runId: number) => `Run #${runId} delivered`,
-      reviewed: (runId: number, pass: boolean) => `Run #${runId} review ${pass ? 'passed' : 'failed'}`,
+      delivered: (delivery: Delivery) => (delivery === null ? 'Delivered' : `Delivery ${delivery}`),
+      reviewed: (pass: boolean) => `Review ${pass ? 'passed' : 'failed'}`,
       created: (by: 'user' | 'lead' | null, leadName: string) => (by === 'user'
         ? 'You created the ticket'
         : by === 'lead' ? `${leadName} created the ticket` : 'Created the ticket'),
@@ -124,18 +131,20 @@ export const ticketHistoryMessages = defineMessages({
       ticketDone: 'The ticket is complete',
       youCancelled: 'You cancelled the ticket',
       ticketCancelled: 'The ticket is cancelled',
-      runtimeSwitched: (runtime: string) => `You changed the executor agent to ${runtime}`,
-      failedOne: (review: boolean, runId: number) => (review ? `Review Run #${runId} did not complete` : `Run #${runId} did not deliver`),
-      failedMany: (review: boolean, count: number) => (review ? `${count} reviews did not complete` : `${count} runs did not deliver`),
+      runtimeSwitched: (runtime: string) => `You changed the executor to ${runtime}`,
+      /** 合成一行的那几次里，每一次的名字。 */
+      runTitle: (review: boolean) => (review ? 'Review' : 'Execution'),
+      failedOne: (review: boolean) => (review ? 'A review did not complete' : 'An execution did not deliver'),
+      failedMany: (review: boolean, count: number) => (review ? `${count} reviews did not complete` : `${count} executions did not deliver`),
       mergeActions: (first: string, next: string) => `${first} and ${next.replace(/^You /, '')}`,
       reasons: (reasons: string[]) => reasons.join(', '),
     },
   },
   zh: {
-    actor: { user: '用户', child: '执行 Agent', system: '系统' },
+    actor: { user: '用户', child: '执行者', system: '系统' },
     transition: {
       draft: '待确认', ready: '已确认 / 就绪', active: '开始执行', blocked: '进入阻塞',
-      cancelled: '已取消', review: '进入 Review', done: '已完成',
+      cancelled: '已取消', review: '进入待验收', done: '已完成',
       scheduled: '已排期', fired: '已触发', acked: '已确认',
     },
     createdTicket: '创建工单',
@@ -145,11 +154,11 @@ export const ticketHistoryMessages = defineMessages({
     transitionTitle: (label, from, to) => `${label}（${from} → ${to}）`,
     noReason: '未记录原因',
     recordType: (id) => `记录类型 ${id}`,
-    runStarting: (runId) => (runId === null ? 'Run 开始启动' : `Run #${runId} 开始启动`),
-    runFailed: (runId) => (runId === null ? 'Run 失败' : `Run #${runId} 失败`),
+    runStarting: (purpose) => `${purpose}开始`,
+    runFailed: (purpose) => `${purpose}失败`,
     systemBlock: '系统阻塞',
-    unknownRuntime: '未知 runtime',
-    modelNotRecorded: '未记录 model',
+    unknownRuntime: '未知执行器',
+    modelNotRecorded: '未记录模型',
     relationRevoked: '已撤销',
     relationActive: '有效',
     reasonMode: (mode) => `模式：${mode}`,
@@ -189,11 +198,13 @@ export const ticketHistoryMessages = defineMessages({
     evidence: {
       counts: { passed: (n) => `${n} 项通过`, failed: (n) => `${n} 项未通过`, pending: (n) => `${n} 项待补证据`, not_run: (n) => `${n} 项未运行` },
       waiting: '等待新的 Checkpoint 证据',
-      historyTitle: (attemptId, delivery) => `${attemptId === null ? '系统记录' : `Run #${attemptId}`} 的证据 · 已被 Run #${delivery} 取代`,
+      historyTitle: (system, delivery, current) => `${system
+        ? '系统记录的证据'
+        : delivery === null ? '更早的证据' : `第 ${delivery} 次交付的证据`} · 已被${current === null ? '最新的交付' : `第 ${current} 次交付`}取代`,
       none: '还没有可验证证据',
-      noValidation: (delivery) => `Run #${delivery} 没有登记验证结果`,
+      noValidation: (delivery) => `${delivery === null ? '最新的交付' : `第 ${delivery} 次交付`}没有登记验证结果`,
       current: '当前证据',
-      thisDelivery: (delivery) => `本次交付 · Run #${delivery}`,
+      thisDelivery: (delivery) => (delivery === null ? '本次交付' : `本次交付 · 第 ${delivery} 次交付`),
     },
     log: {
       fullCommand: '完整命令',
@@ -225,16 +236,16 @@ export const ticketHistoryMessages = defineMessages({
         request_approval: '请求审批',
         request_decision: '请求决策',
         restore_task_from_user_request: '恢复任务',
-        spawn_child: '启动 Child',
+        spawn_child: '启动执行者',
         submit_checkpoint: '提交进度记录',
         ticket_update: '更新工单',
       },
       events: {
         'message.completed': 'Agent 输出',
         'message.delta': 'Agent 输出片段',
-        'run.completed': '运行完成',
-        'run.failed': '运行失败',
-        'run.started': '开始运行',
+        'run.completed': '执行完成',
+        'run.failed': '执行失败',
+        'run.started': '开始执行',
         'runtime.stderr': '标准错误',
         'session.updated': '会话更新',
         'usage.updated': 'Token 用量',
@@ -244,15 +255,16 @@ export const ticketHistoryMessages = defineMessages({
       delegated: (leadName) => `你授权 ${leadName} 托管`,
       reworkRequested: '你发起返工',
       reviewRequested: '你派发了独立核查',
-      delivered: (runId) => `Run #${runId} 交付`,
-      reviewed: (runId, pass) => `Run #${runId} 核查${pass ? '通过' : '不通过'}`,
+      delivered: (delivery) => (delivery === null ? '交付了成果' : `第 ${delivery} 次交付`),
+      reviewed: (pass) => `核查${pass ? '通过' : '不通过'}`,
       created: (by, leadName) => `${by === 'user' ? '你' : by === 'lead' ? `${leadName} ` : ''}创建了工单`,
       youAccepted: '你验收通过',
       ticketDone: '工单完成',
       youCancelled: '你取消了工单',
       ticketCancelled: '工单已取消',
-      runtimeSwitched: (runtime) => `你把执行 agent 换成 ${runtime}`,
-      failedOne: (review, runId) => (review ? `核查 Run #${runId} 没有完成` : `Run #${runId} 没有交付`),
+      runtimeSwitched: (runtime) => `你把执行者换成 ${runtime}`,
+      runTitle: (review) => (review ? '核查' : '执行'),
+      failedOne: (review) => (review ? '一次核查没有完成' : '一次执行没有交付'),
       failedMany: (review, count) => `${count} 次${review ? '核查没有完成' : '执行没有交付'}`,
       mergeActions: (first, next) => `${first}，${next.replace(/^你/, '')}`,
       reasons: (reasons) => reasons.join('、'),

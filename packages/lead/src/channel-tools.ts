@@ -157,7 +157,9 @@ export function createChannelCardTools(cards: LeadChannelCards | undefined, db?:
         + "不要抄对方的原话。权限清单由代码按这条消息的权限上限算：你只能收窄，可以补上仓库、选定 PR，超出上限的部分会被丢掉并告诉你。"
         + "要 PR 的意图不写 pull_request 时用代码从消息里认出的那个；消息里没有链接时先看上下文包和 read_channel_conversation。"
         + "能做什么按交接说明里起作用的那一句的能力（消息事件里写着「派活能用：……」）；这一句没有派活的能力时，只能派只读的 knowledge 或 progress。"
-        + "派出去以后通道在来源里回一句「正在处理」，结果回到通道，由信心模型决定代用户回复还是交回给你。",
+        + "派出去以后通道在来源里回一句「正在处理」，结果回到通道，由信心模型决定代用户回复还是交回给你。"
+        + "一张工单只管一个 PR：消息里有几个 PR，每个 PR 调一次（pull_request 写那一个），可以同时调。"
+        + "子 agent 的结果交回给你以后（失败了或者信心不够），可以用同一个 event 再派一次，summary 写清这次要改的做法。",
       parameters: Type.Object({
         event,
         summary: Type.String({ minLength: 1, maxLength: 1_000 }),
@@ -267,7 +269,7 @@ export function createChannelCardTools(cards: LeadChannelCards | undefined, db?:
           const parts = [JSON.stringify(facts, null, 2), untrustedBlock(`${read.label} 的消息`, read.messages.map(messageLine).join("\n") || "（没有消息）")];
           const card = message?.cardId ? cards.read(message.cardId) : null;
           if (card) {
-            parts.push(`卡 #${card.card.id}：\n${JSON.stringify(cardFacts(card.card, card.request, card.tasks), null, 2)}`);
+            parts.push(`card_id=${card.card.id}（对用户写成 [称呼](plc:card/${card.card.id})，不写编号）：\n${JSON.stringify(cardFacts(card.card, card.request, card.tasks), null, 2)}`);
             const result = card.card.lookup?.result;
             if (result) {
               const quotes = result.sources.map((source) => `${source.repo} ${source.path}:${source.startLine}-${source.endLine}：${source.quote}`).join("\n");

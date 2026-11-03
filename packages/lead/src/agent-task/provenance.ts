@@ -8,12 +8,14 @@ import {
   type AgentTaskResult, type AgentTaskSource, type ConnectionSource, type LookupSource, type RunGrant,
 } from "@pi-lead-child/protocol";
 import type { RunReadContent } from "@pi-lead-child/connections";
-import { checkLineSource, mergeCaveats, normalizeQuote } from "../lookup/provenance.js";
+import { checkLineSource, correctedNote, mergeCaveats, normalizeQuote, type SourceCheck } from "../lookup/provenance.js";
 
 export interface AgentTaskSourceCheck {
   source: AgentTaskSource;
   verified: boolean;
   reason: string | null;
+  // 按行引用的出处在别的行找到、行号改正过时，原来写的行号（lookup/provenance.ts）。
+  corrected?: { startLine: number; endLine: number };
 }
 
 export interface AgentTaskVerification {
@@ -62,8 +64,10 @@ export function verifyAgentTaskResult(input: { result: AgentTaskResult; grant: R
   const sources = input.result.sources.map((source): AgentTaskSourceCheck => source.via === "connection"
     ? checkConnectionSource(source, input.grant, input.reads)
     : checkLineSource(source as LookupSource, repos, input.reads));
-  const notes = sources.filter((check) => !check.verified)
-    .map((check) => `出处没有通过核实：${describeSource(check.source)}（${check.reason}）`.slice(0, 500));
+  const notes = [
+    ...sources.filter((check) => !check.verified).map((check) => `出处没有通过核实：${describeSource(check.source)}（${check.reason}）`),
+    ...sources.flatMap((check) => (check.corrected ? [correctedNote(check as SourceCheck)] : [])),
+  ].map((note) => note.slice(0, 500));
   return {
     result: { ...input.result, sources: sources.map((check) => check.source), caveats: mergeCaveats(input.result.caveats, notes) },
     sources,

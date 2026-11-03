@@ -3,13 +3,13 @@ import { defineMessages } from '@/i18n';
 
 export const provenanceMessages = defineMessages({
   en: {
-    runEvents: (runId: number | null) => (runId === null ? 'Run events' : `Events of Run #${runId}`),
+    runEvents: (_runId: number | null) => 'Execution records',
     ticketLedger: (ticketId: number | null) => (ticketId === null ? 'Ticket ledger' : `Ledger of ticket #${ticketId}`),
     ticketList: 'Ticket list',
     needsUser: 'Tickets that need you',
     inbox: 'System notices',
     notifications: 'Notifications',
-    runtimeHealth: 'Runtime status',
+    runtimeHealth: 'Executor status',
     modelCatalog: 'Model catalog',
     basis: (label: string) => `Source: ${label}`,
     showSources: (label: string) => `Source: ${label}. Show the sources.`,
@@ -19,7 +19,7 @@ export const provenanceMessages = defineMessages({
     ticket: 'Ticket',
   },
   zh: {
-    runEvents: (runId) => (runId === null ? 'Run 的事件' : `Run #${runId} 的事件`),
+    runEvents: () => '执行记录',
     ticketLedger: (ticketId) => (ticketId === null ? '工单账本' : `工单 #${ticketId} 的账本`),
     ticketList: '工单列表',
     needsUser: '等你处理的工单',

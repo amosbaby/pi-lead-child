@@ -84,7 +84,7 @@ describe("lead prompt disciplines", () => {
     const moved: Record<string, string[]> = {
       // 工单 11：只有要求独立核查的工单能委托；核查做不成时的三条路，D11 的勾选。
       "ticket-acceptance": [
-        "转述 Run #N 的核查报告", "只有要求独立核查（verification=independent_reviewer）的工单能委托",
+        "转述核查员的报告", "只有要求独立核查（verification=independent_reviewer）的工单能委托",
         "retry_review", "accept_without_review",
       ],
       "ticket-planning": ["provision_workspace(mode='shared'", "兜底的 LLM 会用掉那个模型的额度", "它不读你的笔记"],

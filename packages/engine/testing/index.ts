@@ -6,3 +6,4 @@ export * from "./channels/fake-smart-model.js";
 export * from "./channels/cards.js";
 export * from "./channels/fake-agent-tasks.js";
 export * from "./fake-hindsight.js";
+export * from "./install-fakes.js";

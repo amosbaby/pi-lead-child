@@ -105,7 +105,7 @@ describe('whose turn it is', () => {
     renderUI(<CompanionRuntimeProvider runtime={runtime}><Workbench /></CompanionRuntimeProvider>);
 
     const header = screen.getByTestId('work-rail-header');
-    expect(within(header).getByText('2 Runs are running')).toBeTruthy();
+    expect(within(header).getByText('2 tickets are running')).toBeTruthy();
     expect(screen.queryByText('任务线程模式')).toBeNull();
   });
 

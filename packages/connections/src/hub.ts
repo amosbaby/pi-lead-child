@@ -19,8 +19,12 @@
 //   - 每个 Run 读到的内容记在内存里（runReads），交回结果时出处按它核实；Run 结束后 releaseRun。
 // 工具守卫（guards.ts）对所有调用方生效，带不带清单都一样。
 import { createHash, randomBytes } from "node:crypto";
+import { join } from "node:path";
 import {
   addConnectionEvent,
+  CONNECTION_REMOVED_EVENT,
+  CONNECTION_REQUESTED_EVENT,
+  connectionRequestPending,
   getRunGrant,
   recordRunToolCall,
   settleRunToolCall,
@@ -61,6 +65,8 @@ import {
   type ConnectionSettings,
   type ConnectionSettingsSealState,
   type Locale,
+  type LocalMcpLaunch,
+  localMcpCommandText,
   type RunGrant,
 } from "@pi-lead-child/protocol";
 import type {
@@ -98,6 +104,7 @@ import {
   type TokenSet,
 } from "./oauth.js";
 import { contentText, McpAuthError, McpHttpClient, McpRpcError, McpTransportError, type McpTool } from "./mcp-client.js";
+import { findLocalExecutable, isLocalServerUrl, localServerUrl, McpStdioClient, type McpSessionClient } from "./mcp-stdio.js";
 import {
   CONNECTION_SETTINGS_MANIFEST_AAD, connectionSecretAad, connectionSettingsAad, oauthClientSecretAad, type SecretVault,
 } from "./vault.js";
@@ -203,6 +210,30 @@ export interface ConnectionHubOptions {
   localDeniedRoots?: readonly string[];
   localRepoLimits?: Partial<LocalRepoLimits>;
   clientName?: string;
+  // 本地 MCP 进程的工作目录放在这里，每个连接一个子目录（daemon 传 <数据目录>/mcp）。不给时用系统的临时目录。
+  localMcpDir?: string;
+  // 找 npx、uvx（缺省 findLocalExecutable）。
+  findExecutable?: (name: "npx" | "uvx") => string | null;
+  // 测试用：本地 MCP 不经过 npx、uvx，直接跑给的命令。
+  localCommand?: (launch: LocalMcpLaunch) => { executable: string; args: string[] };
+  // 本地 MCP 闲多久停掉进程。
+  localIdleMs?: number;
+}
+
+// 加连接的是谁、为什么（2026-11-02，.scratch/lead-self-install）：记进连接事件，给设置页和账本看。
+export interface ConnectionRequestMeta {
+  actor: "user" | "lead";
+  reason: string;
+}
+
+// 加远程 MCP 的结果：已经连上（服务器不要授权），或者行建好了、等用户授权。
+export interface RemoteConnectionRequest {
+  state: "connected" | "needs_authorization";
+  connection: ConnectionDto;
+  // 读到的工具数。还没连上时为 null。
+  toolCount: number | null;
+  // 这一行在这次以前就连着（或者在等重新授权）：不是这次加的。
+  existing: boolean;
 }
 
 // 带清单的 Run 经连接中心做的一次写操作（已经成功）。
@@ -380,7 +411,11 @@ export class ConnectionHub {
   readonly #flows = new Map<string, Flow>();
   readonly #flowByState = new Map<string, string>();
   readonly #refreshing = new Map<number, Promise<string | null>>();
-  readonly #clients = new Map<number, McpHttpClient>();
+  readonly #clients = new Map<number, McpSessionClient>();
+  readonly #localMcpDir: string | null;
+  readonly #findExecutable: (name: "npx" | "uvx") => string | null;
+  readonly #localCommand: ((launch: LocalMcpLaunch) => { executable: string; args: string[] }) | null;
+  readonly #localIdleMs: number | undefined;
   readonly #serverMetadata = new Map<string, { metadata: AuthorizationServerMetadata; at: number }>();
   readonly #ghToken = { value: null as string | null, at: 0 };
   #tickTimer: ReturnType<typeof setInterval> | null = null;
@@ -407,6 +442,10 @@ export class ConnectionHub {
     this.#localDeniedRoots = options.localDeniedRoots ?? [];
     this.#localRepoLimits = options.localRepoLimits ?? {};
     this.#clientName = options.clientName ?? "Paimon (pi-lead-child)";
+    this.#localMcpDir = options.localMcpDir ?? null;
+    this.#findExecutable = options.findExecutable ?? ((name) => findLocalExecutable(name));
+    this.#localCommand = options.localCommand ?? null;
+    this.#localIdleMs = options.localIdleMs;
   }
 
   // ——— 生命周期 ———
@@ -443,7 +482,8 @@ export class ConnectionHub {
   list(): ConnectionDto[] {
     const rows = listConnections(this.#db).map((row) => this.#verified(row));
     const preset = CATALOG.map((entry) => this.#dto(entry, entry.serverUrl ? rows.find((row) => row.server_url === entry.serverUrl) ?? null : null));
-    const custom = rows.filter((row) => row.provider === "custom" && row.status !== "disconnected")
+    // 请求过、还在等授权的自定义行（Lead 或用户加的远程 MCP）也列出来：授权卡和设置页按 key 找它。
+    const custom = rows.filter((row) => row.provider === "custom" && (row.status !== "disconnected" || connectionRequestPending(this.#db, row.id)))
       .map((row) => this.#dto(null, row));
     return [...preset, ...custom];
   }
@@ -525,7 +565,8 @@ export class ConnectionHub {
       provider,
       label: row?.label ?? entry?.label ?? key,
       capability: capabilityText(locale, entry?.id ?? knownServer(row?.server_url)?.alias ?? null),
-      serverUrl: row?.server_url ?? entry?.serverUrl ?? null,
+      // 本地 MCP 给人看的是命令（npx -y --package=…），不是内部的唯一键。
+      serverUrl: row?.launch_json ? this.#localCommandText(row) : row?.server_url ?? entry?.serverUrl ?? null,
       state,
       account: live?.account_label ?? null,
       tokenSource: live?.token_source ?? null,
@@ -599,6 +640,13 @@ export class ConnectionHub {
     if (unavailable) throw new ConnectionError("unavailable", unavailable, key);
     const serverUrl = row?.server_url ?? entry?.serverUrl;
     if (!serverUrl) throw new ConnectionError("unavailable", this.#m().noServerUrl, key);
+    // 本地 MCP 没有授权：重新连上就是再起一次进程。
+    if (row && isLocalServerUrl(serverUrl)) {
+      const launch = this.#localLaunch(row);
+      if (!launch) throw new ConnectionError("unavailable", this.#m().noServerUrl, key);
+      const added = await this.addLocal(launch, { actor: "user", reason: "reconnect" });
+      return { flow: "connected", connection: added.connection };
+    }
     const label = row?.label ?? entry?.label ?? key;
     const provider = (entry?.id ?? "custom") as ConnectionProvider;
     if (entry?.auth === "github") return this.#startGithub(entry, serverUrl, input.token);
@@ -622,6 +670,135 @@ export class ConnectionHub {
     const key = existing ? connectionKey(existing) : "custom";
     const label = existing?.label ?? knownServer(url)?.label ?? new URL(url).host;
     return this.#startOAuth({ key, provider: "custom", label, serverUrl: url, entry: null });
+  }
+
+  /**
+   * 加一个远程 MCP，不开始浏览器授权（Lead 打不开用户的浏览器，2026-11-02）。服务器不要授权时直接连上；要授权时先建行
+   * （状态 disconnected，记一条 requested），设置页和授权卡按 key 找得到它，用户点了再走 start。已经有这一行时用它。
+   */
+  async requestCustom(serverUrl: string, meta: ConnectionRequestMeta): Promise<RemoteConnectionRequest> {
+    this.#sweepFlows();
+    let url: string;
+    try {
+      url = normalizeCustomServerUrl(serverUrl, this.#locale());
+    } catch (error) {
+      throw new ConnectionError("invalid_request", error instanceof Error ? error.message : String(error));
+    }
+    if (CATALOG.some((entry) => entry.serverUrl === url)) throw new ConnectionError("invalid_request", this.#m().urlAlreadyListed);
+    // 地址里的密钥会进账本、设置页和 Lead 的上下文：不收。密钥在设置页填。
+    for (const [name, value] of new URL(url).searchParams) {
+      if (/(^|[_-])(key|token|secret|password|passwd|auth|signature|sig|credential)s?([_-]|$)/i.test(name) || credentialProblem({ value })) {
+        throw new ConnectionError("invalid_request", this.#m().urlHasSecret);
+      }
+    }
+    const existing = getConnectionByServer(this.#db, url);
+    if (existing && existing.status !== "disconnected") {
+      const key = connectionKey(existing);
+      const connected = existing.status === "connected" || existing.status === "degraded";
+      return {
+        state: connected ? "connected" : "needs_authorization", connection: this.get(key),
+        toolCount: connected ? this.#rowTools(existing).length : null, existing: true,
+      };
+    }
+    const label = existing?.label ?? knownServer(url)?.label ?? new URL(url).host;
+    let discovery;
+    try {
+      discovery = await discover(this.#fetch, url);
+    } catch (error) {
+      throw this.#authError(existing ? connectionKey(existing) : "custom", error, this.#m().readAuthInfoFailed(label));
+    }
+    const now = iso(this.#now());
+    const detail = JSON.stringify({ actor: meta.actor, reason: meta.reason.slice(0, 500) });
+    if (!discovery.server || !discovery.resource) {
+      const row = this.#saveConnected({ key: "custom", provider: "custom", label, serverUrl: url, entry: null, tokenSource: "oauth", tokens: null, server: null, client: null, scope: null });
+      addConnectionEvent(this.#db, row.id, CONNECTION_REQUESTED_EVENT, detail, now);
+      await this.#afterConnect(row);
+      const fresh = getConnection(this.#db, row.id)!;
+      return { state: "connected", connection: this.get(connectionKey(fresh)), toolCount: this.#rowTools(fresh).length, existing: false };
+    }
+    this.#ensureManifest();
+    const id = this.#db.transaction(() => {
+      const row = existing ?? insertConnection(this.#db, {
+        provider: "custom", label, serverUrl: url, tokenSource: "oauth", writePolicy: this.#newWritePolicy,
+      }, now);
+      if (!existing) this.#sealNewRow(row, now);
+      addConnectionEvent(this.#db, row.id, CONNECTION_REQUESTED_EVENT, detail, now);
+      return row.id;
+    })();
+    const key = connectionKey(getConnection(this.#db, id)!);
+    this.#log(`[connections] ${key}: requested by ${meta.actor}, waiting for authorization`);
+    this.#onChange(key);
+    return { state: "needs_authorization", connection: this.get(key), toolCount: null, existing: false };
+  }
+
+  /**
+   * 加一个本地 MCP（2026-11-02）：按固定好的启动参数起进程、读工具列表。起不来或者没有工具时抛 ConnectionError，不留下行。
+   * 审查（包是不是可信、版本固定）由调用方先做（engine 的 installs/local-mcp-review.ts）。同样的包、版本、参数已经有行时用它。
+   */
+  async addLocal(launch: LocalMcpLaunch, meta: ConnectionRequestMeta): Promise<{ connection: ConnectionDto; toolCount: number }> {
+    const serverUrl = localServerUrl(launch);
+    const label = launch.bin === launch.package ? launch.package : `${launch.package} (${launch.bin})`;
+    const existing = getConnectionByServer(this.#db, serverUrl);
+    if (existing && existing.status !== "disconnected") {
+      return { connection: this.get(connectionKey(existing)), toolCount: this.#rowTools(existing).length };
+    }
+    const m = this.#m();
+    // 先用一个临时的工作目录起一次，读到工具才建行：起不来的包不留在列表里。
+    const probe = this.#stdioClient(launch, `probe-${randomBytes(4).toString("hex")}`);
+    let tools: CachedTool[];
+    try {
+      tools = (await probe.listTools()).map(toCachedTool);
+    } catch (error) {
+      throw new ConnectionError("temporarily_unavailable", m.localStartFailed(label, error instanceof Error ? error.message : String(error)));
+    } finally {
+      await probe.close();
+    }
+    if (!tools.length) throw new ConnectionError("invalid_request", m.localNoTools(label));
+    const now = iso(this.#now());
+    this.#ensureManifest();
+    const id = this.#db.transaction(() => {
+      const row = existing ?? insertConnection(this.#db, {
+        provider: "custom", label, serverUrl, tokenSource: "oauth", writePolicy: this.#newWritePolicy, launchJson: JSON.stringify(launch),
+      }, now);
+      if (!existing) this.#sealNewRow(row, now);
+      addConnectionEvent(this.#db, row.id, CONNECTION_REQUESTED_EVENT, JSON.stringify({ actor: meta.actor, reason: meta.reason.slice(0, 500) }), now);
+      updateConnection(this.#db, row.id, {
+        status: "connected", last_ok_at: now, connected_at: now, failure_kind: null, failure_detail: null, failure_count: 0,
+        next_attempt_at: null, tools_json: JSON.stringify(tools), tools_fetched_at: now,
+      }, now);
+      addConnectionEvent(this.#db, row.id, "connected", "local", now);
+      return row.id;
+    })();
+    this.#dropClient(id);
+    const key = connectionKey(getConnection(this.#db, id)!);
+    this.#log(`[connections] ${key}: local MCP ${launch.package}@${launch.version} connected (${tools.length} tools)`);
+    this.#onChange(key);
+    return { connection: this.get(key), toolCount: this.#shapeTools(getConnection(this.#db, id)!, tools).length };
+  }
+
+  #localLaunch(row: Pick<ConnectionRow, "launch_json">): LocalMcpLaunch | null {
+    if (!row.launch_json) return null;
+    try {
+      return JSON.parse(row.launch_json) as LocalMcpLaunch;
+    } catch {
+      return null;
+    }
+  }
+
+  #localCommandText(row: Pick<ConnectionRow, "launch_json" | "server_url">): string {
+    const launch = this.#localLaunch(row);
+    return launch ? localMcpCommandText(launch) : row.server_url;
+  }
+
+  #stdioClient(launch: LocalMcpLaunch, dirName: string): McpStdioClient {
+    return new McpStdioClient({
+      launch,
+      cwd: join(this.#localMcpDir ?? join(process.env.TMPDIR ?? "/tmp", "plc-mcp"), dirName),
+      findExecutable: this.#findExecutable,
+      ...(this.#localCommand ? { command: this.#localCommand(launch) } : {}),
+      ...(this.#localIdleMs !== undefined ? { idleMs: this.#localIdleMs } : {}),
+      log: this.#log,
+    });
   }
 
   async #startOAuth(input: { key: string; provider: ConnectionProvider; label: string; serverUrl: string; entry: CatalogEntry | null }): Promise<StartConnectionResponse> {
@@ -929,6 +1106,13 @@ export class ConnectionHub {
 
   async disconnect(key: string): Promise<ConnectionDto> {
     const { entry, row } = this.#resolve(key);
+    if (row && row.status === "disconnected" && connectionRequestPending(this.#db, row.id)) {
+      // 请求过、还没授权就撤回：记一条 removed，列表里不再显示。
+      addConnectionEvent(this.#db, row.id, CONNECTION_REMOVED_EVENT, null, iso(this.#now()));
+      this.#log(`[connections] ${key}: request withdrawn`);
+      this.#onChange(key);
+      return this.#dto(entry, getConnection(this.#db, row.id));
+    }
     if (!row || row.status === "disconnected") return this.#dto(entry, row);
     const secret = this.#readSecret(row);
     if (row.revocation_endpoint && secret && row.client_id) {
@@ -1653,14 +1837,17 @@ export class ConnectionHub {
     }
   }
 
-  #client(id: number): McpHttpClient {
+  #client(id: number): McpSessionClient {
     let client = this.#clients.get(id);
     if (!client) {
       const row = getConnection(this.#db, id)!;
-      client = new McpHttpClient({
-        url: row.server_url, fetch: this.#fetch, clientName: "pi-lead-child",
-        token: () => this.#tokenFor(id),
-      });
+      const launch = this.#localLaunch(row);
+      client = launch
+        ? this.#stdioClient(launch, String(id))
+        : new McpHttpClient({
+          url: row.server_url, fetch: this.#fetch, clientName: "pi-lead-child",
+          token: () => this.#tokenFor(id),
+        });
       this.#clients.set(id, client);
     }
     return client;

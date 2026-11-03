@@ -161,6 +161,16 @@ describe("a connection tool result over the budget", () => {
     expect(calls).toEqual(["list_issues"]);
   });
 
+  // 2026-11-02：Lead 在 codemode 脚本里 JSON.parse 一份 PR 评审列表，拿到的是截断后加了说明的文字，解析失败，
+  // 核对一条评审调了 10 次工具。脚本要全文时写 full=true。
+  it("gives the whole text with full=true, so a codemode script can parse it", async () => {
+    const text = JSON.stringify({ reviews: [body(12_000), body(13_000)] });
+    const { call } = bigResult(text, { budget: 10_000 });
+    const whole = await call("call_connection_tool", { connection: "github", tool: "pull_request_read", arguments: {}, full: true });
+    expect(whole).toBe(text);
+    expect(() => JSON.parse(whole)).not.toThrow();
+  });
+
   it("is left whole when it fits the budget", async () => {
     const text = body(9_000);
     const { call } = bigResult(text, { budget: 10_000 });

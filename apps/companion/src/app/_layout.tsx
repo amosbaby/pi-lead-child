@@ -5,6 +5,8 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 
 import { DesignPreferencesBridge } from '@/components/DesignPreferencesBridge';
+import { ChannelCardSlot } from '@/features/chat/ChannelMessageCard';
+import { ObjectLinkProvider } from '@/features/chat/ObjectLinkProvider';
 import { CompanionStateProvider } from '@/state/CompanionStateProvider';
 
 void SplashScreen.preventAutoHideAsync();
@@ -25,6 +27,8 @@ export default function RootLayout() {
         <StatusBar style="dark" />
         {/* 原生上收集触摸，用来判断最近有没有人在看；web 上不加元素。 */}
         <ActivityBoundary>
+          {/* 文字里外来消息卡的链接（P14.7）在这里的浮层里打开那张卡。 */}
+          <ObjectLinkProvider renderCard={(cardId) => <ChannelCardSlot cardId={cardId} />}>
           <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: palette.workspace } }}>
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="ticket/[id]" />
@@ -34,6 +38,7 @@ export default function RootLayout() {
             {/* 设置：桌面上整页替换工作台，手机上是自己的栈（app/settings/_layout.tsx）。 */}
             <Stack.Screen name="settings" />
           </Stack>
+          </ObjectLinkProvider>
         </ActivityBoundary>
         </DesignPreferencesBridge>
       </CompanionStateProvider>

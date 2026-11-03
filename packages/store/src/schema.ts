@@ -668,7 +668,8 @@ CREATE TABLE IF NOT EXISTS connections (
   secret_version       INTEGER NOT NULL DEFAULT 0,
   connected_at         TEXT,
   created_at           TEXT NOT NULL,
-  updated_at           TEXT NOT NULL
+  updated_at           TEXT NOT NULL,
+  launch_json          TEXT
 );
 CREATE TABLE IF NOT EXISTS connection_events (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,

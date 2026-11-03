@@ -152,7 +152,8 @@ describe("the agent task runtime", () => {
     const results = toolResults(events);
     expect(results.filter((result) => result.failed).map((result) => result.name)).toEqual(["bash", "read", "call_connection_tool", "call_connection_tool"]);
     expect(results.find((result) => result.name === "search_connection_tools")?.text).toContain("allowed_by");
-    expect(results[3]).toMatchObject({ name: "call_connection_tool", failed: false, text: expect.stringContaining("export const limit = 10;") });
+    // GitHub 的文件带上行号，和读取记录的行号一样（2026-11-02：子 agent 自己数行常数错）。
+    expect(results[3]).toMatchObject({ name: "call_connection_tool", failed: false, text: expect.stringContaining("     1\\texport const limit = 10;") });
     expect(results[4]!.text).toContain("禁止名单");
     expect(results[5]!.text).toContain("清单里没有这个写操作");
     expect(gh.calls.map((entry) => entry.tool)).toEqual(["get_file_contents"]);
@@ -198,6 +199,45 @@ describe("the agent task runtime", () => {
     const { exit, outcome } = await runToEnd(runtime, runId, itemId);
     expect(exit).toMatchObject({ ok: false, errorCode: "agent_task_no_result" });
     expect(outcome).toMatchObject({ result: null, error: "子 agent 没有用 submit_result 交结果" });
+  });
+
+  // 2026-11-02 Run #222、#223：评审 agent 在一条回复里写满了输出上限（stopReason=length，正文是空的），里面的工具调用没有执行，
+  // 回合就此结束，Run 被记成「没交结果」。现在系统告诉它被截断了，让它拆小接着做。
+  it("continues a sub-agent whose reply hit the output limit, and completes once it submits", async () => {
+    const h = await hub();
+    const { itemId, runId } = grantedRun("knowledge", { repos: ["Acme/x"] });
+    const continued: string[] = [];
+    const { factory } = fauxFactory([
+      fauxAssistantMessage("", { stopReason: "length" }),
+      (context) => {
+        const last = context.messages.at(-1) as { role: string; content: unknown };
+        continued.push(typeof last.content === "string" ? last.content : JSON.stringify(last.content));
+        return fauxAssistantMessage([fauxToolCall("submit_result", {
+          found: "partial", answer: "先交查到的", sources: [], checked: [], caveats: [], replyDraft: "draft",
+        } as never)], { stopReason: "toolUse" });
+      },
+      fauxAssistantMessage("交了"),
+    ]);
+    const runtime = createAgentTaskRuntime({ intent: "knowledge", ownerName: "Leo", connections: agentTaskConnections(h, db), sessionFactory: factory });
+    const { events, exit, outcome } = await runToEnd(runtime, runId, itemId);
+    expect(continued).toEqual([expect.stringContaining("输出长度的上限")]);
+    expect(exit).toMatchObject({ ok: true });
+    expect(outcome).toMatchObject({ error: null, result: expect.objectContaining({ found: "partial" }) });
+    expect(events.filter((event) => event.type === "run.started")).toHaveLength(1);
+  });
+
+  it("fails as truncated, not as a missing result, when the output limit is hit again after the continuations", async () => {
+    const h = await hub();
+    const { itemId, runId } = grantedRun("knowledge", { repos: ["Acme/x"] });
+    const { factory } = fauxFactory([
+      fauxAssistantMessage("", { stopReason: "length" }),
+      fauxAssistantMessage("", { stopReason: "length" }),
+      fauxAssistantMessage("", { stopReason: "length" }),
+    ]);
+    const runtime = createAgentTaskRuntime({ intent: "knowledge", ownerName: "Leo", connections: agentTaskConnections(h, db), sessionFactory: factory });
+    const { exit, outcome } = await runToEnd(runtime, runId, itemId);
+    expect(exit).toMatchObject({ ok: false, errorCode: "agent_task_output_truncated" });
+    expect(outcome.error).toBe("子 agent 的回复写到了输出上限，接着做了 2 次还是没交结果");
   });
 
   // 代回复风格（2026-10-28）：子 agent 的草稿信心够时由系统自动代发，所以它也要按用户的风格写。

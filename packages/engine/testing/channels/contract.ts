@@ -21,6 +21,8 @@ export interface ChannelContractFake {
 export interface ChannelContractService {
   adapter: ChannelAdapter;
   credential: ChannelCredential;
+  /** 用例开始前要做的事（例如 Slack 的浏览器会话方式先用 cookie 换出会话）。没有时不做。 */
+  prepare?(): Promise<void>;
   /** 别人在 thread 这个对话里发来一条消息。thread 是测试自己起的名字，假服务按自己的规则映射到来源里的对话。 */
   message(thread: string, text: string): ChannelDelivery;
   /** 用户本人在这个对话里回复了。 */
@@ -57,9 +59,10 @@ export function describeChannelAdapterContract(name: string, fake: ChannelContra
     let hub: ChannelHub;
     let logs: string[];
 
-    beforeEach(() => {
+    beforeEach(async () => {
       db = openDb(join(tempDir("plc-channel-contract-"), "plc.db"));
       service = fake.setup();
+      await service.prepare?.();
       logs = [];
       hub = new ChannelHub({
         db, registry: new ChannelRegistry([service.adapter]), credentials: credentialsOf(service.credential),

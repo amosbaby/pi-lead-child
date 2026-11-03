@@ -4,14 +4,16 @@
 // perform_action）都经过 index.ts 的 runUiAction，所以两个入口做同样的检查，记同样的账本，只是 actor 不同。
 import type { RuntimeDisabledBy, RuntimeId, RuntimeSwitchBy } from "@pi-lead-child/core";
 import type {
-  ActionPermission, ChannelCardAction, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
+  ActionPermission, ChannelCardAction, ConnectionDto, LocalMcpLaunch, StartConnectionResponse, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
   FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
   SetFastChainRequest, TimerOrigin, UiActionTargetType, UserActionRequest,
 } from "@pi-lead-child/protocol";
 import type { Db, OwnerActionInput } from "@pi-lead-child/store";
-import type { ChannelEditedMessage, ChannelOpenCard, ChannelReaction, ChannelSentMessage } from "../channels/types.js";
+import type {
+  ChannelEditedMessage, ChannelOpenCard, ChannelReaction, ChannelSentMessage, ChannelSignInFailure,
+} from "../channels/types.js";
 import type { ActionAttribution } from "../ticket-actions/attribution.js";
 import type { SmartTextComplete } from "../smart-model/types.js";
 import type { TicketActionHost } from "../ticket-actions/lifecycle.js";
@@ -79,6 +81,73 @@ export interface UiActionServices {
   textModel?: () => SmartTextComplete | null;
   // 工单操作的宿主（daemon 的用户操作服务，和页面上的工单操作是同一个）：确认卡放行 Lead 被拦下的工单操作时用它。
   ticketActions?: { host: TicketActionHost; pullRequestRunner?: PullRequestRunner };
+  // Lead 自己装 MCP 和 skill（2026-11-02，.scratch/lead-self-install/spec.md）。daemon 交进来；没有的部分，用到它的操作报还没有启动。
+  installs?: InstallServices;
+  // 来源的连接方式（daemon 的通道设置，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道接好以后才有。
+  channelConnections?: ChannelConnectionService;
+}
+
+/** 一个来源的连接方式现在的样子（没有密钥）。 */
+export interface ChannelConnectionState {
+  source: string;
+  label: string;
+  // 现在用的方式。
+  mode: string;
+  // 能选的方式：要不要登录、要不要单独打开「代你写」。
+  modes: Array<{ mode: string; needsSignIn: boolean; writesSwitch: boolean }>;
+  // 现在的方式要单独打开「代你往来源里写」时，开关的值；不需要时是 null。
+  writes: boolean | null;
+  // 现在不能往来源里写的原因（ChannelAdapter.writesBlocked）。能写时是 null。
+  writesBlocked: string | null;
+  // 最近一次登录：等你登录、成功、失败、取消。没有登录过时是 null。expiresAt 是还在等时窗口关掉的时间。
+  // code 是没有成功的原因（设置页按它写话），error 是给 Lead 和日志的一句话。
+  signIn: {
+    mode: string; state: "waiting" | "done" | "failed" | "cancelled"; startedAt: string; expiresAt: string | null;
+    code: ChannelSignInFailure | null; error: string | null;
+  } | null;
+}
+
+// 来源的连接方式（daemon 的 channel-settings.ts）。设置页和 Lead 都经过操作层调它。不对的输入、不认识的来源抛 UiActionError。
+export interface ChannelConnectionService {
+  state(source: string): ChannelConnectionState | null;
+  // 打开登录窗口（不等用户登录完）。登录成功、检查通过以后保存密钥、换到这种方式、重连。
+  signIn(source: string, mode: string): ChannelConnectionState;
+  cancelSignIn(source: string): ChannelConnectionState;
+  // 换到一种不用登录的方式，并重连。
+  useMode(source: string, mode: string): Promise<ChannelConnectionState>;
+  setWrites(source: string, allowed: boolean): ChannelConnectionState;
+}
+
+// 加、授权、断开连接（packages/connections 的 ConnectionHub，daemon 包一层：hub 的 ConnectionError 换成 UiActionError）。
+export interface ConnectionInstallService {
+  // 一个连接现在的样子（设置页的同一份 DTO）。没有这个 key 时为 null。
+  get(key: string): ConnectionDto | null;
+  // 加远程 MCP：不要授权时直接连上；要授权时先建行，等用户授权。
+  requestRemote(url: string, meta: { actor: "user" | "lead"; reason: string }): Promise<{
+    state: "connected" | "needs_authorization"; connection: ConnectionDto; toolCount: number | null;
+    // 这一行在这次以前就连着（或者在等重新授权）：不是这次加的。
+    existing: boolean;
+  }>;
+  // 开始授权流程（页面打开 authorizeUrl）。和 POST /v1/connections/<key>/start 是同一个函数。
+  start(key: string): Promise<StartConnectionResponse>;
+  // 断开：吊销令牌、停掉本地进程；请求过还没授权的撤回。和 POST /v1/connections/<key>/disconnect 是同一个函数。
+  disconnect(key: string): Promise<ConnectionDto>;
+  // 加本地 MCP：按固定好的启动参数起进程、读工具。起不来时抛错，不留下行。
+  addLocal(launch: LocalMcpLaunch, meta: { actor: "user" | "lead"; reason: string }): Promise<{ connection: ConnectionDto; toolCount: number }>;
+}
+
+// 查 npm、PyPI、GitHub 用的 fetch（测试换成假的）。
+export type InstallFetch = (input: string, init?: { headers?: Record<string, string>; signal?: AbortSignal }) => Promise<Response>;
+
+export interface InstallServices {
+  connections?: ConnectionInstallService;
+  // PLC 自己的 skill 目录。不给时是 <数据目录>/skills（core 的 dataDir）。
+  skillsDir?: string;
+  // Lead 自带的 skill 的名字：装的 skill 不能和它们重名。
+  reservedSkillNames?: () => readonly string[];
+  fetch?: InstallFetch;
+  // 本机有没有 npx、uvx（审查 PyPI 包时要 uvx）。不给时都当作有。
+  hasExecutable?: (name: "npx" | "uvx") => boolean;
 }
 
 // 用户排着的一条追问（protocol 的 lead-follow-ups.ts）。
@@ -194,6 +263,8 @@ export interface ChannelPolicyTestService {
 export interface ChannelMessageService {
   // 这个来源能不能直接发消息。
   canSend(source: string): boolean;
+  // 不能往这个来源里写的原因（例如用户关掉了「代你发消息」，ChannelAdapter.writesBlocked）。能写、或者说不出原因时是 null。
+  blockedReason?(source: string): string | null;
   // 发一条。出错时抛带 code 的 ChannelActionError（not_found：对话找不到；outbound_failed；unavailable）。
   // 这个对话里等你的卡跟着结束；cardId 是这条消息做的那张卡；seenBefore 是你这一轮开始的时间（engine 的 ChannelHub.sendMessage）。
   // forUser：你本人或者 Lead 在你这一轮里代你发。false 是 Lead 自己发的：Lead 判断，署名写 auto-reply，回复等你的卡时留撤回窗口；
@@ -296,6 +367,9 @@ export interface UiActionDefinition<T = any, I = any> {
   // 写了它的操作和 promptSetting 一样，用户本人正在说话的一轮读过外部内容也拒绝。
   // 不写时按缺省：改规则的操作、externalTurnFloor 的操作被拒时带确认卡（工单 09）。
   externalRefusalNext?: string;
+  // 和 externalRefusalNext 一起写：只拒绝、不带卡，但用户本人正在说话的一轮照常不受外部内容限制（AGENTS.md D10）。
+  // 例如 Lead 装 MCP、skill（用户 2026-11-02：用户自己的一轮里 Lead 直接装，外部消息叫醒的一轮一律拒绝）。
+  liveUserTurnExempt?: boolean;
   external: boolean;
   // 有的按目标算（例如清理工作区：隔离 worktree 的清理删掉目录，不可逆；共享工作区的不是），那时 permissionNote 写给 Lead 看。
   irreversible: boolean | ((target: T) => boolean);

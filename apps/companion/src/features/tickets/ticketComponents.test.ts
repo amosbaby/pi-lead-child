@@ -147,7 +147,7 @@ describe('ticket detail components', () => {
     expect.soft(pow).not.toContain("label: '能力覆盖'");
     expect.soft(pow).not.toContain("label: '发现缺口'");
     expect.soft(pow).not.toContain("label: '耗时'");
-    expect.soft(pow).toContain('buildEvidencePresentation(pow, outcome, locale)');
+    expect.soft(pow).toContain('buildEvidencePresentation(pow, outcome, locale, deliveryNumbers)');
     expect.soft(pow).toContain('testID="pow-history"');
     // F7：不再用正则把 agent 的借口改判成"环境限制"。
     expect.soft(pow).not.toContain('EPERM');

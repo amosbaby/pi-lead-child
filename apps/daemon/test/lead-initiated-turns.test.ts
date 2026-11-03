@@ -35,7 +35,9 @@ afterEach(async () => {
   vi.unstubAllEnvs();
 });
 
-type StubResponse = "text" | "empty" | "tools-only" | "error" | "hang" | "speak-then-error";
+type StubResponse =
+  | "text" | "empty" | "tools-only" | "error" | "hang" | "speak-then-error"
+  | "narrate-act-quiet" | "narrate-read-quiet" | "narrate-act-speak" | "narrate-draw-quiet";
 
 // 不调用模型的 lead：每次 prompt 按 response 说一句话、什么都不说，或者只调一个工具。
 // plan 按 prompt 的内容逐次决定怎么回答，缺省总是 response。
@@ -79,6 +81,17 @@ function stubLead(
         if (response === "tools-only") {
           emit({ type: "tool_execution_start", toolCallId: "call-1", toolName: "list_tickets", args: {} });
           emit({ type: "tool_execution_end", toolCallId: "call-1", toolName: "list_tickets", args: {}, result: { content: [] }, isError: false });
+        }
+        // 先写一句给自己看的话，再调一个工具，最后的回答是 NO_REPLY 或者一句给用户的话（2026-11-02 线上：
+        // 「这是 Run #217 的结束通知，结果我上一轮已核对并告诉用户了，不重复。」出现在会话里）。
+        if (response.startsWith("narrate-")) {
+          const tool = response === "narrate-read-quiet" ? "get_ticket_status"
+            : response === "narrate-draw-quiet" ? "render_ui" : "record_disposition";
+          emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "这是 Run #7 的结束通知，按约定记 no_action，不打扰用户。" } });
+          emit({ type: "tool_execution_start", toolCallId: "call-n", toolName: tool, args: {} });
+          emit({ type: "tool_execution_end", toolCallId: "call-n", toolName: tool, args: {}, result: { content: [] }, isError: false });
+          const last = response === "narrate-act-speak" ? "#1 这次执行跑完了。" : "NO_REPLY";
+          emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: last } });
         }
       },
       async steer() {
@@ -234,6 +247,48 @@ describe("a blocker wake-up", () => {
       .toEqual({ state: "completed", error: null }));
     expect(plc.events.some((event) => event.type === "lead.tool.started" && event.turnId === turnId)).toBe(true);
     expect(plc.events.some((event) => event.type === "notice.created")).toBe(false);
+  });
+
+  // 一轮最后回了 NO_REPLY，就是没有要告诉用户的话：工具调用之前那句给自己看的话也不留在会话里。
+  it("keeps the narration before a tool out of the conversation when the turn ends with NO_REPLY", async () => {
+    await start(stubLead("narrate-act-quiet"));
+    const plc = await v2Client("plc");
+    newBlocker("lead 记了处置");
+    await vi.waitFor(() => expect(listInbox(db, { state: ["consumed"] })).toHaveLength(1));
+    // 记处置会改变状态，这一轮当场落成（工具调用要有轮次）。落成了也不写字：界面不显示没有字的系统回合。
+    const rows = db.prepare("SELECT assistant_text, state FROM channel_turns WHERE origin_kind=?")
+      .all(SYSTEM_TURN_ORIGINS.blocker) as Array<{ assistant_text: string; state: string }>;
+    expect(rows).toEqual([{ assistant_text: "", state: "completed" }]);
+    expect(plc.events.some((event) => event.type === "lead.message.delta")).toBe(false);
+  });
+
+  it("posts no turn at all when the narration was followed only by a read and NO_REPLY", async () => {
+    await start(stubLead("narrate-read-quiet"));
+    const plc = await v2Client("plc");
+    newBlocker("lead 只查了状态");
+    await vi.waitFor(() => expect(listInbox(db, { state: ["consumed"] })).toHaveLength(1));
+    expect(db.prepare("SELECT COUNT(*) AS n FROM channel_turns WHERE origin_kind=?").get(SYSTEM_TURN_ORIGINS.blocker))
+      .toEqual({ n: 0 });
+    expect(turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker)).toEqual([]);
+  });
+
+  it("keeps everything Lead wrote when the last words are for the user", async () => {
+    await start(stubLead("narrate-act-speak"));
+    const plc = await v2Client("plc");
+    newBlocker("lead 说了结果");
+    await vi.waitFor(() => expect(turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker)).toHaveLength(1));
+    const [turnId] = turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker);
+    await vi.waitFor(() => expect(text(plc.events, turnId!)).toBe("这是 Run #7 的结束通知，按约定记 no_action，不打扰用户。#1 这次执行跑完了。"));
+  });
+
+  // 画了卡片的一轮有话对用户说：卡片前面的字照旧留着（不按 NO_REPLY 收起）。
+  it("keeps the words before a card it drew, even when it ends with NO_REPLY", async () => {
+    await start(stubLead("narrate-draw-quiet"));
+    const plc = await v2Client("plc");
+    newBlocker("lead 画了卡");
+    await vi.waitFor(() => expect(turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker)).toHaveLength(1));
+    const [turnId] = turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker);
+    await vi.waitFor(() => expect(text(plc.events, turnId!)).toBe("这是 Run #7 的结束通知，按约定记 no_action，不打扰用户。"));
   });
 
   it("shows a failed Lead turn when the model call fails", async () => {

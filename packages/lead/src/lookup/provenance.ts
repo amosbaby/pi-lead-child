@@ -15,6 +15,8 @@ export interface SourceCheck {
   source: LookupSource;
   verified: boolean;
   reason: string | null;
+  // 原文在别的行找到、行号改正过时，原来写的行号。
+  corrected?: { startLine: number; endLine: number };
 }
 
 export interface CommentCheck {
@@ -60,20 +62,57 @@ function checkSource(source: LookupSource, scope: { local: ReadonlySet<string>; 
   const file = reads.files.find((entry) => entry.via === source.via && entry.repo.toLowerCase() === repo
     && normalizeSourcePath(entry.path) === path);
   if (!file) return fail("这次代查没有读过这个文件");
-  const cited: string[] = [];
-  for (let line = source.startLine; line <= source.endLine; line += 1) {
-    const text = file.lines[line];
-    if (text === undefined) return fail(`第 ${line} 行没有读过`);
-    cited.push(text);
-  }
-  const quote = normalizeQuote(source.quote);
+  const stripped = withoutLineNumbers(source.quote);
+  const quote = normalizeQuote(stripped);
   if (!quote) return fail("引用的原文是空的");
-  if (!normalizeQuote(cited.join("\n")).includes(quote)) return fail("引用的原文和读到的这几行对不上");
-  return {
-    source: { ...source, ...(source.ref || !file.ref ? {} : { ref: file.ref }), verified: true },
+  const verified = (lines: { startLine: number; endLine: number }): SourceCheck => ({
+    source: { ...source, ...lines, ...(source.ref || !file.ref ? {} : { ref: file.ref }), verified: true },
     verified: true,
     reason: null,
-  };
+    ...(lines.startLine !== source.startLine || lines.endLine !== source.endLine
+      ? { corrected: { startLine: source.startLine, endLine: source.endLine } } : {}),
+  });
+  const cited: string[] = [];
+  let unread: number | null = null;
+  for (let line = source.startLine; line <= source.endLine; line += 1) {
+    const text = file.lines[line];
+    if (text === undefined) { unread = line; break; }
+    cited.push(text);
+  }
+  if (unread === null && normalizeQuote(cited.join("\n")).includes(quote)) return verified(source);
+  // 子 agent 自己数行号，常差一两行（2026-11-02）：原文在读过的别的行里时，改正行号，不算编的。
+  const found = locateQuote(file.lines, quote, stripped.split("\n").length, source.startLine);
+  if (found) return verified(found);
+  return fail(unread !== null ? `第 ${unread} 行没有读过` : "引用的原文和读到的这几行对不上");
+}
+
+/** 去掉每行前面工具给的行号（local 的 read_file 和 GitHub 的文件内容都是「行号\t内容」）：照着工具结果复制的引用也认。 */
+function withoutLineNumbers(quote: string): string {
+  return quote.split("\n").map((line) => line.replace(/^\s*\d+\t/, "")).join("\n");
+}
+
+/**
+ * 在读过的行里找引用的原文：从每一个读过的行开始，往下最多取引用的行数加一行。找到的取离原来写的行号最近的一处，
+ * 同样近时取范围小的。找不到是 null。
+ */
+function locateQuote(
+  lines: Readonly<Record<number, string>>, quote: string, span: number, near: number,
+): { startLine: number; endLine: number } | null {
+  let best: { startLine: number; endLine: number } | null = null;
+  for (const start of Object.keys(lines).map(Number).sort((a, b) => a - b)) {
+    const window: string[] = [];
+    for (let line = start; line <= start + span && lines[line] !== undefined; line += 1) {
+      window.push(lines[line]!);
+      if (!normalizeQuote(window.join("\n")).includes(quote)) continue;
+      const distance = Math.abs(start - near);
+      if (!best || distance < Math.abs(best.startLine - near)
+        || (distance === Math.abs(best.startLine - near) && line - start < best.endLine - best.startLine)) {
+        best = { startLine: start, endLine: line };
+      }
+      break;
+    }
+  }
+  return best;
 }
 
 function checkComment(comment: LookupReviewComment, scope: LookupScope, reads: LookupReadContent): CommentCheck {
@@ -84,6 +123,12 @@ function checkComment(comment: LookupReviewComment, scope: LookupScope, reads: L
   const inDiff = reads.diffLines.some((line) => line.repo.toLowerCase() === repo && line.path === path
     && line.side === comment.side && line.line === comment.line);
   return inDiff ? { comment, kept: true, reason: null } : { comment, kept: false, reason: "这一行不在读到的 diff 里" };
+}
+
+/** 行号改正过的出处在 caveats 里的说明。 */
+export function correctedNote(check: SourceCheck): string {
+  const { source, corrected } = check;
+  return `出处的行号改正了：${source.repo} ${source.path}:${corrected?.startLine}-${corrected?.endLine} → ${source.startLine}-${source.endLine}`;
 }
 
 function clip(text: string, max: number): string {
@@ -109,6 +154,7 @@ export function verifyLookupResult(input: { result: LookupResult; scope: LookupS
   const notes = [
     ...sources.filter((check) => !check.verified).map((check) =>
       `出处没有通过核实：${check.source.repo} ${check.source.path}:${check.source.startLine}-${check.source.endLine}（${check.reason}）`),
+    ...sources.flatMap((check) => (check.corrected ? [correctedNote(check)] : [])),
     ...comments.filter((check) => !check.kept).map((check) =>
       `评论已去掉：${check.comment.path}:${check.comment.line}（${check.comment.side}，${check.reason}）`),
   ].map((note) => clip(note, 500));

@@ -153,7 +153,8 @@ describe('review state projection', () => {
 
     expect(buildReviewNoticePresentation(ticket, 'zh')!.facts).toEqual([
       { label: '当前验证状态', value: '未知' },
-      { label: '上次核查', value: 'Run #43 · FAIL · 核查的是 Run #42 · 已被 Run #49 作废' },
+      // 不写执行记录的编号（设计规范 P14.6）；这里不知道第几次交付。
+      { label: '上次核查', value: '不通过（FAIL） · 已被之后的交付作废' },
       { label: '已用返工次数', value: '1/1' },
     ]);
   });

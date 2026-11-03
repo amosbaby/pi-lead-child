@@ -1,6 +1,9 @@
 import { Code, Link, safeLink, Text, type FontSizeToken, type TextProps } from '@pi-lead-child/components';
 
+import { parseObjectLink } from '@pi-lead-child/protocol';
+
 import type { MarkdownInline } from './markdownModel';
+import { ObjectLink } from './ObjectLink';
 
 type MarkdownInlineTextProps = {
   inlines: MarkdownInline[];
@@ -27,6 +30,11 @@ export function MarkdownInlineText({ inlines, size, leading, weight = 'regular',
         const key = `${index}-${inline.text}`;
         const href = safeLink(inline.href);
         const inlineWeight = inline.strong ? 'bold' : weight;
+        // [Ethan 的私信](plc:card/134)：指向 App 里一个对象的链接（P14.7）。
+        const target = parseObjectLink(inline.href);
+        if (target) {
+          return <ObjectLink key={key} target={target} text={inline.text} size={size} weight={inlineWeight} italic={inline.emphasis} />;
+        }
         if (href) {
           return (
             <Link key={key} href={href} underline="hover" testID="markdown-link" size={size} weight={inlineWeight} italic={inline.emphasis}>

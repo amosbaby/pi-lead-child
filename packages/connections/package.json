@@ -2,7 +2,7 @@
   "name": "@pi-lead-child/connections",
   "version": "0.1.0",
   "private": true,
-  "description": "Connections to third-party accounts: the daemon's only OAuth client and only remote MCP client, with the token vault and refresh.",
+  "description": "Connections to third-party accounts: the daemon's only OAuth client and only MCP client (remote over HTTP, local over stdio), with the token vault and refresh.",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
@@ -12,6 +12,7 @@
     "test": "cd ../.. && vitest run packages/connections"
   },
   "dependencies": {
+    "@earendil-works/pi-mcp": "^1.1.0",
     "@pi-lead-child/core": "*",
     "@pi-lead-child/protocol": "*",
     "@pi-lead-child/store": "*"

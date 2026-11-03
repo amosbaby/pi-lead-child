@@ -316,10 +316,11 @@ export interface ChannelOpenLane {
  *   connected：连上了；
  *   error：连不上，过一会儿再试。error 是给人看的一句话，不含凭据。
  */
+// reason：设置页按它写给人看的话（两种语言）。signed_out：用户的登录已经失效（例如浏览器会话过期），要重新登录，不再自己重试。
 export type ChannelTransportStatus =
   | { state: "connecting" }
   | { state: "connected" }
-  | { state: "error"; error: string };
+  | { state: "error"; error: string; reason?: "signed_out" };
 
 /** hub 给适配器的传输（transport）的东西。 */
 export interface ChannelTransportContext {
@@ -385,6 +386,37 @@ export interface ChannelSettingsSpec {
 }
 
 /**
+ * 一个来源的几种连接方式（2026-11-02）。来源定义有哪些方式、每种要哪些密钥、哪种要用户登录、哪种的「代你往来源里写」
+ * 要单独打开；daemon 的通道设置按它做登录、检查、保存和切换，记下选的是哪种（store 的 channel-connections.ts）。
+ * 现在用哪种方式、开关开没开，来源从 daemon 给的设置里读（builtin.ts 接上）：auth.secrets、settings、capabilities 跟着变。
+ */
+/** 登录没有成功的原因（设置页按它写给人看的话，两种语言）。 */
+export type ChannelSignInFailure = "cancelled" | "window_closed" | "timed_out" | "no_browser" | "checks_failed" | "failed";
+
+/** 来源的登录窗口没有登录成功。code 给界面，message 给日志。 */
+export class ChannelSignInError extends Error {
+  constructor(readonly code: ChannelSignInFailure, message: string) {
+    super(message);
+    this.name = "ChannelSignInError";
+  }
+}
+
+export interface ChannelConnectionControl {
+  // 能选的方式。第一个是缺省。
+  readonly modes: readonly string[];
+  // 现在用的方式。
+  mode(): string;
+  // 这种方式的凭据设置：要哪些密钥、怎么检查。
+  settingsFor(mode: string): ChannelSettingsSpec;
+  // 要用户登录才能用的方式：打开一个窗口让用户自己登录，返回这种方式要的密钥（按名字）。超时、取消、窗口关掉时抛错，
+  // 错误的话是给人看的原因。不要登录的方式没有它。
+  needsSignIn(mode: string): boolean;
+  signIn(mode: string, options: { log(line: string): void; signal: AbortSignal }): Promise<Readonly<Record<string, string>>>;
+  // 这种方式下「代你往来源里写」要不要单独打开（缺省关）。
+  writesSwitch(mode: string): boolean;
+}
+
+/**
  * 记忆沉淀（slack-takeover 工单 07，spec D12）：来源里哪些对话可以整理成事实笔记。内核（channels/memory.ts）按对象键
  * 把下面这些类型的事件分成对话，一个对话一条笔记；它只读事件日志，不再调来源的接口。来源的知识（哪种对话可以沉淀、
  * 排除名单、消息的编号在 payload 的哪个字段）都在这里，内核不认识具体的来源。
@@ -447,6 +479,13 @@ export interface ChannelAdapter {
   readonly transport?: ChannelTransport;
   /** 凭据设置（设置页）。声明了的来源，生产入口总是登记：没有密钥时传输不启动，用户在设置页存了密钥以后马上连上。 */
   readonly settings?: ChannelSettingsSpec;
+  /** 有几种连接方式的来源（例如一种用应用的令牌，一种用浏览器会话，2026-11-02）。只有一种时没有。 */
+  readonly connection?: ChannelConnectionControl;
+  /**
+   * 现在不能往来源里写（发消息、改、删、回表情）的原因，给 Lead 和设置页看（一句话，带下一步）。能写时是 null。
+   * 不能写时 capabilities 里这几项同时是 false：hub、卡片和 Lead 的工具都按 capabilities 判断，这里只给原因。
+   */
+  writesBlocked?(): string | null;
   /** 记忆沉淀（channels/memory.ts）。没有时这个来源的对话不沉淀。 */
   readonly memory?: ChannelMemorySpec;
   /**

@@ -8,6 +8,8 @@ export const slackSettingsMessages = defineMessages({
       + "and authorizations:read (when other people also install this app, it tells which messages you can see).",
     userTokenHint: "In the app, open OAuth & Permissions, click Install to Workspace, allow it, then copy the User OAuth Token "
       + "(not the Bot User OAuth Token).",
+    sessionCookieHint: "In Settings → Message channels → Slack, click Sign in to Slack and sign in in the window that opens. "
+      + "It carries the full permissions of your Slack account and stays on this Mac.",
     // 手建应用时最容易漏的两处（2026-11-02）。
     setupNote: (events: readonly string[]) => "Add the scopes under User Token Scopes, not Bot Token Scopes. "
       + `Subscribe to events on behalf of users must list ${events.join(", ")}. `
@@ -25,6 +27,7 @@ export const slackSettingsMessages = defineMessages({
     appTokenHint: "在应用的 Basic Information → App-Level Tokens 点 Generate Token and Scopes，加 connections:write 和 authorizations:read"
       + "（别人也装了这个应用时，用它认出哪些消息是你能看到的）。",
     userTokenHint: "在应用的 OAuth & Permissions 点 Install to Workspace，授权以后复制 User OAuth Token（不是 Bot User OAuth Token）。",
+    sessionCookieHint: "在设置 → 消息通道 → Slack 里点「登录 Slack」，在弹出的窗口里登录。它等于你整个 Slack 账号的权限，只存在这台 Mac 上。",
     setupNote: (events) => "权限加在 User Token Scopes 里（不是 Bot Token Scopes）。"
       + `Subscribe to events on behalf of users 里要有 ${events.join("、")}。`
       + "改了权限或事件以后，点 Reinstall to Workspace，把新的 User OAuth Token 填在上面。",

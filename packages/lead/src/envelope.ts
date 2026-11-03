@@ -269,6 +269,13 @@ function handbookCeilingLines(ceiling: Record<string, unknown>, final: HandbookM
   return lines;
 }
 
+// 对用户提到一张外来消息卡时现成的写法（设计规范 P14.7，2026-11-02）：用户看不懂「卡 #134」，点得开「Ethan 的消息」。
+// 名字是外部来的，去掉会弄坏 Markdown 链接的括号。
+export function cardLinkHint(cardId: number, senderName: string | null): string {
+  const who = (senderName ?? "").replace(/[[\]()\n]/gu, " ").trim().slice(0, 40) || "对方";
+  return `对用户提到这条消息时写成 [${who} 的消息](plc:card/${cardId})，用户在 App 里点了能打开这张卡；card_id=${cardId} 只用在调工具的参数里，不写给用户看。`;
+}
+
 /**
  * 一条外部通道的消息事件（message.received）给 Lead 的文字：结构化的事实，加上外部标签里的原话。
  * contextIn：同一个对话里几条消息事件一起交给 Lead 时（工单 10），上下文包只给最新的那一份（它是哪一条的编号）。
@@ -283,6 +290,8 @@ export function leadMessageEventBlock(event: LeadEventLike, options: { contextIn
   const lines = [`消息事件 #${event.seq}：${capped(textOf(payload.summary) ?? "一条外部消息", FIELD_MAX * 3)}`];
   // 怎样处理外部消息写在 skill channel-replies 里（2026-10-28 从系统提示词拆出去）：事件自己点名，Lead 不靠想起来去读。
   lines.push(CHANNEL_SKILL_HINT);
+  const cardId = countOf(payload.cardId);
+  if (cardId > 0) lines.push(cardLinkHint(cardId, textOf(sender.name)));
   const edits = typeof payload.edits === "number" ? payload.edits : 0;
   if (edits > 0) lines.push(`对方编辑过 ${edits} 次，下面是编辑以后的版本。`);
   if (inbound) {
@@ -398,7 +407,7 @@ export function leadContextPackBlocks(context: Record<string, unknown>): string[
   const history = recordsOf(context.history).flatMap((card) => {
     const time = contextTime(card.at);
     return [
-      `- 卡 #${countOf(card.cardId)}（${time ? `${time}，` : ""}${textOf(card.state) ?? ""}）${textOf(card.sender) ?? "某人"}：${textOf(card.excerpt) ?? ""}`,
+      `- card_id=${countOf(card.cardId)}（${time ? `${time}，` : ""}${textOf(card.state) ?? ""}）${textOf(card.sender) ?? "某人"}：${textOf(card.excerpt) ?? ""}`,
       ...(Array.isArray(card.notes) ? card.notes : []).flatMap((note) => (typeof note === "string" ? [`  - ${note}`] : [])),
     ];
   });
@@ -406,7 +415,7 @@ export function leadContextPackBlocks(context: Record<string, unknown>): string[
     blocks.push(contextBlock({ part: "history", source, conversation: textOf(conversation.label) ?? undefined }, history));
   }
   const memory = recordsOf(context.memory).map((note) =>
-    `- 笔记 #${countOf(note.noteId)}「${textOf(note.title) ?? ""}」：${textOf(note.text) ?? ""}`);
+    `- note_id=${countOf(note.noteId)}「${textOf(note.title) ?? ""}」：${textOf(note.text) ?? ""}`);
   if (memory.length) blocks.push(contextBlock({ part: "memory", source: "记忆" }, memory));
   return blocks;
 }

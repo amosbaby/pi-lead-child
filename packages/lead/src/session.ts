@@ -10,6 +10,7 @@ import {
   createAgentSession,
   createCodemodeExtension,
   DefaultResourceLoader,
+  loadSkillsFromDir,
   ModelRuntime,
   SessionManager,
   SettingsManager,
@@ -25,7 +26,7 @@ import { designPreferencesFields } from "@pi-lead-child/protocol";
 import { APPEARANCE_SECTION, renderAppearance } from "./appearance.js";
 import { REPLY_STYLE_SECTION, renderReplyStyle } from "./reply-style.js";
 import { credentialGuardExtension, knownSecretValues } from "./credential-guard.js";
-import { applyLeadCompactionReserve } from "./compaction-settings.js";
+import { applyLeadCompactionReserve, leadAutoCompactionInstructions } from "./compaction-settings.js";
 import { costSignalsExtension } from "./cost-signals.js";
 import { compactionChunksExtension, type CompactionProgress } from "./compaction-chunks.js";
 import {
@@ -73,6 +74,16 @@ export function isLeadOwnSkill(filePath: string): boolean {
  */
 export function hideUserSkillsFromPrompt<T extends { skills: Skill[] }>(base: T): T {
   return { ...base, skills: base.skills.map((skill) => (isLeadOwnSkill(skill.filePath) ? skill : { ...skill, disableModelInvocation: true })) };
+}
+
+/** PLC 自己的 skill 目录里装的 skill（Lead 装的，2026-11-02）。每次现扫；目录不在时为空。 */
+export function installedSkillInfos(dir: string): Array<{ name: string; description: string; filePath: string }> {
+  try {
+    return loadSkillsFromDir({ dir, source: "plc" }).skills
+      .map((skill) => ({ name: skill.name, description: skill.description, filePath: skill.filePath }));
+  } catch {
+    return [];
+  }
 }
 
 /** 用户给 agent 装的 skill 所在的目录（存在的）。 */
@@ -195,6 +206,9 @@ export async function createLeadSession(opts: {
   environment?: () => LeadDaemonEnvironment;
   // 用户给 agent 装的 skill 的目录（userSkillDirs）。daemon 的入口传；不传时只有 Lead 自带的。
   skillDirs?: string[];
+  // PLC 自己的 skill 目录（<数据目录>/skills，2026-11-02）：Lead 用操作层装的 skill 在这里。find_skill 每次现扫它，
+  // 装完、卸完马上生效，不重载会话（重载会关掉并重建全部扩展，而安装就发生在 Lead 自己的一次工具调用里）。
+  installedSkillsDir?: string;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
   models: string[]; switchModel: (spec: string) => Promise<void>; reportsInputDelivery: boolean;
@@ -359,12 +373,14 @@ export async function createLeadSession(opts: {
         name: "plc-cost-signals", hidden: true,
         factory: costSignalsExtension({ compactAt: (window) => window - settingsManager.getCompactionSettings().reserveTokens }),
       },
-      // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。放得进时 pi 照常压缩。
+      // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
+      // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {
         name: "plc-compaction-chunks", hidden: true,
         factory: compactionChunksExtension({
           ...(opts.onCompactionProgress ? { onProgress: opts.onCompactionProgress } : {}),
           log: (line) => console.error(line),
+          instructions: leadAutoCompactionInstructions(),
         }),
       },
       // inlineBudget 0：codemode 的说明不列不常用工具的签名，系统提示词列它们的名字（tool-exposure.ts）。
@@ -415,9 +431,14 @@ export async function createLeadSession(opts: {
 
   const toolDeps: LeadDeps = {
     db: opts.db, dbPath: opts.dbPath, dataDir: opts.dataDir,
-    userSkills: () => loader.getSkills().skills
-      .filter((skill) => !isLeadOwnSkill(skill.filePath))
-      .map((skill) => ({ name: skill.name, description: skill.description, filePath: skill.filePath })),
+    userSkills: () => {
+      const loaded = loader.getSkills().skills
+        .filter((skill) => !isLeadOwnSkill(skill.filePath))
+        .map((skill) => ({ name: skill.name, description: skill.description, filePath: skill.filePath }));
+      const installed = opts.installedSkillsDir ? installedSkillInfos(opts.installedSkillsDir) : [];
+      const seen = new Set(loaded.map((skill) => skill.filePath));
+      return [...loaded, ...installed.filter((skill) => !seen.has(skill.filePath))];
+    },
     ...(opts.onChildDone ? { onChildDone: opts.onChildDone } : {}),
     ...(opts.onChildEvent ? { onChildEvent: opts.onChildEvent } : {}),
     ...(opts.childPi ? { childPi: opts.childPi } : {}),

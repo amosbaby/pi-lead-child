@@ -3302,7 +3302,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (refusal) return coreMemoryRefused(refusal);
         const { reason, ...note } = params;
         const outcome = saveNoteRecorded(db, memory, note, { actor: "lead", reason: reason ?? "" });
-        return text(`note #${outcome.id} saved${coreMemoryNoted(outcome)}`);
+        return text(`笔记已保存（note_id=${outcome.id}）${coreMemoryNoted(outcome)}`);
       },
     }),
 
@@ -3367,7 +3367,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (refusal) return coreMemoryRefused(refusal);
         const { note_id: noteId, reason, ...patch } = params;
         const outcome = updateNoteRecorded(db, memory, noteId, patch, { actor: "lead", reason: reason ?? "" });
-        return text(`note #${noteId} updated${coreMemoryNoted(outcome)}`);
+        return text(`笔记已更新（note_id=${noteId}）${coreMemoryNoted(outcome)}`);
       },
     }),
 
@@ -4351,7 +4351,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           if (!params.draft?.trim()) throw new Error("推给用户时要带一份你写的给对方的回复草稿（draft），闲聊也一样：用户改一改就能发");
           if (!deps.channelCards?.notify) throw new Error("没有接任何外部通道");
           await deps.channelCards.notify(params.event, { note: params.title, ...(params.body ? { body: params.body } : {}), draft: params.draft });
-          return text(`已推给用户：消息事件 #${params.event} 的卡上放了你的草稿`);
+          return text(`已推给用户：你的草稿放在这条消息的卡上（event=${params.event}）`);
         }
         if (params.ticket_id !== undefined && !getItem(db, params.ticket_id)) throw new Error(`item #${params.ticket_id} not found`);
         const id = db.transaction(() => {
@@ -4371,7 +4371,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           }
           return created;
         })();
-        return text(`已通知用户（通知 #${id}）`);
+        return text(`已通知用户（notification_id=${id}）`);
       },
     }),
 
@@ -4410,7 +4410,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           tool: "follow_up", at: at.toISOString(), note: params.note, ...(params.ticket_id !== undefined ? { ticketId: params.ticket_id } : {}),
           ...(params.outward ? { outward: params.outward } : {}),
         }, { ...(params.event !== undefined ? { event: params.event } : {}) });
-        return "refused" in done ? done.refused : text(`已设跟进 #${done.set.id}，${localIso(at)} 叫醒你。${done.note}`);
+        return "refused" in done ? done.refused : text(`已设跟进（follow_up_id=${done.set.id}），${localIso(at)} 叫醒你。${done.note}`);
       },
     }),
 
@@ -4426,7 +4426,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       }),
       execute: async (_id, params: { follow_up_id: number; reason: string }) => {
         cancelLeadFollowUp(db, params.follow_up_id, { reason: params.reason });
-        return text(`已取消跟进 #${params.follow_up_id}`);
+        return text(`已取消这条跟进（follow_up_id=${params.follow_up_id}）`);
       },
     }),
 

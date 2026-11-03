@@ -51,7 +51,7 @@ export const conversationMessages = defineMessages({
     tail: {
       asked: (id: number, quoted: string) => `You asked in #${id}: "${quoted}"`,
       sent: (id: number) => `You sent a message in #${id}`,
-      queued: (head: string) => `${head} · The Run cannot take messages now · Queued, goes to the run when it ends`,
+      queued: (head: string) => `${head} · It cannot take messages while it works · Queued, delivered when it ends`,
       streaming: (head: string) => `${head} · Delivered · Answering`,
       failed: (head: string, name: string) => `${head} · Not delivered · Sent to ${name}`,
       steered: (head: string) => `${head} · Answered with the next message`,
@@ -126,7 +126,7 @@ export const conversationMessages = defineMessages({
     tail: {
       asked: (id, quoted) => `你在 #${id} 问了「${quoted}」`,
       sent: (id) => `你在 #${id} 发了一条消息`,
-      queued: (head) => `${head} · Run 不能中途插话 · 已排队，结束后转交`,
+      queued: (head) => `${head} · 执行中不能插话 · 已排队，结束后转交`,
       streaming: (head) => `${head} · 已送达 · 正在回答`,
       failed: (head, name) => `${head} · 没送到 · 已交给 ${name}`,
       steered: (head) => `${head} · 和下一条一起回答`,

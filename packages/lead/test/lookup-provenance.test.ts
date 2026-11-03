@@ -51,7 +51,7 @@ describe("verifyLookupResult", () => {
         sources: [
           { ...base, repo: "acme/secret-repo" },
           { ...base, path: "src/other.ts" },
-          { ...base, startLine: 9, endLine: 11 },
+          { ...base, startLine: 9, endLine: 9, quote: "这一行没有读过" },
           { ...base, quote: "return 42;" },
           { ...base, via: "github", repo: "acme/widgets" },
           { via: "github", repo: "acme/service", path: "lib/limits.ts", startLine: 3, endLine: 3, quote: "MAX = 40" },
@@ -69,6 +69,36 @@ describe("verifyLookupResult", () => {
     expect(checked.result.sources.map((source) => source.verified)).toEqual([false, false, false, false, false, true]);
     expect(checked.result.caveats).toHaveLength(5);
     expect(checked.result.caveats[0]).toContain("出处没有通过核实");
+  });
+
+  // 2026-11-02：子 agent 自己数行号，常差一两行，也写过 path:1-1 这样的占位；原文其实读过。核实只看引用的那几行，
+  // 7 处出处判 6 处「对不上（可能是编的）」，信心掉到 14%。现在按原文在读过的行里找，找到就改正行号，并写进 caveats。
+  it("corrects the line numbers of a quote that was read elsewhere in the file, and says so", () => {
+    const base = result().sources[0]!;
+    const checked = verifyLookupResult({
+      scope, reads,
+      result: result({
+        sources: [
+          { ...base, startLine: 12, endLine: 13 },
+          { ...base, startLine: 1, endLine: 1, quote: "export function retryDelay(attempt: number): number {\n  return Math.min(30_000 * 2 ** attempt, 600_000);" },
+        ],
+      }),
+    });
+    expect(checked.sources.map((source) => source.verified)).toEqual([true, true]);
+    expect(checked.result.sources.map((source) => [source.startLine, source.endLine])).toEqual([[11, 11], [10, 11]]);
+    expect(checked.result.caveats).toEqual([
+      "出处的行号改正了：acme/widgets ./src/retry.ts:12-13 → 11-11",
+      "出处的行号改正了：acme/widgets ./src/retry.ts:1-1 → 10-11",
+    ]);
+  });
+
+  it("accepts a quote copied together with the tool's line numbers", () => {
+    const base = result().sources[0]!;
+    const checked = verifyLookupResult({
+      scope, reads,
+      result: result({ sources: [{ ...base, quote: "    11\t  return Math.min(30_000 * 2 ** attempt,   600_000);\n    12\t}" , endLine: 12 }] }),
+    });
+    expect(checked.sources.map((source) => [source.verified, source.reason])).toEqual([[true, null]]);
   });
 
   it("keeps the agent's caveats and caps the total at the contract's limit", () => {

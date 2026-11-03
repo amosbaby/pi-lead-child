@@ -34,6 +34,40 @@ export function Link({ href, underline = 'always', ...rest }: LinkProps) {
   );
 }
 
+export type ActionLinkProps = Omit<GetProps<typeof LinkFrame>, 'onPress' | 'role'> & {
+  /** 点了做什么。拿到链接的方框（窗口坐标），用来对着它打开浮层。 */
+  onPress: (at: { x: number; y: number; width: number; height: number }) => void;
+  underline?: 'always' | 'hover';
+};
+
+type PressLike = {
+  currentTarget?: unknown;
+  nativeEvent?: { pageX?: number; pageY?: number; locationX?: number; locationY?: number };
+};
+
+// 链接的方框。web 上直接量这个元素（点击事件的 locationX 是 0）；原生上用按下的点减去它在链接里的位置，高度按一行算。
+function pressedBox(event: PressLike): { x: number; y: number; width: number; height: number } {
+  const target = event?.currentTarget as { getBoundingClientRect?: () => { left: number; top: number; width: number; height: number } } | undefined;
+  if (typeof target?.getBoundingClientRect === 'function') {
+    const box = target.getBoundingClientRect();
+    return { x: box.left, y: box.top, width: box.width, height: box.height };
+  }
+  const native = event?.nativeEvent ?? {};
+  return { x: (native.pageX ?? 0) - (native.locationX ?? 0), y: (native.pageY ?? 0) - (native.locationY ?? 0), width: 0, height: 20 };
+}
+
+// 样子和 Link 一样、点了在 App 里做一件事的文字链接：会话文字里的工单和外来消息卡（设计规范 P14.7）。
+export function ActionLink({ onPress, underline = 'always', ...rest }: ActionLinkProps) {
+  return (
+    <LinkText
+      role="link"
+      onPress={(event: PressLike) => onPress(pressedBox(event))}
+      {...(underline === 'hover' ? { textDecorationLine: { default: 'none', hover: 'underline' } } as const : {})}
+      {...rest}
+    />
+  );
+}
+
 // 行内代码。和正文同一行，等宽字体，浅灰底的小圆角块（GitHub 的样式，2026-10-16）。
 // 原生上嵌在 Text 里的文字不支持内边距和圆角，只有底色。
 const CodeFrame = styled(TextFrame, {

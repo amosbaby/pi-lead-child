@@ -7,10 +7,13 @@
 //   4. apps.connections.open（App-Level Token）：成功即可（拿到的地址不用）。
 // 结果里的文字不含令牌：先把这次的两个令牌原样换掉，再按通用的规则脱敏。
 // 连上了却一直收不到事件时（daemon 判断），设置页显示 noEventsWarning：查用户事件的订阅和 User Token Scopes。
-import { SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
+// 浏览器会话方式（2026-11-02）另有一份：只要会话 cookie，检查见 createSlackSessionSettings。
+import { SLACK_APP_TOKEN_ENV, SLACK_SESSION_COOKIE_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
 import { CHANNEL_SETUP_URL_MAX, type ChannelSecretCheck, type ChannelSecretsTestResult, type ChannelSourceAccount } from "@pi-lead-child/protocol";
 import type { ChannelSecretSpec, ChannelSettingsSpec } from "../types.js";
 import { ASSISTANT_NAME_DEFAULT } from "../disclosure.js";
+import { createGabrielCore, gabrielErrorOf, type SlackSessionNetwork } from "./slack-gabriel.js";
+import { SLACK_SESSION_COOKIE_PREFIX } from "./slack-session.js";
 import { slackSettingsMessages } from "./slack-settings.messages.js";
 import { scrubSlackText, type SlackWebApi } from "./slack-web-api.js";
 
@@ -256,4 +259,91 @@ export function createSlackSettings(input: {
     noEventsWarning: (locale) => slackSettingsMessages(locale).noEvents(SLACK_USER_EVENTS, SLACK_USER_SCOPES),
     test,
   };
+}
+
+// 浏览器会话方式（2026-11-02）要的密钥：会话 cookie。用户在设置页的登录窗口里登录以后，daemon 自己存进去（不提供粘贴的入口）。
+const SESSION_SECRETS: readonly ChannelSecretSpec[] = [
+  {
+    name: SLACK_SESSION_COOKIE_ENV,
+    label: "Slack 会话",
+    prefix: SLACK_SESSION_COOKIE_PREFIX,
+    hint: (locale) => slackSettingsMessages(locale).sessionCookieHint,
+  },
+];
+
+// 检查会话时，等 WebSocket 连上（hello）最多多久。
+const SESSION_SOCKET_WAIT_MS = 10_000;
+
+/**
+ * 浏览器会话方式的凭据设置。检查一个会话 cookie：
+ *   1. 格式：以 xoxd- 开头。
+ *   2. 能登录：用 cookie 换出会话（用户本人、工作区），users.info 取显示名。
+ *   3. WebSocket 能连上：连一次，等到 hello 就断开。
+ * 用一个临时的 GabrielCore，不动正在用的会话。结果里的文字不含 cookie 和会话令牌。
+ */
+export function createSlackSessionSettings(input: { network?: SlackSessionNetwork } = {}): ChannelSettingsSpec {
+  async function test(secrets: Readonly<Record<string, string>>, context: { log(line: string): void }): Promise<ChannelSecretsTestResult> {
+    const cookie = (secrets[SLACK_SESSION_COOKIE_ENV] ?? "").trim();
+    let token: string | null = null;
+    const scrub = (text: string) => scrubSlackText(text, [cookie, token]);
+    const check = (id: string, label: string, pass: boolean, detail: string): ChannelSecretCheck =>
+      ({ id, label, pass, detail: scrub(detail).slice(0, 500) });
+    const signInLabel = "能登录 Slack";
+    const socketLabel = "能连上 Slack 的实时消息";
+    const kindOk = cookie.startsWith(SLACK_SESSION_COOKIE_PREFIX);
+    const checks: ChannelSecretCheck[] = [
+      check("session_cookie_kind", "Slack 会话的格式", kindOk, kindOk ? `以 ${SLACK_SESSION_COOKIE_PREFIX} 开头。`
+        : cookie ? `会话应该以 ${SLACK_SESSION_COOKIE_PREFIX} 开头。` : "缺 Slack 会话：还没有登录。"),
+    ];
+    if (!kindOk) {
+      checks.push(check("session_sign_in", signInLabel, false, "没有检查：会话的格式不对。"));
+      checks.push(check("session_socket", socketLabel, false, "没有检查：会话的格式不对。"));
+      return { ok: false, checks, account: null, missingScopes: [] };
+    }
+    const core = await createGabrielCore({ cookie, network: input.network ?? {}, log: (line) => context.log(`settings test: ${line}`) });
+    let account: ChannelSourceAccount | null = null;
+    try {
+      const session = await core.initialize();
+      token = session.token;
+      let userName = session.userId;
+      try {
+        const info = await core.callWebApi("users.info", { user: session.userId });
+        const user = info.user as { name?: string; real_name?: string; profile?: { display_name?: string; real_name?: string } } | undefined;
+        userName = [user?.profile?.display_name, user?.profile?.real_name, user?.real_name, user?.name].find(isString) ?? userName;
+      } catch (error) {
+        context.log(`settings test: users.info failed: ${scrub(errorText(error))}`);
+      }
+      account = {
+        userId: scrub(session.userId).slice(0, 100), userName: scrub(userName).slice(0, 200),
+        teamId: scrub(session.teamId).slice(0, 100), teamName: scrub(session.teamName || session.teamId).slice(0, 200),
+      };
+      checks.push(check("session_sign_in", signInLabel, true, `是 ${account.userName}${account.teamName ? `（${account.teamName}）` : ""}。`));
+    } catch (error) {
+      const dead = gabrielErrorOf(error).code === "AUTH_DEAD";
+      checks.push(check("session_sign_in", signInLabel, false, dead
+        ? "会话已失效：SSO 过期，或者你在 Slack 里登出了。请重新登录。"
+        : `连不上 Slack：${errorText(error)}`));
+      checks.push(check("session_socket", socketLabel, false, "没有检查：没有登录。"));
+      return { ok: false, checks, account: null, missingScopes: [] };
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const hello = new Promise<boolean>((resolve) => {
+        core.onHello(() => resolve(true));
+        timer = setTimeout(() => resolve(false), SESSION_SOCKET_WAIT_MS);
+        timer.unref?.();
+      });
+      await core.connect();
+      const connected = await hello;
+      checks.push(check("session_socket", socketLabel, connected, connected ? "连上了。" : "等了 10 秒还没有连上。"));
+    } catch (error) {
+      checks.push(check("session_socket", socketLabel, false, `连不上 Slack：${errorText(error)}`));
+    } finally {
+      clearTimeout(timer);
+      core.disconnect();
+    }
+    return { ok: checks.every((item) => item.pass), checks, account, missingScopes: [] };
+  }
+
+  return { secrets: SESSION_SECRETS, manifest: null, setupUrl: null, test };
 }

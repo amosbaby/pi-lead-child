@@ -553,15 +553,26 @@ function reviewBudgetFact(
   return [{ label: workspaceModelMessages(locale).facts.reworkUsed, value: `${review.reworkCyclesUsed}/${review.maxReworkCycles}` }];
 }
 
-/** 作废的核查：它是谁、核查的是哪次交付、被哪次交付作废（F9）。 */
-export function supersededReviewText(review: NonNullable<TicketSummary['reviewState']>, locale: Locale = DEFAULT_LOCALE): string | null {
+/**
+ * 作废的核查：结论是什么、核查的是哪次交付、被哪次交付作废（F9）。
+ * 交付写「第 N 次交付」（设计规范 P14.6）：`deliveryNumbers` 是交付它的执行记录 id → 第几次交付。没有序号时不写编号。
+ */
+export function supersededReviewText(
+  review: NonNullable<TicketSummary['reviewState']>,
+  locale: Locale = DEFAULT_LOCALE,
+  deliveryNumbers?: ReadonlyMap<number, number>,
+): string | null {
   const superseded = review.supersededReview;
   if (!superseded) return null;
-  const m = workspaceModelMessages(locale).facts;
+  const messages = workspaceModelMessages(locale);
+  const m = messages.facts;
+  const number = (runId: number | null) => (runId === null ? null : deliveryNumbers?.get(runId) ?? null);
+  const reviewed = number(superseded.reviewedRunId);
+  const by = number(superseded.supersededByRunId);
   return [
-    `Run #${superseded.reviewerAttemptId} · ${superseded.verdict.toUpperCase()}`,
-    superseded.reviewedRunId === null ? null : m.reviewedRun(superseded.reviewedRunId),
-    superseded.supersededByRunId === null ? m.superseded : m.supersededBy(superseded.supersededByRunId),
+    messages.verification[superseded.verdict],
+    reviewed === null ? null : m.reviewedDelivery(reviewed),
+    by !== null ? m.supersededBy(by) : superseded.supersededByRunId !== null ? m.supersededLater : m.superseded,
   ].filter(Boolean).join(' · ');
 }
 

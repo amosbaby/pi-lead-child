@@ -240,6 +240,9 @@ export interface PlcChannelsConfig {
   // 代查扫描本地仓库的根目录（缺省 ~/Workspace，两层以内的 git 仓库；spec D5）。
   lookup?: { localRoots?: string[] };
   slack?: {
+    // 连接方式（2026-11-02）。"app"（缺省）：Slack 应用，两个令牌，官方接口。"session"：浏览器会话，网页版 Slack 的会话 cookie，
+    // 非官方接口。同一时间只有一种在工作。
+    connection?: "app" | "session";
     // 记忆沉淀（slack-takeover 工单 07，spec D12）。exclude：不订阅、不沉淀的频道，写频道编号或者频道名（带不带 # 都行）。
     memory?: { exclude?: string[] };
     // 署名里助手名前面的 emoji，写 Slack 的短代码（自定义 emoji 要在工作区里有，否则 Slack 原样显示短代码）。缺省 ":robot_face:"；写 "" 不加。
@@ -434,6 +437,9 @@ export function buildChildPrompt(t: Pick<Item, "id" | "title" | "brief" | "body"
 // engine 的 Slack 插件声明它要这两个名字，plc doctor 按这两个名字说明缺什么。
 export const SLACK_APP_TOKEN_ENV = "PLC_SLACK_APP_TOKEN";
 export const SLACK_USER_TOKEN_ENV = "PLC_SLACK_USER_TOKEN";
+// 浏览器会话方式（channels.slack.connection 是 "session"，2026-11-02）的会话 cookie（网页版 Slack 的 d cookie，xoxd- 开头）。
+// 它等于整个 Slack 账号的权限。用它换出的会话令牌只在 daemon 的内存里，不存。
+export const SLACK_SESSION_COOKIE_ENV = "PLC_SLACK_SESSION_COOKIE";
 
 // 只给 daemon 自己用的密钥的变量名（例如连接的预注册客户端的 client secret）。child 继承 daemon 的全部环境
 // （packages/runtime 的 childEnvironment），所以这些名字要在那里去掉；daemon 启动时也把它们从自己的环境里删掉。
@@ -441,10 +447,10 @@ export const SLACK_USER_TOKEN_ENV = "PLC_SLACK_USER_TOKEN";
 // TYPESAFE_API_KEY 是决策模型的 key（memory-controller.ts、SmartModel）：设置页存进保险库，
 // 用户也可能放在 Keychain 或环境变量里。它只给 daemon 用。
 // PLC_SLACK_SIGNING_SECRET 是通道（工单 11、16）校验 Slack 推来的请求用的签名密钥（apps/daemon 的 connectionChannelCredentials）。
-// 通道 Slack 的 Socket Mode 令牌见上面的 SLACK_APP_TOKEN_ENV、SLACK_USER_TOKEN_ENV。
+// 通道 Slack 的 Socket Mode 令牌见上面的 SLACK_APP_TOKEN_ENV、SLACK_USER_TOKEN_ENV，浏览器会话的 cookie 是 SLACK_SESSION_COOKIE_ENV。
 export const DAEMON_ONLY_ENV_NAMES: readonly string[] = [
   "PLC_SLACK_CLIENT_SECRET", "PLC_GITHUB_CLIENT_SECRET", "TYPESAFE_API_KEY", "PLC_SLACK_SIGNING_SECRET",
-  SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV,
+  SLACK_APP_TOKEN_ENV, SLACK_USER_TOKEN_ENV, SLACK_SESSION_COOKIE_ENV,
 ];
 
 // 设置页存的外部通道密钥（slack-settings 工单 S1）在保险库里的名字：kv 的一行是 secret.<这个名字>（daemon 的 sealed-secrets.ts）。

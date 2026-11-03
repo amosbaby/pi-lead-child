@@ -528,6 +528,23 @@ describe('CompanionStateRuntime', () => {
     expect(client.getTicketReviewer).toHaveBeenCalledWith(66, undefined);
   });
 
+  // 2026-11-03：工单详情把交付写成「第 N 次交付」，序号来自交付列表（设计规范 P14.6）。旧 daemon 没有这个接口时报错，界面写「最新的交付」。
+  it('reads the delivery sequence numbers from their own endpoint', async () => {
+    const credentials = credentialStore();
+    const deliveries = [{
+      sequence: 1, attemptId: 49, revisions: 1, reason: 'delivered' as const, source: 'git' as const, backfilled: false,
+      head: null, commitCount: 1, totals: null, deliveredAt: '2026-11-03T08:00:00.000Z', updatedAt: '2026-11-03T08:00:00.000Z',
+    }];
+    const client = { ...transport(), getTicketDeliveries: vi.fn(async () => deliveries) };
+    const runtime = createCompanionStateRuntime({ client, credentials, scheduler: scheduler() });
+    await runtime.start();
+
+    expect(await runtime.getTicketDeliveries(66)).toEqual(deliveries);
+    expect(client.getTicketDeliveries).toHaveBeenCalledWith(66, {});
+    const old = createCompanionStateRuntime({ client: transport(), credentials, scheduler: scheduler() });
+    await expect(old.getTicketDeliveries(66)).rejects.toThrow('cannot read the ticket deliveries');
+  });
+
   it('uses the workspace action transport and refetches authoritative snapshots', async () => {
     const credentials = credentialStore();
     const client = transport();

@@ -26,6 +26,7 @@ export function agentTaskSystemPrompt(input: {
     "所有工具都经 search_connection_tools 和 call_connection_tool。先用 search_connection_tools 看有哪些工具、参数怎么填。",
     "本地仓库用 local 连接读（list_dir、read_file、search）。没有 shell，不能读清单以外的文件。",
     "写操作（例如在 PR 上发评论）别人看得到：只做这次任务要的，不做清单允许但任务不需要的事。",
+    "一条回复的输出有长度上限，写到上限会被截断，截断的那次调用不会执行。所以一次工具调用只做一件事：行内评论一条一条加，总评写短。",
     "approve 由 GitHub 那边的检查把关：检查没过、评论没 resolve、是 draft、或者 PR 在你看过以后又有了新提交，都会被拒绝。被拒绝就照实交回原因，不要想办法绕过去。",
     "",
     "## 外部原文",

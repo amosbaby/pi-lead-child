@@ -332,6 +332,8 @@ export async function registerLeadProviders(
   config: LeadModelConfig,
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
+  // 最大输出。缺省是 Lead 用的 16384；子 agent 另起的 ModelRuntime 要更大的（lookup/session.ts）。目录说的更小时用目录的。
+  options: { maxOutputTokens?: number } = {},
 ): Promise<string[]> {
   const notes: string[] = [];
   const chosenProviders = new Set(config.models.map((spec) => parseModelName(spec).provider));
@@ -353,7 +355,9 @@ export async function registerLeadProviders(
       return parsed.provider === name ? [parsed.id] : [];
     });
     const modelIds = uniqueStrings([...catalog.models.map((model) => model.id), ...chosen]);
-    runtime.registerProvider(name, toProviderConfigInput(provider, modelIds, resolveLeadApiKey(provider, env, name), catalog.models));
+    runtime.registerProvider(name, toProviderConfigInput(
+      provider, modelIds, resolveLeadApiKey(provider, env, name), catalog.models, options.maxOutputTokens ?? DEFAULT_MAX_TOKENS,
+    ));
   }
   return notes;
 }
@@ -518,6 +522,7 @@ function toProviderConfigInput(
   modelIds: string[],
   apiKey: string | undefined,
   catalog: readonly LeadCatalogModel[] = [],
+  maxOutputTokens: number = DEFAULT_MAX_TOKENS,
 ): ProviderConfigInput {
   const configured = new Map((provider.models ?? []).map((model) => [model.id, model]));
   const listed = new Map(catalog.map((model) => [model.id, model]));
@@ -540,8 +545,8 @@ function toProviderConfigInput(
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         // config.json 写了窗口时以它为准，没写时用目录的；都没有时按 128K。都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
         contextWindow: Math.min(LEAD_CONTEXT_WINDOW_LIMIT, extra?.contextWindow ?? known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
-        // 最大输出还是 16384，只有目录说的更小时用目录的。
-        maxTokens: extra?.maxTokens ?? Math.min(DEFAULT_MAX_TOKENS, known?.maxTokens ?? DEFAULT_MAX_TOKENS),
+        // 最大输出按调用方要的（Lead 是 16384），只有目录说的更小时用目录的。
+        maxTokens: extra?.maxTokens ?? Math.min(maxOutputTokens, known?.maxTokens ?? DEFAULT_MAX_TOKENS),
         ...(provider.compat ? { compat: provider.compat as never } : {}),
       };
     }),

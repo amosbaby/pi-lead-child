@@ -12,7 +12,7 @@ import {
   AUTHORITY_REFUSAL_TEXT, UiActionError, isLiveUserTurn, listLeadUiActions, runUiAction, uiActionCatalogText,
   type TimerSpec, type UiActionServices,
 } from "@pi-lead-child/engine";
-import { UI_ACTION_IDS, UI_ACTION_TARGET_TYPES, type UiActionTargetType } from "@pi-lead-child/protocol";
+import { isUserActionRequest, UI_ACTION_IDS, UI_ACTION_TARGET_TYPES, type UiActionTargetType, type UserActionRequest } from "@pi-lead-child/protocol";
 import { getEvent, type Db } from "@pi-lead-child/store";
 import { externalMessageOf } from "./channel-tools.js";
 import { EXTERNAL_TURN_WIDGET_SOURCE_REFUSAL, handsBlockedInTurn } from "./hands.js";
@@ -88,7 +88,10 @@ export async function performLeadUiAction(
       ...(outcome.by.actor === "lead" && outcome.by.onBehalfOf ? { on_behalf_of_turn: outcome.by.onBehalfOf.sourceTurnId } : {}),
       result: outcome.forLead,
     };
-    return text(JSON.stringify(view, null, 2), view);
+    // 结果要用户做一件事（例如加远程 MCP 以后的授权卡、本地 MCP 的确认卡）：系统只认 details.userAction，按它登记等待
+    // （wait-tools.ts），用户做完叫醒 Lead。正文里的 user_action 给 Lead 原样抄进 UserAction 卡。
+    const userAction = userActionOfResult(outcome.forLead);
+    return text(JSON.stringify(view, null, 2), userAction ? { ...view, userAction } : view);
   } catch (error) {
     if (error instanceof UiActionError && error.refusal) {
       // 改规则的操作被外部内容拦下：和还没登记成 UI 动作的工具同一个结果（确认卡的 user_action，turn-origin.ts）。
@@ -97,6 +100,13 @@ export async function performLeadUiAction(
     }
     throw error;
   }
+}
+
+// 操作给 Lead 的结果里的 user_action（操作层的 forLead 写的，不是外部的原文）。没有、或者不合格时为 null。
+function userActionOfResult(result: unknown): UserActionRequest | null {
+  if (!result || typeof result !== "object") return null;
+  const action = (result as { user_action?: unknown }).user_action;
+  return isUserActionRequest(action) ? action : null;
 }
 
 // 改提醒时间的请求（reschedule_reminder、perform_action 的 reminder.reschedule）：给了新的时刻时换成定时器的参数。
@@ -237,6 +247,7 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
         + "或者外部消息叫醒你、你判断该发的（例如对方请你给别人带句话），也直接用它。回复一条消息事件的发信人用 reply_to_source。"
         + "words=user：text 是用户在这一轮逐字给的原话，原样发，不加署名；words=assistant：text 是你组织的话，用户这一轮里带「confirmed by 用户」的署名，"
         + "别的轮次带「auto-reply」的署名。这个对话里有等用户的卡时，卡跟着结束（已回复）。发不发、发什么由你判断，系统不再检验。"
+        + "转告用户口述的事时，位置、名字、数字、步骤照用户说的写；你认为用户说错了，先在会话里指出、问一句，确认后再发。"
         + "这条消息做的是另一个对话里那张卡上的事（例如用户让你照卡上的话转告别人）时，card_id 填那张卡：卡结束，在对方的消息上回 ✅。"
         + "写法：像平时聊天。一件事的第一条消息称呼对方一次；接着说同一件事、或者对方刚和用户说过话时，不加称呼。"
         + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就用 mark_channel_card_handled 结束它。",

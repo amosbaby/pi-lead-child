@@ -183,6 +183,19 @@ describe("B5: whatever could be answered for you goes to Lead first", () => {
     expect(decisions().at(-1)).toMatchObject({ payload: { cardId: asks.cardId, decision: "refuse", by: "lead" } });
   });
 
+  // 2026-11-02：同事只发了一张截图。收件判断只看得到「[图片 …]」这一行，「要你的私人数据」打了 0.73，底线判成用固定的话拒绝。
+  // 只有附件（和 @ 人）的消息，敏感信息的分数没有依据，不进底线；交给 Lead 时写明先看附件。
+  it("does not refuse a message that is only an attachment: the sensitive scores have nothing to go on, and Lead is told to look at it", async () => {
+    const channels = hub(jev({ ask_kind: "other", query_owner_private: 0.73 }));
+    const shot = slack.addFile("image.png", "image/png", new Uint8Array([1, 2, 3]));
+    const item = await receive(channels, slack.dm("U0ETHAN", "", { files: [shot] }));
+    expect(messages().at(-1)).toMatchObject({ payload: { cardId: item.cardId } });
+    expect(messages().at(-1)!.payload.ceiling).not.toMatchObject({ authority: "refuse" });
+    expect(messages().at(-1)!.payload.summary).toContain("read_channel_file");
+    expect(listEvents(db, { kind: "channel.authority.decided" }).at(-1)!.payload.action).not.toBe("refuse");
+    expect(slack.sent()).toEqual([]);
+  });
+
   it("keeps Lead inside the ceiling: a closing gives no work to dispatch, and only a read-only task without a grant intent", async () => {
     const channels = hub(jev({ ask_kind: (state) => (messageOf(state).includes("review") ? "code_review" : "closing") }));
     const ok = await receive(channels, slack.dm("U0ETHAN", "ok"));
@@ -282,6 +295,53 @@ describe("B2: Lead decides", () => {
     expect(pushes).toEqual([]);
     expect(decisions()).toMatchObject([{ payload: { decision: "told", by: "lead" } }]);
     expect(getChannelCard(db, item.cardId)).toMatchObject({ state: "open", draft: { drafter: "lead", text: "周五我看下日程再回你。" } });
+  });
+});
+
+// 2026-11-02：一条消息里有两个 PR，Lead 同时派两张，第二张被拒「卡正在派工单」；子 agent 失败交回以后，再派被拒「已经处理过了」，
+// 两个拒绝都没说下一步，同事等了一个多小时。现在每个 PR 一张工单，交回以后能重派，拒绝写明下一步。
+describe("dispatching again on the same message", () => {
+  const twoPullRequests = (text: string) => {
+    const match = /acme\/orders#(\d+)/g;
+    const numbers = [...text.matchAll(match)].map((found) => Number(found[1]));
+    return numbers.length ? { owner: "acme", repo: "orders", number: numbers[0]! } : null;
+  };
+
+  it("re-dispatches once the sub-agent's failed result comes back, and records it as Lead's decision on that result", async () => {
+    const channels = hub(jev());
+    const item = await receive(channels, slack.dm("U0ETHAN", "帮忙 review 一下 acme/orders#12"));
+    const first = await channels.leadDispatch(eventOf(item.cardId), { summary: "review 这个 PR" });
+    await dispatcher.finish(first.runId, { status: "failed", result: null, error: "子 agent 没有用 submit_result 交结果" });
+    await channels.idle();
+    const [back] = handedBack();
+    expect(back).toBeDefined();
+    const again = await channels.leadDispatch(eventOf(item.cardId), { summary: "再评一次，这次拆小提交" });
+    expect(again.runId).not.toBe(first.runId);
+    expect(dispatcher.requests.at(-1)).toMatchObject({ scope: { pullRequest: { owner: "acme", repo: "orders", number: 12 } } });
+    expect(decisions().map((event) => [event.payload.stage, event.payload.decision])).toEqual([["intake", "dispatch"], ["reply", "dispatch"]]);
+    // 重派的结果交回以后，Lead 照常能处理它：它不会被上一次的决定算成已经定了。
+    await dispatcher.finish(again.runId, { status: "failed", result: null, error: "又失败了" });
+    await channels.idle();
+    expect(channels.pendingLeadRequest(item.cardId)).toMatchObject({ stage: "reply" });
+  });
+
+  it("dispatches a second PR from the same message, one task per PR, even while the first is running", async () => {
+    const channels = hub(jev(), { pullRequestOf: twoPullRequests });
+    const item = await receive(channels, slack.dm("U0ETHAN", "帮忙 review 一下 acme/orders#12 和 acme/orders#13"));
+    const event = eventOf(item.cardId);
+    const pr = (number: number) => ({ owner: "acme", repo: "orders", number });
+    const [a, b] = await Promise.all([
+      channels.leadDispatch(event, { summary: "review #12", pullRequest: pr(12) }),
+      channels.leadDispatch(event, { summary: "review #13", pullRequest: pr(13) }),
+    ]);
+    expect(a.runId).not.toBe(b.runId);
+    expect(dispatcher.requests.map((request) => request.scope.pullRequest?.number).sort()).toEqual([12, 13]);
+    expect(decisions().filter((decision) => decision.payload.decision === "dispatch")).toHaveLength(2);
+    // 同一个 PR 再派一次，或者派一个这条消息里没有的 PR：拒绝，并说下一步。
+    await expect(channels.leadDispatch(event, { summary: "再评 #12", pullRequest: pr(12) }))
+      .rejects.toMatchObject({ code: "invalid_action", message: expect.stringContaining("create_task") });
+    await expect(channels.leadDispatch(event, { summary: "评 #99", pullRequest: pr(99) }))
+      .rejects.toMatchObject({ code: "invalid_action", message: expect.stringContaining("create_task") });
   });
 });
 
@@ -460,6 +520,21 @@ describe("reply first, then work", () => {
     expect(dispatcher.requests).toEqual([]);
     expect(listEvents(db, { kind: "channel.authority.decided" }).at(-1)).toMatchObject({
       payload: { forSeq: item.seq, intent: "progress", action: "skip", reason: expect.stringContaining("多半不用回"), situation: "ask_progress" },
+    });
+  });
+
+  // 2026-11-02：同一个群聊里，判成「多半不用回：只记录」的四次编辑都因为对话里开着卡，被改成「问你」交给 Lead，Lead 跑了四轮。
+  // 开着卡时只记录的照旧只记录：并进卡，不交给 Lead。
+  it("only records a no-reply message that joins an open card: the card takes it, Lead gets nothing", async () => {
+    const channels = hub(model());
+    const first = await receive(channels, slack.dm("U0LILEI", "这个接口的超时是多少？"));
+    expect(messages().map((event) => event.payload.forSeq)).toEqual([first.seq]);
+    const note = await receive(channels, slack.dm("U0LILEI", "那我更新一下修复情况"));
+    expect(note.cardId).toBe(first.cardId);
+    expect(getChannelCard(db, first.cardId)).toMatchObject({ state: "open", messageCount: 2 });
+    expect(messages().map((event) => event.payload.forSeq)).toEqual([first.seq]);
+    expect(listEvents(db, { kind: "channel.authority.decided" }).at(-1)).toMatchObject({
+      payload: { forSeq: note.seq, action: "skip", reason: expect.stringContaining("多半不用回") },
     });
   });
 

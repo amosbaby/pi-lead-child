@@ -27,6 +27,7 @@ import type { ActionAttribution } from "../ticket-actions/attribution.js";
 import { AVAILABLE, unavailable } from "../ticket-actions/types.js";
 import { latestInstantOf, leadUserTurnOf } from "./authority.js";
 import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
+import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
 import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.js";
@@ -37,6 +38,9 @@ import { SETUP_HINT_ACTIONS, SETUP_HINT_TARGET } from "./setup-hints.js";
 import { RULE_CHANGE_ACTIONS, RULE_CHANGE_TARGET } from "./rule-change-confirmations.js";
 import { WIDGET_ACTIONS, WIDGET_BOARD_ACTIONS, WIDGET_BOARD_TARGET, WIDGET_TARGET } from "./widgets.js";
 import { TIMER_ACTIONS, TIMER_REQUEST_ACTIONS, TIMER_REQUEST_TARGET, TIMER_TARGET } from "./timers.js";
+import {
+  CONNECTION_ACTIONS, CONNECTION_TARGET, CONNECTIONS_ACTIONS, CONNECTIONS_TARGET, SKILL_ACTIONS, SKILL_TARGET, SKILLS_ACTIONS, SKILLS_TARGET,
+} from "./installs.js";
 import {
   UiActionError,
   type ChannelCardActionService, type ChannelMessageService, type ChannelPolicyTestService, type FollowUpEntry, type FollowUpQueueService,
@@ -487,7 +491,7 @@ const CHANNEL_CONVERSATION_ACTIONS = {
     defaultReason: "在来源里发消息",
     available: (target, env) => (channelMessages(env).canSend(target.source)
       ? AVAILABLE
-      : unavailable(`来源 ${target.source} 现在不能直接发消息。`)),
+      : unavailable(channelMessages(env).blockedReason?.(target.source) ?? `来源 ${target.source} 现在不能直接发消息。`)),
     run: (run) => {
       const input = run.input as UiActionInputOf<"channel_conversation", "send_message">;
       return channelMessages(run.env).send(run.target.id, {
@@ -514,7 +518,7 @@ const CHANNEL_CONVERSATION_ACTIONS = {
     defaultReason: "在来源里回表情",
     available: (target, env) => (channelMessages(env).canSend(target.source)
       ? AVAILABLE
-      : unavailable(`来源 ${target.source} 现在不能回表情。`)),
+      : unavailable(channelMessages(env).blockedReason?.(target.source) ?? `来源 ${target.source} 现在不能回表情。`)),
     run: (run) => {
       const input = run.input as UiActionInputOf<"channel_conversation", "react">;
       return channelMessages(run.env).react(run.target.id, {
@@ -541,7 +545,7 @@ const CHANNEL_CONVERSATION_ACTIONS = {
     defaultReason: "在来源里改消息",
     available: (target, env) => (channelMessages(env).canSend(target.source) && channelMessages(env).edit
       ? AVAILABLE
-      : unavailable(`来源 ${target.source} 现在不能改消息。`)),
+      : unavailable(channelMessages(env).blockedReason?.(target.source) ?? `来源 ${target.source} 现在不能改消息。`)),
     run: (run) => {
       const input = run.input as UiActionInputOf<"channel_conversation", "edit_message">;
       return channelMessages(run.env).edit!(run.target.id, {
@@ -1202,6 +1206,11 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   setup_hint: SETUP_HINT_TARGET,
   widget_board: WIDGET_BOARD_TARGET,
   widget: WIDGET_TARGET,
+  channel_connection: CHANNEL_CONNECTION_TARGET,
+  connections: CONNECTIONS_TARGET,
+  connection: CONNECTION_TARGET,
+  skills: SKILLS_TARGET,
+  skill: SKILL_TARGET,
 };
 
 export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<string, UiActionDefinition>> } = {
@@ -1239,4 +1248,12 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   // 自定义控件（2026-10-30，.scratch/custom-views/spec.md）：建、排序、视图改名、改、删。定义在 widgets.ts。
   widget_board: WIDGET_BOARD_ACTIONS,
   widget: WIDGET_ACTIONS,
+  // 来源的连接方式（2026-11-02）：登录、换方式、「代你往来源里写」开关。定义在 channel-connections.ts。
+  channel_connection: CHANNEL_CONNECTION_ACTIONS,
+  // Lead 自己装 MCP 和 skill（2026-11-02，.scratch/lead-self-install/spec.md）：加远程、本地 MCP，授权、断开连接，装、卸 skill。
+  // 定义在 installs.ts。
+  connections: CONNECTIONS_ACTIONS,
+  connection: CONNECTION_ACTIONS,
+  skills: SKILLS_ACTIONS,
+  skill: SKILL_ACTIONS,
 };

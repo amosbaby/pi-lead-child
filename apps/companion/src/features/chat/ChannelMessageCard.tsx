@@ -612,7 +612,7 @@ function MessageStack({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
       {earlier > 0 ? <Text size="meta" tone="secondary">{m.earlier(earlier)}</Text> : null}
       {recent.map((message, index) => (
         <Row key={`${index}:${message.at}`} items="flex-end" gap="side-item">
-          <Box flex={1} minW={0}><MarkdownMessage markdown={sourceMarkdown(card, message.text)} size="message-lead" breaks /></Box>
+          <Box flex={1} minW={0}><MarkdownMessage markdown={sourceMarkdown(card, message.text)} size="message-lead" breaks objectLinks={false} /></Box>
           {recent.length > 1 ? <Text size="meta" mono tone="muted" shrink={0}>{clockWords(message.at) ?? ''}</Text> : null}
         </Row>
       ))}

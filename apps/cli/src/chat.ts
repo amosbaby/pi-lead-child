@@ -5,7 +5,8 @@ import { createInterface } from "node:readline";
 import type { Readable, Writable } from "node:stream";
 import { ChatOutbox, type ControlPlaneClient, type OutboxEntry, type OutboxStorage } from "@pi-lead-child/client";
 import {
-  DEFAULT_LEAD_NAME, isDaemonNoticeOrigin, leadTurnFailureSentence, leadTurnWaitingSentence, PRESENCE_IDLE_MS, systemTurnLabel, type GatewayEvent, type HelloV2,
+  DEFAULT_LEAD_NAME, isDaemonNoticeOrigin, leadTurnFailureSentence, leadTurnWaitingSentence, plainObjectLinks, PRESENCE_IDLE_MS, systemTurnLabel,
+  type GatewayEvent, type HelloV2,
 } from "@pi-lead-child/protocol";
 import { fileOutboxStorage } from "./chat-outbox-file.js";
 
@@ -14,6 +15,9 @@ const DIM = (text: string) => `\x1b[2m${text}\x1b[0m`;
 const OLD_DAEMON_AUTH_ERROR = "Lead 模型连接认证失败，请重试。";
 const YELLOW = (text: string) => `\x1b[33m${text}\x1b[0m`;
 const CYAN = (text: string) => `\x1b[36m${text}\x1b[0m`;
+
+// 一段可能还没写完的 Markdown 链接：[文字、[文字]、[文字](地址 这三种，都还没闭合。
+const OPEN_LINK = /\[[^\]\n]*(?:\](?:\([^)\s]*)?)?$/u;
 
 function preview(value: unknown): string {
   const text = JSON.stringify(value ?? {});
@@ -39,6 +43,8 @@ export class ChatRenderer {
   private reconnectNoticeShown = false;
   // Lead 的名字（设置 → 身份与风格）。连上以后读一次 /v1/lead/profile，读不到时用缺省的。
   leadName: string = DEFAULT_LEAD_NAME;
+  // 流过来的回答里还没写完的链接。等它闭合，再把 App 里的对象链接（[Ethan 的私信](plc:card/134)，P14.7）换成文字。
+  private heldText = "";
 
   constructor(private readonly bindingId: number, private readonly out: ChatOutput) {}
 
@@ -65,11 +71,27 @@ export class ChatRenderer {
     this.out.prompt();
   }
 
+  private writeText(delta: string): void {
+    const text = this.heldText + delta;
+    const open = OPEN_LINK.exec(text);
+    // 很长还没闭合的，不是链接：照常印出来。
+    const hold = open && text.length - open.index <= 300 ? open.index : text.length;
+    this.heldText = text.slice(hold);
+    if (hold > 0) this.out.write(plainObjectLinks(text.slice(0, hold)));
+  }
+
+  private flushText(): void {
+    if (!this.heldText) return;
+    this.out.write(plainObjectLinks(this.heldText));
+    this.heldText = "";
+  }
+
   // 审批（approval.required）不会到这里：plc 的凭证做不了用户的决定，网关不给它发（store 的 bindingScopes）。
   event(event: GatewayEvent): void {
     if (event.audienceBindingId !== this.bindingId && event.audienceBindingId !== null) return;
     switch (event.type) {
       case "lead.turn.started": {
+        this.flushText();
         const origin = typeof event.payload.originKind === "string" ? event.payload.originKind : null;
         // Lead 自己发起的回合写 Lead 的名字；daemon 的系统通知照旧写「系统通知 …」。
         const label = isDaemonNoticeOrigin(origin) ? systemTurnLabel(origin, "zh") : systemTurnLabel(origin) ? this.leadName : null;
@@ -78,9 +100,10 @@ export class ChatRenderer {
         return;
       }
       case "lead.message.delta":
-        this.out.write(String(event.payload.delta ?? ""));
+        this.writeText(String(event.payload.delta ?? ""));
         return;
       case "lead.tool.started": {
+        this.flushText();
         // render_ui 画的卡片：命令行画不了，打印 Lead 写的 fallback_text（generative UI spec D8）。
         const fallback = event.payload.toolName === "render_ui"
           ? (event.payload.args as { fallback_text?: unknown } | undefined)?.fallback_text
@@ -93,6 +116,7 @@ export class ChatRenderer {
         return;
       }
       case "lead.message.completed":
+        this.flushText();
         this.out.write("\n");
         this.out.prompt();
         return;

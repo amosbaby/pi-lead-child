@@ -167,7 +167,7 @@ export function TicketHistorySections({
             <Box mt={5}><Dot color="accent" size={7} /></Box>
             <Column minW={0} flex={1} pb="timeline-event" borderBottomWidth={1} borderBottomColor="border-soft">
               <EntryTitle>{entry.title}</EntryTitle>
-              <MetaText>{m.lifecycleMeta(timeLabel(entry.createdAt, undefined, locale), entry.actor, String(entry.sourceTicketId), entry.attemptId)}</MetaText>
+              <MetaText>{m.lifecycleMeta(timeLabel(entry.createdAt, undefined, locale), entry.actor, String(entry.sourceTicketId))}</MetaText>
               {entry.reason ? <DetailText>{entry.reason}</DetailText> : null}
             </Column>
           </Row>
@@ -193,7 +193,7 @@ export function TicketHistorySections({
             return (
               <Card key={attempt.id} testID={`attempt-${attempt.id}`} p="card" borderColor="border-soft" rounded="md">
                 <Row flexWrap="wrap" justify="space-between" gap="inline-item">
-                  <EntryTitle>{`Run #${attempt.id} · ${attempt.purposeLabel} · ${attempt.result}`}</EntryTitle>
+                  <EntryTitle>{`${attempt.purposeLabel} · ${attempt.result}`}</EntryTitle>
                   <Text size="meta" mono tone="accent">{attempt.choice}</Text>
                 </Row>
                 <MetaText>{`${timeRangeLabel(attempt.startedAt, attempt.endedAt, undefined, locale)}${attempt.durationMs === null ? '' : ` · ${formatDuration(attempt.durationMs)}`}`}</MetaText>

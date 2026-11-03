@@ -12,7 +12,8 @@
 //
 // 内核照常管它：runItem 建 Run、落事件、按 purpose=lookup 收尾（不改生命周期、不升 blocker、不叫醒 Lead）。
 // Run 的结局：交了结果（submit_result）并且回合正常结束是 run.completed；没交结果、LLM 错误、超过工具调用上限或时长上限、
-// 被中断是 run.failed。结束以后 outcome() 给出核实过出处的结果（provenance.ts），派单器交回发起方。
+// 被中断是 run.failed。回复写到输出上限时先让它接着做（AGENT_TASK_MAX_CONTINUATIONS）。结束以后 outcome() 给出核实过出处的
+// 结果（provenance.ts），派单器交回发起方。
 import type { TypedFailure } from "@pi-lead-child/core";
 import type { AgentTaskResult, GrantIntent } from "@pi-lead-child/protocol";
 import {
@@ -28,6 +29,15 @@ import {
 
 // 一次运行最长多久。派单器另有自己的超时。
 export const DEFAULT_AGENT_TASK_MAX_DURATION_MS = 15 * 60_000;
+
+// 一条回复写到输出上限（stopReason=length）时，回复里的工具调用没有执行，回合就结束了。没交结果时告诉它被截断了，
+// 让它拆小接着做，最多这么多次（2026-11-02：评审 agent 在一次调用里写整份评审，Run #222、#223 都这样结束）。
+export const AGENT_TASK_MAX_CONTINUATIONS = 2;
+export const AGENT_TASK_CONTINUE_PROMPT = [
+  "你上一条回复写到了输出长度的上限，被截断了，里面的工具调用没有执行。",
+  "接着做，把内容拆小：一次工具调用只做一件事，行内评论一条一条加，总评和答案写短。",
+  "最后一定用 submit_result 交结果；做不完的，先交已经查到的，并写明没查到什么。",
+].join("\n");
 
 /**
  * profile 身份：runtime 记 pi（线上契约的 RuntimeId 是封闭联合），可执行文件是一个不存在的进程内标记，
@@ -116,6 +126,11 @@ export function createAgentTaskRuntime(options: {
       let interruptReason: string | null = null;
       let limitReason: string | null = null;
       let timer: ReturnType<typeof setTimeout> | null = null;
+      // 最近一条助手消息为什么结束；length 是写到了输出上限。
+      let lastStopReason: string | null = null;
+      let continuations = 0;
+      // 这一回合因为输出上限结束、还没交结果：先不定结局，running 里接着做。
+      let continuePending = false;
 
       const dispose = (): void => {
         if (disposed) return;
@@ -148,6 +163,9 @@ export function createAgentTaskRuntime(options: {
           fail("agent_task_limit", limitReason, typedFailure("task_failed", { errorCode: "agent_task_limit", message: limitReason }));
         } else if (llmError !== null) {
           fail("llm_error", llmError, classifyPiFailure({ errorCode: "llm_error", message: llmError }));
+        } else if (!toolState?.submitted && lastStopReason === "length") {
+          const message = `子 agent 的回复写到了输出上限，接着做了 ${continuations} 次还是没交结果`;
+          fail("agent_task_output_truncated", message, typedFailure("task_failed", { errorCode: "agent_task_output_truncated", message }));
         } else if (!toolState?.submitted) {
           const message = "子 agent 没有用 submit_result 交结果";
           fail("agent_task_no_result", message, typedFailure("task_failed", { errorCode: "agent_task_no_result", message }));
@@ -190,14 +208,28 @@ export function createAgentTaskRuntime(options: {
         return { pid: null, events: queue, interrupt: async () => {}, wait: () => exitPromise };
       }
 
-      const mapNative = createPiEventMapper({
+      // 回合结束：写到输出上限、还没交结果、还能接着做时，先不定结局。
+      const roundEnded = (llmError: string | null): void => {
+        if (llmError === null && lastStopReason === "length" && !toolState?.submitted && !terminal
+          && interruptReason === null && limitReason === null && continuations < AGENT_TASK_MAX_CONTINUATIONS) {
+          continuePending = true;
+          return;
+        }
+        settle(llmError);
+      };
+      // 映射器在回合结束以后不再处理事件，所以接着做的每一回合用一个新的；run.started 只报第一次。
+      const createMapper = (first: boolean) => createPiEventMapper({
         runId: request.runId,
         runtime: LOCAL_RUNTIME_ID,
         model,
-        emit: (input) => { if (!terminal) queue.push(events.event(input)); },
-        settle,
+        emit: (input) => { if (!terminal && (first || input.type !== "run.started")) queue.push(events.event(input)); },
+        settle: roundEnded,
       });
+      let mapNative = createMapper(true);
       unsubscribe = session.subscribe((native) => {
+        if (native?.type === "message_end" && native.message?.role === "assistant") {
+          lastStopReason = native.message.stopReason ? String(native.message.stopReason) : null;
+        }
         try {
           mapNative(native);
         } catch (mapError) {
@@ -213,6 +245,17 @@ export function createAgentTaskRuntime(options: {
       const running = (async () => {
         try {
           await session!.prompt(request.prompt);
+          while (continuePending && !terminal) {
+            continuePending = false;
+            continuations += 1;
+            lastStopReason = null;
+            queue.push(events.event({
+              type: "runtime.stderr",
+              text: `the reply hit the output limit; continuing (${continuations}/${AGENT_TASK_MAX_CONTINUATIONS})\n`,
+            }));
+            mapNative = createMapper(false);
+            await session!.prompt(AGENT_TASK_CONTINUE_PROMPT);
+          }
         } catch (promptError) {
           if (!terminal && interruptReason === null && limitReason === null) {
             const message = promptError instanceof Error ? promptError.message : String(promptError);

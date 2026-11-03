@@ -75,6 +75,25 @@ describe("compactInChunks", () => {
     expect(summarize).not.toHaveBeenCalled();
   });
 
+  // 2026-11-02：pi 自己触发的压缩不带任何要求，上一份摘要里「pending 的检查会拦 APPROVE」「不能改 Slack 消息」这类旧结论
+  // 一次次被抄进新摘要，代码早改了，Lead 还照着拒绝。没有要求的压缩由这里来写，带上 instructions。
+  it("writes pi's own compaction itself when it has instructions for it, even when the history fits in one request", async () => {
+    const seen: Array<string | undefined> = [];
+    const summarize = vi.fn(async (_chunk: unknown[], _model: unknown, _reserve: number, _apiKey: unknown, _headers: unknown,
+      _signal: unknown, instructions: string | undefined) => {
+      seen.push(instructions);
+      return { text: "新摘要" };
+    });
+    const automatic = { ...event([user("短的")]), customInstructions: undefined };
+    const result = await compactInChunks(automatic as never, ctx(500_000) as never, { summarize: summarize as never, instructions: "能力不写成规则" });
+    expect(seen).toEqual(["能力不写成规则"]);
+    expect(result!.compaction).toMatchObject({ firstKeptEntryId: "keep-1", tokensBefore: 123_456, details: { chunks: 1 } });
+    expect(result!.compaction.summary.startsWith("新摘要")).toBe(true);
+    // daemon 自己发起、带了要求的压缩，放得进一次请求时照旧交给 pi。
+    expect(await compactInChunks(event([user("短的")]) as never, ctx(500_000) as never, { summarize: summarize as never, instructions: "能力不写成规则" }))
+      .toBeUndefined();
+  });
+
   it("summarizes a long history part by part, each part carrying the summary so far, and reports each part", async () => {
     const messages = Array.from({ length: 12 }, (_, index) => (index % 2 ? assistant : user)(`第 ${index} 条 ${"内容".repeat(600)}`));
     const budget = chunkTokenBudget(16_000, 20_480);

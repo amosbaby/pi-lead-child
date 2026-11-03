@@ -1452,9 +1452,14 @@ export class ChannelHub {
       ...(lane?.context ?? []).filter((message) => message.origin).reverse().map((message) => message.text),
     ];
     const found = new Map<string, ChannelLeadObject>();
-    for (const text of texts) {
-      const pr = this.pullRequestOf(text);
-      if (pr && found.size < 8) found.set(`${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase(), { kind: "pull_request", ...pr });
+    // 一句话里可能有几个 PR（2026-11-02：一条消息请你看两个 PR）：认出一个，从话里去掉它的写法，再认下一个。
+    for (let text of texts) {
+      for (let pr = this.pullRequestOf(text); pr && found.size < 8; pr = this.pullRequestOf(text)) {
+        found.set(`${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase(), { kind: "pull_request", ...pr });
+        const rest = withoutPullRequest(text, pr);
+        if (rest === text) break;
+        text = rest;
+      }
     }
     return [...found.values()];
   }
@@ -1475,8 +1480,9 @@ export class ChannelHub {
          AND ((r.kind = ? AND (r.disposition IS NULL OR r.disposition <> 'superseded'))
            OR (r.kind = ? AND json_extract(r.payload, '$.handedBack') = 1))
          ${where.map((clause) => `AND ${clause}`).join(" ")}
-         ${filter.undecided ? `AND NOT EXISTS (SELECT 1 FROM events d WHERE d.source = 'system' AND d.source_ref =
-           'channel-lead-decided:' || (CASE r.kind WHEN ? THEN 'intake' ELSE 'reply' END) || ':' || json_extract(r.payload, '$.forSeq'))` : ""}
+         ${filter.undecided ? `AND NOT EXISTS (SELECT 1 FROM events d WHERE d.source = 'system' AND d.source_ref IN (
+           'channel-lead-decided:' || (CASE r.kind WHEN ? THEN 'intake' ELSE 'reply' END) || ':' || json_extract(r.payload, '$.forSeq'),
+           'channel-lead-decided:reply:' || json_extract(r.payload, '$.forSeq') || ':' || r.seq))` : ""}
        ORDER BY r.seq ${filter.newest ? "DESC" : ""} LIMIT 20`,
     ).all(MESSAGE_EVENT_KIND, CHANNEL_EVENT_KINDS.taskFinished, ...params, ...(filter.undecided ? [MESSAGE_EVENT_KIND] : [])) as
       Array<{ seq: number; kind: string; payload: string }>;
@@ -1524,7 +1530,9 @@ export class ChannelHub {
   // 记 Lead 的决定（系统只记两种事实：并进了新的请求、卡已经结束）。同一个请求只记一次：返回 false 时别人已经定了。
   private recordLeadDecision(
     request: LeadRequest, decision: ChannelLeadDecision, by: "lead" | "system", reason: string,
-    extra: { itemId?: number; runId?: number; dropped?: string[] } = {},
+    extra: { itemId?: number; runId?: number; dropped?: string[]; pullRequest?: string } = {},
+    // 同一条消息多派的一张工单另记一条（extraDispatchRef），不占这个请求的决定。
+    sourceRef: string = leadDecidedRef(request.stage, request.forSeq, request.seq),
   ): boolean {
     const card = getChannelCard(this.db, request.cardId);
     const objectKey = card?.objectKey ?? `${request.channel}:unknown`;
@@ -1534,7 +1542,7 @@ export class ChannelHub {
       react: "回了表情", refuse: "用固定的话拒绝了", no_reply: "判断不用回",
     };
     return this.db.transaction(() => appendEvent(this.db, {
-      source: "system", sourceRef: leadDecidedRef(request.stage, request.forSeq), kind: CHANNEL_EVENT_KINDS.leadDecided,
+      source: "system", sourceRef, kind: CHANNEL_EVENT_KINDS.leadDecided,
       entityKey: objectKey, correlationId: `channel:${objectKey}`, level: "record", causationId: String(request.seq),
       occurredAt: this.now().toISOString(),
       payload: {
@@ -1552,8 +1560,9 @@ export class ChannelHub {
    */
   async leadDispatch(eventSeq: number, input: ChannelLeadDispatchInput): Promise<ChannelLeadDispatchResult> {
     const { card } = this.leadTarget(eventSeq);
-    const request = this.leadRequests({ cardId: card.id, stage: "intake" }).at(-1);
-    if (!request) throw new ChannelActionError("invalid_action", `消息事件 #${eventSeq}（卡 #${card.id}）没有等你派活的请求：已经处理过了`);
+    const pending = this.leadRequests({ cardId: card.id, stage: "intake" }).at(-1);
+    const request = pending ?? this.followUpDispatch(card.id, eventSeq, input);
+    const followUp = !pending && request.stage === "intake";
     if (request.action === "tell") {
       throw new ChannelActionError("invalid_action", `卡 #${card.id} 是对方在接着回答用户刚说的话：权限上限只让你告诉用户，不能派活`);
     }
@@ -1590,24 +1599,65 @@ export class ChannelHub {
       // 外部的人请你做事：不能代你要求改动（REQUEST_CHANGES 只给你本人要的评审，lead-self-routing spec B）。
       ...(input.reviewEvents ? { reviewEvents: input.reviewEvents.filter(isExternalReviewEvent) } : {}),
     };
-    const dispatched = await this.dispatchTask(adapter, request, { intent, summary: input.summary, scope, ...(sentenceBound ? { bound: sentenceBound } : {}) });
+    const dispatched = await this.dispatchTask(adapter, request, {
+      intent, summary: input.summary, scope, followUp, ...(sentenceBound ? { bound: sentenceBound } : {}),
+    });
     return { itemId: dispatched.itemId, runId: dispatched.runId, grant: describeRunGrant(dispatched.grant), dropped: dispatched.dropped };
   }
 
+  /**
+   * 这条消息的请求已经定了以后，Lead 还能再派的两种情况（2026-11-02：同事等了一个多小时）：
+   *   - 子 agent 的结果交回了（交回的那一次还没定）：重派，算 Lead 对那次交回的决定；
+   *   - 这条消息里还有别的 PR 没派：每个 PR 一张工单，权限各管一个 PR。
+   * 上限都按原来那条消息算。一条消息最多派 CHANNEL_MAX_TASKS_PER_MESSAGE 张。不能派时抛错，写明下一步。
+   */
+  private followUpDispatch(cardId: number, eventSeq: number, input: ChannelLeadDispatchInput): LeadRequest {
+    const refuse = (why: string) => new ChannelActionError("invalid_action", `消息事件 #${eventSeq}（卡 #${cardId}）${why}。${DISPATCH_NEXT_STEP}`);
+    const intake = this.leadRequestRows({ cardId, stage: "intake", undecided: false, newest: true })[0];
+    const dispatched = intake ? this.dispatchedFor(intake.forSeq) : null;
+    if (!intake || !dispatched?.count) throw refuse("没有等你派活的请求：已经处理过了");
+    if (dispatched.count >= CHANNEL_MAX_TASKS_PER_MESSAGE) throw refuse(`这条消息已经派了 ${dispatched.count} 张工单，不能再派`);
+    const back = this.leadRequests({ cardId, stage: "reply", forSeq: intake.forSeq }).at(-1);
+    if (back) return { ...intake, seq: back.seq, event: back.event, stage: "reply" };
+    const wanted = input.pullRequest ?? intake.objects.find((object) => !dispatched.pullRequests.has(pullRequestKey(object)));
+    if (!wanted) throw refuse("这条消息派过工单了，结果还没交回，也没有别的 PR 要派");
+    const key = pullRequestKey(wanted);
+    const object = intake.objects.find((candidate) => pullRequestKey(candidate) === key);
+    if (!object) throw refuse(`这条消息里没有 ${key}，只能为这条消息里的 PR 再派`);
+    if (dispatched.pullRequests.has(key)) throw refuse(`${key} 已经派过工单，等结果交回以后才能重派`);
+    // 没给 PR 时 leadDispatch 用 objects 的第一个：把要派的这个排到前面。
+    return { ...intake, objects: [object, ...intake.objects.filter((candidate) => candidate !== object)] };
+  }
+
+  // 这条消息派过的子 agent 工单：几张，哪些 PR（Lead 的决定里记着）。
+  private dispatchedFor(forSeq: number): { count: number; pullRequests: Set<string> } {
+    const rows = this.db.prepare(
+      `SELECT json_extract(payload, '$.pullRequest') AS pr FROM events
+       WHERE source = 'system' AND kind = ? AND json_valid(payload)
+         AND json_extract(payload, '$.forSeq') = ? AND json_extract(payload, '$.decision') = 'dispatch'`,
+    ).all(CHANNEL_EVENT_KINDS.leadDecided, forSeq) as Array<{ pr: unknown }>;
+    return { count: rows.length, pullRequests: new Set(rows.flatMap((row) => (typeof row.pr === "string" ? [row.pr] : []))) };
+  }
+
   // Lead 派一张子 agent 工单：原话和上下文只进子 agent 的提示词（不可信）；工单的说明是 Lead 写的一句话。
+  // followUp：这条消息已经派过工单，这一张是另一个 PR 的（followUpDispatch 查过），不再要求请求没有定。
   private async dispatchTask(adapter: ChannelAdapter, request: LeadRequest, input: {
-    intent: GrantIntent; summary: string; scope: ExternalGrantScope; bound?: IntentGrantBound;
+    intent: GrantIntent; summary: string; scope: ExternalGrantScope; bound?: IntentGrantBound; followUp?: boolean;
   }): Promise<AgentTaskDispatch> {
     const lead = this.options.lead;
     const db = this.db;
     const card = getChannelCard(db, request.cardId);
     const event = getEvent(db, request.forSeq);
     if (!lead || !card || !event) throw new ChannelActionError("not_found", `没有通道卡 #${request.cardId}`);
-    const key = `${request.stage}:${request.forSeq}`;
-    if (this.leadDeciding.has(key)) throw new ChannelActionError("conflict", `卡 #${card.id} 正在派工单`);
+    // 同一个 PR 同时只派一张；同一条消息里不同的 PR 可以同时派（2026-11-02）。
+    const pr = input.scope.pullRequest ? pullRequestKey(input.scope.pullRequest) : "-";
+    const key = `${request.stage}:${request.forSeq}:${pr}`;
+    if (this.leadDeciding.has(key)) throw new ChannelActionError("conflict", `卡 #${card.id} 正在为 ${pr === "-" ? "这条消息" : pr} 派工单，等它派完`);
     this.leadDeciding.add(key);
     try {
-      if (!this.leadRequestAt(request.stage, request.forSeq)) throw new ChannelActionError("conflict", `卡 #${card.id} 的请求已经定了`);
+      if (!input.followUp && !this.leadRequestAt(request.stage, request.forSeq)) {
+        throw new ChannelActionError("conflict", `卡 #${card.id} 的请求已经定了。${DISPATCH_NEXT_STEP}`);
+      }
       const lane = getChannelLaneById(db, card.laneId);
       // 对方改过的消息用改以后的话（spec D6）。
       const text = this.mergedMessage(adapter.id, event).text || card.excerpt;
@@ -1627,9 +1677,14 @@ export class ChannelHub {
         bound: input.bound ?? (request.intent === input.intent && request.bound ? request.bound : DEFAULT_INTENT_GRANT_BOUNDS[input.intent]),
         callback: { kind: CHANNEL_TASK_CALLBACK, ref: taskRef(card.id, request.forSeq) },
       });
-      this.recordLeadDecision(request, "dispatch", "lead", "Lead 决定派工单", {
-        itemId: dispatched.itemId, runId: dispatched.runId, ...(dispatched.dropped.length ? { dropped: dispatched.dropped } : {}),
-      });
+      const decided = {
+        itemId: dispatched.itemId, runId: dispatched.runId, ...(pr !== "-" ? { pullRequest: pr } : {}),
+        ...(dispatched.dropped.length ? { dropped: dispatched.dropped } : {}),
+      };
+      // 同时派的另一个 PR 的工单，请求已经被前一张定了：另记一条，下一次派活按它数这条消息派过哪些 PR。
+      if (input.followUp || !this.recordLeadDecision(request, "dispatch", "lead", "Lead 决定派工单", decided)) {
+        this.recordLeadDecision(request, "dispatch", "lead", `Lead 为 ${pr} 再派一张工单`, decided, extraDispatchRef(request.forSeq, dispatched.runId));
+      }
       this.recordTaskStart(adapter, card, request, input.intent, input.scope, dispatched, text);
       // 回一句「正在处理」：结果出来以后的回复改写它（落地计划 A3）。只有 Lead 派活时才发（统一消息事件 spec D9）。
       this.sendStatusNotice(adapter, card, request.forSeq, text, input.intent === "code_review" || input.intent === "approve" ? "review" : "lookup");
@@ -1823,6 +1878,11 @@ export class ChannelHub {
   canSendMessage(source: string): boolean {
     const adapter = this.options.registry.get(source);
     return Boolean(adapter?.capabilities.reply && adapter.resolveConversation);
+  }
+
+  /** 不能往这个来源里写的原因（来源说的，例如用户关掉了「代你发消息」）。能写、或者来源没说时是 null。 */
+  writesBlocked(source: string): string | null {
+    return this.options.registry.get(source)?.writesBlocked?.() ?? null;
   }
 
   /**
@@ -3188,8 +3248,10 @@ export class ChannelHub {
     const request = this.options.lead ? this.leadRequestRows({ cardId: card.id, undecided: false, newest: true })[0] ?? null : null;
     let lead: ChannelCardHandling["lead"] = null;
     if (request) {
-      const outcome = payloadOf(this.db.prepare("SELECT payload FROM events WHERE source = 'system' AND source_ref = ?")
-        .get(leadDecidedRef(request.stage, request.forSeq)) as { payload: string } | undefined);
+      const decidedRow = (ref: string) => this.db.prepare("SELECT payload FROM events WHERE source = 'system' AND source_ref = ?")
+        .get(ref) as { payload: string } | undefined;
+      const outcome = payloadOf(decidedRow(leadDecidedRef(request.stage, request.forSeq, request.seq))
+        ?? (request.stage === "reply" ? decidedRow(legacyReplyDecidedRef(request.forSeq)) : undefined));
       const decision = outcome && (CHANNEL_LEAD_DECISIONS as readonly unknown[]).includes(outcome.decision)
         ? outcome.decision as ChannelLeadDecision : null;
       // 定过、但决定不认识的（工单 06 以前系统兜底的 fallback_*，旧记录不迁移）：不显示，免得卡上写成还在排队。
@@ -3632,7 +3694,8 @@ export class ChannelHub {
       action = settled.action;
     } else if (decided) {
       // 这条消息并进了已经开着的卡：卡还在等你，通道不替你回表情、拒绝或者收尾；要干活的、告诉你的照旧。
-      action = decided.action.kind === "work" || decided.action.kind === "tell" ? decided.action
+      // 只记录的照旧只记录：并进卡，不交给 Lead（2026-11-02：同一条消息改了四次，Lead 跑了四轮）。
+      action = decided.action.kind === "work" || decided.action.kind === "tell" || decided.action.kind === "skip" ? decided.action
         : { kind: "ask", reason: `这个对话已经有一张卡在等你（${decided.action.reason}）` };
       const recorded = card;
       db.transaction(() => this.recordAuthority(adapter, event, recorded.id, decided, action!, at))();
@@ -3648,6 +3711,7 @@ export class ChannelHub {
           intent: decided?.intent ?? null, action: kind, handbook: decided?.handbook ?? null,
           reason: (action?.reason ?? `收件判断没有做成（${result.error ? clipEventText(redactSecretText(result.error), 120) : "快模型不可用"}）`)
             + (action?.kind === "react" ? `（建议 :${action.emoji}:）` : "")
+            + (event.payload.attachmentsOnly === true ? "（这条消息只有附件：先用 read_channel_file 看内容再判断）" : "")
             + (result.fallback && result.reason ? `（决策模型没有回答，由 LLM 判断：${clipEventText(redactSecretText(result.reason), 160)}）` : ""),
         }, context);
       } finally {
@@ -3690,7 +3754,8 @@ export class ChannelHub {
     const situation = situationOfIntake(handbook, repicked ?? intake.situation, intake.askKind);
     const sender = event.payload.sender as { trust?: unknown; bot?: unknown } | undefined;
     const audience = event.payload.audience;
-    const sensitive = intake.sensitive && typeof intake.sensitive === "object"
+    // 只有附件的消息（来源标的 attachmentsOnly）：收件判断只看得到文件的标记，敏感信息的分数不进底线，由 Lead 看了附件再定。
+    const sensitive = event.payload.attachmentsOnly !== true && intake.sensitive && typeof intake.sensitive === "object"
       ? Object.fromEntries(Object.entries(intake.sensitive as Record<string, unknown>).filter((entry): entry is [string, number] => typeof entry[1] === "number"))
       : null;
     const decided = decideByHandbook({
@@ -4327,8 +4392,40 @@ function dbTime(value: string): number {
   return Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(" ", "T")}Z` : value);
 }
 
-// Lead 的决定的 source_ref：同一条消息的同一步只定一次。
-const leadDecidedRef = (stage: ChannelLeadStage, forSeq: number) => `channel-lead-decided:${stage}:${forSeq}`;
+// Lead 的决定的 source_ref：同一条消息的同一步只定一次。交回的结果（reply）按那一次交回定：重派以后又交回的结果是新的一次
+// （2026-11-02）。以前的 reply 决定不带交回的编号（legacyReplyDecidedRef），照旧算数。
+const leadDecidedRef = (stage: ChannelLeadStage, forSeq: number, seq: number) =>
+  stage === "reply" ? `channel-lead-decided:reply:${forSeq}:${seq}` : `channel-lead-decided:${stage}:${forSeq}`;
+const legacyReplyDecidedRef = (forSeq: number) => `channel-lead-decided:reply:${forSeq}`;
+const pullRequestKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase();
+// 同一条消息多派的一张工单（另一个 PR，或者交回以后重派以外的情况）：按 Run 记。
+const extraDispatchRef = (forSeq: number, runId: number) => `channel-lead-dispatched:${forSeq}:run:${runId}`;
+// 一条消息最多派这么多张子 agent 工单（每个 PR 一张，加上失败以后的重派）。再多就开普通工单。
+export const CHANNEL_MAX_TASKS_PER_MESSAGE = 6;
+// 派不了时 Lead 的下一步（AGENTS.md：新的拒绝要说 Lead 下一步做什么）。
+const DISPATCH_NEXT_STEP = "下一步：要再查、再评，用 create_task 开一张普通工单（PR 评审用 template=pr_review），做完自己核对结果再回对方；"
+  + "要先回对方一句，用 reply_to_source；要用户决定，用 notify_user";
+
+/** 话里去掉一个 PR 的两种写法（github.com/<owner>/<repo>/pull/<n> 和 <owner>/<repo>#<n>），不分大小写。后面紧跟数字的不算同一个 PR。 */
+function withoutPullRequest(text: string, pr: { owner: string; repo: string; number: number }): string {
+  let rest = text;
+  for (const form of [`github.com/${pr.owner}/${pr.repo}/pull/${pr.number}`, `${pr.owner}/${pr.repo}#${pr.number}`]) {
+    const needle = form.toLowerCase();
+    let out = "";
+    let from = 0;
+    // 按原文的位置比：整段转小写以后，个别字母的长度会变，位置就对不上了。
+    for (let at = 0; at + needle.length <= rest.length; at += 1) {
+      if (rest.slice(at, at + needle.length).toLowerCase() !== needle) continue;
+      const next = rest.charAt(at + needle.length);
+      if (next >= "0" && next <= "9") continue;
+      out += `${rest.slice(from, at)} `;
+      from = at + needle.length;
+      at = from - 1;
+    }
+    rest = out + rest.slice(from);
+  }
+  return rest;
+}
 // 消息事件（统一消息事件 spec D1）：按来源、这条消息和并进来的最后一次编辑。并进一次编辑就是新的一条。
 const messageEventRef = (source: string, seqs: readonly number[]) => `channel-message:${source}:${seqs[0]}:${seqs.at(-1)}`;
 // 子 agent 工单的回调引用：结果交回时找到卡和消息。

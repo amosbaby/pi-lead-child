@@ -31,7 +31,7 @@ import {
   type ChannelHubOptions, type ChannelMemory, type ChannelMemoryOptions, type ChannelTransportContext, type LiveChannelOptions,
 } from "@pi-lead-child/engine";
 import { redactSecretText, type ChannelSourceAccount } from "@pi-lead-child/protocol";
-import { listConnections, type Db } from "@pi-lead-child/store";
+import { getChannelConnection, listConnections, type Db } from "@pi-lead-child/store";
 
 /** startDaemon 的 channels 选项。false 关掉通道。 */
 export type ChannelDaemonOptions = false | {
@@ -161,7 +161,7 @@ export type ChannelSourceStatusUpdate =
   | { state: "not_configured" }
   | { state: "connecting" }
   | { state: "connected"; account: ChannelSourceAccount | null }
-  | { state: "error"; error: string }
+  | { state: "error"; error: string; reason?: "signed_out" }
   | { state: "received" };
 
 /** startChannels 接好的通道：hub、热重连、停机。 */
@@ -316,8 +316,13 @@ export function startChannels(input: {
 }): StartedChannels | null {
   if (input.options === false) return null;
   const { sources, live, credentials, keychain: _keychain, memory: _memory, contextPack, ...tuning } = input.options ?? {};
+  // 设置页存的连接方式和「代你往来源里写」开关（store 的 channel-connections.ts，2026-11-02）。来源每次用时现读。
+  const connectionSettings = (source: string) => getChannelConnection(input.db, source);
   const found = live
-    ? liveBuiltinChannels(input.secret, { log: (line) => input.log(`[channels] ${line}`), ...(live === true ? {} : live) })
+    ? liveBuiltinChannels(input.secret, {
+      log: (line) => input.log(`[channels] ${line}`), ...(input.config ? { config: input.config } : {}), connectionSettings,
+      ...(live === true ? {} : live),
+    })
     : null;
   for (const gap of found?.missing ?? []) {
     input.log(`[channels] ${gap.source} is not configured: missing ${gap.names.join(", ")} `
@@ -327,6 +332,7 @@ export function startChannels(input: {
   const adapters = builtinChannelAdapters({ ...found?.sources, ...sources }, input.config, {
     ...(input.assistantName ? { assistantName: input.assistantName } : {}),
     ...(input.assistantEmoji ? { assistantEmoji: input.assistantEmoji } : {}),
+    connectionSettings,
   });
   if (!adapters.length) return null;
   const credentialSource = credentials ?? channelCredentials({

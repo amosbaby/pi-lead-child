@@ -106,7 +106,7 @@ describe('ticket history presentation', () => {
     expect(lifecycle.map((item) => item.title)).toEqual([
       'Created the ticket',
       'Rework is requested and waits for dispatch',
-      'Run #30 is starting',
+      'Execution started',
       'Run dispatch failed',
     ]);
     expect(lifecycle[2]).toMatchObject({ reason: 'codex · gpt-5', attemptId: 30 });
@@ -138,7 +138,7 @@ describe('ticket history presentation', () => {
 
     expect(attempts.map((item) => item.id)).toEqual([1, 2]);
     expect(attempts[0]).toMatchObject({ runtime: 'codex', model: 'gpt-5', result: 'Failed (exit 1)' });
-    expect(attempts[1]).toMatchObject({ runtime: 'Unknown runtime', model: 'Model not recorded', failureFull: null });
+    expect(attempts[1]).toMatchObject({ runtime: 'Unknown executor', model: 'Model not recorded', failureFull: null });
     expect(attempts[0]?.choice).toBe('codex · gpt-5');
   });
 
@@ -157,7 +157,27 @@ describe('ticket history presentation', () => {
         sessionCursor: null, createdAt: '2026-08-11T05:00:00.000Z',
       }],
     });
-    expect(lifecycle[1]).toMatchObject({ title: 'Run #30 is starting', reason: 'claude · opus · effort max' });
+    expect(lifecycle[1]).toMatchObject({ title: 'Execution started', reason: 'claude · opus · effort max' });
+  });
+
+  // 设计规范 P14.6：开始、失败的那一行写这次是做什么的，不写 Run 的编号。
+  it('names what a run was for when it starts or fails, without its run number', () => {
+    const activities: ActivityDto[] = [
+      {
+        id: 5, ticketId: 19, attemptId: 31, actor: 'system', kind: 'attempt_start',
+        payload: { runtime: 'codex' }, sessionCursor: null, createdAt: '2026-08-11T05:00:00.000Z',
+      },
+      {
+        id: 6, ticketId: 19, attemptId: 31, actor: 'system', kind: 'crash',
+        payload: { reason: 'exit 1' }, sessionCursor: null, createdAt: '2026-08-11T05:10:00.000Z',
+      },
+    ];
+    const facts = new Map([[31, { purpose: 'review' as const }]]);
+    const titles = (locale: 'en' | 'zh') => buildLifecyclePresentation({ ticketId: 19, leadName: 'Paimon', activities, facts, locale })
+      .map((item) => item.title);
+
+    expect(titles('en')).toEqual(['Review started', 'Review failed']);
+    expect(titles('zh')).toEqual(['核查开始', '核查失败']);
   });
 
   it('labels relation provenance without merging another ticket history', () => {

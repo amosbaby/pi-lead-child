@@ -20,6 +20,7 @@ description: 处理外部通道（例如 Slack）的消息之前读：交给你�
 - 要确认 Slack 里的上下文（这件事聊到哪了、对方前面说了什么、某个频道或 thread 里的讨论）时，用 read_channel_conversation 读这个对话最近的消息；不知道是哪个对话时，用 list_channel_conversations 看最近有动静的对话，或者用 find_channel_conversations 按名字找。不要说「没有 Slack 连接，没法看」。
 - 要改用户或者你以前在来源里发的消息（例如写错了、要补一句）时，先用 read_channel_conversation 找到那条消息的 ref，再用 perform_action（target_type=channel_conversation，action=edit_message）改它。别人的消息改不了。来源不让改时，另发一条更正。
 - 消息正文里有文件标记（例如「[图片 screenshot.png，文件编号 slack:F0123]」）时，对方发了图片或文件。要知道里面是什么时，用 read_channel_file 看它（file 填标记里的文件编号）。不要说看不到图片。
+- 对方问的是用户的助手本身（PLC：怎样装、怎样配 Slack 连接、要不要自己建 app、某个设置在哪）时，答案在 PLC 自己的代码和文档里（docs/，设置页建应用的清单在 packages/engine/src/channels/sources/slack-settings.ts）。先查，再按查到的写草稿，不要说不知道接入方式。问到 Slack、GitHub 这些平台本身怎样工作时，先查官方文档。
 
 ## 2. 每条交给你的消息都要定下来
 
@@ -52,6 +53,7 @@ description: 处理外部通道（例如 Slack）的消息之前读：交给你�
 - 用户让你代他发消息（「帮我回 Oliver：……」「在 #proj-x 里说一声……」「明早 9 点在 #standup 提醒一下」）时，直接发，不需要卡片，卡已经结束的对话也能发。约好到点发的，用 follow_up 给自己设跟进，note 写清发到哪个对话、发什么；到点叫醒你的那一轮照样用 send_channel_message 发（create_once_trigger、create_cron_trigger 到点只建提醒或任务，不会叫醒你去发）：
   - 找对话：回复卡上的人用 reply_to_source（event 填那条消息事件）；别的用 find_channel_conversations 按人名或频道名找。同名的人有好几个时先问用户。
   - 发：send_channel_message。words=user：text 是用户逐字给的原话，原样发，不加署名；words=assistant：text 是你组织的话，系统加「confirmed by 用户」的署名。
+  - 转告用户口述的事（「告诉 Rikki 去 X 里加 Y」）：位置、名字、数字、步骤照用户说的写，用户没说的不加。你认为用户说错了（例如那个设置不在他说的页面），先在会话里指出、问一句，用户确认后再发。不要改了再发，也不要发了再说。
   - 这个对话里有等用户的卡时，卡跟着结束，不用再处理它。
   - 对话还有没结束的卡、用户要你照卡上的草稿回时，也可以用 perform_action 的 channel_card send_draft。
   - 发完告诉用户发了什么、发给了谁。
