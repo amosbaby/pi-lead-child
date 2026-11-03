@@ -7,10 +7,13 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { Value } from "typebox/value";
-import { MODEL_SETTINGS_RESOURCE, ModelSettingsDtoSchema } from "@pi-lead-child/protocol";
-import { loadLeadModelConfig, resolveLeadApiKey } from "@pi-lead-child/lead";
+import { MODEL_SETTINGS_RESOURCE, ModelSettingsDtoSchema, serviceUrlHost } from "@pi-lead-child/protocol";
 import { createPairing, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
+import { fileKeySource, lazyVault } from "@pi-lead-child/connections";
+import { loadLeadModelConfig, registerLeadProviders } from "@pi-lead-child/lead";
+import { providerSecretName } from "../src/model-settings.js";
+import { SealedSecrets } from "../src/sealed-secrets.js";
 import { startDaemon } from "../src/server.js";
 
 let dir: string;
@@ -18,6 +21,9 @@ let dbPath: string;
 let db: Db;
 let daemon: Awaited<ReturnType<typeof startDaemon>> | null = null;
 let vibeproxy: Server | null = null;
+let vibeproxyUrl: string;
+// 拉目录时带的 Authorization 头（没带时是 null）。
+let catalogAuth: Array<string | null> = [];
 const sockets: WebSocket[] = [];
 
 async function startVibeproxy(): Promise<string> {
@@ -25,6 +31,7 @@ async function startVibeproxy(): Promise<string> {
     const url = new URL(req.url ?? "/", "http://127.0.0.1");
     res.setHeader("content-type", "application/json");
     if (url.pathname !== "/v1/models" || url.searchParams.has("client_version")) { res.statusCode = 404; res.end("{}"); return; }
+    catalogAuth.push(req.headers.authorization ?? null);
     res.end(JSON.stringify({
       data: [
         { id: "claude-sonnet-5", owned_by: "anthropic", created: 1_780_000_000 },
@@ -43,10 +50,12 @@ beforeEach(async () => {
   mkdirSync(dir, { recursive: true });
   dbPath = join(dir, "plc.db");
   db = openDb(dbPath);
+  catalogAuth = [];
   vi.stubEnv("PLC_NOTICE_POLL_MS", "20");
+  vibeproxyUrl = await startVibeproxy();
   writeFileSync(join(dir, "config.json"), JSON.stringify({
     lead: {
-      providers: { vibeproxy: { baseUrl: await startVibeproxy(), discover: true } },
+      providers: { vibeproxy: { baseUrl: vibeproxyUrl, discover: true } },
       models: ["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"],
     },
   }));
@@ -151,26 +160,25 @@ describe("settings → models through the gateway", () => {
     expect(lead.refreshes()).toBe(1);
   });
 
-  // 只在设置页存了 key 的用户：重启以后 Lead 的会话第一次注册服务商时就要拿得到它，不然选中的服务商拉目录 401，daemon 起不来。
-  it("hands a key saved on the page to the Lead session on the next start, before the session registers its providers", async () => {
-    const { http } = await start(stubLead());
-    const baseUrl = config().lead.providers.vibeproxy.baseUrl;
-    const saved = await http(...act("save_provider", { name: "vibeproxy", baseUrl, api: "openai-completions", apiKey: "sk-test-restart-0123" }));
-    expect(saved.status).toBe(200);
-    for (const socket of sockets.splice(0)) socket.close();
-    await daemon!.close();
-    daemon = null;
-
-    const seen: Array<string | undefined> = [];
+  // 工单 #181：设置页存的 key 只在保险库里，config.json 没写 apiKey。daemon 启动时 Lead 第一次注册服务商、拉目录就要带上它，
+  // 不能等设置页再存一次（providersChanged → refreshProviders）。假的会话工厂像真的 createLeadSession 一样在被调用时注册服务商。
+  it("registers a provider with the key stored on the settings page the first time Lead starts", async () => {
+    // 测试 daemon 的保险库密钥在数据目录的 connections.key：先用同一个文件存好 key，再启动。
+    new SealedSecrets<string>(db, lazyVault(fileKeySource(join(dir, "connections.key"))))
+      .set(providerSecretName("vibeproxy"), { value: "sk-vault-0123456789", host: serviceUrlHost(vibeproxyUrl) });
+    expect(config().lead.providers.vibeproxy.apiKey).toBeUndefined();
     const lead = stubLead();
-    const factory = lead.factory;
-    lead.factory = async () => {
-      // 这一刻就是 createLeadSession 调 registerLeadProviders 的时候。
-      seen.push(resolveLeadApiKey(loadLeadModelConfig(dir).providers.vibeproxy!, {}, "vibeproxy"));
-      return factory();
+    const registered: Record<string, string | undefined> = {};
+    const runtime = { registerProvider: (name: string, input: { apiKey?: string }) => { registered[name] = input.apiKey; } };
+    const factory = async () => {
+      await registerLeadProviders(runtime as never, loadLeadModelConfig(dir), {});
+      return lead.factory();
     };
-    await start(lead);
-    expect(seen).toEqual(["sk-test-restart-0123"]);
+    await start({ ...lead, factory });
+    expect(registered).toEqual({ vibeproxy: "sk-vault-0123456789" });
+    expect(catalogAuth[0]).toBe("Bearer sk-vault-0123456789");
+    expect(lead.refreshes()).toBe(0);
+    expect(readFileSync(join(dir, "config.json"), "utf8")).not.toContain("sk-vault");
   });
 
   // 回归：分工里在用的服务商启动时拉不到目录（key 错），以前 daemon 起不来、被反复重启，网页和 Slack 都连不上。
