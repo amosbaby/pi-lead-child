@@ -285,7 +285,7 @@ export function createChannelCardTools(cards: LeadChannelCards | undefined, db?:
   }
   const readFile = cards.readFile;
   if (readFile) {
-    // 例子里不写具体来源的名字：文件编号是「来源名:编号」（hub 按来源名找插件），Lead 照抄正文里标记写的。
+    // 文件编号带来源名，hub 按它找插件，所以要 Lead 带着来源名照抄。
     tools.push(defineTool({
       name: "read_channel_file",
       label: "Read Channel File",
