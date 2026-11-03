@@ -2358,10 +2358,11 @@ export class ChannelHub {
 
   /** 最近有动静的对话（道），最近的在前：给 Lead 翻对话列表用，只有结构化的事实。 */
   recentConversations(source: string | null, limit = 20): ChannelRecentConversation[] {
+    const lastPayloadOf = this.lastPayloadReader();
     return listRecentChannelLanes(this.db, Math.min(Math.max(Math.floor(limit), 1), 50), source ?? undefined)
       .map((lane) => ({
         id: lane.objectKey, label: lane.label, updatedAt: lane.updatedAt, summary: lane.summary,
-        link: linkOf(this.options.registry.get(lane.source), this.lastPayloadOf(lane.source, lane.objectKey)),
+        link: linkOf(this.options.registry.get(lane.source), lastPayloadOf(lane.source, lane.objectKey)),
       }));
   }
 
@@ -3657,19 +3658,22 @@ export class ChannelHub {
 
   // 这个来源有没结束的卡的道，带这条道里这个来源最后一条事件的 payload。
   private openLanesOf(adapter: ChannelAdapter, limit: number): ChannelOpenLane[] {
+    const lastPayloadOf = this.lastPayloadReader();
     return listOpenChannelLanes(this.db, Math.max(1, Math.trunc(limit)), adapter.id)
-      .map((lane) => ({ objectKey: lane.objectKey, lastPayload: this.lastPayloadOf(adapter.id, lane.objectKey) }));
+      .map((lane) => ({ objectKey: lane.objectKey, lastPayload: lastPayloadOf(adapter.id, lane.objectKey) }));
   }
 
-  // 这条道里这个来源最后一条事件的 payload。没有、读不出时是 null。
-  private lastPayloadOf(source: string, objectKey: string): Record<string, unknown> | null {
-    const row = this.db.prepare("SELECT payload FROM events WHERE source = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1")
-      .get(source, objectKey) as { payload: string } | undefined;
-    try {
-      return row ? JSON.parse(row.payload) as Record<string, unknown> : null;
-    } catch {
-      return null;
-    }
+  // 读一条道里某个来源最后一条事件的 payload（没有、读不出时是 null）。只 prepare 一次，给循环里一条条读。
+  private lastPayloadReader(): (source: string, objectKey: string) => Record<string, unknown> | null {
+    const last = this.db.prepare("SELECT payload FROM events WHERE source = ? AND entity_key = ? ORDER BY seq DESC LIMIT 1");
+    return (source, objectKey) => {
+      const row = last.get(source, objectKey) as { payload: string } | undefined;
+      try {
+        return row ? JSON.parse(row.payload) as Record<string, unknown> : null;
+      } catch {
+        return null;
+      }
+    };
   }
 
   // ── 代查（代查与按信心代回 spec D3–D8）────────────────────────────────────────

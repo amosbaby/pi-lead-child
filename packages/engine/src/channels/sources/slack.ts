@@ -948,7 +948,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       link.host?.log(`could not save the catch-up mark: ${errorText(error)}`);
     }
   }
-  // 工作区的网址（auth.test 的 url；会话方式按会话的 domain 拼）：拼消息的地址用（slackMessageLink）。不知道时是 null。
+  // 工作区的网址（auth.test 的 url；会话方式是会话的 apiBase，没有时按 domain 拼）：拼消息的地址用（slackMessageLink）。不知道时是 null。
   let homeUrl: string | null = null;
   // 连接方式。浏览器会话方式下，Web API 经过会话（SlackSessions），其余的代码两种方式一样。
   const mode = (): SlackConnection => ((typeof options.connection === "function" ? options.connection() : options.connection) === "session"
@@ -1361,7 +1361,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       return null;
     }
     homeTeam = identity.teamId;
-    homeUrl = identity.domain ? slackWorkspaceUrl(`https://${identity.domain}.slack.com`) : null;
+    // 先用会话给的网址（Enterprise Grid 下只拼 domain 会拼到别的主机），没有时才按 domain 拼。
+    homeUrl = slackWorkspaceUrl(identity.url) ?? (identity.domain ? slackWorkspaceUrl(`https://${identity.domain}.slack.com`) : null);
     let accountName: string | undefined;
     try {
       const info = await web.call("users.info", { user: identity.userId }, cookie);
