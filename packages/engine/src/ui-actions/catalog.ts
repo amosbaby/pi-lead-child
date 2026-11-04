@@ -394,9 +394,11 @@ function cardAction(
       ...(run.input.react !== undefined ? { react: run.input.react } : {}),
     }),
     // 只给卡的状态和发出去的字（发出去的是你的话或者卡上的草稿，不是对方的原文）。
+    // 「自动代你处理」关着时 Lead 的发送放到了卡上：和 reply_to_source 一样给 outcome=drafted 和下一步，Lead 看得出没发出去。
     forLead: (_run, result) => {
-      const card = result as ChannelCardDto;
-      return { card: { id: card.id, state: card.state, sentText: card.sentText, actions: card.actions } };
+      const card = result as ChannelCardDto & { drafted?: string };
+      const brief = { id: card.id, state: card.state, sentText: card.sentText, actions: card.actions };
+      return card.drafted ? { card: brief, outcome: "drafted", note: card.drafted } : { card: brief };
     },
     // 你这一轮开始以后对方又发来了消息：你说话时还没见过，不算代你做，记成 Lead 自己做的。
     appearedAt: (card) => latestInstantOf(card.lastMessageAt),
@@ -408,7 +410,8 @@ const CHANNEL_CARD_ACTIONS = {
   send_draft: cardAction("send_draft", "用草稿回复", {
     permission: "user_only", external: true, defaultReason: "在卡上点了用草稿回复",
     hint: "把卡上的草稿发出去，开头带「confirmed by 用户」的署名。用户让你代他回复、但没有逐字给出原话时："
-      + "用 reply_to_source 写你的话直接回复。不在用户这一轮里时，回复由你判断，带 auto-reply 署名发出。",
+      + "用 reply_to_source 写你的话直接回复。不在用户这一轮里时，回复由你判断，带 auto-reply 署名发出；"
+      + "「自动代你处理」关着时放到卡上等用户点发送（outcome=drafted）。",
   }),
   reply_myself: cardAction("reply_myself", "我自己回", {
     permission: "user_only", external: false, defaultReason: "在卡上点了我自己回",
@@ -429,7 +432,8 @@ const CHANNEL_CARD_ACTIONS = {
   send_edited: cardAction("send_edited", "改一下再发", {
     permission: "user_only", external: true, defaultReason: "在卡上改了草稿再发",
     hint: "把 text 原样发出去，不加署名：发出去的是用户自己的话。只用于用户逐字给出的原话；"
-      + "你自己组织的话用 reply_to_source（带署名）。不在用户这一轮里时，回复由你判断，带 auto-reply 署名发出。",
+      + "你自己组织的话用 reply_to_source（带署名）。不在用户这一轮里时，回复由你判断，带 auto-reply 署名发出；"
+      + "「自动代你处理」关着时放到卡上等用户点发送（outcome=drafted）。",
   }),
   cancel_lookup: cardAction("cancel_lookup", "停掉工单", {
     permission: "lead_allowed", external: false, defaultReason: "在卡上点了停掉工单",
