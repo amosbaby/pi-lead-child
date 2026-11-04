@@ -610,4 +610,26 @@ describe("auto-handling off: a message that most likely needs no reply", () => {
     const third = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，重启不影响生产"));
     expect(levelsOf().slice(2)).toEqual([[question.seq, "tell"], [third.seq, "tell"]]);
   });
+
+  // 回归：上下文包按交接说明的 digest 跳过，消息事件却因为前面有 tell 级的请求在等而是 tell 级：Lead 单独看它，没有上下文包。
+  it("packs the context for a message that stays at tell level behind a waiting request", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    await receive(channels, slack.dm("U0ETHAN", "测试环境什么时候重启？"));
+    const third = await receive(channels, slack.dm("U0ETHAN", "顺便说一下，重启不影响生产"));
+    const event = messages().at(-1)!;
+    expect(event).toMatchObject({ level: "tell", payload: { forSeq: third.seq } });
+    expect(listEvents(db, { kind: CONTEXT_EVENT }).map((packed) => packed.payload.messageEvent)).toContain(event.seq);
+  });
+
+  // 回归：收件时判断成紧急的（Lead 接着时系统不直接推送，由 Lead 决定告诉用户），要回的概率再低也不能等摘要。
+  it("still wakes Lead, with a context pack, for an urgent message that needs no reply", async () => {
+    turnAutoReplyOff();
+    const channels = hub(model());
+    const item = await receive(channels, slack.dm("U0ETHAN", "紧急：顺便说一下，生产库十分钟后切换"));
+    const event = messages().at(-1)!;
+    expect(event).toMatchObject({ level: "tell", payload: { forSeq: item.seq, inbound: { urgent: true } } });
+    expect(pushes).toEqual([]);
+    expect(listEvents(db, { kind: CONTEXT_EVENT }).map((packed) => packed.payload.messageEvent)).toEqual([event.seq]);
+  });
 });
