@@ -215,6 +215,30 @@ describe("pg0 database password", () => {
     expect(third.sealed().databasePassword).toBe(replaced);
     expect(t.harness.launchctl.slice(mark)).toEqual(["print"]);
   });
+
+  // 换了密码、但重启 Hindsight 失败（launchctl 出错）：健康检查接着重试，用的还是换好的那一个。
+  it("keeps the replaced password and keeps retrying when Hindsight fails to come up at daemon start", async () => {
+    const { t } = await installWithDashPassword();
+    const ensure = t.harness.hooks.ensure!;
+    let broken = true;
+    const controller = new MemoryController({
+      db: t.db, dataDir: t.dataDir, vault: t.vault, memory: t.notes as unknown as NotesMemory, log: (line) => t.logs.push(line),
+      publish: () => {}, externalSecret: () => null, summaryModels: async () => NO_MODELS, programArguments: ["/node", "/hindsight.mjs"],
+      ...t.harness.hooks,
+      healthIntervalMs: 20,
+      ensure: async (options) => { if (broken) throw new Error("launchctl bootstrap failed"); return ensure(options); },
+    });
+    controllers.push(controller);
+    await expect(controller.start()).rejects.toMatchObject({ code: "unavailable" });
+    const replaced = t.sealed().databasePassword;
+    expect(replaced).toMatch(/^[0-9a-f]{48}$/);
+    expect(controller.get().service.state).toBe("down");
+
+    broken = false;
+    await vi.waitFor(() => expect(controller.get().service.state).toBe("healthy"));
+    expect(t.sealed().databasePassword).toBe(replaced);
+    expect(storedPassword(t)).toBe(replaced);
+  });
 });
 
 describe("MemoryController: local models download in the background, pinned and safetensors-only", () => {
