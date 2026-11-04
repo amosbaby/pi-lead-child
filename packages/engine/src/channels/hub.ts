@@ -1289,6 +1289,19 @@ export class ChannelHub {
   }
 
   /**
+   * 这条消息并进摘要交给 Lead，不单独叫醒它（#21）：交接说明说可以（开关关着、多半不用回，handbook-decision.ts 的 digest），
+   * 收件时没有判断成紧急，同一张卡上也没有 tell 级的请求在等（它会并掉前面那一条，前面那一条不能跟着晚交；前面的也是摘要级的
+   * 就照旧，一个对话里连着来几条不用回的消息合在同一批里）。拼不拼上下文包也按它定：调用方拼包之前问一次，requestLead 再问一次。
+   */
+  private digestsRequest(cardId: number, forSeq: number, handbook: HandbookDecision | null | undefined): boolean {
+    if (handbook?.digest !== true) return false;
+    // 紧急的（urgency.ts）：接着 Lead 的时候系统不直接推送，由 Lead 决定告诉用户，不能等摘要。
+    if (getEvent(this.db, forSeq)?.payload.urgent === true) return false;
+    return !this.leadRequests({ cardId, stage: "intake" })
+      .some((older) => older.forSeq !== forSeq && getEvent(this.db, older.seq)?.level !== "digest");
+  }
+
+  /**
    * 交给 Lead 一个请求（B1，统一消息事件 spec D1、D8，工单 05）：记一条消息事件（message.received），它就是请求，不再另记
    * channel.lead.requested。tell 级，Lead 单独一轮看到它：结构化的事实（意图、发信人、对话、代码认出的对象、权限上限）
    * 加上外部标签里的原话和上下文包。同一条消息（和并进来的编辑）只交一次。没有期限（工单 06）。Lead 不能工作时照样记 tell 级
@@ -1307,14 +1320,8 @@ export class ChannelHub {
     const objects = this.objectsOf(card, event);
     // 同一张卡上还没有决定的请求并进这一个：Lead 处理这一个时，通用工具按卡关掉这张卡上所有还没决定的请求
     // （两条合成一次处理，spec D6）。
-    // 同一张卡上有 tell 级的请求在等时，这一条不降成摘要：它会并掉前面那一条，前面那一条不能跟着晚交（#21）。
-    // 前面的也是摘要级的就照旧：一个对话里连着来几条不用回的消息，合在同一批里。
     const waiting = this.leadRequests({ cardId: card.id, stage: "intake" }).filter((older) => older.forSeq !== forSeq);
-    const waitingAtTell = waiting.some((older) => {
-      const seq = this.messageEventOf(card.id, older.forSeq);
-      return (seq === null ? null : getEvent(db, seq)?.level) !== "digest";
-    });
-    const digest = input.handbook?.digest === true && !waitingAtTell;
+    const digest = this.digestsRequest(card.id, forSeq, input.handbook);
     for (const older of waiting) {
       this.recordLeadDecision(older, "superseded", "system", `同一张卡又来了新消息（事件 #${forSeq}），并进新的请求`);
     }
@@ -3762,7 +3769,7 @@ export class ChannelHub {
       this.packing.add(seq);
       try {
         // 并进摘要的消息不拼上下文包：不单独开一轮，用不着，也省一次对话摘要的模型调用（#21）。
-        const context = decided?.handbook.digest ? null : await this.contextPackFor(adapter, card.id, seq);
+        const context = this.digestsRequest(card.id, seq, decided?.handbook) ? null : await this.contextPackFor(adapter, card.id, seq);
         this.requestLead(adapter, card.id, seq, {
           intent: decided?.intent ?? null, action: kind, handbook: decided?.handbook ?? null,
           reason: (action?.reason ?? `收件判断没有做成（${result.error ? clipEventText(redactSecretText(result.error), 120) : "快模型不可用"}）`)
@@ -4097,7 +4104,8 @@ export class ChannelHub {
             this.packing.add(seq);
             this.later(async () => {
               try {
-                this.requestLead(adapter, card.id, seq, request, decided?.handbook.digest ? null : await this.contextPackFor(adapter, card.id, seq));
+                this.requestLead(adapter, card.id, seq, request,
+                  this.digestsRequest(card.id, seq, decided?.handbook) ? null : await this.contextPackFor(adapter, card.id, seq));
               } finally {
                 this.packing.delete(seq);
               }
