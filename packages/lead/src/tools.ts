@@ -1283,7 +1283,7 @@ function prReviewTemplate(
     deliver?: PrReviewDelivery; review_events?: string[];
   },
   external: boolean,
-): { brief: string; workdir: string | undefined; criteria: string[]; repository: string; record: Record<string, unknown> } {
+): { brief: string; workdir: string | undefined; criteria: string[]; repository: string; pullRequest: number; record: Record<string, unknown> } {
   if (!params.pr_review) throw new Error("template=pr_review needs pr_review: { pr, focus, acceptance }");
   const pr = parsePullRequestRef(params.pr_review.pr);
   const repo = githubRepoRoots(db, pr.owner, pr.repo)[0];
@@ -1296,6 +1296,7 @@ function prReviewTemplate(
     }),
     workdir: repo,
     repository: `${pr.owner}/${pr.repo}`,
+    pullRequest: pr.number,
     // 结构化验收标准（工单 05）：系统把用户的原话按行抄进去，不经 Lead 改写。
     criteria: normalizeCriterionTexts(acceptanceCriteriaFromUserWords(params.pr_review.acceptance), "pr_review.acceptance"),
     record: {
@@ -2068,6 +2069,10 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         // 没给 workdir 的轻子 agent（例如市场调查）：不让它在 daemon 的当前目录（部署用的主 checkout）里跑，给它一个
         // 自己的目录（数据目录下的 light-tasks/），沙箱里能写的就是这里（lead-tools-and-routing spec D9）。
         const workdir = given ?? (params.light ? lightTaskDir(deps.dataDir) : undefined);
+        // template=pr_review 也要登记 PR 目标（工单 #17），评审 Run 才在 PR head 的临时检出里跑，而不是 master 的 worktree。
+        // 号码取模板里解析出的 PR；Lead 另给了 review_pull_request 时以它为准。workdir 不是 git 仓库时没法检出，照旧建单。
+        const reviewPullRequest = params.review_pull_request
+          ?? (template && workdir && await gitRunLead(["rev-parse", "--show-toplevel"], workdir) ? template.pullRequest : undefined);
         const relationResults: LinkTicketResult[] = [];
         // 建单的事务里要认项目（仓库根目录、origin）、判断 PR 工单的仓库：git 的事实先异步查好，事务里只读缓存（git-facts.ts）。
         await Promise.all([warmRepositoryIdentity(workdir), warmWorkdirFacts(workdir)]);
@@ -2099,11 +2104,11 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           if (params.due_at) {
             setItemTime(db, createdId, { dueAt: new Date(params.due_at).toISOString() }, leadSource());
           }
-          if (params.review_pull_request !== undefined) {
+          if (reviewPullRequest !== undefined) {
             // PR 所在的仓库一起记下：检出时按它的地址找 remote，不写死 origin（工单 #212）。
             const pullRequestRepository = template?.repository ?? repository?.key;
             setPullRequestReviewTarget(db, {
-              itemId: createdId, number: params.review_pull_request, actor: "lead",
+              itemId: createdId, number: reviewPullRequest, actor: "lead",
               ...(params.pull_request_remote ? { remote: params.pull_request_remote } : {}),
               ...(pullRequestRepository ? { repository: pullRequestRepository } : {}),
             });
