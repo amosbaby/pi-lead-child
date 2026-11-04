@@ -121,6 +121,35 @@ describe("create_task for a pull request review", () => {
     expect(pullRequestReviewTarget(db, itemId)).toEqual({ number: 9, remote: "public" });
   });
 
+  // 工单 #17：template=pr_review 只写了模板记录，没有 PR 目标，评审 Run 落在 master 的 worktree 上，没有检出 PR head。
+  describe("with template=pr_review", () => {
+    const prReview = { pr: "Acme/agent-app#101", focus: "看鉴权", acceptance: "每个问题指到行" };
+    const itemIdOf = (result: any) => Number(/#(\d+)/.exec(result.content[0].text)![1]);
+
+    it("records the pull request from the template, so the run checks out its head", async () => {
+      const result = await tool("create_task").execute("call", {
+        title: "review via template", brief: "", workdir: repo, template: "pr_review", pr_review: prReview, runtime: "codex",
+      });
+      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 101, remote: "origin" });
+    });
+
+    it("keeps an explicit review_pull_request and remote over the template's number", async () => {
+      const result = await tool("create_task").execute("call", {
+        title: "review via template, explicit", brief: "", workdir: repo, template: "pr_review", pr_review: prReview,
+        review_pull_request: 55, pull_request_remote: "upstream", runtime: "codex",
+      });
+      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 55, remote: "upstream" });
+    });
+
+    it("still creates the ticket, without a target, when the workdir is not a git repository", async () => {
+      const result = await tool("create_task").execute("call", {
+        title: "review via template, no repo", brief: "", workdir: tempDir("plc-plain-"), template: "pr_review", pr_review: prReview,
+        runtime: "codex",
+      });
+      expect(pullRequestReviewTarget(db, itemIdOf(result))).toBeNull();
+    });
+  });
+
   it("refuses a pull request review whose workdir is not a git repository", async () => {
     const plain = tempDir("plc-plain-");
     await expect(tool("create_task").execute("call", {
