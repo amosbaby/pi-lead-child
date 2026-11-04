@@ -131,6 +131,7 @@ describe("create_task for a pull request review", () => {
         title: "review via template", brief: "", workdir: repo, template: "pr_review", pr_review: prReview, runtime: "codex",
       });
       expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 101, repository: "github.com/acme/agent-app" });
+      expect(result.content[0].text).toContain("评审 Run 在 PR #101 head 的临时检出里跑");
     });
 
     it("keeps the remote Lead names next to the template's own number", async () => {
@@ -156,6 +157,8 @@ describe("create_task for a pull request review", () => {
         runtime: "codex",
       });
       expect(pullRequestReviewTarget(db, itemIdOf(result))).toBeNull();
+      // 回执要说出来：Lead 只看得到这句话，不说就以为评审会在 PR head 上做（工单 #17 就是这样没人发现）。
+      expect(result.content[0].text).toContain("没有登记 PR 目标");
     });
   });
 
