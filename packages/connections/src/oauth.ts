@@ -149,8 +149,9 @@ async function fetchResourceMetadata(fetchImpl: FetchLike, serverUrl: string, hi
     }
     if (typeof body.resource !== "string") throw new OAuthError("protocol", "resource metadata has no resource");
     // RFC 9728 §3.3：resource 必须是我们请求的那个地址，防止别的资源冒充。只比较到路径，忽略末尾的斜杠。
-    // 例外：同源且是服务器路径的上级（Slack 声明站点根 https://mcp.slack.com，MCP 地址是 /mcp）。
-    if (!coversServer(body.resource, serverUrl)) {
+    // 例外：同源且是服务器路径的上级，而且元数据就是从这个上级自己的 well-known 地址读到的（§3.3 第一段）。
+    // Slack 的 401 指向站点根的 well-known，声明 resource 为站点根，MCP 地址是 /mcp。
+    if (!coversServer(body.resource, serverUrl, url)) {
       throw new OAuthError("protocol", `resource metadata is for ${body.resource}, not ${serverUrl}`);
     }
     return {
@@ -162,15 +163,20 @@ async function fetchResourceMetadata(fetchImpl: FetchLike, serverUrl: string, hi
   throw new OAuthError("protocol", "the MCP server publishes no resource metadata");
 }
 
-function coversServer(resource: string, serverUrl: string): boolean {
-  let claimed: string;
+function coversServer(resource: string, serverUrl: string, metadataUrl: string): boolean {
+  let claimed: URL;
   try {
-    claimed = normalizeResource(resource);
+    claimed = new URL(resource);
   } catch {
     return false;
   }
   const actual = normalizeResource(serverUrl);
-  return actual === claimed || actual.startsWith(`${claimed}/`);
+  if (actual === normalizeResource(resource)) return true;
+  // 别的文档（包括 MCP 路径下的 well-known、任意 resource_metadata 地址）只能声明 MCP 地址本身，
+  // 否则路径下的服务器能拿到整个站点的令牌。
+  const origin = `${claimed.protocol}//${claimed.host.toLowerCase()}`;
+  const path = claimed.pathname.replace(/\/+$/, "");
+  return actual.startsWith(`${origin}${path}/`) && normalizeResource(metadataUrl) === `${origin}/.well-known/oauth-protected-resource${path}`;
 }
 
 function normalizeResource(url: string): string {
