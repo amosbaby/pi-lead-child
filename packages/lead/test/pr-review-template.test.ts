@@ -100,7 +100,10 @@ describe("create_task with template=pr_review", () => {
       const brief = getItem(db, Number(/#(\d+)/.exec(result.content[0].text)![1]))!.brief;
       expect(brief).toContain("## 验证");
       expect(brief).toContain("PR head 的临时检出");
-      expect(brief).toContain("不跑浏览器测试和 e2e 测试");
+      expect(brief).toContain("不跑要起浏览器的测试");
+      // 不起浏览器的 e2e 测试（例如 vitest 跑的 *-e2e.test.ts）是 PR 改了的测试时照样要跑：不能一概说不跑 e2e。
+      expect(brief).not.toContain("不跑浏览器测试和 e2e 测试");
+      expect(brief).not.toContain("master");
       expect(brief).toContain("不做全量构建");
       expect(brief).toContain("只跑和这个 PR 改动相关的测试");
       expect(brief).toContain("命令输出只看摘要");
