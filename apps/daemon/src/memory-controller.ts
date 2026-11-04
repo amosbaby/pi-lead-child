@@ -242,9 +242,13 @@ export class MemoryController implements MemoryService {
   // daemon 启动时调一次：接着下没下完的模型（关掉 Hindsight 时不下），让 Hindsight 处在期望状态。
   async start(): Promise<void> {
     if (!this.off()) this.downloads.resume();
-    await this.serial(() => this.reconcile("startup"));
-    this.healthTimer = setInterval(() => void this.checkHealth(), this.healthIntervalMs());
-    this.healthTimer.unref?.();
+    try {
+      await this.serial(() => this.reconcile("startup"));
+    } finally {
+      // Hindsight 在启动时没起来（apply 抛错）也要开健康检查：重试靠它（this.retry）。
+      this.healthTimer = setInterval(() => void this.checkHealth(), this.healthIntervalMs());
+      this.healthTimer.unref?.();
+    }
   }
 
   stop(): void {
