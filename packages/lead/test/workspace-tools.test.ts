@@ -133,12 +133,21 @@ describe("create_task for a pull request review", () => {
       expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 101, repository: "github.com/acme/agent-app" });
     });
 
-    it("keeps an explicit review_pull_request and remote over the template's number", async () => {
+    it("keeps the remote Lead names next to the template's own number", async () => {
       const result = await tool("create_task").execute("call", {
         title: "review via template, explicit", brief: "", workdir: repo, template: "pr_review", pr_review: prReview,
-        review_pull_request: 55, pull_request_remote: "upstream", runtime: "codex",
+        review_pull_request: 101, pull_request_remote: "upstream", runtime: "codex",
       });
-      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 55, remote: "upstream", repository: "github.com/acme/agent-app" });
+      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 101, remote: "upstream", repository: "github.com/acme/agent-app" });
+    });
+
+    // brief 和发布权限清单都只认模板里的 PR：检出另一个号码时，评审看的是那个 PR 的代码，发到的却是这个 PR。
+    it("refuses a review_pull_request that is not the template's PR, and creates nothing", async () => {
+      await expect(tool("create_task").execute("call", {
+        title: "review via template, mismatch", brief: "", workdir: repo, template: "pr_review", pr_review: prReview,
+        review_pull_request: 55, runtime: "codex",
+      })).rejects.toThrow(/review_pull_request=55.*#101/);
+      expect(db.prepare("SELECT COUNT(*) AS n FROM items WHERE title='review via template, mismatch'").get()).toEqual({ n: 0 });
     });
 
     it("still creates the ticket, without a target, when the workdir is not a git repository", async () => {
