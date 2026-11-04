@@ -3240,7 +3240,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       pendingModelSwitch = { reason: "用户在输入框里换了模型", restoreAt: null, manual: true };
       log(`lead model chosen by the user: ${previousSpec} -> ${spec}`);
       // Lead 正在回答：这一轮结束以后，下一轮开始前换（runTurnNow 的 syncLeadModel）。
-      if (sched.busy || sched.draining || sched.starting) return { previous, selected: choice, applied: "after_turn" };
+      if (sched.busy || sched.draining || sched.starting) {
+        resumeLeadWakes("the user chose a model");
+        return { previous, selected: choice, applied: "after_turn" };
+      }
       await syncLeadModel();
       if (leadModelName !== spec) {
         // 换不过去（例如注册不了这个模型）：原因在日志里。config 退回原来的顺序。
@@ -3248,6 +3251,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         rebuildModelFailover();
         throw new UiActionError("unavailable", serverMessages(getLocale(db)).model.switchFailed(spec, leadModelName));
       }
+      resumeLeadWakes("the user chose a model");
       return { previous, selected: choice, applied: "now" };
     },
   };
@@ -3281,13 +3285,17 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         modelFailover!.clearBlocked(primary);
         pendingModelSwitch = { reason: "用户在设置页换了主用", restoreAt: null, manual: true, via: "在设置页" };
         log(`lead model chain set by the user: ${previousModels.join(", ")} -> ${specs.join(", ")}`);
-        if (sched.busy || sched.draining || sched.starting) return "after_turn";
+        if (sched.busy || sched.draining || sched.starting) {
+          resumeLeadWakes("the user set a new primary model");
+          return "after_turn";
+        }
         await syncLeadModel();
         if (leadModelName !== primary) {
           setLeadModelChainInConfig(previousModels, opts.dataDir);
           rebuildModelFailover();
           throw new UiActionError("unavailable", serverMessages(getLocale(db)).model.switchFailed(primary, leadModelName));
         }
+        resumeLeadWakes("the user set a new primary model");
         return "now";
       },
       async providersChanged() {
@@ -3299,6 +3307,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           log(`lead providers refresh failed: ${error?.message ?? String(error)}`);
           return;
         }
+        // 服务商或者它的 key 改了（例如换了一个能用的 key）。
+        resumeLeadWakes("the user changed Lead's providers");
         if (sched.busy || sched.draining || sched.starting) {
           rebindLeadModel = true;
           return;
@@ -3938,6 +3948,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     } catch (error) {
       log(`lead wake retry stop notice failed: ${error instanceof Error ? error.message : String(error)}`);
     }
+  }
+  // 用户换了 Lead 的模型或者服务商（通知里让他去设置里查）：退避和到上限的停止都清掉，下一次轮询照常叫醒 Lead，
+  // 不用再发一条消息。以前没有上限，退避最多 5 分钟，换好以后自己会再试；有了上限，不清掉就一直停着。
+  function resumeLeadWakes(reason: string): void {
+    if (!leadWakeRetry && !digestRetry) return;
+    leadWakeRetry = null;
+    digestRetry = null;
+    wakeRetryStoppedNotified = false;
+    log(`lead wake retries reset: ${reason}`);
   }
 
   // 用户现在方不方便（Jarvis 模式）：Lead 据此判断现在告诉他、推给他，还是等他回来。
@@ -5286,7 +5305,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     retryWaitingUserTurn();
     if (sched.busy || !network.online) return;
-    if (leadInput.pendingMessages().length && !wakeRetryBlocks(leadWakeRetry, Date.now())) {
+    // 摘要那一路到上限停下了也不再为事叫醒：模型是同一个，通知已经说了停止自动重试（只是退避中的摘要不挡带事的一轮）。
+    if (leadInput.pendingMessages().length && !wakeRetryBlocks(leadWakeRetry, Date.now()) && !digestRetry?.stopped) {
       wakeForEvents();
       return;
     }
