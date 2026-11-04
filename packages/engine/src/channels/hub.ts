@@ -1350,8 +1350,15 @@ export class ChannelHub {
     const objects = this.objectsOf(card, event);
     // 同一张卡上还没有决定的请求并进这一个：Lead 处理这一个时，通用工具按卡关掉这张卡上所有还没决定的请求
     // （两条合成一次处理，spec D6）。
-    for (const older of this.leadRequests({ cardId: card.id, stage: "intake" })) {
-      if (older.forSeq === forSeq) continue;
+    // 同一张卡上有 tell 级的请求在等时，这一条不降成摘要：它会并掉前面那一条，前面那一条不能跟着晚交（#21）。
+    // 前面的也是摘要级的就照旧：一个对话里连着来几条不用回的消息，合在同一批里。
+    const waiting = this.leadRequests({ cardId: card.id, stage: "intake" }).filter((older) => older.forSeq !== forSeq);
+    const waitingAtTell = waiting.some((older) => {
+      const seq = this.messageEventOf(card.id, older.forSeq);
+      return (seq === null ? null : getEvent(db, seq)?.level) !== "digest";
+    });
+    const digest = input.handbook?.digest === true && !waitingAtTell;
+    for (const older of waiting) {
       this.recordLeadDecision(older, "superseded", "system", `同一张卡又来了新消息（事件 #${forSeq}），并进新的请求`);
     }
     const lane = getChannelLaneById(db, card.laneId);
@@ -1360,7 +1367,7 @@ export class ChannelHub {
     const head = `通道卡 #${card.id}：${card.sender.name}（${SENDER_TRUST_LABELS[card.sender.trust]}）在${lane?.label ?? card.objectKey}找用户`
       + `（${what}${prs ? `，${prs}` : ""}）：${input.reason}。对方的原话在下面的外部标签里。`;
     const summary = `${head}${leadNextStep(input.action)}。`;
-    const inserted = db.transaction(() => this.appendMessageEvent(adapter, card, event, input, summary, at, context, { forSeq, objects }))();
+    const inserted = db.transaction(() => this.appendMessageEvent(adapter, card, event, input, summary, at, context, { forSeq, objects, digest }))();
     if (inserted) this.pushIfLeadDown(adapter, "intake", forSeq);
   }
 
@@ -1373,7 +1380,7 @@ export class ChannelHub {
   private appendMessageEvent(
     adapter: ChannelAdapter, card: ChannelCard, event: EventRecord,
     input: { intent: ChannelIntent | null; action: string; handbook?: HandbookDecision | null },
-    summary: string, at: Date, context: BuiltContextPack | null, request: { forSeq: number; objects: ChannelLeadObject[] },
+    summary: string, at: Date, context: BuiltContextPack | null, request: { forSeq: number; objects: ChannelLeadObject[]; digest: boolean },
   ): boolean {
     const db = this.db;
     const merged = this.mergedMessage(adapter.id, event);
@@ -1397,7 +1404,8 @@ export class ChannelHub {
     });
     const recorded = appendEvent(db, {
       source: "system", sourceRef: messageEventRef(adapter.id, merged.seqs), kind: MESSAGE_EVENT_KIND, entityKey: card.objectKey,
-      correlationId: `channel:${card.objectKey}`, level: "tell", causationId: String(event.seq), occurredAt: at.toISOString(),
+      // 要回的概率低、自动代你处理关着的消息（handbook-decision.ts 的 digest）：digest 级，并进摘要，不单独叫醒 Lead（#21）。
+      correlationId: `channel:${card.objectKey}`, level: request.digest ? "digest" : "tell", causationId: String(event.seq), occurredAt: at.toISOString(),
       payload: { ...payload, forSeq: request.forSeq, objects: request.objects },
     });
     if (!context || !recorded.inserted) return recorded.inserted;
@@ -3865,7 +3873,8 @@ export class ChannelHub {
       // 拼上下文包的时候对方改了消息：并进这次判断（editMergeFor），记消息事件时用改后的话。
       this.packing.add(seq);
       try {
-        const context = await this.contextPackFor(adapter, card.id, seq);
+        // 并进摘要的消息不拼上下文包：不单独开一轮，用不着，也省一次对话摘要的模型调用（#21）。
+        const context = decided?.handbook.digest ? null : await this.contextPackFor(adapter, card.id, seq);
         this.requestLead(adapter, card.id, seq, {
           intent: decided?.intent ?? null, action: kind, handbook: decided?.handbook ?? null,
           reason: (action?.reason ?? `收件判断没有做成（${result.error ? clipEventText(redactSecretText(result.error), 120) : "快模型不可用"}）`)
@@ -4200,7 +4209,7 @@ export class ChannelHub {
             this.packing.add(seq);
             this.later(async () => {
               try {
-                this.requestLead(adapter, card.id, seq, request, await this.contextPackFor(adapter, card.id, seq));
+                this.requestLead(adapter, card.id, seq, request, decided?.handbook.digest ? null : await this.contextPackFor(adapter, card.id, seq));
               } finally {
                 this.packing.delete(seq);
               }
