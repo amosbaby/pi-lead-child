@@ -240,14 +240,13 @@ describe("Lead does nothing outward by itself when auto-handling is off", () => 
   });
   const reactions = () => slack.calls.filter((call) => call.method === "reactions.add");
 
-  it("refuses Lead's own reaction, edit and send from the card, closes a handled card without ✅; the user's reaction still goes", async () => {
+  it("refuses Lead's own reaction and edit, closes a handled card without ✅; the user's reaction still goes", async () => {
     const channels = hub(jev());
     const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
     const objectKey = getChannelCard(db, ivy.cardId)!.objectKey;
     await autoHandling(false);
     const off = { code: "invalid_action", message: expect.stringMatching(/自动代你处理关着.*notify_user/u) };
     await expect(channels.react(objectKey, { emoji: "eyes", by: "lead" })).rejects.toMatchObject(off);
-    await expect(channels.act(ivy.cardId, "send_edited", { by: "lead", forUser: false, text: "发了。" })).rejects.toMatchObject(off);
     await expect(channels.editMessage(objectKey, { ref: "1792000000.000100", text: "改一下", words: "assistant", by: "lead", forUser: false }))
       .rejects.toMatchObject(off);
     expect(getChannelCard(db, ivy.cardId)).toMatchObject({ state: "open" });
@@ -262,6 +261,25 @@ describe("Lead does nothing outward by itself when auto-handling is off", () => 
     const mine = await channels.react(getChannelCard(db, nina.cardId)!.objectKey, { emoji: "+1", by: "user" });
     expect(mine).toMatchObject({ emoji: "+1" });
     expect(reactions()).toHaveLength(1);
+  });
+
+  // 卡上的「发送」和 reply_to_source 结果一样（2026-11-04 定）：放到卡上等用户点发送，Lead 拿到 drafted 和下一步，不抛错。
+  it("keeps Lead's send_draft and send_edited on the card for the user to send, like reply_to_source", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    await autoHandling(false);
+    const edited = await channels.act(ivy.cardId, "send_edited", { by: "lead", forUser: false, text: "发了。" });
+    expect(edited).toMatchObject({ state: "open", draft: { text: "发了。", drafter: "lead" }, drafted: expect.stringMatching(/自动代你处理关着.*等用户点发送/u) });
+    const drafted = await channels.act(ivy.cardId, "send_draft", { by: "lead", forUser: false });
+    expect(drafted).toMatchObject({ state: "open", draft: { text: "发了。" }, drafted: expect.stringMatching(/放到了卡 #\d+ 上/u) });
+    expect(slack.sent()).toEqual([]);
+    expect(pushes.filter((push) => push.cardId === ivy.cardId).at(-1)).toMatchObject({ body: expect.stringContaining("等你点发送") });
+
+    // 用户自己在卡上点「发送」照常发。
+    const mine = await channels.act(ivy.cardId, "send_draft", { by: "user via Mac 网页" });
+    expect(mine).toMatchObject({ state: "replied" });
+    expect(mine.drafted).toBeUndefined();
+    expect(sentTexts("D0IVYLIN")).toHaveLength(1);
   });
 
   it("says no 「正在处理」 for a dispatch, and hands a confident result back instead of sending it", async () => {

@@ -1872,7 +1872,7 @@ export class ChannelHub {
    * 卡正在发别的回复时抛 conflict。reasons：没发出去时写原因（系统会用同一个幂等键再试）。
    */
   private async leadReply(adapter: ChannelAdapter, card: ChannelCard, text: string): Promise<{ card: ChannelCard; reasons: string[] }> {
-    // 自动代你处理关着（issue 07）：Lead 自己不代你发。卡上的「发送」也走这里（act 的 forUser 是 false）。
+    // 自动代你处理关着（issue 07）：Lead 自己不代你发。两个入口（sendMessage、act）关着时都先放到卡上，这里只兜底。
     if (!this.handbookNow().autoReply) throw new ChannelActionError("invalid_action", LEAD_OFF_NEXT("不代你发"));
     // 派了活还没交回：子 agent 的结果交回以后由出站检验定代你回还是交给你，「正在处理」已经告诉了对方。现在回会让卡提前结束。
     const task = this.awaitingTask(card.id);
@@ -3116,7 +3116,7 @@ export class ChannelHub {
   async act(
     cardId: number, action: ChannelCardAction,
     options: { by: string; forUser?: boolean; expectedVersion?: number; text?: string; note?: string; emoji?: string; react?: boolean },
-  ): Promise<ChannelCard> {
+  ): Promise<ChannelCard & { drafted?: string }> {
     const card = getChannelCard(this.db, cardId);
     if (!card) throw new ChannelActionError("not_found", `没有通道卡 #${cardId}`);
     if (options.expectedVersion !== undefined && options.expectedVersion !== card.version) {
@@ -3133,6 +3133,12 @@ export class ChannelHub {
     if ((action === "send_draft" || action === "send_edited") && options.forUser === false) {
       const text = action === "send_draft" ? card.draft?.text ?? "" : options.text?.trim() ?? "";
       if (!text) throw new ChannelActionError("invalid_action", action === "send_draft" ? `卡 #${cardId} 上没有草稿` : "「改一下再发」要带要发的文字");
+      // 自动代你处理关着（issue 07，2026-11-04 定）：和 sendMessage 一样放到卡上等你点发送，不抛错。drafted 是给 Lead 的下一步。
+      if (!this.handbookNow().autoReply) {
+        const label = getChannelLaneById(this.db, card.laneId)?.label ?? card.objectKey;
+        const kept = this.draftForUser(adapter, card, text, null, { conversation: card.objectKey, label, objectKey: card.objectKey });
+        return { ...getChannelCard(this.db, card.id)!, drafted: kept.card!.note! };
+      }
       return (await this.leadReply(adapter, card, text)).card;
     }
     const now = this.now();

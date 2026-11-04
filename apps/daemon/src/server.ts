@@ -4853,7 +4853,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         const card = getChannelCard(db, cardId);
         return card ? hub.actionsFor(card) : [];
       },
-      act: async (cardId, action, options) => hub.cardDto(await hub.act(cardId, action, options)),
+      act: async (cardId, action, options) => {
+        const card = await hub.act(cardId, action, options);
+        return card.drafted ? { ...hub.cardDto(card), drafted: card.drafted } : hub.cardDto(card);
+      },
     };
     // Lead 代用户直接往一个对话里发消息、回表情，不经过卡片（用户 2026-10-23、10-26）。等你的卡跟着结束；发完给 Lead 还开着的卡自查。
     uiActionServices.channelMessages = {
