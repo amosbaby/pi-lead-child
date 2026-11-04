@@ -173,12 +173,15 @@ function switchDto(stored: StoredSwitch): MemorySwitch {
   const { desired: _desired, ...dto } = stored;
   return { ...dto, dataFlows: dto.dataFlows ?? [], parts: dto.parts ?? ["embedding"] };
 }
-// pg0 的密码会被 hindsight_api/pg0.py 拼进命令行 `pg0 start --password <值>`。base64url 的字母表有 `-`，
-// 密码以 `-` 开头时 pg0 的 CLI（clap）把它当成短选项，报 `unexpected argument`，PostgreSQL 起不来。所以只用 [A-Za-z0-9]：24 字节 = 48 位 hex。
+// pg0 的密码从 URL 里来：hindsight_api/pg0.py 把它交给 pg0-embedded，后者拼成命令行 `pg0 start ... --password <值>`。
+// 以前用 base64url，字母表有 `-`：密码以 `-` 开头（约 1/64）时 pg0 的 CLI（clap）把它当成选项，报 `unexpected argument`
+// 或 `a value is required for '--password'`，PostgreSQL 起不来。现在只用 hex（[0-9a-f]）：24 字节 = 48 位，熵和以前一样是 192 位。
+// hex 在 URL 里也不用编码（Hindsight 不解码 URL 里的密码），放进 pg0 建用户的 SQL 字符串也安全。
 export const newDatabasePassword = (): string => randomBytes(24).toString("hex");
 
-// 以 `-` 开头的旧密码从来没让 pg0 启动成功：命令行解析在 initdb 之前就失败了，所以没有用它初始化过的数据目录（~/.pg0 下的 plc-hindsight-*），
-// 直接换新密码不会连不上，也不用重建数据目录。不以 `-` 开头的旧密码（含中间有 `-`、`_` 的）能正常启动，数据目录可能已经用它初始化，保留不动。
+// 以 `-` 开头的旧密码从来没让 pg0 启动成功：命令行解析在 initdb 之前就失败了，所以没有用它初始化过的数据目录，
+// 直接换新密码不会连不上，也不用重建数据目录。不以 `-` 开头的旧密码（含中间有 `-`、`_` 的）能正常启动，数据目录可能已经用它初始化，
+// 保留不动：pg0 只在用户不存在时建用户（CREATE USER ... PASSWORD），不改已有用户的密码，换了就连不上自己的数据。
 export const isUsableDatabasePassword = (value: string): boolean => value.length > 0 && !value.startsWith("-");
 
 const digest = (secrets: HindsightSecrets) => createHash("sha256").update(json(secrets)).digest("hex");
@@ -543,6 +546,7 @@ export class MemoryController implements MemoryService {
   private generated(name: "hindsight.apiKey" | "hindsight.databasePassword", make: () => string, usable: (value: string) => boolean = () => true): string {
     const existing = this.secrets.get(name);
     if (existing && usable(existing.value)) return existing.value;
+    if (existing) this.options.log(`[memory] replaced the stored ${name}: the old value cannot be used`);
     const value = make();
     this.secrets.set(name, { value, host: null });
     return value;
