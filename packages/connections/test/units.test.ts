@@ -106,7 +106,7 @@ describe("OAuth discovery", () => {
 });
 
 describe("token exchange", () => {
-  const server = { token_endpoint: "https://auth.fake.test/token", token_endpoint_auth_methods_supported: ["client_secret_post"] };
+  const server = { issuer: "https://auth.fake.test", authorization_endpoint: "https://auth.fake.test/authorize", token_endpoint: "https://auth.fake.test/token", token_endpoint_auth_methods_supported: ["client_secret_post"] };
   const input = { code: "c", verifier: "v", redirectUri: "http://127.0.0.1:1/oauth/callback", resource: "https://mcp.fake.test/mcp" };
 
   it("reports the error code of a 200 response that carries ok:false and no token", async () => {
