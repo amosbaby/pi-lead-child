@@ -2310,7 +2310,11 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
               + relationImpactLine(result),
             ).join("\n")}`
           : "";
-        const templateText = template ? `；按 PR 评审模板建的，brief 里有用户的原话和固定护栏${workdir ? `，workdir=${workdir}` : "，没有找到登记过的本地仓库"}` : "";
+        const templateText = template ? `；按 PR 评审模板建的，brief 里有用户的原话和固定护栏${workdir ? `，workdir=${workdir}` : "，没有找到登记过的本地仓库"}`
+          + (reviewPullRequest !== undefined
+            ? `；评审 Run 在 PR #${reviewPullRequest} head 的临时检出里跑`
+            : "；没有登记 PR 目标：workdir 不是（或还不是）本地的 git 仓库，评审 Run 不会检出 PR head。要检出时取消这张单再建一张，workdir 写这个 PR 所在仓库的本地 checkout")
+          : "";
         const criteriaText = criteria.length ? `；验收标准 ${criteria.length} 条` : "；没有结构化的验收标准";
         const created = getItem(db, id);
         // 审查 L4：给了核查员、却不要求独立核查时，说清楚不会自动派核查。
