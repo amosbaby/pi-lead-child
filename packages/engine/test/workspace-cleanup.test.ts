@@ -5,7 +5,8 @@
 //   · 清理有记录，Lead 的当前局面里看得见（inbox）。
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { openDb, type Db } from "@pi-lead-child/store";
 import {
@@ -14,9 +15,11 @@ import {
 import { tempDir } from "@pi-lead-child/core/testing";
 import type { AgentRuntime, RuntimeStartRequest } from "@pi-lead-child/runtime";
 import {
-  abandonIsolatedWorkspace, integrateIsolatedWorkspace, provisionWorkspace, sweepWorkspaces, workspaceRootFor,
+  abandonIsolatedWorkspace, cleanupWorkspace, integrateIsolatedWorkspace, provisionWorkspace, releaseWorkspace, sweepWorkspaces,
+  workspaceCleanupChecks, workspaceRootFor, WORKTREE_REMOVE_TIMEOUT_MS,
 } from "../src/coordinator/workspace.js";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { performWorkspaceAction } from "../src/coordinator/workspace-actions.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import { createDispatcher } from "../src/coordinator/dispatch.js";
 import { runItem } from "../src/children/manager.js";
 
@@ -48,7 +51,7 @@ function codingTicket(): number {
 }
 
 function isolatedFor(itemId: number) {
-  return prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  return prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
 }
 
 function commitIn(path: string, file: string, content: string): void {
@@ -130,7 +133,7 @@ describe("the sweep and an isolated worktree of a finished ticket", () => {
     sweepWorkspaces(db, later(0));
     expect(getWorkspace(db, worktree.id)?.state).toBe("pending_integration");
 
-    const chat = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "conversation" }).workspace!;
+    const chat = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "conversation" }).workspace!;
     expect(chat).toMatchObject({ id: worktree.id, state: "idle" });
   });
 
@@ -232,7 +235,7 @@ describe("a worktree whose creation failed half way", () => {
 
   it("is replaced when it is a clean worktree still at its base", () => {
     const { itemId, worktree } = failedWorktree(() => {});
-    const next = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const next = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     expect(next.id).not.toBe(worktree.id);
     expect(next.state).toBe("active");
     expect(getWorkspace(db, worktree.id)?.state).toBe("archived");
@@ -245,14 +248,14 @@ describe("a worktree whose creation failed half way", () => {
       mkdirSync(path);
       writeFileSync(join(path, ".git"), "gitdir: nowhere\n");
     });
-    const next = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const next = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     expect(next.id).not.toBe(worktree.id);
     expect(existsSync(worktree.path)).toBe(false);
   });
 
   it("is kept when it holds work", () => {
     const { itemId, worktree } = failedWorktree((path) => commitIn(path, "work.txt", "work\n"));
-    const next = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const next = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     expect(next.id).toBe(worktree.id);
     expect(readFileSync(join(worktree.path, "work.txt"), "utf8")).toBe("work\n");
   });
@@ -419,5 +422,252 @@ describe("the full persisted flow of a coding ticket", () => {
     expect(existsSync(worktree.path)).toBe(false);
     expect(getItem(db, itemId)?.stage).toBe("done");
     expect(sweepWorkspaces(db, later(30))).toMatchObject({ cleaned: 0, awaitingDecision: 0, failed: [] });
+  });
+});
+
+// #188：放弃或合并时存的快照带上了整个仓库的历史（git bundle … HEAD）。历史超过 25 MB 的仓库存不下快照，
+// 状态停在一半：merge_status 已经写成 abandoned，state 没到 released；合并成功的被记成 conflict。
+describe("a repository whose history is larger than the artifact limit", () => {
+  function bigHistory(): void {
+    // 随机内容压不小：bundle 就是这么大。
+    writeFileSync(join(repo, "blob.bin"), randomBytes(26 * 1024 * 1024));
+    git(repo, "add", "blob.bin");
+    git(repo, "commit", "-qm", "large file");
+  }
+
+  function snapshotArtifactBytes(workspaceId: number): number | null {
+    const row = db.prepare(
+      `SELECT a.byte_length FROM workspace_cleanup_snapshots s JOIN artifacts a ON a.id=s.artifact_id WHERE s.workspace_id=?`,
+    ).get(workspaceId) as { byte_length: number } | undefined;
+    return row?.byte_length ?? null;
+  }
+
+  // 存快照要写进数据目录的 artifacts/。那里是一个普通文件时，快照存不成。
+  function breakArtifactStore(): () => void {
+    const path = join(dir, "artifacts");
+    rmSync(path, { recursive: true, force: true });
+    writeFileSync(path, "not a directory\n");
+    return () => rmSync(path, { force: true });
+  }
+
+  it("abandons the worktree, keeps the branch, and snapshots only the branch's own commits", () => {
+    bigHistory();
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId, "cancelled");
+
+    const result = abandonIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "r", userConfirmation: "不要了" });
+    expect(result).toMatchObject({ branchDeleted: false, workspace: { state: "archived", merge_status: "abandoned" } });
+    expect(git(repo, "show", `${worktree.branch}:feature.txt`)).toBe("feature");
+    expect(snapshotArtifactBytes(worktree.id)).toBeLessThan(100_000);
+    expect(decisionsOf(itemId, "workspace_abandoned")).toHaveLength(1);
+  });
+
+  it("records a merge as merged, not as a conflict", () => {
+    bigHistory();
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId);
+
+    const result = integrateIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "merge it" });
+    expect(result).toMatchObject({ workspace: { state: "archived", merge_status: "merged" } });
+    expect(readFileSync(join(repo, "feature.txt"), "utf8")).toBe("feature\n");
+  });
+
+  it("snapshots a worktree without new commits with no bundle", () => {
+    bigHistory();
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    finish(itemId, "cancelled");
+
+    expect(abandonIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "r" }).workspace.state).toBe("archived");
+    expect(snapshotArtifactBytes(worktree.id)).toBeLessThan(10_000);
+  });
+
+  it("changes neither merge_status nor state when the snapshot cannot be stored, and can be abandoned again", () => {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId, "cancelled");
+    const before = getWorkspace(db, worktree.id)!;
+    const repair = breakArtifactStore();
+
+    expect(() => abandonIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "r", userConfirmation: "不要了" })).toThrow();
+    const after = getWorkspace(db, worktree.id)!;
+    expect({ state: after.state, merge_status: after.merge_status }).toEqual({ state: before.state, merge_status: before.merge_status });
+    expect(db.prepare("SELECT 1 FROM workspace_cleanup_snapshots WHERE workspace_id=?").get(worktree.id)).toBeUndefined();
+
+    repair();
+    const retried = abandonIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "r", userConfirmation: "不要了" });
+    expect(retried.workspace).toMatchObject({ state: "archived", merge_status: "abandoned" });
+  });
+
+  it("reports a merge whose release failed as merged, and the sweep finishes the cleanup", () => {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId);
+    db.prepare("UPDATE workspaces SET merge_status='pending' WHERE id=?").run(worktree.id);
+    db.prepare("UPDATE workspaces SET state='pending_integration' WHERE id=?").run(worktree.id);
+    const repair = breakArtifactStore();
+
+    expect(() => integrateIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "merge it" })).toThrow(/merged into main/);
+    expect(readFileSync(join(repo, "feature.txt"), "utf8")).toBe("feature\n");
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "pending_integration", merge_status: "merged" });
+
+    repair();
+    expect(sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+  });
+});
+
+// #191: git worktree remove of a 1.4 GB worktree ran past git's 10 s timeout and was killed half way.
+// The row stayed failed, and every cleanup after that refused the half-deleted tree as unrecorded changes.
+describe("a worktree whose removal stopped half way", () => {
+  // A git on PATH whose next `worktree remove` deletes these files and fails, like a git killed by the timeout.
+  function interruptNextRemoval(files: string[]): () => void {
+    const realGit = execFileSync("/bin/sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+    const bin = join(dir, "bin");
+    const marker = join(dir, "interrupt-next-removal");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(marker, "");
+    writeFileSync(join(bin, "git"), [
+      "#!/bin/sh",
+      `if [ "$3" = worktree ] && [ "$4" = remove ] && [ -f '${marker}' ]; then`,
+      `  rm -f '${marker}'; for last; do :; done`,
+      ...files.map((file) => `  rm -f "$last/${file}"`),
+      "  echo 'spawnSync git ETIMEDOUT' >&2; exit 1",
+      "fi",
+      `exec '${realGit}' "$@"`,
+    ].join("\n"));
+    chmodSync(join(bin, "git"), 0o755);
+    const path = process.env.PATH;
+    process.env.PATH = `${bin}:${path}`;
+    return () => { process.env.PATH = path; };
+  }
+
+  // The row an older daemon left behind for #130: abandoned and snapshotted, the removal killed after
+  // it deleted some tracked files, the state failed.
+  function abandonedHalfWay() {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId, "cancelled");
+    releaseWorkspace(db, worktree.id, { mergeStatus: "abandoned" });
+    rmSync(join(worktree.path, "source.txt"));
+    db.prepare("UPDATE workspaces SET state='failed' WHERE id=?").run(worktree.id);
+    return worktree;
+  }
+
+  it("gives the removal far more than git's default 10 s", () => {
+    expect(WORKTREE_REMOVE_TIMEOUT_MS).toBeGreaterThanOrEqual(5 * 60_000);
+  });
+
+  for (const [label, files] of [["tracked files", ["source.txt"]], ["the .git file", [".git", "source.txt"]]] as const) {
+    it(`finishes an abandon in the same call when git is killed after it deleted ${label}`, () => {
+      const itemId = codingTicket();
+      const worktree = isolatedFor(itemId);
+      commitIn(worktree.path, "feature.txt", "feature\n");
+      finish(itemId, "cancelled");
+      const restore = interruptNextRemoval([...files]);
+      let result;
+      try {
+        result = abandonIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "r", userConfirmation: "不要了" });
+      } finally {
+        restore();
+      }
+      expect(result.workspace).toMatchObject({ state: "archived", merge_status: "abandoned" });
+      expect(existsSync(worktree.path)).toBe(false);
+      expect(git(repo, "worktree", "list")).not.toContain(worktree.path);
+      // 放弃保留分支：改动还能找回。
+      expect(git(repo, "show", `${worktree.branch}:feature.txt`)).toBe("feature");
+    });
+  }
+
+  it("cleans up on retry a failed abandoned row whose tree is half deleted", () => {
+    const worktree = abandonedHalfWay();
+    expect(workspaceCleanupChecks(db, worktree.id).contentMatchesSnapshot).toBe(true);
+
+    const result = performWorkspaceAction(db, { action: "cleanup", workspaceId: worktree.id });
+    expect(result).toMatchObject({ status: "cleaned", workspace: { state: "archived", merge_status: "abandoned" } });
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(git(repo, "worktree", "list")).not.toContain(worktree.path);
+    expect(git(repo, "show", `${worktree.branch}:feature.txt`)).toBe("feature");
+  });
+
+  it("cleans up a failed abandoned row whose directory someone deleted by hand, and the sweep does not ask to merge it", () => {
+    const first = abandonedHalfWay();
+    git(repo, "worktree", "remove", "--force", first.path);
+    expect(workspaceCleanupChecks(db, first.id).contentMatchesSnapshot).toBe(true);
+    expect(performWorkspaceAction(db, { action: "cleanup", workspaceId: first.id }).workspace.state).toBe("archived");
+
+    const second = abandonedHalfWay();
+    rmSync(second.path, { recursive: true, force: true });
+    expect(sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, awaitingDecision: 0, failed: [] });
+    expect(getWorkspace(db, second.id)).toMatchObject({ state: "archived", merge_status: "abandoned" });
+    expect(git(repo, "branch", "--list", second.branch!)).toContain(second.branch!);
+    expect(inboxOf("workspace_merge_decision")).toHaveLength(0);
+  });
+
+  it("lets the sweep resume a half-deleted failed row", () => {
+    const worktree = abandonedHalfWay();
+    expect(sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, awaitingDecision: 0, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "abandoned" });
+    expect(existsSync(worktree.path)).toBe(false);
+  });
+
+  it("finishes a merge in the same call when git is killed half way", () => {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    finish(itemId);
+    const restore = interruptNextRemoval(["source.txt"]);
+    let result;
+    try {
+      result = integrateIsolatedWorkspace(db, worktree.id, { actor: "lead", reason: "merge it" });
+    } finally {
+      restore();
+    }
+    expect(result.workspace).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(readFileSync(join(repo, "feature.txt"), "utf8")).toBe("feature\n");
+    expect(git(repo, "branch", "--list", worktree.branch!)).toBe("");
+  });
+
+  it("still refuses a released worktree that gained a file nobody recorded", () => {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    finish(itemId);
+    db.prepare("UPDATE workspaces SET merge_status='merged' WHERE id=?").run(worktree.id);
+    releaseWorkspace(db, worktree.id, { mergeStatus: "merged" });
+    rmSync(join(worktree.path, "source.txt"));
+    writeFileSync(join(worktree.path, "late.txt"), "written after the snapshot\n");
+
+    expect(workspaceCleanupChecks(db, worktree.id).contentMatchesSnapshot).toBe(false);
+    expect(() => cleanupWorkspace(db, worktree.id)).toThrow(/unrecorded changes/);
+    expect(existsSync(join(worktree.path, "late.txt"))).toBe(true);
+    // 扫描也不删它。
+    expect(sweepWorkspaces(db, later(30))).toMatchObject({ cleaned: 0 });
+    expect(existsSync(join(worktree.path, "late.txt"))).toBe(true);
+  });
+});
+
+// #191: old code recorded a branch that had fast-forwarded into the user's branch as conflict and left
+// the row idle. The sweep waited for the idle TTL and never finished it.
+describe("a worktree recorded as conflict whose branch is already in the user's branch", () => {
+  it("is recorded as merged and removed by the next sweep", () => {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    git(repo, "merge", "-q", "--ff-only", worktree.branch!);
+    db.prepare("UPDATE workspaces SET merge_status='conflict', state='idle' WHERE id=?").run(worktree.id);
+    finish(itemId);
+
+    expect(sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, awaitingDecision: 0, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(git(repo, "branch", "--list", worktree.branch!)).toBe("");
   });
 });

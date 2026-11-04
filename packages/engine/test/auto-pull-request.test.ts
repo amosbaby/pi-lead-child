@@ -11,7 +11,7 @@ import {
   type Db,
 } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import type { PullRequestRunner } from "../src/coordinator/delivery.js";
 import {
   AUTO_PULL_REQUEST_SINCE_KEY, autoPullRequestPlan, markAutoPullRequestRollout, setAutoPullRequest, syncAutoPullRequests,
@@ -69,7 +69,7 @@ function deliver(itemId: number, deliveredAt: string): number {
 function codingTicket(options: { verification?: "lead_static" | "independent_reviewer" | "user"; deliveredAt?: string } = {}) {
   const itemId = createItem(db, { title: "优化 code review skill", brief: "b", createdBy: "lead", workdir: repo });
   db.prepare("UPDATE items SET verification_policy=? WHERE id=?").run(options.verification ?? "lead_static", itemId);
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   commitIn(workspace.path, "plan.md", "# 方案\n");
   const runId = deliver(itemId, options.deliveredAt ?? "2026-10-26T08:00:00.000Z");
   return { itemId, worktree: workspace.path, branch: workspace.branch!, runId };

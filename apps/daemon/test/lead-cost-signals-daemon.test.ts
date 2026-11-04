@@ -91,6 +91,6 @@ describe("someone waits while Lead works in place", () => {
     const notices = calls.flatMap((call) => call.inputs).filter((input) => input.includes('kind="queue"'));
     expect(notices).toHaveLength(1);
     expect(notices[0]).toContain("Owen");
-    expect(notices[0]).toMatch(/排了 \d+ (秒|分钟)/u);
+    expect(notices[0]).toMatch(/等了 \d+ (秒|分钟)/u);
   }, 30_000);
 });

@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createControlPlaneService, createUserActionService, startPairedServer } from "@pi-lead-child/gateway";
 import { createLeadTools, type LeadDeps } from "@pi-lead-child/lead";
-import { liveChildren, prepareRunWorkspace, type PullRequestRunner } from "@pi-lead-child/engine";
+import { liveChildren, prepareRunWorkspaceNowForTesting, type PullRequestRunner } from "@pi-lead-child/engine";
 import { computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS, type TicketActionId } from "@pi-lead-child/protocol";
 import {
   addAcceptanceCriteria, confirmCriterion, createItem, createLoopbackBinding, createPairing, createRun, createTurn, getItem,
@@ -106,7 +106,7 @@ function deliveredCode(db: Db, dir: string, stage: "review" | "done"): number {
   git(repo, "push", "-q", "origin", "main");
   const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
   transition(db, { itemId, to: "active", actor: "system", reason: "start" });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   mkdirSync(join(workspace.path, "docs"));
   writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n");
   git(workspace.path, "add", "-A");

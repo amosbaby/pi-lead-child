@@ -68,9 +68,9 @@ import {
   abilitiesGrantBound, ATLASSIAN_CONNECTION, HANDBOOK_ABILITIES, HANDBOOK_FALLBACK_ID, HANDBOOK_MODE_LABELS, HANDBOOK_MODE_PHRASES,
   handbookModePhrase, isHandbookMode, situationIntent,
   type HandbookAbility, type HandbookMode, type HandbookSituation, CHANNEL_REACTION_EMOJIS, CHANNEL_REPLY_DECISIONS,
-  CHANNEL_REPLY_DRAFT_KINDS, CHANNEL_LOOKUP_CHECK_STATUSES, CHANNEL_RULE_CHANGE_FLAG, DEFAULT_INTENT_GRANT_BOUNDS, DELEGATION_CATEGORY_LABELS,
+  CHANNEL_REPLY_DRAFT_KINDS, CHANNEL_LOOKUP_CHECK_STATUSES, CHANNEL_RULE_CHANGE_FLAG, DEFAULT_INTENT_GRANT_BOUNDS, channelPolicyLabels,
   channelRuleChangeNotice, isChannelRuleChangeKind, type ChannelRuleChangeKind,
-  GRANT_INTENTS, describeRunGrant, LOOKUP_PLAYBOOK_LABELS, SENDER_TRUST_LABELS, isChannelClosingKind, isChannelIntent,
+  GRANT_INTENTS, describeRunGrant, SENDER_TRUST_LABELS, isChannelClosingKind, isChannelIntent,
   isSenderTrust, NEVER_DELEGATED_TRUST, redactSecretText, strongerDelivery,
   type ChannelCardAction, type ChannelCardDto, type ChannelHandbook, type HandbookRehearsal, type HandbookRehearsalRequest, type ChannelCardState, type ChannelDeliveryMode, type ChannelIntent,
   type ChannelReactionEmoji, type EventDisposition, type SenderTrust, CHANNEL_POLICY_DEFAULTS, CHANNEL_POLICY_REPLAY_HOURS,
@@ -87,7 +87,7 @@ import type { SmartModel, SmartTextComplete } from "../smart-model/types.js";
 import {
   appendEvent, appendEventGuarded, channelAuthorityTable, channelDelegatePolicy, channelHandbook, CHANNEL_HANDBOOK_ORDER_ID, channelDeliveryPolicy, channelPolicy, channelReplyPolicy,
   clipEventText, createChannelLookup, findNoteByTitle, getActiveLookupForCard, getChannelCard, getChannelLane,
-  getChannelLaneById, getChannelLookup, getEvent, getRun, getLatestChannelCard, getLatestLookupForCard, getOpenChannelCard, hasRecentChannelLane, isActiveLookupState,
+  getChannelLaneById, getChannelLookup, getEvent, getLocale, getRun, getLatestChannelCard, getLatestLookupForCard, getOpenChannelCard, hasRecentChannelLane, isActiveLookupState,
   leadDisplayName, listActiveLookups, listChannelCards, listChannelCardsForObject, listDueSnoozedChannelCards,
   listOpenChannelLanes, listRecentChannelLanes, openChannelCard,
   recordChannelLaneMessage, setChannelLaneOrigin, setChannelLaneSummary, setEventDisposition, syncSystemStandingOrders, updateChannelCard,
@@ -100,6 +100,7 @@ import {
   AUTHORITY_ANSWER_WINDOW_MS, AUTHORITY_ORDER, AUTHORITY_REFUSAL_TEXT, AUTHORITY_REVOKE_WINDOW_MS, closingReaction, type AuthorityAction,
 } from "./authority.js";
 import { DELEGATION_GATE_LABELS } from "./delegation-gate.js";
+import { channelHubMessages } from "./hub.messages.js";
 import {
   autoReplyDisclosure, confirmedDraftDisclosure, defaultHandlingVerb, disclosureAssistantName, disclosureOwnerName, handlingNotice,
   isHandlingVerb, ownerReplyDisclosure,
@@ -1255,20 +1256,21 @@ export class ChannelHub {
       }, { at: now });
       const category = refusal ? "refusal" : task ? "agent_task" : answer ? "lead_answer"
         : lookup ? lookup.playbook : card.gate?.category ?? "acknowledgement";
-      const what = refusal ? "问到了涉密信息，用固定的话拒绝" : task ? "子 agent 工单的结果"
-        : answer ? "Lead 写的回复"
-        : lookup ? `代查的结果（${LOOKUP_PLAYBOOK_LABELS[lookup.playbook]}）`
-        : DELEGATION_CATEGORY_LABELS[category as keyof typeof DELEGATION_CATEGORY_LABELS] ?? category;
+      // 「Lead 动态」里给你看的那一句：按你选的语言写，不写内部的词和会过期的撤回期限（2026-11-03 截图）。
+      const locale = getLocale(db);
+      const words = channelHubMessages(locale).autoReply;
+      const labels = channelPolicyLabels(locale);
+      const summary = refusal ? words.refused(card.sender.name)
+        : words.replied(card.sender.name, task ? words.task
+          : answer ? words.answer(leadDisplayName(db))
+          : lookup ? words.lookup(labels.playbook[lookup.playbook])
+          : labels.delegationCategory[category as keyof typeof labels.delegationCategory] ?? category);
       const { event } = appendEvent(db, {
         source: "system", sourceRef: `channel-auto-reply:${adapter.id}:${sent.key}`, kind: CHANNEL_EVENT_KINDS.replyAutoSent,
         entityKey: card.objectKey, correlationId: `channel:${card.objectKey}`, level: "auto",
         payload: {
           channel: adapter.id, cardId: card.id, category, templateId: lookup ? "" : card.draft?.templateId ?? "", text: sent.text,
-          revokeUntil, order,
-          summary: (refusal ? `按授权表代你拒绝了${card.sender.name}（${what}）`
-            : task || answer ? `按授权表代你回复了${card.sender.name}（${what}）`
-            : `按常设指令 ${order.id} v${order.version} 代你回复了${card.sender.name}（${what}）`)
-            + (revokeWindowMs > 0 ? `，${clock(revokeUntil)} 前可以撤回` : ""),
+          revokeUntil, order, summary,
         },
       });
       setEventDisposition(db, event.seq, "auto_handled", { standingOrder: order, cardId: card.id }, now);

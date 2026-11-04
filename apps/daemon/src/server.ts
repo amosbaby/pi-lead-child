@@ -20,6 +20,10 @@ import {
   type LeadCatalogModel,
 } from "@pi-lead-child/lead";
 import { overflowLimits, overflowReached, overflowReminder, queueNotice, queueNoticeMs, waitingText, type WaitingConversation } from "@pi-lead-child/lead";
+import {
+  durationText, firstLine, interruptibleWrite, overflowSecondReminder, RED_LINE_HANDOFF_TOOLS, redLineLimits, redLineMessage,
+  userQueueNoticeMs,
+} from "@pi-lead-child/lead";
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
@@ -49,7 +53,7 @@ import {
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
 import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
-import { LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
+import { isStopCommand, LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerMessage } from "@pi-lead-child/engine";
 import {
   autoReplyDisclosure, disclosureAssistantName, disclosureOwnerName, fairyEyeReply, leadAvatarSlackEmoji, setLeadAvatarFairyEye,
@@ -538,6 +542,8 @@ export interface DaemonOpts {
     channelCards?: LeadDeps["channelCards"];
     // Lead 的 get_environment 里 daemon 提供的部分（工单 13；2026-10-30 起不进系统提示词）：决策模型的设置和记忆服务的状态。
     environment?: () => LeadDaemonEnvironment;
+    // 红线以后这一轮能用的工具（lead 的 red-line.ts）；没有限制时为 null。
+    toolGate?: () => ReadonlySet<string> | null;
   }) => Promise<LeadEngineFactoryResult>;
   // 托管 Hindsight 记忆服务（memory-controller.ts）。main.ts 传 true。缺省不托管：记忆只用 notes 的全文检索，
   // /v1/memory 回 503。测试传一组替身（launchd、下载、网络、Keychain），走真的设置、确认和收件箱。
@@ -753,6 +759,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let draining = false;
   // 排空到时，daemon 中断了正在跑的这一轮：这一轮按「被重启打断」收尾，不按模型失败。
   let restartAbort = false;
+  // 用户发了 /stop（answerStopCommand）：daemon 中断了正在跑的这一轮，这一轮按「用户停下」收尾，不按失败。
+  let userStopRequested = false;
+  // 上一轮被 /stop 停下了：下一轮开头告诉 Lead 一次，免得它自己接着做那一轮没做完的事。
+  let stopNotice: string | null = null;
   // 正在跑的这一轮结束（finally 写完记录）时 resolve。排空据此等它。
   let currentTurn: Promise<void> | null = null;
   // 这一轮从什么时候开始跑，Lead 最后一次有动静（会话发来任何事件）是什么时候：判断 Lead 是不是卡死了。
@@ -798,6 +808,25 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 超预算转派（lead-tools-and-routing spec D7，lead 的 overflow.ts）：这一轮顶层的工具调用次数，和这一轮有没有提醒过。
   let runToolCalls = 0;
   let overflowReminded = false;
+  // 正在跑的这一轮是不是用户本人的消息开的（不是系统事件、外部消息、到点的跟进叫醒的）：user-placement.ts 据此决定
+  // 用户新发的消息插不插进来。
+  let ownUserRun = false;
+  // 两盏灯（lead 的 overflow.ts 和 red-line.ts，用户 2026-11-03）：按时间算的预算从什么时候开始（排着的消息在这一次运行里
+  // 开始答时重新算）；过了红线、没有人在等时有没有再提醒过；红线走到哪一步：
+  //   stopping：等正在跑的写操作做完，然后中断；aborting：已经中断，这一次 prompt 返回后送红线消息；
+  //   handoff：Lead 在交接，只能用交接的工具；closing：交接超时，又中断了一次；done：交接完了。
+  let budgetStartedAt: number | null = null;
+  let secondReminded = false;
+  let redLine: {
+    phase: "stopping" | "aborting" | "handoff" | "closing" | "done";
+    waiting: WaitingConversation[];
+    writeDeadline: number;
+    waitingFor: string | null;
+  } | null = null;
+  let handoffTimer: NodeJS.Timeout | null = null;
+  const RED_LINE_TOOLS: ReadonlySet<string> = new Set(RED_LINE_HANDOFF_TOOLS);
+  // 正在跑的工具调用（顶层的和 codemode 里嵌套的）：调用 id → 名字和参数。红线停下这一轮以前，正在跑的写操作先做完。
+  const toolsInFlight = new Map<string, { name: string; args: unknown }>();
   // 这一轮有没有插过「有人在排队」的说明（noticeQueue，lead-self-routing spec C）。
   let queueNoticed = false;
   let publishControlEvent: (args: Parameters<typeof publishGatewayEvent>[1]) => ReturnType<typeof publishGatewayEvent> =
@@ -1270,6 +1299,36 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
     });
     return { mode: "started", turnId: turn.id };
+  }
+
+  // /stop（用户 2026-11-03）：停下 Lead 正在进行的一轮。和 /fairyeye 一样由 daemon 自己答：Lead 在等一条很久的命令时，
+  // 交给它的话要等命令结束才看得到。pi 的 abort 中断模型调用和正在跑的工具（bash 结束整个进程组）；这一轮按完成收尾，
+  // 回答末尾加一句「已用 /stop 停下」（runTurnNow），不给失败卡片，也不自动重试。
+  function answerStopCommand(
+    command: { message: string; bindingId: number; bindingKind: string; commandId: string },
+  ): { mode: "started"; turnId: string } {
+    const turn = createTurn(db, {
+      originBindingId: command.bindingId, originKind: `paired:${command.bindingKind}`, userText: command.message, state: "streaming",
+      // 命令不是对 Lead 说的话：不记 user.message 事件，Lead 在等用户回话时不会被它叫醒。
+      userMessageEvent: false,
+    });
+    const entry: ActiveChannelTurn = { turn, assistantText: "", commandId: command.commandId };
+    queueMicrotask(() => {
+      publishTurnStarted(entry, "started");
+      const m = serverMessages(getLocale(db)).stop;
+      publishTurnText(entry, stopLeadTurn() ? m.stopped(leadDisplayName(db)) : m.idle(leadDisplayName(db)));
+      sealChannelTurn(entry);
+    });
+    return { mode: "started", turnId: turn.id };
+  }
+
+  // 中断正在跑的这一轮。Lead 空着（或者会话不能中断）时返回 false。
+  function stopLeadTurn(): boolean {
+    if (!busy || !currentTurn || !session.abort) return false;
+    userStopRequested = true;
+    log("/stop: aborting the running Lead turn");
+    Promise.resolve(session.abort()).catch((error: any) => log(`/stop: abort failed: ${error?.message ?? String(error)}`));
+    return true;
   }
 
   // 用户的一条消息没有自己的回答，Lead 把它和后面那一条一起答了（工单 04 第 7 项）：结局是 done，不是失败。
@@ -1889,6 +1948,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       startQueuedTurn(db, entry.turn.id);
       publishTurnStarted(entry, "started", { placement: "delivered" });
       noteUserTurn(entry.turn.id);
+      restartLeadBudget();
+    } else if (redLinePhase() === "done") {
+      // 交接完以后插进来的话是新的一件事：两盏灯重新算。
+      restartLeadBudget();
     }
     handOverTo(entry);
   }
@@ -1985,8 +2048,17 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     );
   }
 
-  // 正在跑的这一轮带着外部内容时，用户的消息等它结束后单独开一轮（lead-tools-and-routing spec D16）：
-  // 存进 carryOverTurns，这一轮结束时 dispatchLeadWork 先开它。界面显示「排队」。
+  // user-placement.ts 要的、正在跑的这一轮的事实。
+  function placementFacts() {
+    return {
+      busy, external: runOrigin.external, ownUserTurn: ownUserRun,
+      externalMessage: (runOrigin.externalBy ?? []).some((source) => source.via === "message"),
+    };
+  }
+
+  // 正在跑的这一轮带着外部内容（不是用户本人开的，或者插进了外部消息的原文）时，用户的消息等它结束后单独开一轮
+  // （lead-tools-and-routing spec D16，user-placement.ts）：存进 carryOverTurns，这一轮结束时 dispatchLeadWork 先开它。
+  // 界面显示「排队」。
   function holdForOwnTurn(prompt: string, entry: ActiveChannelTurn): void {
     publishTurnStarted(entry, "queued", { placement: "queued" });
     carryOverTurns.push({ prompt, entry });
@@ -2039,7 +2111,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   function heldFollowUpReason(): string {
     // 快照里的说明，界面显示：按读的时候用户选的语言。
     const m = queueMessages();
-    return runOrigin.external ? m.heldExternal : m.heldNextTurn;
+    return userMessagePlacement({ ...placementFacts(), busy: true, followUp: false }) === "own_turn_after"
+      ? m.heldExternal : m.heldNextTurn;
   }
 
   function followUpSnapshot(): FollowUpEntry[] {
@@ -2683,6 +2756,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // lead 往往先动工具再说话，那时出水口还没改接过来。
     currentTurnId: () => pendingSteerSink?.turn.id ?? activeChannelTurn?.turn.id ?? null,
     turnOrigin: () => runOrigin,
+    toolGate: () => (redLine?.phase === "handoff" ? RED_LINE_TOOLS : null),
     cancelBudgetTurnId: () => cancelBudgetTurnId,
     // set_lead_avatar 的结果按它算 Slack 署名 emoji 的生效值。
     configSlackEmoji,
@@ -3165,6 +3239,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       routeAssistantText(delta);
     }
     if (event.type === "message_update") streamRenderUi(event.assistantMessageEvent);
+    if (event.type === "tool_execution_start") toolsInFlight.set(String(event.toolCallId), { name: String(event.toolName), args: event.args });
+    if (event.type === "tool_execution_end") toolsInFlight.delete(String(event.toolCallId));
     if (event.type === "tool_execution_start") {
       // 输出算外部内容的工具（turn-origin.ts 的清单，没声明的也算）：这一轮算读过外部内容，记下是哪个工具。
       if (isExternalTextTool(event.toolName)) runOrigin = withExternalContent(runOrigin, { via: "tool", tool: event.toolName });
@@ -3201,7 +3277,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 改日程的 Lead 工具自己发刷新事件（经过操作层的由操作层发），这里不再按工具名另发一份（ui-action-parity P04）。
     if (event.type === "message_end") {
       if (event.message?.role === "assistant") {
-        if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
+        if (event.message.stopReason === "aborted" && userStopRequested) {
+          // 用户用 /stop 停下的：不是错误，runTurnNow 按停下收尾。
+          log("lead reply stopped by /stop");
+        } else if (event.message.stopReason === "aborted" && (redLinePhase() === "aborting" || redLinePhase() === "closing")) {
+          // 红线停下的（lead 的 red-line.ts）：不是失败，这一轮接着交接或者就此结束。
+          log("lead red line: the running reply was stopped");
+        } else if (event.message.stopReason === "error" || event.message.stopReason === "aborted") {
           const rawError = String(
             event.message.errorMessage
               || (event.message.stopReason === "aborted"
@@ -3229,6 +3311,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           // 界面标记从「已插入」改为「下一轮回答」（spec D6）。
           const calledTools = Array.isArray(event.message.content)
             && event.message.content.some((part: any) => part?.type === "toolCall");
+          // 红线以后 Lead 交接完了（这一段最后的回答）：工具限制解除，排着的消息照常答。
+          if (!calledTools && redLinePhase() === "handoff") {
+            redLine!.phase = "done";
+            log("lead red line: hand-off done");
+          }
           if (!calledTools && inputDeliveryEvents) {
             for (const input of queuedInputs) {
               if (input.kind !== "steer" || input.nextTurn) continue;
@@ -3761,6 +3848,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     runToolCalls = 0;
     overflowReminded = false;
     queueNoticed = false;
+    ownUserRun = Boolean(channelTurn) && !options.system && !options.aish;
+    budgetStartedAt = turnStartedAt;
+    secondReminded = false;
+    redLine = null;
+    toolsInFlight.clear();
     let succeeded = false;
     let offline = false;
     // 这一轮被停机前的排空中断了（restartAbort）。
@@ -3808,6 +3900,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       let coreBlock = "";
       const capabilityBlock = capabilityNotice ? leadSystemEvent("system", capabilityNotice) : "";
       capabilityNotice = null;
+      const stopBlock = stopNotice ? leadSystemEvent("system", stopNotice) : "";
+      stopNotice = null;
       if (coreMemoryDirty) {
         const refresh = coreMemoryRefreshPrefix(db);
         coreBlock = refresh ? leadSystemEvent("core_memory", refresh) : "";
@@ -3819,22 +3913,40 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 当前局面（spec D7）放在这一轮输入的开头，不放进系统提示（系统提示一变，整段对话的提示缓存就失效了）。
       // 整理笔记是内部回合，不给：积压的事等下一轮普通的 Lead 回合。
       const situation = options.system === SYSTEM_TURN_ORIGINS.precipitate ? "" : situationBlock();
-      const full = [clock, presence, situation, capabilityBlock, coreBlock, delivered?.text ?? "", body].filter(Boolean).join("\n\n");
+      const full = [clock, presence, situation, capabilityBlock, stopBlock, coreBlock, delivered?.text ?? "", body].filter(Boolean).join("\n\n");
       // 上一次自动压缩失败了：先压缩，再调模型（recoverLeadContext）。放在取事件之后：失败时这一轮带着事件失败，
       // 游标不动，按退避再叫醒（leadWakeRetry），不会马上又开一轮、又压缩一次。
       await recoverLeadContext();
       // 用户这一轮带的图片（新的一轮、转到下一轮、自动重试、重启后再答都走这里）。
       const images = channelTurn ? leadTurnImages(channelTurn.turn.id) : [];
-      if (images.length) await session.prompt(full, { images });
-      else await session.prompt(full);
+      try {
+        // /stop 在这一轮调模型以前就到了（例如在等换模型、等压缩）：不再调模型。
+        if (!userStopRequested) {
+          if (images.length) await session.prompt(full, { images });
+          else await session.prompt(full);
+        }
+        // 红线停下了这一轮（lead 的 red-line.ts）：在同一轮里马上叫 Lead 交接。用户已经用 /stop 停下时不交接。
+        if (!userStopRequested) await continueAfterRedLine();
+      } catch (error) {
+        // 用户用 /stop 停下时，pi 也可能以错误结束这次调用：一样按停下收尾。
+        if (!userStopRequested) throw error;
+      }
       // 排空中断了这一轮：pi 不一定发出 aborted 的 message_end（例如中断时工具正在执行），按被打断收尾。
       if (restartAbort) throw new Error(LEAD_RESTART_INTERRUPTED_ERROR);
-      if (activeTurnError) throw new Error(activeTurnError);
+      if (activeTurnError && !userStopRequested) throw new Error(activeTurnError);
       // 这次运行结束时还在 pi 队列里的输入：交出去时 pi 已经过了最后一次取队列。用户的消息转为下一轮的输入，
       // 插进来的系统事件不算交给了 Lead（工单 04）。
       takeLeftoverInputs();
       // 系统回合说了要告诉用户的话（或者改了外部状态）才落成一轮；什么都没有就不留痕迹。
       settleSystemTurnBuffer();
+      if (userStopRequested) {
+        // 用户用 /stop 停下了这一轮：回答停在哪里，就在那里加一句「已用 /stop 停下」，这一轮按完成收尾。
+        // 交给这一轮的事件算处理过了（游标前进）：用户叫停了，不再自动做一遍。下一轮开头告诉 Lead 一次。
+        const stopped = activeChannelTurn ?? channelTurn;
+        if (stopped) publishTurnText(stopped, `${stopped.assistantText.trim() ? "\n\n" : ""}${serverMessages(getLocale(db)).stop.note}`);
+        stopNotice = "用户用 /stop 停下了你的上一轮：那一轮里正在跑的模型调用和工具都中断了。"
+          + "那一轮没做完的事不要自己接着做；用户要你接着做时再做。";
+      }
       // 收口的是**当前**出水口，未必是本回合开的那条：插话把出水口改接走之后，原来那条
       // 在交接当场就已经收口过了，这里结算的是最后接水的那一条。
       // （出水口也可能是插进一条无轮次回合里的 chat.v2 插话，此时 channelTurn 缺席。）
@@ -3859,7 +3971,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         }
       }
       if (!emptyUserTurn) {
-        modelFailover?.turnSucceeded();
+        // 用户停下的一轮说明不了模型好不好。
+        if (!userStopRequested) modelFailover?.turnSucceeded();
         succeeded = true;
         // 模型能用了：认证失败排的长退避作废。
         if (leadWakeRetry?.setup) leadWakeRetry = null;
@@ -3992,6 +4105,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       turnStartedAt = null;
       leadSilentSince = null;
       runningSystemOrigin = null;
+      ownUserRun = false;
+      budgetStartedAt = null;
+      secondReminded = false;
+      redLine = null;
+      if (handoffTimer) clearNodeTimeout(handoffTimer);
+      handoffTimer = null;
+      toolsInFlight.clear();
       // 首次启动引导（spec R2）：用户自己的一轮（不是系统、外部消息、到点的跟进叫醒的）成功结束时，看要不要发一张建议卡。
       const userTurn = Boolean(channelTurn) && !options.system && !runOrigin.external && runOrigin.timer === null;
       void setupTracker?.afterTurn({ userTurn, succeeded })
@@ -4006,6 +4126,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       activeTurnError = null;
       aishStream = null;
       restartAbort = false;
+      userStopRequested = false;
       currentTurn = null;
       settleTurn();
       if (stream) await stream.end().catch(() => {});
@@ -4589,6 +4710,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pollStep("setup-status", () => { void setupTracker?.refreshThrottled(new Date(pollNow)); });
     pollStep("lead-activity", () => syncLeadActivity?.("poll"));
     pollStep("queue-notice", () => noticeQueue(pollNow));
+    pollStep("lead-budget", () => checkLeadBudget(pollNow));
     // 用户通知（spec §4）：lead 表达，系统保证。这里只把 immediate 通知交给 lead 去播报，
     // 播报成功才标 delivered_via='lead'。lead 没播（挂了、卡住、判断失误）就一直停在
     // pending，由 scheduler 第 4 步在 PLC_NOTIFY_FALLBACK_MS 之后兜底直推并标 'fallback'。
@@ -4817,39 +4939,173 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     return Number.isSafeInteger(inboxId) ? inboxId : null;
   }
 
-  // 超预算转派（lead-tools-and-routing spec D7）：就地做的一轮，顶层的工具调用次数或时长超过阈值时，插一条提醒，
-  // 请 Lead 把剩下的交给轻子 agent。每一轮只提醒一次；排空时不插。codemode 脚本里的嵌套调用不算次数。
+  // 超预算转派（lead-tools-and-routing spec D7）：就地做的一轮，顶层的工具调用次数或时长超过阈值时，插一条提醒（黄灯），
+  // 请 Lead 把剩下的交给轻子 agent，或者先回用户一句还要多久。每一轮只提醒一次；排空时不插。codemode 脚本里的嵌套调用不算次数。
   function remindOnOverflow(): void {
     runToolCalls += 1;
-    if (overflowReminded || draining || turnStartedAt === null) return;
-    const state = { toolCalls: runToolCalls, startedAt: turnStartedAt };
-    const now = Date.now();
-    const reason = overflowReached(state, now, overflowLimits());
-    if (!reason) return;
-    overflowReminded = true;
-    log(`lead overflow: ${reason} (${runToolCalls} tool calls), reminding Lead to hand the rest to a sub-agent`);
-    const usage = currentContextUsage();
-    const extra = { context: usage ? contextUsageLine(usage) : null, waiting: waitingText(waitingConversations(now)) };
-    session.steer(overflowReminder(state, now, reason, extra)).catch((error: any) => {
-      log(`overflow reminder failed: ${error?.message ?? String(error)}`);
+    checkLeadBudget(Date.now());
+  }
+
+  // 两盏灯（lead 的 overflow.ts、red-line.ts，用户 2026-11-03）。工具开始时和每次轮询时看一次：轮询不等工具，
+  // Lead 在写一段长回答、或者一个工具跑很久时也准时。
+  //   · 黄灯（缺省 2 分钟或 10 次工具调用）：提醒一次；
+  //   · 红灯（缺省 2 分半）：有人在等（用户或外部的人，系统事件不算）时停下这一轮，叫 Lead 交接；没有人在等时再提醒一次，
+  //     之后有人开始等时照样停下。
+  function checkLeadBudget(now: number): void {
+    if (draining || !busy || budgetStartedAt === null || redLine) return;
+    // 正在压缩上下文：不停下（中断会把压缩一起打断，上下文就清不出空间）。压缩做完以后的这一次检查照常。
+    if (compactionTimer !== null || recoveringCompaction) return;
+    const state = { toolCalls: runToolCalls, startedAt: budgetStartedAt };
+    const limits = redLineLimits();
+    if (!overflowReminded) {
+      const reason = overflowReached(state, now, overflowLimits());
+      if (reason) {
+        overflowReminded = true;
+        log(`lead overflow: ${reason} (${runToolCalls} tool calls), reminding Lead to hand the rest to a sub-agent`);
+        const usage = currentContextUsage();
+        const extra = {
+          context: usage ? contextUsageLine(usage) : null, waiting: waitingText(waitingConversations(now)),
+          redLine: durationText(limits.ms),
+        };
+        steerNotice(overflowReminder(state, now, reason, extra), "overflow reminder");
+      }
+    }
+    const elapsed = now - budgetStartedAt;
+    if (elapsed < limits.ms) return;
+    const waiting = waitingConversations(now);
+    if (!waiting.length) {
+      if (secondReminded) return;
+      secondReminded = true;
+      log(`lead red line: ${Math.round(elapsed / 1_000)}s and nobody is waiting; reminding Lead again`);
+      const usage = currentContextUsage();
+      steerNotice(overflowSecondReminder(elapsed, { context: usage ? contextUsageLine(usage) : null }), "second overflow reminder");
+      return;
+    }
+    redLine = { phase: "stopping", waiting, writeDeadline: now + limits.writeGraceMs, waitingFor: null };
+    log(`lead red line: ${Math.round(elapsed / 1_000)}s with ${waiting.length} conversation(s) waiting; stopping the turn for a hand-off`);
+    stopForRedLine();
+  }
+
+  function steerNotice(text: string, what: string): void {
+    session.steer(text).catch((error: any) => {
+      log(`${what} failed: ${error?.message ?? String(error)}`);
     });
   }
 
-  // 排着队的外部消息，按对话：谁、在哪、几条、排了多久（lead-input.ts 的 queue，和状态栏同一份）。
+  // 红线停下这一轮：正在跑的写操作先做完（最多等 PLC_LEAD_WRITE_GRACE_MS），然后中断。中断以后这一次 prompt 返回，
+  // continueAfterRedLine 在同一轮里送红线消息。
+  function stopForRedLine(): void {
+    const line = redLine;
+    if (!line || line.phase !== "stopping") return;
+    const write = writeInFlight();
+    if (write && Date.now() < line.writeDeadline) {
+      if (line.waitingFor !== write) {
+        line.waitingFor = write;
+        log(`lead red line: waiting for ${write} to finish before stopping the turn`);
+      }
+      setNodeTimeout(stopForRedLine, 250).unref();
+      return;
+    }
+    if (write) log(`lead red line: ${write} still runs after the grace period; stopping the turn anyway`);
+    if (!session.abort) {
+      // 会话不能中断（老的会话端口）：把红线消息插进这一轮，照样只能交接。
+      line.phase = "handoff";
+      steerNotice(redLineMessage(Date.now() - (budgetStartedAt ?? Date.now()), redLineWaiting()), "red line message");
+      return;
+    }
+    line.phase = "aborting";
+    Promise.resolve(session.abort()).catch((error: any) => log(`lead red line: abort failed: ${error?.message ?? String(error)}`));
+  }
+
+  // 停下这一轮会把它做到一半的写操作（lead 的 red-line.ts 的 interruptibleWrite）：它的名字，没有时为 null。
+  function writeInFlight(): string | null {
+    for (const call of toolsInFlight.values()) {
+      if (interruptibleWrite(call.name, call.args, (key, tool) => connections.isReadOnlyTool(key, tool))) return call.name;
+    }
+    return null;
+  }
+
+  // 红线消息里写的在等的人：送的时候重新算（这期间可能又来了人）；都已经送到时用停下时的那一份。
+  function redLineWaiting(): WaitingConversation[] {
+    const waiting = waitingConversations(Date.now());
+    return waiting.length ? waiting : redLine?.waiting ?? [];
+  }
+
+  function redLinePhase(): NonNullable<typeof redLine>["phase"] | null {
+    return redLine?.phase ?? null;
+  }
+
+  // 红线中断以后，这一次 prompt 返回了：在同一轮里马上给 Lead 红线消息。pi 先送这条，再送排着的插话；排队的消息
+  // 等 Lead 交接完（这一段最后的回答）才送，那时工具限制已经解除。交接超过 PLC_LEAD_HANDOFF_MS 时再中断一次，这一轮结束。
+  async function continueAfterRedLine(): Promise<void> {
+    if (redLinePhase() !== "aborting" || restartAbort) return;
+    activeTurnError = null;
+    redLine!.phase = "handoff";
+    const elapsed = Date.now() - (budgetStartedAt ?? Date.now());
+    const { handoffMs } = redLineLimits();
+    log(`lead red line: turn stopped after ${Math.round(elapsed / 1_000)}s; asking Lead to hand off`);
+    handoffTimer = setNodeTimeout(() => {
+      handoffTimer = null;
+      if (redLinePhase() !== "handoff") return;
+      redLine!.phase = "closing";
+      log(`lead red line: the hand-off took over ${Math.round(handoffMs / 1_000)}s; ending the turn`);
+      Promise.resolve(session.abort?.()).catch((error: any) => log(`lead red line: abort failed: ${error?.message ?? String(error)}`));
+    }, handoffMs);
+    handoffTimer.unref();
+    try {
+      await session.prompt(redLineMessage(elapsed, redLineWaiting()));
+    } finally {
+      if (handoffTimer) clearNodeTimeout(handoffTimer);
+      handoffTimer = null;
+    }
+    if (redLinePhase() === "closing") activeTurnError = null;
+    if (redLine) redLine.phase = "done";
+  }
+
+  // 排着的消息在这一次运行里开始答（pi 的 followUp）：那是用户新的一件事，两盏灯重新算。
+  function restartLeadBudget(): void {
+    if (redLine && redLine.phase !== "done") return;
+    budgetStartedAt = Date.now();
+    runToolCalls = 0;
+    overflowReminded = false;
+    secondReminded = false;
+    redLine = null;
+  }
+
+  // 在等 Lead 的人，按对话：谁、在哪、几条、等了多久。外部的人来自 lead-input.ts 的 queue（和状态栏同一份）。
+  // 用户本人（2026-11-03 以前不算，Lead 不知道用户在等）：在这一轮里排着的、插进来还没送到的、送到了 Lead 还没回的，
+  // 带每条的第一句；等这一轮结束后单独开一轮的（D16）只算条数，原文不放进这一轮。
   function waitingConversations(now: number): WaitingConversation[] {
-    return leadInput.queue().map((entry) => ({
+    const people = leadInput.queue().map((entry): WaitingConversation => ({
       who: entry.senders.join("、") || entry.conversation, conversation: entry.conversation, count: entry.count,
       waitedMs: Math.max(0, now - Date.parse(entry.firstAt)),
     }));
+    const seen = new Set<string>();
+    const fresh = (entries: ActiveChannelTurn[]) => entries.filter((entry) => {
+      if (seen.has(entry.turn.id)) return false;
+      seen.add(entry.turn.id);
+      return true;
+    });
+    const unanswered = activeChannelTurn?.placement === "steer" && !activeChannelTurn.assistantText.trim() ? [activeChannelTurn] : [];
+    const inRun = fresh([...unanswered, ...queuedInputs.map((input) => input.entry)]);
+    const held = fresh(carryOverTurns.map((carried) => carried.entry));
+    const all = [...inRun, ...held];
+    if (!all.length) return people;
+    const since = Math.min(...all.map((entry) => Date.parse(entry.turn.created_at)).filter(Number.isFinite));
+    return [{
+      who: "用户", conversation: "和你的对话", count: all.length, waitedMs: Math.max(0, now - since), user: true,
+      ...(inRun.length ? { firstLines: inRun.map((entry) => firstLine(entry.turn.user_text)) } : {}),
+    }, ...people];
   }
 
   // 代价信号（lead-self-routing spec C 第 3 条）：Lead 在一轮里时，一条外部消息排队超过 PLC_LEAD_QUEUE_NOTICE_MS（缺省 5 分钟），
   // 插一条说明，告诉它谁在等、等了多久。同一轮只插一次；是信息，不停下这一轮。2026-10-28：Lead 在主会话里发评审时，
   // 两条 Slack 消息排着队，它不知道。
   function noticeQueue(now: number): void {
-    if (queueNoticed || draining || !busy || turnStartedAt === null) return;
+    if (queueNoticed || draining || !busy || turnStartedAt === null || redLine) return;
     const threshold = queueNoticeMs();
-    const waiting = waitingConversations(now).filter((entry) => entry.waitedMs >= threshold);
+    const userThreshold = userQueueNoticeMs();
+    const waiting = waitingConversations(now).filter((entry) => entry.waitedMs >= (entry.user ? userThreshold : threshold));
     if (!waiting.length) return;
     queueNoticed = true;
     log(`lead queue: ${waiting.length} conversation(s) waited over ${Math.round(threshold / 1_000)}s, telling Lead in the running turn`);
@@ -5126,6 +5382,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // daemon 自己答，不交给 Lead、不调模型，Lead 忙着、正在停机时也马上答。这是打开矢量 FairyEye 的唯一入口。
     const fairyEye = command.itemId === undefined && !command.images?.length ? parseFairyEyeCommand(command.message) : null;
     if (fairyEye) return answerFairyEyeCommand(command, fairyEye === "on");
+    // /stop：只认 Lead 的会话里、不带图片、整条消息只有这条命令。工单对话里的话照常交给工单的 agent。
+    if (command.itemId === undefined && !command.images?.length && isStopCommand(command.message)) return answerStopCommand(command);
     const item = command.itemId === undefined ? undefined : getItem(db, command.itemId);
     if (command.itemId !== undefined && !item) {
       throw new PairedCommandError("not_found", `item #${command.itemId} not found`);
@@ -5166,7 +5424,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const startOwnTurn = () => {
       void runTurn(prompt, { channelTurn: { turn, assistantText: "", commandId: command.commandId } });
     };
-    if (userMessagePlacement({ busy, external: runOrigin.external, followUp: command.mode === "followUp" }) === "own_turn_after") {
+    if (userMessagePlacement({ ...placementFacts(), followUp: command.mode === "followUp" }) === "own_turn_after") {
       // 这一轮带着外部内容（lead-tools-and-routing spec D16，user-placement.ts）：不插进去，等它结束后开一轮只属于用户的。
       holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId });
       return { mode: "queued", turnId: turn.id };
@@ -5457,7 +5715,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       holdTurnForRestart({ turn, assistantText: "" });
       return true;
     }
-    if (userMessagePlacement({ busy, external: runOrigin.external, followUp: false }) === "own_turn_after") {
+    if (userMessagePlacement({ ...placementFacts(), followUp: false }) === "own_turn_after") {
       // 这一轮带着外部内容（lead-tools-and-routing spec D16）：等它结束后开一轮只属于用户的。
       const turn = createTurn(db, { originKind: steerOrigin.originKind, userText: steerOrigin.userText, state: "queued" });
       userTurnPrompts.set(turn.id, message);

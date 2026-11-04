@@ -159,9 +159,11 @@ export const OWNER_ACTIONS: readonly OwnerActionDefinition[] = [
   },
   {
     // 带清单的子 agent 写外部服务（例如在 PR 上发评论、approve）。没有路由：它不是用户点的，而是 Lead 派的工单按清单做的。
+    // 撤不回（2026-11-03）：只有别人看得到的写操作才记成主人操作（daemon 的 agent-writes.ts），这时它已经在外部服务上了，
+    // 撤销只能回一个链接（网关的 revertAgentWrite）。会话卡因此不给「撤销」，浮层里写去哪里改。
     id: "connection.agent_write", scope: "tickets:create",
     routes: [], byAgent: true,
-    undo: "conditional",
+    undo: "none",
   },
   {
     id: "workspace.release", scope: "tickets:create",
@@ -227,9 +229,16 @@ export function ownerActionLabel(id: OwnerActionId, locale: Locale, leadName: st
   return ownerActionText(ownerActionMessages(locale).actions[id].label, leadName);
 }
 
-/** 「不是我」时怎么撤销、为什么不能撤销（按 locale 的语言），{lead} 已经换成 Lead 的名字。 */
-export function ownerActionUndoNote(id: OwnerActionId, locale: Locale, leadName: string = DEFAULT_LEAD_NAME): string {
-  return ownerActionText(ownerActionMessages(locale).actions[id].undoNote, leadName);
+/**
+ * 「不是我」时怎么撤销、为什么不能撤销（按 locale 的语言），{lead} 已经换成 Lead 的名字。
+ * link：外部服务上看得到它的地址（子 agent 的写操作），给出时接在后面，告诉用户去哪里改。
+ */
+export function ownerActionUndoNote(
+  id: OwnerActionId, locale: Locale, leadName: string = DEFAULT_LEAD_NAME, link: string | null = null,
+): string {
+  const m = ownerActionMessages(locale);
+  const note = ownerActionText(m.actions[id].undoNote, leadName);
+  return link ? m.undoNoteWithLink(note, link) : note;
 }
 
 // 工单动作（POST /v1/tickets/:id/:action，USER_ITEM_ACTION_IDS）里哪些算高风险。每个动作都要在这里写明，

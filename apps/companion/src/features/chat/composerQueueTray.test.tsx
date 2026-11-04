@@ -4,7 +4,7 @@
 // daemon 支持时，发送前不再选「插话/排队」，Lead 忙时发出的话一律先排队。
 import {
   CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_PLACEMENT_CAPABILITY,
-  type ConversationTurn, type LeadQueue, type LeadStatus, type Overview,
+  type ConversationTurn, type LeadQueue, type LeadStatus, type Overview, type UiActionView,
 } from '@pi-lead-child/protocol';
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -57,9 +57,11 @@ const queue: LeadQueue = {
   }],
 };
 
-function setup(turns: ConversationTurn[], options: { capabilities?: string[]; leadQueue?: LeadQueue | null } = {}) {
+function setup(turns: ConversationTurn[], options: {
+  capabilities?: string[]; leadQueue?: LeadQueue | null; client?: Partial<CompanionRuntimeDependencies['client']>;
+} = {}) {
   const runtime = createCompanionStateRuntime({
-    client: {} as CompanionRuntimeDependencies['client'],
+    client: (options.client ?? {}) as CompanionRuntimeDependencies['client'],
     credentials: {} as CompanionRuntimeDependencies['credentials'],
     scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
   });
@@ -115,6 +117,40 @@ describe('the queue tray above the composer', () => {
   it('sends Steer and × for that follow-up through the runtime', () => {
     const runtime = setup([running, first, second]);
     const action = vi.spyOn(runtime, 'followUpAction').mockResolvedValue();
+    fireEvent.click(screen.getByTestId('queue-follow-up-turn-q2-steer'));
+    expect(action).toHaveBeenCalledWith('steer', 'turn-q2');
+  });
+
+  // 2026-11-03 截图：这一轮读过外部内容，排着的追问只能单独开一轮。以前 Steer 照样能点，点了才报红字
+  // 「Did not complete: …」，和气泡下面的「In queue」互相矛盾。现在先问操作层（P5.8），不能做就停用并写明原因。
+  it('disables Steer and says why when the follow-up must wait for its own turn', async () => {
+    const reason = 'This turn read external content, so this message gets its own turn.';
+    const listUiActions = vi.fn(async (type: string, id: string | number): Promise<UiActionView[]> => [{
+      target: { type, id: String(id) }, id: 'steer', label: '插进这一轮', permission: 'user_only', external: false,
+      irreversible: false, where: '', confirm: null, available: false, reason,
+    }]);
+    const runtime = setup([running, first, second], { client: { listUiActions } });
+    const action = vi.spyOn(runtime, 'followUpAction').mockResolvedValue();
+    expect(await screen.findByText(reason)).toBeTruthy();
+    expect(listUiActions).toHaveBeenCalledWith('follow_up', 'turn-q2');
+    const steer = screen.getByTestId('queue-follow-up-turn-q2-steer');
+    expect(steer.getAttribute('aria-disabled')).toBe('true');
+    fireEvent.click(steer);
+    expect(action).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Did not complete/)).toBeNull();
+    // × 照常能用：不再发给 Lead 不受这一轮的限制。
+    fireEvent.click(screen.getByTestId('queue-follow-up-turn-q2-cancel'));
+    expect(action).toHaveBeenCalledWith('cancel', 'turn-q2');
+  });
+
+  it('keeps Steer when the operation says it can go into this turn', async () => {
+    const listUiActions = vi.fn(async (type: string, id: string | number): Promise<UiActionView[]> => [{
+      target: { type, id: String(id) }, id: 'steer', label: '插进这一轮', permission: 'user_only', external: false,
+      irreversible: false, where: '', confirm: null, available: true, reason: null,
+    }]);
+    const runtime = setup([running, first, second], { client: { listUiActions } });
+    const action = vi.spyOn(runtime, 'followUpAction').mockResolvedValue();
+    await vi.waitFor(() => expect(listUiActions).toHaveBeenCalled());
     fireEvent.click(screen.getByTestId('queue-follow-up-turn-q2-steer'));
     expect(action).toHaveBeenCalledWith('steer', 'turn-q2');
   });

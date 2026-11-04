@@ -1515,6 +1515,19 @@ export class ConnectionHub {
     return true;
   }
 
+  /**
+   * 这个连接的这个工具是不是只读（服务器标了 readOnlyHint；本机仓库连接都是只读）。连接或工具不存在时按会写入算。
+   * Lead 的红线（lead 的 red-line.ts）据此判断停下这一轮前要不要等它做完。
+   */
+  isReadOnlyTool(key: string, tool: string): boolean {
+    if (key === LOCAL_REPO_CONNECTION) return true;
+    try {
+      return Boolean(this.#rowTools(this.#liveRow(key)).find((entry) => entry.name === tool)?.readOnly);
+    } catch {
+      return false;
+    }
+  }
+
   needsConfirmation(key: string, tool: string): boolean {
     const row = this.#liveRow(key);
     const found = this.#rowTools(row).find((entry) => entry.name === tool);

@@ -19,6 +19,7 @@ import type { ComposerTray } from './MessageComposer';
 //   · 收起：输入卡片的上半截一行，写「排队 N」和最新的一条你的追问（没有追问时写下一个外部消息），右边 Steer、×、展开。
 //   · 展开：其余几条从这一行往上长出来（Grow），最新的一条留在原位，成了列表的最后一行；卡片上面两个角变成直角。
 //   · Steer（user_only，外部的一轮里 Lead 不能做）：把这一条插进 Lead 正在做的这一轮。
+//     这一轮读过外部内容时，这一条只能等这一轮结束后单独开一轮：Steer 停用，下面写操作层给的原因（P5.8，2026-11-03）。
 //   · ×（user_direct）：这一条不再发给 Lead。Lead 永远不能代你做。
 //   · 外部消息不给 Steer；「排到下一个」「移出队列」收在「⋯」里，和以前的排队面板一样。
 
@@ -45,6 +46,27 @@ function useFollowUpText(turnId: string): { text: string; at: string } {
     const text = part?.kind === 'text' ? part.text.trim() : '';
     return { text: text || imageOnly, at: turn?.createdAt ?? '' };
   }));
+}
+
+// 这一条现在能不能插进这一轮：和 Lead 的 list_actions 读同一个判断（GET /v1/actions/follow_up/:turnId）。
+// 读到之前、读不到时（旧 daemon、网络抖动）照常给 Steer：点下去的回答会说明原因。
+// reload 变了就重读：操作失败以后，这一条的情况可能已经变了。
+function useSteerAvailability(turnId: string, enabled: boolean, reload: unknown): { available: boolean; reason: string | null } {
+  const runtime = useCompanionRuntime();
+  const [view, setView] = useState<{ available: boolean; reason: string | null } | null>(null);
+  useEffect(() => {
+    if (!enabled) return undefined;
+    let live = true;
+    runtime.listUiActions('follow_up', turnId).then(
+      (views) => {
+        const steer = views.find((entry) => entry.id === 'steer');
+        if (live) setView(steer ? { available: steer.available, reason: steer.reason } : null);
+      },
+      () => { if (live) setView(null); },
+    );
+    return () => { live = false; };
+  }, [enabled, reload, runtime, turnId]);
+  return view ?? { available: true, reason: null };
 }
 
 // 「排队 N」：你的追问几条，加外部消息几条（外部的一个对话可能排着几条）。
@@ -76,6 +98,7 @@ function FollowUpRow({ turnId, tagged, actions, pending, error, onAction }: {
   const m = all.tray;
   const busy: Record<FollowUpAction, string> = { steer: m.steering, cancel: m.cancelling };
   const { text, at } = useFollowUpText(turnId);
+  const steer = useSteerAvailability(turnId, actions, error);
   return (
     <Column flex={1} minW={0} gap="text-stack">
       <Row items="center" gap="inline-item" minW={0}>
@@ -97,6 +120,7 @@ function FollowUpRow({ turnId, tagged, actions, pending, error, onAction }: {
               variant="outline"
               tone="neutral"
               size="xs"
+              disabled={!steer.available}
               onPress={() => onAction('steer')}
             />
             <IconButton
@@ -112,7 +136,11 @@ function FollowUpRow({ turnId, tagged, actions, pending, error, onAction }: {
           </>
         ) : null}
       </Row>
-      {error ? <Text size="note" tone="danger-dark">{all.queue.failed(error)}</Text> : null}
+      {error
+        ? <Text size="note" tone="danger-dark">{all.queue.failed(error)}</Text>
+        : actions && !pending && !steer.available && steer.reason
+          ? <Text testID={`queue-follow-up-${turnId}-steer-reason`} size="note" tone="secondary">{steer.reason}</Text>
+          : null}
     </Column>
   );
 }

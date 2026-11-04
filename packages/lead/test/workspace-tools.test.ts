@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { openDb, type Db } from "@pi-lead-child/store";
 import { createItem, createLoopbackBinding, createTurn, getWorkspace, listActivities } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { prepareRunWorkspace, pullRequestReviewTarget } from "@pi-lead-child/engine";
+import { prepareRunWorkspaceNowForTesting, pullRequestReviewTarget } from "@pi-lead-child/engine";
 import { createLeadTools, type LeadDeps } from "../src/tools.js";
 
 let db: Db;
@@ -37,7 +37,7 @@ beforeEach(() => {
 
 function finishedTicketWithCommit(stage: "done" | "cancelled" = "done") {
   const itemId = createItem(db, { title: "change", brief: "b", createdBy: "lead", workdir: repo });
-  const worktree = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const worktree = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   writeFileSync(join(worktree.path, "feature.txt"), "feature\n");
   git(worktree.path, "add", "feature.txt");
   git(worktree.path, "commit", "-qm", "feature");
@@ -56,7 +56,7 @@ describe("integrate_workspace", () => {
 
   it("refuses an active ticket: the merge waits until the ticket is done", async () => {
     const itemId = createItem(db, { title: "change", brief: "b", createdBy: "lead", workdir: repo });
-    prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" });
+    prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" });
     await expect(tool("integrate_workspace").execute("call", { item_id: itemId, reason: "r" })).rejects.toThrow(/done or cancelled/);
     expect(existsSync(join(repo, "feature.txt"))).toBe(false);
   });
@@ -93,7 +93,7 @@ describe("release_workspace on an isolated worktree", () => {
 
   it("refuses to abandon the worktree of a ticket that has not ended, even in the user's turn", async () => {
     const itemId = createItem(db, { title: "change", brief: "b", createdBy: "lead", workdir: repo });
-    const worktree = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const worktree = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     const { binding } = createLoopbackBinding(db, { name: "Mac 网页" });
     const turn = createTurn(db, { id: "early-turn", originBindingId: binding.id, originKind: "paired:companion", userText: "删掉吧", state: "streaming" });
     deps.currentTurnId = () => turn.id;

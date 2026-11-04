@@ -4,12 +4,18 @@
 // 起因：#161 要把 skill 迁到 Acme/returns-skills，本机没有这个仓库，工单只好挂在 aish 仓库下。执行者在沙箱里 clone 不了，
 // 两次卡成阻塞，Lead 又开了一张工单用连接工具一个个取文件，用了约半小时；交付以后系统还按 aish 仓库自动开了 PR（#126，
 // 推了 4275 行到错的仓库）。
-import { existsSync, mkdirSync, readdirSync, statSync } from "node:fs";
+//
+// clone 不在建单时等（2026-11-03）：四张工单一张张建，三次 clone 各等了 13–17 秒，Lead 那一轮多等了 45 秒。
+// 现在建单只用 ls-remote 确认仓库连得上（写错名字、没有权限当场就知道），clone 在后台跑；执行者的 Run 开跑前等它
+// （workspace-policy.ts）。daemon 重启丢了后台的 clone 时，Run 开跑前再 clone 一次。
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import type { Item } from "@pi-lead-child/core";
 import type { Db } from "@pi-lead-child/store";
-import { addActivity } from "@pi-lead-child/store";
-import { gitRun } from "./delivery-source.js";
+import { addActivity, getItem } from "@pi-lead-child/store";
+import { gitRun, NETWORK_TIMEOUT_MS } from "./delivery-source.js";
 import { normalizeRemoteUrl } from "./project-resolver.js";
 
 const CLONE_TIMEOUT_MS = 10 * 60_000;
@@ -99,35 +105,154 @@ export interface RepositoryCheckout {
   cloned: boolean;
 }
 
+export interface RepositoryCheckoutOptions {
+  home?: string;
+  // 找现成 checkout 的目录，缺省是 ~/Workspace。
+  roots?: readonly string[];
+}
+
+// 正在 clone 的仓库（按规范化的写法）：同一个仓库只 clone 一次，后来的调用等同一个结果。
+const clones = new Map<string, Promise<StartedClone>>();
+
+interface StartedClone {
+  path: string;
+  done: Promise<RepositoryCheckout>;
+}
+
+/** 本机现成的 checkout。没有时为 null。 */
+export async function findRepositoryCheckout(
+  db: Db, spec: RepositorySpec, options: RepositoryCheckoutOptions = {},
+): Promise<string | null> {
+  const home = options.home ?? homedir();
+  return findCheckout(db, spec, options.roots ?? [join(home, "Workspace")]);
+}
+
 /**
  * 这个仓库在本机的 checkout：有就用，没有就 clone（沙箱外，用户的 git 凭证）。clone 失败时抛错，写明 git 的原因。
- * roots：找现成 checkout 的目录，缺省是 ~/Workspace。
+ * 正在 clone 时等那一次的结果，不再 clone 一份。
  */
 export async function ensureRepositoryCheckout(
-  db: Db, spec: RepositorySpec, options: { home?: string; roots?: readonly string[] } = {},
+  db: Db, spec: RepositorySpec, options: RepositoryCheckoutOptions = {},
 ): Promise<RepositoryCheckout> {
-  const home = options.home ?? homedir();
-  const found = await findCheckout(db, spec, options.roots ?? [join(home, "Workspace")]);
+  const pending = clones.get(spec.key);
+  if (pending) return (await pending).done;
+  const found = await findRepositoryCheckout(db, spec, options);
   if (found) return { path: found, cloned: false };
+  return (await startRepositoryClone(db, spec, options)).done;
+}
+
+/** 确认仓库连得上、有权限读：git ls-remote，不下载内容。连不上时抛错，写明 git 的原因。 */
+export async function checkRepositoryAccess(db: Db, spec: RepositorySpec, options: RepositoryCheckoutOptions = {}): Promise<void> {
+  const home = options.home ?? homedir();
   const plan = await clonePlan(db, spec, home);
-  const target = join(plan.parent, spec.name);
+  const listed = await gitRun(["ls-remote", "--quiet", plan.url, "HEAD"], existsSync(plan.parent) ? plan.parent : home, {
+    timeout: NETWORK_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  if (!listed.ok) {
+    throw new Error(`连不上 ${spec.owner}/${spec.name}，或者没有读它的权限：${firstLine(listed.stderr) || "git 没有说原因"}`);
+  }
+}
+
+/**
+ * 在后台 clone：定下 clone 到哪个目录就返回，done 在 clone 完成时兑现。先 clone 进旁边的临时目录、成功了再改名，
+ * 所以中途停掉（例如 daemon 重启）不会留下半个 checkout 让 findRepositoryCheckout 当成现成的。
+ */
+export function startRepositoryClone(
+  db: Db, spec: RepositorySpec, options: RepositoryCheckoutOptions = {},
+): Promise<StartedClone> {
+  const pending = clones.get(spec.key);
+  if (pending) return pending;
+  const started = clonePlan(db, spec, options.home ?? homedir()).then((plan) => {
+    const path = join(plan.parent, spec.name);
+    const done = cloneInto(spec, plan, path);
+    done.then(forget, forget);
+    return { path, done };
+  });
+  const forget = (): void => { if (clones.get(spec.key) === started) clones.delete(spec.key); };
+  started.catch(forget);
+  clones.set(spec.key, started);
+  return started;
+}
+
+async function cloneInto(spec: RepositorySpec, plan: { parent: string; url: string }, target: string): Promise<RepositoryCheckout> {
   if (existsSync(target)) throw new Error(`${target} 已经存在，但不是 ${spec.owner}/${spec.name} 的 checkout，没有 clone`);
   mkdirSync(plan.parent, { recursive: true });
-  const cloned = await gitRun(["clone", "--quiet", plan.url, target], plan.parent, {
+  const temporary = `${target}.plc-clone-${randomUUID().slice(0, 8)}`;
+  const cloned = await gitRun(["clone", "--quiet", plan.url, temporary], plan.parent, {
     timeout: CLONE_TIMEOUT_MS, env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
   });
   if (!cloned.ok) {
-    throw new Error(`clone ${spec.owner}/${spec.name} 失败：${cloned.stderr.trim().split("\n")[0] || "git 没有说原因"}`);
+    rmSync(temporary, { recursive: true, force: true });
+    throw new Error(`clone ${spec.owner}/${spec.name} 失败：${firstLine(cloned.stderr) || "git 没有说原因"}`);
   }
+  if (existsSync(target)) {
+    rmSync(temporary, { recursive: true, force: true });
+    throw new Error(`${target} 在 clone 的时候出现了，没有覆盖它`);
+  }
+  renameSync(temporary, target);
   return { path: target, cloned: true };
 }
 
-/** 记下工单要改的仓库：交付以后自动开 PR 时核对（auto-pull-request.ts）。 */
-export function recordTicketRepository(db: Db, itemId: number, spec: RepositorySpec, checkout: RepositoryCheckout): void {
+function firstLine(text: string): string {
+  return text.trim().split("\n")[0] ?? "";
+}
+
+/** 记下工单要改的仓库：交付以后自动开 PR 时核对（auto-pull-request.ts）。cloning：还在后台 clone。 */
+export function recordTicketRepository(
+  db: Db, itemId: number, spec: RepositorySpec, checkout: RepositoryCheckout & { cloning?: boolean },
+): void {
   addActivity(db, {
     itemId, actor: "lead", kind: "decision",
-    payload: { decision: "ticket_repository", repository: spec.key, path: checkout.path, cloned: checkout.cloned },
+    payload: {
+      decision: "ticket_repository", repository: spec.key, path: checkout.path, cloned: checkout.cloned,
+      ...(checkout.cloning ? { cloning: true, spec: `${spec.host}/${spec.owner}/${spec.name}` } : {}),
+    },
   });
+}
+
+/** 后台 clone 的结果记到工单上：成功或者失败的原因。 */
+export function recordTicketRepositoryClone(db: Db, itemId: number, spec: RepositorySpec, done: Promise<RepositoryCheckout>): void {
+  done.then(
+    (checkout) => addActivity(db, {
+      itemId, actor: "system", kind: "decision",
+      payload: { decision: "ticket_repository_cloned", repository: spec.key, path: checkout.path },
+    }),
+    (error: unknown) => addActivity(db, {
+      itemId, actor: "system", kind: "decision",
+      payload: {
+        decision: "ticket_repository_clone_failed", repository: spec.key,
+        error: (error instanceof Error ? error.message : String(error)).slice(0, 500),
+      },
+    }),
+  ).catch(() => { /* 工单可能已经删了：记不下也不影响 clone 本身 */ });
+}
+
+/**
+ * Run 开跑前把工单写明的仓库准备好：在后台 clone 的等它，没有在 clone 的（例如 daemon 重启丢了那次 clone）现在 clone。
+ * 用户在这期间自己 clone 到了别处时用那一份，工单的工作目录跟着改。返回更新后的工单。
+ */
+export async function cloneTicketRepository(db: Db, item: Item, spec: RepositorySpec): Promise<Item> {
+  const checkout = await ensureRepositoryCheckout(db, spec);
+  if (checkout.path !== item.workdir) {
+    db.prepare("UPDATE items SET workdir=?, updated_at=datetime('now') WHERE id=?").run(checkout.path, item.id);
+    recordTicketRepository(db, item.id, spec, checkout);
+  }
+  return getItem(db, item.id) ?? item;
+}
+
+/**
+ * 工单写明的仓库还没有 checkout（工作目录不在）：返回它的写法，Run 开跑前要先 clone。已经有 checkout、或者工单没写仓库时为 null。
+ */
+export function ticketRepositoryToClone(db: Db, item: { id: number; workdir: string | null }): RepositorySpec | null {
+  if (!item.workdir || existsSync(item.workdir)) return null;
+  const row = db.prepare(
+    `SELECT json_extract(payload, '$.spec') AS spec, json_extract(payload, '$.repository') AS repository,
+            json_extract(payload, '$.path') AS path FROM activities
+     WHERE item_id=? AND kind='decision' AND json_extract(payload, '$.decision')='ticket_repository'
+     ORDER BY id DESC LIMIT 1`,
+  ).get(item.id) as { spec: string | null; repository: string | null; path: string | null } | undefined;
+  if (!row || row.path !== item.workdir) return null;
+  return parseRepositorySpec(row.spec ?? row.repository ?? "");
 }
 
 /** 工单写明要改的仓库（规范化的 host/owner/name）。没写时为 null。 */

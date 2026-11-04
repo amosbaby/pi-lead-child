@@ -13,7 +13,7 @@
 // 三组断言分别对应工单 #72 的三条要求：投影分流、恢复失败回退、返工耗尽的显式通知。
 import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createDispatcher } from "@pi-lead-child/engine";
+import { createDispatcher, updateDesignPreferences } from "@pi-lead-child/engine";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createControlPlaneService } from "../src/control-plane.js";
 import { createUserActionService } from "../src/user-actions.js";
@@ -36,6 +36,8 @@ beforeEach(() => {
   const dir = tempDir("plc-review-deadlock-");
   workdir = join(dir, "workdir");
   db = openDb(join(dir, "plc.db"));
+  // 断言写的是核查状态的中文原文（2026-11-03 起按界面语言写，缺省英文）。
+  updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
 });
 
 function controlPlane(runningItemIds: number[] = []) {

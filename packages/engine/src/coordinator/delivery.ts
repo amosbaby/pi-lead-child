@@ -206,7 +206,7 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
     ? latestDecision(db, itemId, "workspace_integrated", workspace.id) : null;
   const pr = latestDecision(db, itemId, "workspace_pr_opened", workspace.id);
   const integration: DeliveryIntegration = workspace.merge_status === "merged" ? "merged"
-    : workspace.merge_status === "abandoned" ? "abandoned"
+    : abandonFinished(workspace) ? "abandoned"
       : workspace.merge_status === "conflict" ? "conflict"
         : commits > 0 || uncommittedFiles > 0 ? "unmerged" : "no_changes";
 
@@ -218,6 +218,7 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
   const actions = await deliveryActions(db, item, workspace, {
     head, target, commits, uncommittedFiles, integration, present, pullRequestUrl: pr?.url ?? null,
     listProblem: listProblem(db, item, { snapshot, outcome: outcome ?? null, head, integration }), abandonProblem,
+    halfAbandoned: workspace.merge_status === "abandoned" && integration !== "abandoned",
   });
   return {
     snapshot, fileSource,
@@ -226,6 +227,12 @@ async function deliveryView(db: Db, itemId: number): Promise<DeliveryViewResult>
       truncated: snapshot?.truncated ?? false, totals, workspace: deliveryWorkspaceView, actions,
     },
   };
+}
+
+// abandoned 只在工作区已经释放以后才算放弃完了。以前放弃时快照存不成，merge_status 已经写成 abandoned，
+// 工作区却没释放（#188）。这样的工作区按分支上的改动显示，放弃按钮可用，再放弃一次就能走完。
+function abandonFinished(workspace: Workspace): boolean {
+  return workspace.merge_status === "abandoned" && ["released", "cleaning", "cleaned", "archived"].includes(workspace.state);
 }
 
 // 用户看到的文件列表是快照里的。合并之前要先看到改了什么（审查 M2）：
@@ -265,6 +272,8 @@ async function deliveryActions(
     present: boolean; pullRequestUrl: string | null;
     // 合并不可用的原因：文件列表和要合并的提交对不上（listProblem）。放弃不可用的原因：看不到要放弃的改动。
     listProblem: string | null; abandonProblem: string | null;
+    // 放弃到一半停下的工作区（abandonFinished）：只能再放弃一次，不能合并或开 PR。
+    halfAbandoned: boolean;
   },
 ): Promise<TicketDelivery["actions"]> {
   const repo = workspace.repo_root!;
@@ -273,9 +282,11 @@ async function deliveryActions(
     : state.integration === "abandoned" ? "改动已经放弃。"
       : state.integration === "no_changes" ? "分支上没有新的改动。" : null;
 
+  const halfAbandoned = state.halfAbandoned ? "改动已经放弃，但收尾没有完成。再放弃一次可以走完。" : null;
   let merge: DeliveryAction;
   const acceptsTicket = item.stage === "review";
   if (settled) merge = unavailable(settled);
+  else if (halfAbandoned) merge = unavailable(halfAbandoned);
   else if (!["review", "done"].includes(item.stage)) merge = unavailable("交付以后才能合并。");
   else if (running) merge = unavailable("还有 agent 在这个分支上工作，等它结束再合并。");
   else if (state.listProblem) merge = unavailable(state.listProblem);
@@ -289,6 +300,7 @@ async function deliveryActions(
 
   let openPullRequest: DeliveryAction;
   if (state.pullRequestUrl) openPullRequest = unavailable("已经开过 PR。");
+  else if (halfAbandoned) openPullRequest = unavailable(halfAbandoned);
   else if (state.integration === "merged" || state.integration === "abandoned" || state.integration === "no_changes") openPullRequest = unavailable(settled!);
   else if (!["review", "done"].includes(item.stage)) openPullRequest = unavailable("交付以后才能开 PR。");
   else if (state.uncommittedFiles > 0) openPullRequest = unavailable(`分支上还有 ${state.uncommittedFiles} 个没提交的文件，先让工单的 agent 提交。`);
@@ -574,7 +586,7 @@ function recheckBeforeActing(
 ): Item {
   const workspace = getWorkspace(db, workspaceId);
   if (!workspace || workspace.merge_status === "merged") throw new DeliveryError("unavailable", "改动已经合并。");
-  if (workspace.merge_status === "abandoned") throw new DeliveryError("unavailable", "改动已经放弃。");
+  if (abandonFinished(workspace)) throw new DeliveryError("unavailable", "改动已经放弃。");
   const item = getItem(db, itemId)!;
   if (!stages.includes(item.stage)) throw new DeliveryError("unavailable", stageReason);
   if (activeRuns(db, workspaceId) > 0) {
@@ -611,6 +623,11 @@ export async function mergeDelivery(
     try {
       integrateIsolatedWorkspace(db, workspace.id, { ...workspaceBy(input.by), reason: input.reason });
     } catch {
+      // 合并已经完成，只是清理工作区失败（#188）：不说「合并没有成功」。
+      if (getWorkspace(db, workspace.id)?.merge_status === "merged") {
+        const done = "改动已经合进你的仓库，但清理工作区没有完成，系统的定期清理会再试。";
+        throw new DeliveryError("failed", accepts ? `工单已经验收。${done}` : done);
+      }
       const detail = mergeFailureText(db, workspace);
       throw new DeliveryError("failed", accepts ? `工单已经验收，但合并没有成功：${detail}` : `合并没有成功：${detail}`);
     }

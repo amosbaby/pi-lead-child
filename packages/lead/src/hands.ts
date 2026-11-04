@@ -13,7 +13,8 @@
 import { mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
-import { createBashToolDefinition, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { createBashToolDefinition, type BashOperations, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { sandboxPolicy, sandboxToolNote, sandboxWriteBlocker, type SandboxPolicy } from "@pi-lead-child/core";
 import { sandboxedBashOperations } from "@pi-lead-child/engine";
 import type { Db } from "@pi-lead-child/store";
@@ -83,6 +84,19 @@ export function leadWriteRefusal(path: string, options: { cwd: string; home: str
   return blocker ? `${blocker}（底线）。` : null;
 }
 
+/**
+ * Lead 的 bash 不填 timeout 时的时限（秒）。pi 的 bash 缺省不设时限：2026-11-03 Lead 在仓库根目录跑了一条 grep -r，
+ * 扫进了几十个工作树的 node_modules，15 分钟没有结束，这一轮一直停在 Running。要跑更久的命令，模型自己填 timeout。
+ */
+export const LEAD_BASH_DEFAULT_TIMEOUT_SECONDS = 120;
+
+/** 没填 timeout 的命令按 seconds 秒的时限跑。到时限时 pi 结束命令，告诉模型「Command timed out after N seconds」。 */
+export function withDefaultTimeout(operations: BashOperations, seconds: number): BashOperations {
+  return {
+    exec: (command, cwd, run) => operations.exec(command, cwd, { ...run, timeout: run.timeout ?? seconds }),
+  };
+}
+
 export interface LeadHandsOptions {
   db: Db;
   dataDir: string;
@@ -91,21 +105,34 @@ export interface LeadHandsOptions {
   currentTurnId?: () => string | null;
   home?: string;
   log?: (line: string) => void;
+  // bash 不填 timeout 时的时限（秒），缺省 LEAD_BASH_DEFAULT_TIMEOUT_SECONDS。测试用短的。
+  bashTimeoutSeconds?: number;
 }
 
 /** pi 扩展：沙箱里的 bash（替换 pi 内置的），以及三个动手工具的检查。 */
 export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory {
   const scratch = leadScratchDir(options.dataDir);
   const home = options.home ?? homedir();
+  const timeoutSeconds = options.bashTimeoutSeconds ?? LEAD_BASH_DEFAULT_TIMEOUT_SECONDS;
   return (pi) => {
     mkdirSync(scratch, { recursive: true, mode: 0o700 });
     const bash = createBashToolDefinition(scratch, {
-      operations: sandboxedBashOperations(() => leadSandboxPolicy(options.db, options.dataDir)),
+      operations: withDefaultTimeout(sandboxedBashOperations(() => leadSandboxPolicy(options.db, options.dataDir)), timeoutSeconds),
     });
     pi.registerTool({
       ...bash,
+      // pi 的参数说明写着「没有缺省时限」：换成 Lead 的缺省，模型才知道长命令要自己填。
+      parameters: Type.Object({
+        command: Type.String({ description: "Shell command to execute" }),
+        timeout: Type.Optional(Type.Number({
+          description: `Timeout in seconds. Without it, the command stops after ${timeoutSeconds} seconds.`,
+        })),
+      }),
       // 工具说明每一轮都发给模型服务商：用户目录写成 ~（home-paths.ts，用户 2026-10-30）。
       description: tildeHome(`${bash.description}\n工作目录是 ${scratch}。`
+        + `不填 timeout 时，命令跑到 ${timeoutSeconds} 秒就结束；要跑更久的命令（装依赖、跑测试）自己填 timeout。`
+        + "在仓库里找文件、搜代码用 find、grep 工具，读已知的文件用 read：它们按 .gitignore 跳过 node_modules 这类目录。"
+        + "bash 里的 grep -r、find 不会跳过它们，在大仓库里会跑很久。"
         + sandboxToolNote(leadSandboxPolicy(options.db, options.dataDir), "整个 home（挡住会在沙箱外执行的地方）、plc 的隔离 worktree")
         + "\n发评审、发消息这类写外部账号的事用连接工具：那里有你的账号和护栏。", home),
     });

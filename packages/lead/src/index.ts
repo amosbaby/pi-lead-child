@@ -27,3 +27,4 @@ export * from "./wait-tools.js";
 export * from "./ui-action-tools.js";
 export { ticketRunAnnotation } from "./read-tools.js";
 export * from "./overflow.js";
+export * from "./red-line.js";

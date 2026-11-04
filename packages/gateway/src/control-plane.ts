@@ -51,7 +51,6 @@ import {
   latestDeliveryRunId,
   outcomeRecoveryFailure,
   anyReviewerUsable,
-  REVIEW_ESCALATION_WORDS,
   reviewDeadlock,
   reviewEscalation,
   requiresIndependentReview,
@@ -308,15 +307,17 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
       supersededReview: superseded,
       reviewProgress: progress?.state ?? null,
     };
+    // 标签和原因给人看：读的时候现算，按用户现在选的语言（2026-11-03 截图：英文界面里写着「等待用户验收」）。
+    const m = controlPlaneMessages(getLocale(db)).review;
     if (deadlock) {
       const budgetText = exhaustion.maxCycles === null
-        ? "自动返工未获授权"
-        : `返工 ${exhaustion.cyclesUsed}/${exhaustion.maxCycles} 已用尽`;
+        ? m.noAutoRework
+        : m.reworkUsedUp(exhaustion.cyclesUsed, exhaustion.maxCycles);
       const label = deadlock.reworkExhausted && deadlock.outcomeRecoveryFailed
-        ? "返工已用尽且成果未登记，需要你决定"
+        ? m.exhaustedAndUnrecorded
         : deadlock.reworkExhausted
-          ? "返工已用尽，自动化已停止"
-          : "成果未登记，无法验收";
+          ? m.exhausted
+          : m.unrecorded;
       const recovery = outcomeRecoveryFailure(db, item.id);
       return {
         state: "rework_exhausted",
@@ -325,16 +326,13 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
         verdict: verification.current?.verdict ?? null,
         reason: [
           deadlock.reworkExhausted ? budgetText : null,
-          deadlock.outcomeRecoveryFailed && recovery
-            ? `Run #${recovery.runId} 结束后没有可登记的成果快照，自我恢复失败`
-            : null,
+          deadlock.outcomeRecoveryFailed && recovery ? m.recoveryFailed(recovery.runId) : null,
           verification.current
-            ? `独立核查 ${verification.current.verdict.toUpperCase()}（Run #${verification.current.run_id}）`
+            ? m.verdictOf(verification.current.verdict.toUpperCase(), verification.current.run_id)
             : verification.latest
-              ? `当前验证状态未知：Run #${verification.latest.run_id} 的`
-                + `${verification.latest.verdict.toUpperCase()} 已被之后的执行作废`
-              : "当前验证状态未知：从未产生过独立核查裁决",
-        ].filter(Boolean).join("；"),
+              ? m.verdictSuperseded(verification.latest.run_id, verification.latest.verdict.toUpperCase())
+              : m.neverReviewed,
+        ].filter(Boolean).join(m.separator),
         ...budget,
         ...(deadlock.outcomeRecoveryFailed ? { outcomeRecoveryFailed: true } : {}),
         // 哈希描述的是某一次核查看到的工作区。作废的核查的哈希不是当前事实。
@@ -352,27 +350,17 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
       return {
         state: reviewing ? "independent_review" : "waiting_user",
         label: !reviewing
-          ? "等待用户验收"
-          : progress?.state === "running"
-            ? "独立核查中"
-            : progress?.state === "queued"
-              ? "独立核查排队中"
-              : progress?.state === "suspended"
-                ? "独立核查已暂停"
-                : gap ? "独立核查未派发" : "等待独立核查",
+          ? m.waitingUser
+          : progress ? m.chip[progress.state] : gap ? m.notDispatched : m.waiting,
         reviewerAttemptId: null,
         verdict: null,
         reason: !reviewing
           ? null
-          : progress?.state === "running"
-            ? "独立核查正在进行。"
-            : progress?.state === "queued"
-              ? "核查请求已排队，等待派发。"
-              : progress?.state === "suspended"
-                ? progress.reason ?? "核查请求已挂起，恢复后才会派发。"
-                : gap
-                  ? `Run #${gap.deliveryRunId} 的交付还没有被独立核查，系统不会自动派发。`
-                  : "执行已结束，独立核查即将开始。",
+          : progress?.state === "suspended"
+            ? progress.reason ?? m.why.suspended
+            : progress
+              ? m.why[progress.state]
+              : gap ? m.gap(gap.deliveryRunId) : m.soon,
         ...budget,
         ...reviewHashProjection(null),
         ...delivery,
@@ -380,16 +368,16 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
     }
     // 核查员声明要你决定（review_verdict 的 escalate，工单 10）。以前在证据文本里找 evidence_conflict 这个词。
     const escalate = reviewEscalation(db, verdict.run_id);
-    const escalateWords = escalate ? `核查员要你决定：${REVIEW_ESCALATION_WORDS[escalate.reason]}` : null;
+    const escalateWords = escalate ? m.escalated(m.escalation[escalate.reason]) : null;
     if (verdict.verdict === "fail") {
       const conflict = escalate?.reason === "evidence_conflict";
       return {
         state: conflict ? "evidence_conflict" : "review_failed",
         // 自动化只在出结论那一刻跑一次；工单还在 review，说明它没有派返工，要用户决定。
-        label: conflict ? "证据冲突，等待用户决策" : escalateWords ? `核查不通过，${escalateWords}` : "核查不通过，等你决定",
+        label: conflict ? m.conflict : escalateWords ? m.failedEscalated(escalateWords) : m.failed,
         reviewerAttemptId: verdict.run_id,
         verdict: "fail",
-        reason: escalate ? `${verdict.evidence}\n${escalateWords}：${escalate.note}` : verdict.evidence,
+        reason: escalate && escalateWords ? m.escalatedNote(verdict.evidence, escalateWords, escalate.note) : verdict.evidence,
         ...budget,
         ...reviewHashProjection(verdict),
         ...delivery,
@@ -398,10 +386,10 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
     return {
       state: "review_passed",
       // 托管的 PASS 会在出结论的同一笔事务里直接结单；还停在 review，就是在等用户验收。
-      label: escalateWords ? `核查通过，${escalateWords}` : "核查通过，等待验收",
+      label: escalateWords ? m.passedEscalated(escalateWords) : m.passed,
       reviewerAttemptId: verdict.run_id,
       verdict: "pass",
-      reason: escalate ? `${verdict.evidence}\n${escalateWords}：${escalate.note}` : verdict.evidence,
+      reason: escalate && escalateWords ? m.escalatedNote(verdict.evidence, escalateWords, escalate.note) : verdict.evidence,
       ...budget,
       ...reviewHashProjection(verdict),
       ...delivery,

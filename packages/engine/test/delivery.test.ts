@@ -14,7 +14,7 @@ import { createAgentToolHandlers } from "../src/agent-tools/definitions.js";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { TicketDeliverySchema } from "@pi-lead-child/protocol";
 import { Value } from "typebox/value";
-import { prepareRunWorkspace } from "../src/coordinator/workspace-policy.js";
+import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
 import { integrateIsolatedWorkspace } from "../src/coordinator/workspace.js";
 import {
   abandonDelivery, DeliveryError, mergeDelivery, normalizeDeliveryPath, openDeliveryPullRequest, ticketDelivery,
@@ -53,7 +53,7 @@ function deliveredTicketIn(path: string): number {
   git(path, "add", ".");
   git(path, "commit", "-qm", "base");
   const itemId = createItem(db, { title: "second", brief: "b", createdBy: "lead", workdir: path });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   writeFileSync(join(workspace.path, "notes.md"), "notes\n");
   git(workspace.path, "add", "-A");
   git(workspace.path, "-c", "user.email=a@b.test", "-c", "user.name=agent", "commit", "-qm", "notes");
@@ -66,7 +66,7 @@ function deliveredTicketIn(path: string): number {
 // 一张写代码的工单：在隔离分支上新增一份文档、改一行 persona、顺手提交了一个 .env，并登记成果。
 function deliveredTicket(): { itemId: number; worktree: string } {
   const itemId = createItem(db, { title: "优化 code review skill", brief: "b", createdBy: "lead", workdir: repo });
-  const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+  const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
   mkdirSync(join(workspace.path, "docs"));
   writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n\n第一行\n第二行\n");
   writeFileSync(join(workspace.path, "config", "persona.md"), "# persona\n\nbase rule\nnew fallback rule\n");
@@ -194,6 +194,22 @@ describe("accept and merge", () => {
     // 合并以后 worktree 删了，文件和改动还能从合并时记下的提交里看。
     expect(delivery.files.map((file) => file.path)).toEqual(["docs/plan.md", "config/persona.md", ".env"]);
     expect((await ticketDeliveryFile(db, itemId, "docs/plan.md", "diff")).text).toContain("+第一行");
+  });
+
+  // #188：合并成功、清理工作区失败时，以前报「合并没有成功」，还把工作区记成冲突。
+  it("says the changes are merged when only the cleanup after the merge failed", async () => {
+    const { itemId } = deliveredTicket();
+    const workspaceId = (await ticketDelivery(db, itemId)).workspace!.workspaceId;
+    // 存快照要写进数据目录的 artifacts/。那里是一个普通文件时，快照存不成，工作区释放不了。
+    writeFileSync(join(dir, "artifacts"), "not a directory\n");
+
+    await expect(mergeDelivery(db, itemId, {
+      accept: () => { db.prepare("UPDATE items SET stage='done' WHERE id=?").run(itemId); },
+      reason: "用户在工单详情里点了「验收并合并」",
+    })).rejects.toMatchObject({ code: "failed", message: "工单已经验收。改动已经合进你的仓库，但清理工作区没有完成，系统的定期清理会再试。" });
+    expect(git(repo, "show", "HEAD:docs/plan.md")).toContain("# 方案");
+    expect(getWorkspace(db, workspaceId)?.merge_status).toBe("merged");
+    expect((await ticketDelivery(db, itemId)).workspace).toMatchObject({ integration: "merged" });
   });
 
   it("does not accept the ticket when the user's checkout has uncommitted changes", async () => {
@@ -438,6 +454,26 @@ describe("abandon the changes", () => {
     expect(git(repo, "branch", "--list", before.workspace!.branch!)).toContain(before.workspace!.branch!);
     expect(git(repo, "show", "HEAD:README.md")).toBe("readme");
   });
+
+  // #188：以前放弃时快照存不成，merge_status 已经写成 abandoned，state 没到 released。界面按 merge_status 说
+  // 「改动已经放弃。」，放弃按钮不可用，这个工作区再也收不了尾。
+  for (const state of ["pending_integration", "idle"] as const) {
+    it(`can be abandoned again after an earlier abandon stopped half way (state ${state})`, async () => {
+      const { itemId } = deliveredTicket();
+      db.prepare("UPDATE items SET stage='cancelled' WHERE id=?").run(itemId);
+      const workspaceId = (await ticketDelivery(db, itemId)).workspace!.workspaceId;
+      db.prepare("UPDATE workspaces SET merge_status='abandoned', state=? WHERE id=?").run(state, workspaceId);
+
+      const before = await ticketDelivery(db, itemId);
+      expect(before.workspace).toMatchObject({ integration: "unmerged" });
+      expect(before.actions.abandon).toEqual({ available: true, reason: null });
+
+      const after = await abandonDelivery(db, itemId, { reason: "再放弃一次" });
+      expect(after.workspace).toMatchObject({ integration: "abandoned" });
+      expect(getWorkspace(db, workspaceId)).toMatchObject({ state: "archived", merge_status: "abandoned" });
+      expect(git(repo, "branch", "--list", before.workspace!.branch!)).toContain(before.workspace!.branch!);
+    });
+  }
 });
 
 describe("a ticket that changed the user's directory directly", () => {
@@ -501,7 +537,7 @@ describe("the delivered file list after the workspace is gone", () => {
   it("still lists what the agent delivered after the worktree and its branch are removed", async () => {
     const itemId = createItem(db, { title: "写方案", brief: "b", createdBy: "lead", workdir: repo });
     transition(db, { itemId, to: "active", actor: "system", reason: "start" });
-    const workspace = prepareRunWorkspace(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
+    const workspace = prepareRunWorkspaceNowForTesting(db, itemId, { role: "executor", purpose: "execution" }).workspace!;
     mkdirSync(join(workspace.path, "docs"));
     writeFileSync(join(workspace.path, "docs", "plan.md"), "# 方案\n\n第一行\n");
     git(workspace.path, "add", "-A");

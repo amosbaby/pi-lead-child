@@ -1,10 +1,11 @@
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import {
-  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync,
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmdirSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 import type { Db } from "@pi-lead-child/store";
 import { addActivity, addInbox, getItem } from "@pi-lead-child/store";
 import type { Actor, Workspace, WorkspaceKind, WorkspaceMode, WorkspaceState } from "@pi-lead-child/core";
@@ -16,7 +17,9 @@ import { chooseWorktreeBase, recordWorktreeBase } from "./workspace-remote.js";
 import { workspaceContentHash } from "./workspace-integrity.js";
 import { startWorktreeDependencies } from "./worktree-dependencies.js";
 import { createCheckpointDomainService } from "./checkpoints.js";
-import { openArtifactContent, stageArtifact } from "@pi-lead-child/store";
+import { MAX_ARTIFACT_BYTES, openArtifactContent, stageArtifact } from "@pi-lead-child/store";
+
+const execFileAsync = promisify(execFile);
 
 export interface ProvisionWorkspaceInput {
   itemId: number;
@@ -60,25 +63,42 @@ function databaseDataDir(db: Db): string | null {
   return db.name === ":memory:" ? null : dirname(db.name);
 }
 
+// The snapshot records where the branch was. Its bundle holds only the branch's own commits
+// (HEAD ^base_ref): the base history is already in the user's repository, and a whole-history
+// bundle of a large repository exceeded the artifact limit, so merge and abandon failed (#188).
+// Nothing reads the bundle back. When there is no new commit, or the bundle would exceed the
+// limit, or git cannot make it, the snapshot keeps only the metadata. Abandon keeps the branch
+// and merge puts its commits into the user's branch, so no change depends on the bundle.
 function buildWorkspaceSnapshot(db: Db, workspace: Workspace, contentHash: string): Buffer {
   if (!workspace.git_worktree || !workspace.repo_root || !workspace.base_ref) {
     return Buffer.from(JSON.stringify({ version: 1, workspaceId: workspace.id, contentHash }), "utf8");
   }
+  const metadata = {
+    version: 1,
+    workspaceId: workspace.id,
+    contentHash,
+    head: git(["rev-parse", "HEAD"], workspace.path),
+    baseRef: workspace.base_ref,
+    branch: workspace.branch,
+  };
+  const withoutBundle = (bundleOmitted: "no_new_commits" | "too_large" | "unavailable", detail: Record<string, unknown> = {}) =>
+    Buffer.from(JSON.stringify({ ...metadata, bundle: null, bundleOmitted, ...detail }), "utf8");
   const bundleDir = mkdtempSync(join(tmpdir(), "plc-workspace-bundle-"));
   const bundlePath = join(bundleDir, "workspace.bundle");
   try {
-    // A standalone bundle must carry its own prerequisite history. Using HEAD
-    // (instead of HEAD ^base_ref) also handles a workspace with no new commit.
-    git(["bundle", "create", bundlePath, "HEAD"], workspace.path);
-    return Buffer.from(JSON.stringify({
-      version: 1,
-      workspaceId: workspace.id,
-      contentHash,
-      head: git(["rev-parse", "HEAD"], workspace.path),
-      baseRef: workspace.base_ref,
-      branch: workspace.branch,
-      bundle: readFileSync(bundlePath).toString("base64"),
-    }), "utf8");
+    let commits: number;
+    try {
+      commits = Number(git(["rev-list", "--count", `${workspace.base_ref}..HEAD`], workspace.path));
+      if (commits > 0) git(["bundle", "create", bundlePath, "HEAD", `^${workspace.base_ref}`], workspace.path);
+    } catch (error) {
+      return withoutBundle("unavailable", { error: error instanceof Error ? error.message.slice(0, 500) : String(error) });
+    }
+    if (commits === 0) return withoutBundle("no_new_commits");
+    // base64 makes the bundle 4/3 as large. Check the size before reading a large file into memory.
+    const bundleBytes = statSync(bundlePath).size;
+    if (Math.ceil(bundleBytes / 3) * 4 > MAX_ARTIFACT_BYTES) return withoutBundle("too_large", { commits, bundleBytes });
+    const content = Buffer.from(JSON.stringify({ ...metadata, commits, bundle: readFileSync(bundlePath).toString("base64") }), "utf8");
+    return content.length > MAX_ARTIFACT_BYTES ? withoutBundle("too_large", { commits, bundleBytes }) : content;
   } finally {
     rmSync(bundleDir, { recursive: true, force: true });
   }
@@ -114,10 +134,52 @@ function persistWorkspaceSnapshot(db: Db, workspace: Workspace, contentHash: str
   }
 }
 
-function git(args: string[], cwd?: string): string {
+function git(args: string[], cwd?: string, timeout = 10_000): string {
   return execFileSync("git", cwd ? ["-C", cwd, ...args] : args, {
-    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+    encoding: "utf8", timeout, stdio: ["ignore", "pipe", "pipe"],
   }).trim();
+}
+
+// git worktree remove deletes the whole directory, ignored files such as node_modules included.
+// A 1.4 GB worktree took longer than the 10 s of git(): git was killed half way, the row stayed
+// failed and the next cleanup saw the half-deleted tree as unrecorded changes (#191).
+export const WORKTREE_REMOVE_TIMEOUT_MS = 10 * 60_000;
+
+// A killed git worktree remove leaves only deletions of tracked files (" D" in git status), or a
+// directory whose .git file is already gone. Those files are in HEAD, which is on the branch, so
+// removing the rest loses nothing. Only plc's removal deletes the .git file of a plc worktree.
+function removalInterrupted(workspace: Workspace): boolean {
+  if (!existsSync(join(workspace.path, ".git"))) return true;
+  // Not git(): its trim() would eat the leading space of the first " D" line.
+  const lines = execFileSync("git", ["-C", workspace.path, "status", "--porcelain", "--untracked-files=normal"], {
+    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"],
+  }).split("\n").filter(Boolean);
+  return lines.length > 0 && lines.every((line) => line.startsWith(" D "));
+}
+
+// Deletes the worktree directory and git's registration of it. The caller has checked that the
+// content is recorded. A worktree whose removal was interrupted is removed with --force: git's own
+// check would refuse the half-deleted tree.
+function removeWorktreeDirectory(workspace: Workspace): void {
+  const repoRoot = workspace.repo_root ?? undefined;
+  if (!existsSync(workspace.path)) {
+    // When the directory is gone, git worktree remove --force deletes only the registration.
+    try { git(["worktree", "remove", "--force", workspace.path], repoRoot); } catch { /* not registered */ }
+    return;
+  }
+  const interrupted = removalInterrupted(workspace);
+  if (!interrupted && git(["status", "--porcelain"], workspace.path)) {
+    throw new Error("workspace has unrecorded changes; snapshot or merge before cleanup");
+  }
+  try {
+    git(["worktree", "remove", ...(interrupted ? ["--force"] : []), workspace.path], repoRoot, WORKTREE_REMOVE_TIMEOUT_MS);
+  } catch (error) {
+    // git stopped half way, or does not accept a directory whose .git file is gone. What is left is
+    // part of the content checked above, so delete the rest here instead of failing on every retry.
+    if (!insideWorkspaceRoot(workspace) || (existsSync(workspace.path) && !removalInterrupted(workspace))) throw error;
+    rmSync(workspace.path, { recursive: true, force: true });
+    git(["worktree", "prune"], repoRoot);
+  }
 }
 
 /** plc 为一个仓库建的 worktree 都放在仓库旁边的这个目录里。清理扫描在这里找没有登记的孤儿目录。 */
@@ -182,26 +244,81 @@ export function provisionWorkspace(db: Db, input: ProvisionWorkspaceInput): Work
   if (!item) throw new Error(`item ${input.itemId} not found`);
   const kind = input.kind ?? (input.mode === "isolated" ? "isolated_child" : "primary");
 
-  if (input.mode === "shared") {
-    const existing = existingWorkspaceForOwner(db, input.itemId, kind);
-    // 共享工作区就是用户自己的目录，准备它不需要做任何事。所以 failed 或 blocked 的共享工作区
-    // 重新准备时直接回到 active，和 isolated 工作区的重新准备一样。旧版本在 Run 启动失败时
-    // 会把它标成 failed（工单 79），preflight 的 blocker 要人重建工作区，靠的就是这一步。
-    if (existing && (existing.state === "failed" || existing.state === "blocked")) {
-      transitionWorkspace(db, existing.id, "provisioning");
-      return transitionWorkspace(db, existing.id, "active");
+  if (input.mode !== "shared") {
+    const started = startIsolatedWorkspace(db, input, kind);
+    if (!started.checkout) return started.workspace;
+    try {
+      execFileSync("git", worktreeAddArgs(started), { encoding: "utf8", timeout: WORKTREE_ADD_TIMEOUT_MS, stdio: ["ignore", "pipe", "pipe"] });
+    } catch (error) {
+      throw failProvisioning(db, input.itemId, started.workspace, error);
     }
-    if (existing) return existing;
-    const path = input.path ?? item.workdir;
-    if (!path) throw new Error(`shared workspace for item #${input.itemId} requires an explicit path`);
-    const workspace = createWorkspace(db, {
-      ownerItemId: input.itemId, mode: "shared", kind, path: assertAbsolutePath(path, "workspace path"),
-      projectId: item.project_id, state: "active", sourceItemId: input.itemId, sourceRunId: input.sourceRunId,
-    });
-    markWorkspacePath(db, workspace);
-    return workspace;
+    return finishIsolatedWorkspace(db, started);
   }
 
+  const existing = existingWorkspaceForOwner(db, input.itemId, kind);
+  // 共享工作区就是用户自己的目录，准备它不需要做任何事。所以 failed 或 blocked 的共享工作区
+  // 重新准备时直接回到 active，和 isolated 工作区的重新准备一样。旧版本在 Run 启动失败时
+  // 会把它标成 failed（工单 79），preflight 的 blocker 要人重建工作区，靠的就是这一步。
+  if (existing && (existing.state === "failed" || existing.state === "blocked")) {
+    transitionWorkspace(db, existing.id, "provisioning");
+    return transitionWorkspace(db, existing.id, "active");
+  }
+  if (existing) return existing;
+  const path = input.path ?? item.workdir;
+  if (!path) throw new Error(`shared workspace for item #${input.itemId} requires an explicit path`);
+  const workspace = createWorkspace(db, {
+    ownerItemId: input.itemId, mode: "shared", kind, path: assertAbsolutePath(path, "workspace path"),
+    projectId: item.project_id, state: "active", sourceItemId: input.itemId, sourceRunId: input.sourceRunId,
+  });
+  markWorkspacePath(db, workspace);
+  return workspace;
+}
+
+/**
+ * provisionWorkspace 的异步版：git worktree add 在子进程里跑，不占住 daemon 的事件循环（2026-11-03）。
+ * 大仓库的检出要十几秒：同步跑的时候 Slack 收不到 pong 判定连接已断，Companion 也掉线，派发的工具调用一直等着。
+ * Run 的工作区（workspace-policy.ts 的 prepareRunWorkspace）用它。共享工作区不碰 git，和同步版一样。
+ */
+export async function provisionWorkspaceAsync(db: Db, input: ProvisionWorkspaceInput): Promise<Workspace> {
+  if (input.mode === "shared") return provisionWorkspace(db, input);
+  if (!getItem(db, input.itemId)) throw new Error(`item ${input.itemId} not found`);
+  const kind = input.kind ?? "isolated_child";
+  // 同一个主人的同一种工作区一次只准备一个：子工单和父工单共用一个 worktree，Lead 一口气派出的两张会同时来。
+  // 后来的等前一个建完，再拿到它。
+  const key = `${input.itemId}:${kind}`;
+  const previous = provisioningByOwner.get(key);
+  const current = (previous ? previous.catch(() => undefined) : Promise.resolve()).then(async () => {
+    const started = startIsolatedWorkspace(db, input, kind);
+    if (!started.checkout) return started.workspace;
+    try {
+      await execFileAsync("git", worktreeAddArgs(started), { encoding: "utf8", timeout: WORKTREE_ADD_TIMEOUT_MS });
+    } catch (error) {
+      throw failProvisioning(db, input.itemId, started.workspace, error);
+    }
+    return finishIsolatedWorkspace(db, started);
+  });
+  provisioningByOwner.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (provisioningByOwner.get(key) === current) provisioningByOwner.delete(key);
+  }
+}
+
+const provisioningByOwner = new Map<string, Promise<Workspace>>();
+
+// 大仓库的检出要几十秒：默认的 10 秒会让它中途失败，留下半个目录（审查 2026-10-19 第 7 条）。
+const WORKTREE_ADD_TIMEOUT_MS = 120_000;
+
+interface StartedIsolatedWorkspace {
+  workspace: Workspace;
+  repoRoot: string;
+  // true：工作区停在 provisioning，还要 git worktree add 建出目录。false：现成的 worktree，直接用。
+  checkout: boolean;
+}
+
+// 隔离 worktree 在库里的那一半：找到或建好工作区的行，停在 provisioning。检出（git worktree add）由调用方做。
+function startIsolatedWorkspace(db: Db, input: ProvisionWorkspaceInput, kind: WorkspaceKind): StartedIsolatedWorkspace {
   const source = sourceWorkspace(db, input);
   // 来源路径可以是 child 要新建的目录（还不存在）：按它最近的已存在的上级目录找仓库。
   const sourceDir = existingAncestor(source.path);
@@ -224,7 +341,7 @@ export function provisionWorkspace(db: Db, input: ProvisionWorkspaceInput): Work
     if (workspace.state === "active" || workspace.state === "idle" || workspace.state === "review_hold") {
       // 以前建的 worktree 可能还没有依赖：补上（已经有时什么也不做）。
       prepareDependencies(db, workspace, repoRoot);
-      return workspace;
+      return { workspace, repoRoot, checkout: false };
     }
     if (workspace.state === "failed" || workspace.state === "blocked") {
       workspace = transitionWorkspace(db, workspace.id, "provisioning");
@@ -248,26 +365,35 @@ export function provisionWorkspace(db: Db, input: ProvisionWorkspaceInput): Work
     if (chosenBase) recordWorktreeBase(db, workspace, chosenBase);
     workspace = transitionWorkspace(db, workspace.id, "provisioning");
   }
-
   try {
     if (existsSync(workspace.path)) throw new Error(`workspace path already exists: ${workspace.path}`);
     mkdirSync(dirname(workspace.path), { recursive: true });
-    // 大仓库的检出要几十秒：默认的 10 秒会让它中途失败，留下半个目录（审查 2026-10-19 第 7 条）。
-    execFileSync("git", ["-C", repoRoot, "worktree", "add", "-b", workspace.branch!, workspace.path, workspace.base_ref!], {
-      encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"],
-    });
-    workspace = transitionWorkspace(db, workspace.id, "active");
-    markWorkspacePath(db, workspace);
-    prepareDependencies(db, workspace, repoRoot);
-    return workspace;
   } catch (error) {
-    const current = getWorkspace(db, workspace.id);
-    if (current && (current.state === "provisioning" || current.state === "requested")) {
-      workspace = transitionWorkspace(db, current.id, "failed");
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    throw new Error(`workspace provisioning failed for item #${input.itemId}: ${message}`);
+    throw failProvisioning(db, input.itemId, workspace, error);
   }
+  return { workspace, repoRoot, checkout: true };
+}
+
+function worktreeAddArgs(started: StartedIsolatedWorkspace): string[] {
+  const { workspace, repoRoot } = started;
+  return ["-C", repoRoot, "worktree", "add", "-b", workspace.branch!, workspace.path, workspace.base_ref!];
+}
+
+function finishIsolatedWorkspace(db: Db, started: StartedIsolatedWorkspace): Workspace {
+  const workspace = transitionWorkspace(db, started.workspace.id, "active");
+  markWorkspacePath(db, workspace);
+  prepareDependencies(db, workspace, started.repoRoot);
+  return workspace;
+}
+
+// 检出失败：还停在 provisioning 或 requested 的工作区记成 failed，返回给调用方抛出的错误。
+function failProvisioning(db: Db, itemId: number, workspace: Workspace, error: unknown): Error {
+  const current = getWorkspace(db, workspace.id);
+  if (current && (current.state === "provisioning" || current.state === "requested")) {
+    transitionWorkspace(db, current.id, "failed");
+  }
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(`workspace provisioning failed for item #${itemId}: ${message}`);
 }
 
 // 在后台把用户 checkout 的依赖克隆进 worktree（worktree-dependencies.ts）。执行者启动前会等它（children/manager.ts）。
@@ -312,19 +438,22 @@ export function releaseWorkspace(db: Db, id: number, options: { mergeStatus?: "m
     }
     throw new Error(`isolated workspace #${id} requires an explicit merge decision`);
   }
-  if (workspace.mode === "isolated" && options.mergeStatus) {
-    if (options.mergeStatus === "merged" && workspace.merge_status !== "merged") {
-      throw new Error(`isolated workspace #${id} is not merged; use integrateWorkspace first`);
-    }
-    db.prepare("UPDATE workspaces SET merge_status=? WHERE id=?").run(options.mergeStatus, id);
+  const mergeStatus = workspace.mode === "isolated" ? options.mergeStatus : undefined;
+  if (mergeStatus === "merged" && workspace.merge_status !== "merged") {
+    throw new Error(`isolated workspace #${id} is not merged; use integrateWorkspace first`);
   }
-  const current = getWorkspace(db, id)!;
-  const contentHash = hashesContent(current) ? workspaceContentHash(current) : CONTENT_NOT_HASHED;
+  // The snapshot comes first. When it fails, nothing below is written: merge_status and state stay
+  // as they were, and the same call can run again (#188: a failed snapshot left merge_status=abandoned
+  // with the workspace not released).
+  const contentHash = hashesContent(workspace) ? workspaceContentHash(workspace) : CONTENT_NOT_HASHED;
   const artifactId = persistWorkspaceSnapshot(db, workspace, contentHash, options.dataDir ?? databaseDataDir(db));
-  db.prepare(`INSERT INTO workspace_cleanup_snapshots (workspace_id, content_hash, artifact_id) VALUES (?, ?, ?)
-    ON CONFLICT(workspace_id) DO UPDATE SET content_hash=excluded.content_hash, artifact_id=excluded.artifact_id, captured_at=datetime('now')`)
-    .run(id, contentHash, artifactId);
-  return transitionWorkspace(db, id, "released");
+  return db.transaction(() => {
+    if (mergeStatus) db.prepare("UPDATE workspaces SET merge_status=? WHERE id=?").run(mergeStatus, id);
+    db.prepare(`INSERT INTO workspace_cleanup_snapshots (workspace_id, content_hash, artifact_id) VALUES (?, ?, ?)
+      ON CONFLICT(workspace_id) DO UPDATE SET content_hash=excluded.content_hash, artifact_id=excluded.artifact_id, captured_at=datetime('now')`)
+      .run(id, contentHash, artifactId);
+    return transitionWorkspace(db, id, "released");
+  })();
 }
 
 export function workspaceCleanupChecks(db: Db, id: number, now = new Date()): WorkspaceCleanupChecks {
@@ -343,11 +472,14 @@ export function workspaceCleanupChecks(db: Db, id: number, now = new Date()): Wo
       artifactAvailable = false;
     }
   }
+  // After the snapshot, nothing unrecorded can be lost when the directory is gone, or when an
+  // earlier removal stopped half way (#191). A file written after the snapshot still blocks cleanup,
+  // also in an abandoned worktree.
   let matches = false;
-  if (snapshot && !hashesContent(workspace)) {
+  if (snapshot && (!hashesContent(workspace) || !existsSync(workspace.path))) {
     matches = true;
-  } else if (snapshot && existsSync(workspace.path)) {
-    try { matches = workspaceContentHash(workspace) === snapshot.content_hash; } catch { matches = false; }
+  } else if (snapshot) {
+    try { matches = removalInterrupted(workspace) || workspaceContentHash(workspace) === snapshot.content_hash; } catch { matches = false; }
   }
   return {
     ownerTerminal: Boolean(owner && ["done", "cancelled"].includes(owner.stage)),
@@ -374,11 +506,7 @@ export function cleanupWorkspace(db: Db, id: number): Workspace {
       if (!checks.contentMatchesSnapshot) throw new Error("workspace has unrecorded changes; snapshot or merge before cleanup");
       throw new Error(`workspace cleanup preconditions failed: ${JSON.stringify(checks)}`);
     }
-    if (workspace.git_worktree) {
-      const dirty = git(["-C", workspace.path, "status", "--porcelain"]);
-      if (dirty) throw new Error("workspace has unrecorded changes; snapshot or merge before cleanup");
-      git(["worktree", "remove", workspace.path], workspace.repo_root ?? undefined);
-    }
+    if (workspace.git_worktree) removeWorktreeDirectory(workspace);
     workspace = transitionWorkspace(db, id, "cleaned");
     return transitionWorkspace(db, id, "archived");
   } catch (error) {
@@ -427,14 +555,20 @@ export function integrateWorkspace(db: Db, id: number, targetBranch?: string): W
   }
   try {
     git(["merge", "--no-edit", workspace.branch], workspace.repo_root);
-    db.prepare("UPDATE workspaces SET merge_status='merged' WHERE id=?").run(id);
-    return releaseWorkspace(db, id, { mergeStatus: "merged", dataDir: databaseDataDir(db) ?? undefined });
   } catch (error) {
     try { git(["merge", "--abort"], workspace.repo_root); } catch { /* best effort */ }
     db.prepare("UPDATE workspaces SET merge_status='conflict' WHERE id=?").run(id);
     const current = getWorkspace(db, id)!;
     if (current.state === "pending_integration") transitionWorkspace(db, id, "blocked");
     throw new Error(`workspace integration conflict for #${id} into ${target}: ${String(error)}`);
+  }
+  // The commits are in the user's branch now. A failed release does not undo that, so it is not a
+  // conflict (#188): merge_status stays merged, the state stays, and the sweep releases it later.
+  db.prepare("UPDATE workspaces SET merge_status='merged' WHERE id=?").run(id);
+  try {
+    return releaseWorkspace(db, id, { mergeStatus: "merged", dataDir: databaseDataDir(db) ?? undefined });
+  } catch (error) {
+    throw new Error(`workspace #${id} merged into ${target}, but releasing it failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 }
 
@@ -753,14 +887,28 @@ function sweepIsolatedWorktree(
     return "cleaned";
   }
   if (!["active", "idle", "pending_integration", "blocked", "failed"].includes(workspace.state)) return null;
+  const abandoned = workspace.merge_status === "abandoned";
+  // 清理删目录时中断（#191）：已经有快照、只剩删了一半的已跟踪文件时，接着删完。
+  // 删了一半的目录可能已经没有 .git 文件，所以在 worktreeChanges 之前判断。
+  if (workspace.state === "failed" && existsSync(workspace.path)) {
+    const snapshotted = db.prepare("SELECT 1 FROM workspace_cleanup_snapshots WHERE workspace_id=?").get(workspace.id);
+    if (!snapshotted || !removalInterrupted(workspace)) return null;
+    removeReleasedWorktree(db, workspace.id);
+    addActivity(db, {
+      itemId: workspace.owner_item_id, actor: "system", kind: "decision",
+      payload: { decision: "workspace_cleaned", workspaceId: workspace.id, branch: workspace.branch, removalResumed: true },
+    });
+    return "cleaned";
+  }
   const changes = worktreeChanges(workspace);
   // 目录已经不在了（有人手动删了它，或者 daemon 重启时把它标成了 failed）：没有没合并的 commit 时，只收拾 git 的登记和分支。
+  // 已经放弃的（abandon 删目录时中断，#191）不再问合并决定：用户已经决定了，分支保留。
   if (!existsSync(workspace.path)) {
-    if (hasUnmergedChanges(changes)) {
+    if (hasUnmergedChanges(changes) && !abandoned) {
       askForMergeDecision(db, workspace, changes, now, ttlMs);
       return "awaiting";
     }
-    const merged = changes.head !== null && changes.head !== workspace.base_ref;
+    const merged = !abandoned && changes.head !== null && changes.head !== workspace.base_ref;
     const { branchDeleted } = archiveMissingWorktree(db, workspace, merged ? "merged" : "abandoned", now);
     addActivity(db, {
       itemId: workspace.owner_item_id, actor: "system", kind: "decision",
@@ -779,7 +927,9 @@ function sweepIsolatedWorktree(
     return "awaiting";
   }
   // 没有要合并的东西：等合并决定的、合并冲突的（用户自己合并了）马上清理，其余闲置满 TTL 再清理，期间工单对话还能用它。
-  if (!["pending_integration", "blocked"].includes(workspace.state) && idleFor(workspace, now) < ttlMs) return null;
+  // merge_status 是 conflict 的也马上清理：旧代码把已经快进合并的分支记成 conflict，状态却留在 idle（#191）。
+  const awaitedMerge = ["pending_integration", "blocked"].includes(workspace.state) || workspace.merge_status === "conflict";
+  if (!awaitedMerge && idleFor(workspace, now) < ttlMs) return null;
   const merged = changes.head !== null && changes.head !== workspace.base_ref;
   if (merged) db.prepare("UPDATE workspaces SET merge_status='merged' WHERE id=?").run(workspace.id);
   releaseWorkspace(db, workspace.id, { mergeStatus: merged ? "merged" : "abandoned" });

@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   conversationWorkspaceChecksSettled, createDispatcher, createOrchestrator, recordOutcomeRegistrationMissing,
-  setWorkspaceTreeHashForTesting, workspaceTreeHash, type Orchestrator,
+  setWorkspaceTreeHashForTesting, updateDesignPreferences, workspaceTreeHash, type Orchestrator,
 } from "@pi-lead-child/engine";
 import { createUserActionService } from "@pi-lead-child/gateway";
 import {
@@ -107,6 +107,8 @@ beforeEach(() => {
   process.env.PLC_DATA_DIR = dir;
   process.env.PLC_CHILD_LINGER_MS = "0";
   db = openDb(join(dir, "plc.db"));
+  // 断言写的是核查状态的中文原文（2026-11-03 起按界面语言写，缺省英文）。
+  updateDesignPreferences(db, { request: { locale: "zh" }, caller: { kind: "user" } });
 });
 
 // 等所有 child 结束：直接等 runningChildren 里登记的 Promise，不轮询。以前用 vi.waitFor 的缺省时限（1 秒），
