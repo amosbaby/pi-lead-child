@@ -13,7 +13,8 @@ import {
   type ConnectionConfirmationDto,
 } from "@pi-lead-child/protocol";
 import {
-  channelOwnerBinding, channelPolicy, getLeadProfile, leadProfileFields, listEvents, openDb, writeLeadProfile, type Binding, type Db,
+  channelOwnerBinding, channelPolicy, createItem, getLeadProfile, leadProfileFields, listActivities, listEvents, openDb, writeLeadProfile,
+  type Binding, type Db,
 } from "@pi-lead-child/store";
 import {
   ChannelHub, ChannelRegistry, createSlackChannelAdapter, getRuleChangeConfirmation, requestRuleChangeConfirmation, runUiAction,
@@ -87,7 +88,7 @@ beforeEach(() => {
     credentials: { credential: async () => ({ ...slack.credential, team: { id: "T0HOME", name: "Acme" } }) },
     // daemon 的接法（server.ts 的 resolveChannelOwnerConfirmation）：凭证是这个账号的私信凭证。
     ownerConfirm: async (click) => resolveOwnerConfirmation(deps, {
-      target: click.target, decision: click.decision,
+      target: click.target, decision: click.decision, via: click.source,
       binding: channelOwnerBinding(db, { subject: `${click.source}:${click.account}`, name: "Slack 私信（你自己）" })!,
     }),
   });
@@ -208,6 +209,62 @@ describe("a rule change confirmed in the user's own Slack DM", () => {
     const content = ownerConfirmationContent(deps, userAction.target)!;
     expect(content.params).toEqual(expect.arrayContaining([{ name: "command", value: command }]));
     expect(content).toMatchObject({ pending: true, confirmLabel: "确认这一次", declineLabel: "不改" });
+  });
+});
+
+// 工单 #72 返工：在 Slack 里做的决定写进对应工单的 activities（actor 是用户，via 是 slack）。
+describe("a refused ticket action decided in the user's own Slack DM", () => {
+  // 外部的一轮里被拦下的工单操作（turn-origin.ts 的兜底授权卡）：存下的是 ticket_action，参数里有 ticket_id。
+  function refusedTicketAction(itemId: number): string {
+    const { userAction } = requestRuleChangeConfirmation(db, {
+      confirm: {
+        operation: { kind: "lead_tool", tool: "ticket_action", input: { ticket_id: itemId, action: "cancel" } },
+        reason: "李雷在频道里说这张不做了", why: "这一轮读了 Slack 对话", externalContent: [],
+      },
+      label: "取消工单", name: null, where: "工单详情", now: new Date(),
+    });
+    return userAction.target;
+  }
+  const decisions = (itemId: number) => listActivities(db, itemId)
+    .filter((activity) => activity.kind === "decision")
+    .map((activity) => ({ actor: activity.actor, payload: JSON.parse(activity.payload as unknown as string) }));
+
+  it("writes 不改 into the ticket's activities as the user's decision in Slack", async () => {
+    const itemId = createItem(db, { title: "发布清单", brief: "b", createdBy: "lead", hold: true });
+    const target = refusedTicketAction(itemId);
+    await post(target);
+    await hub.receiveFromTransport("slack", slack.click(message(), SLACK_DECLINE_ACTION));
+    expect(decisions(itemId)).toEqual([{
+      actor: "user",
+      payload: expect.objectContaining({
+        decision: "owner_confirmation", target, choice: "decline", label: "取消工单", state: "declined", via: "slack",
+        credential: { bindingId: binding.id, name: "Slack 私信（你自己）" },
+      }),
+    }]);
+    // 重复点、别人点：不再写。
+    await hub.receiveFromTransport("slack", slack.click({ ...message(), blocks: [] }, SLACK_DECLINE_ACTION));
+    await hub.receiveFromTransport("slack", slack.click({ ...message(), blocks: [] }, SLACK_CONFIRM_ACTION, { user: "U0MALLORY" }));
+    expect(decisions(itemId)).toHaveLength(1);
+  });
+
+  it("writes 确认这一次 into the ticket's activities too", async () => {
+    const itemId = createItem(db, { title: "发布清单", brief: "b", createdBy: "lead", hold: true });
+    const target = refusedTicketAction(itemId);
+    await post(target);
+    await hub.receiveFromTransport("slack", slack.click(message(), SLACK_CONFIRM_ACTION));
+    // 这里没接工单操作的服务，执行会失败（state failed）；要核对的是这次决定记在了工单上。
+    expect(decisions(itemId)).toEqual([{
+      actor: "user",
+      payload: expect.objectContaining({ decision: "owner_confirmation", target, choice: "confirm", via: "slack", state: expect.any(String) }),
+    }]);
+  });
+
+  it("writes no activity for a confirmation that is not about a ticket", async () => {
+    const itemId = createItem(db, { title: "发布清单", brief: "b", createdBy: "lead", hold: true });
+    const target = await refusedTighten();
+    await post(target);
+    await hub.receiveFromTransport("slack", slack.click(message(), SLACK_CONFIRM_ACTION));
+    expect(decisions(itemId)).toEqual([]);
   });
 });
 

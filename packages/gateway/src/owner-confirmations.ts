@@ -12,7 +12,9 @@ import {
   RULE_CHANGE_CONFIRMATION_ID, userActionTargetParts,
   type ConnectionConfirmationDto, type Locale, type OwnerActionSource, type RuleChangeConfirmationDto, type UserActionRequest,
 } from "@pi-lead-child/protocol";
-import { bindingScopes, getLocale, leadDisplayName, recordOwnerAction, type Binding, type Db } from "@pi-lead-child/store";
+import {
+  addActivity, bindingScopes, getItem, getLocale, leadDisplayName, recordOwnerAction, type Binding, type Db,
+} from "@pi-lead-child/store";
 import { getRuleChangeConfirmation, type OwnerConfirmCardContent } from "@pi-lead-child/engine";
 import { resolveConnectionConfirmationAsUser, type ConnectionsService } from "./connections-routes.js";
 import { ownerConfirmationMessages } from "./owner-confirmations.messages.js";
@@ -112,6 +114,35 @@ export function ownerConfirmationContent(deps: OwnerConfirmationDeps, target: st
   return confirmation ? connectionContent(target, confirmation, locale) : null;
 }
 
+// 确认卡关联的工单：存下的工单操作（被拦下的 ticket_action，参数里有 ticket_id）。写入确认不带工单，返回 null。
+function ticketOf(db: Db, confirmation: RuleChangeConfirmationDto): number | null {
+  if (confirmation.operation.kind !== "lead_tool" || confirmation.operation.tool !== "ticket_action") return null;
+  const raw = confirmation.params.find((param) => param.name === "ticket_id")?.value;
+  const id = raw && /^[1-9]\d{0,9}$/u.test(raw) ? Number(raw) : null;
+  return id !== null && getItem(db, id) ? id : null;
+}
+
+// 在通道里做的决定写进工单的 activities（工单 #72 返工）：actor 是用户，via 是来源（slack），凭证是那个通道的私信凭证。
+// 只在这次点击真的做了决定时写（之前还在等）；已经处理过、过期的不写。
+function recordTicketDecision(
+  deps: OwnerConfirmationDeps, itemId: number,
+  input: { target: string; decision: "confirm" | "decline"; via: string; binding: Binding; label: string; state: string; result: string | null },
+): void {
+  try {
+    addActivity(deps.db, {
+      itemId, actor: "user", kind: "decision",
+      payload: {
+        decision: "owner_confirmation", target: input.target, choice: input.decision, label: input.label,
+        state: input.state, result: input.result, via: input.via,
+        credential: { bindingId: input.binding.id, name: input.binding.display_name },
+        summary: `用户在 ${input.binding.display_name} 里点了「${input.decision === "confirm" ? "确认这一次" : "不改"}」：${input.label}`,
+      },
+    });
+  } catch (error) {
+    deps.log(`[owner-confirm] failed to record the activity of ${input.target} on #${itemId}: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
 /** 在通道里点的：主人操作和账本里的来源。 */
 export function channelOwnerSource(binding: Binding): OwnerActionSource {
   return { client: "channel", deviceName: binding.display_name, loopback: false, fromThisMachine: false };
@@ -121,8 +152,9 @@ export function channelOwnerSource(binding: Binding): OwnerActionSource {
  * 用户本人在自己的私信里点了按钮：按 App 里点卡的同一份实现决定这一次，返回点完以后的确认消息。
  * 不认识这个对象、找不到这个确认时返回 null。已经处理过、过期的不再执行：返回它现在的状态。
  */
+// via：在哪个来源里点的（通道名，例如 slack），写进工单的 activities。
 export async function resolveOwnerConfirmation(
-  deps: OwnerConfirmationDeps, request: { target: string; decision: "confirm" | "decline"; binding: Binding },
+  deps: OwnerConfirmationDeps, request: { target: string; decision: "confirm" | "decline"; binding: Binding; via: string },
 ): Promise<OwnerConfirmCardContent | null> {
   const parsed = targetOf(request.target);
   if (!parsed) return null;
@@ -141,6 +173,14 @@ export async function resolveOwnerConfirmation(
       } catch (error) {
         // 两次点击同时到、刚好过期、凭证缺权限：操作层拒绝了，消息显示它现在的状态。
         deps.log(`[owner-confirm] ${request.target}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      const after = getRuleChangeConfirmation(db, parsed.id);
+      const itemId = after && after.state !== "pending" && after.resolvedBy ? ticketOf(db, after) : null;
+      if (after && itemId !== null) {
+        recordTicketDecision(deps, itemId, {
+          target: request.target, decision: request.decision, via: request.via, binding,
+          label: after.label, state: after.state, result: after.resultPreview,
+        });
       }
     }
     return ownerConfirmationContent(deps, request.target);

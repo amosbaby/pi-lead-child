@@ -6194,7 +6194,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const label = channelHub?.registry.get(click.source)?.label ?? click.source;
     const binding = channelOwnerBinding(db, { subject: `${click.source}:${click.account}`, name: `${label} 私信（你自己）` });
     if (!binding) throw new Error(`${label} 私信的凭证在设置 → 设备里撤销了，按钮不再生效`);
-    const content = await resolveOwnerConfirmation(ownerConfirmationDeps, { target: click.target, decision: click.decision, binding });
+    const content = await resolveOwnerConfirmation(ownerConfirmationDeps, {
+      target: click.target, decision: click.decision, binding, via: click.source,
+    });
     log(`[channels] ${click.source}: the user clicked ${click.decision} on ${click.target} → ${content?.stateLabel ?? "unknown"}`);
     return content;
   }
