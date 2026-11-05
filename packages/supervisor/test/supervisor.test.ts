@@ -7,6 +7,7 @@ import { openDb, LATEST_SCHEMA_VERSION } from "@pi-lead-child/store";
 import { createItem } from "@pi-lead-child/store";
 import { createRun, updateRun } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
+import { WEB_BUILD_FILE, webBuildInfo } from "@pi-lead-child/protocol";
 import { supervisorAvailable, supervisorListening, supervisorRequest } from "../src/client.js";
 import type { SupervisorStatus } from "../src/protocol.js";
 import {
@@ -531,11 +532,9 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(Number(failed.daemon?.pid)).toBe(pid);
   }, 45_000);
 
-  it("swaps the staged daemon and cli in after the backup, and leaves dist/web alone", async () => {
+  it("swaps the staged daemon and cli in after the backup, and leaves dist/web alone when there is none", async () => {
     const dir = tempDir("plc-supervisor-staged-swap-");
     const deployment = deployCheckout(dir);
-    mkdirSync(join(deployment.distDir, "web"));
-    writeFileSync(join(deployment.distDir, "web", "index.html"), "web\n");
     const cli = oldCli(deployment);
     const pid = await start(dir, deployment, undefined, async (root, outdir) => writeStagedBuild(root, outdir, deployment.distDir));
     writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 15;\n");
@@ -545,8 +544,54 @@ describe("the deploy gate at the maintenance entry", () => {
     await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
     expect(readFileSync(join(deployment.distDir, "coordinatord.mjs"), "utf8")).toBe("// new\n");
     expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(head);
-    expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("web\n");
+    expect(existsSync(join(deployment.distDir, "web"))).toBe(false);
     expect(readFileSync(cli, "utf8")).toBe("// new cli\n");
+    expect(existsSync(stagingDistDir(deployment.distDir))).toBe(false);
+  }, 45_000);
+
+  // #45（2026-11-05）：升级时只从 HEAD 重建了 daemon，dist/web 还是旧 commit 的网页包，设置 → 记忆读不到 Hindsight 的状态。
+  // 有 dist/web 时，重新构建也构建网页包，和 daemon 一起换进去：两者来自同一个 commit。
+  function writeWebBuild(dir: string, commit: string, marker: string): void {
+    mkdirSync(join(dir, "web"), { recursive: true });
+    writeFileSync(join(dir, "web", "index.html"), `${marker}\n`);
+    writeFileSync(join(dir, "web", WEB_BUILD_FILE), JSON.stringify(webBuildInfo({ commit, dirty: false, builtAt: new Date().toISOString() })));
+  }
+
+  it("rebuilds dist/web from HEAD with the daemon, so the web UI and the daemon come from the same commit", async () => {
+    const dir = tempDir("plc-supervisor-staged-web-");
+    const deployment = deployCheckout(dir);
+    writeWebBuild(deployment.distDir, deployment.git("rev-parse", "HEAD"), "old web");
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => {
+      writeStagedBuild(root, outdir, deployment.distDir);
+      writeWebBuild(outdir, deployment.git("rev-parse", "HEAD"), "new web");
+    });
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 16;\n");
+    deployment.git("commit", "-qam", "the fix");
+    const head = deployment.git("rev-parse", "HEAD");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const done = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "succeeded" && Number(status.daemon?.pid) !== pid);
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(head);
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "web", WEB_BUILD_FILE), "utf8")).commit).toBe(head);
+    expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("new web\n");
+    expect(done.deploy).toMatchObject({ ready: true, rebuild: false });
+  }, 45_000);
+
+  // 重新构建没有产出同一个 commit 的网页包：不换、不停机，记成 build_mismatch。
+  it("refuses before the stop when the rebuild leaves dist/web on an older commit", async () => {
+    const dir = tempDir("plc-supervisor-stale-web-");
+    const deployment = deployCheckout(dir);
+    const base = deployment.git("rev-parse", "HEAD");
+    writeWebBuild(deployment.distDir, base, "old web");
+    const pid = await start(dir, deployment, undefined, async (root, outdir) => writeStagedBuild(root, outdir, deployment.distDir));
+    writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 17;\n");
+    deployment.git("commit", "-qam", "the fix");
+    await supervisorRequest({ type: "request_maintenance", action: "restart", reason: "deploy the fix" }, { dataDir: dir });
+    const failed = await waitStatus(dir, (status) => status.supervisor.maintenance?.state === "failed");
+    expect(failed.supervisor.maintenance?.failureKind).toBe("build_mismatch");
+    expect(failed.supervisor.maintenance?.error).toContain("dist/web");
+    expect(Number(failed.daemon?.pid)).toBe(pid);
+    expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(base);
+    expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("old web\n");
     expect(existsSync(stagingDistDir(deployment.distDir))).toBe(false);
   }, 45_000);
 

@@ -5,6 +5,7 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
+import { WEB_BUILD_FILE, webBuildInfo } from "@pi-lead-child/protocol";
 import {
   buildDaemonDist, deployReadiness, gitFailureKind, promoteStagedBuild, stagedCliDir, stagingDistDir, writeBuildProvenance,
   type GitExec,
@@ -143,6 +144,46 @@ describe("deploy readiness", () => {
   });
 });
 
+// #45（2026-11-05）：升级时只从 HEAD 重建了 daemon，dist/web 还是旧 commit 的网页包。旧页面严格校验新 daemon 的回答，
+// 设置 → 记忆读不到 Hindsight 的状态。daemon 和网页包不是同一个 commit 时，闸门要发现，并要求重建。
+describe("deploy readiness of the web UI next to the daemon", () => {
+  function writeWebBuild(source: { commit: string; dirty: boolean; builtAt: string }): void {
+    mkdirSync(join(dist, "web"), { recursive: true });
+    writeFileSync(join(dist, "web", WEB_BUILD_FILE), JSON.stringify(webBuildInfo(source)));
+  }
+
+  it("asks for a rebuild when the daemon is a build of HEAD but dist/web is from an older commit", () => {
+    const old = writeBuildProvenance(checkout, dist);
+    writeWebBuild(old);
+    writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 9;\n");
+    git("commit", "-qam", "the fix");
+    const built = writeBuildProvenance(checkout, dist);
+    const result = readiness();
+    expect(result).toMatchObject({ ready: false, rebuild: true, head: built.commit, build: { commit: built.commit } });
+    expect(result.reasons.join("\n")).toContain(old.commit);
+  });
+
+  it("asks for a rebuild when dist/web has no build record", () => {
+    writeBuildProvenance(checkout, dist);
+    mkdirSync(join(dist, "web"), { recursive: true });
+    writeFileSync(join(dist, "web", "index.html"), "web\n");
+    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+  });
+
+  it("asks for a rebuild when dist/web was built from uncommitted code", () => {
+    const built = writeBuildProvenance(checkout, dist);
+    writeWebBuild({ ...built, dirty: true });
+    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+  });
+
+  it("passes when dist/web and the daemon come from the same commit, or when there is no dist/web", () => {
+    const built = writeBuildProvenance(checkout, dist);
+    expect(readiness()).toMatchObject({ ready: true, rebuild: false });
+    writeWebBuild(built);
+    expect(readiness()).toMatchObject({ ready: true, rebuild: false });
+  });
+});
+
 // 2026-11-02：系统负载高时 git 超时，闸门把 cat-file 的超时报成「不在这个仓库里」，把 merge-base 的超时报成
 // 「不在当前分支的历史里」，用户照着去重建，其实 commit 好好的。超时只能说「无法判断」，但照样拒绝部署。
 describe("deploy readiness when git fails", () => {
@@ -218,13 +259,16 @@ describe("gitFailureKind", () => {
 // 维护时 supervisor 用它从 HEAD 构建（server.ts 的 executeMaintenance）。这里用假的构建脚本，不跑真的构建。
 describe("building dist for maintenance", () => {
   // 假的 checkout：apps/cli 和 apps/daemon 各有一个 scripts/build.ts。node_modules 指向本仓库，--import tsx 才找得到。
-  function fakeRoot(scripts: { cli?: string; daemon: string }): string {
+  // web 是 apps/daemon/scripts/build-web.ts（npm run build:web）。
+  function fakeRoot(scripts: { cli?: string; daemon: string; web?: string }): string {
     const root = tempDir("plc-build-dist-");
     symlinkSync(resolve("node_modules"), join(root, "node_modules"));
-    for (const [app, body] of Object.entries({ cli: "", ...scripts })) {
+    const { web = "", ...apps } = scripts;
+    for (const [app, body] of Object.entries({ cli: "", ...apps })) {
       mkdirSync(join(root, "apps", app, "scripts"), { recursive: true });
       writeFileSync(join(root, "apps", app, "scripts", "build.ts"), body);
     }
+    writeFileSync(join(root, "apps", "daemon", "scripts", "build-web.ts"), web);
     return root;
   }
 
@@ -235,6 +279,19 @@ describe("building dist for maintenance", () => {
     });
     await buildDaemonDist(root);
     expect(readFileSync(join(root, "order.txt"), "utf8")).toBe("cli\ndaemon\n");
+  }, 60_000);
+
+  // #45：升级时的重新构建要和完整构建（npm run build 加 npm run build:web）一样，网页包也从同一个 HEAD 构建。
+  it("builds the cli, the web UI into the outdir, then the daemon when asked for the web UI", async () => {
+    const record = (name: string) => `import { writeFileSync } from "node:fs"; writeFileSync("../../order.txt", ${JSON.stringify(name)} + " " + JSON.stringify(process.argv.slice(2)) + "\\n", { flag: "a" });`;
+    const root = fakeRoot({ cli: record("cli"), web: record("web"), daemon: record("daemon") });
+    await buildDaemonDist(root, { outdir: "/tmp/plc-staged-example", cliOutdir: "/tmp/plc-staged-example/cli", web: true });
+    expect(readFileSync(join(root, "order.txt"), "utf8")).toBe([
+      `cli ["--outdir","/tmp/plc-staged-example/cli"]`,
+      `web ["--outdir","/tmp/plc-staged-example"]`,
+      `daemon ["--outdir","/tmp/plc-staged-example"]`,
+      "",
+    ].join("\n"));
   }, 60_000);
 
   it("rejects with the last lines of the output when the build fails", async () => {
@@ -301,13 +358,24 @@ describe("swapping the staged build in", () => {
     return { distDir, cliDir };
   }
 
-  it("swaps the daemon and the cli in together, and leaves dist/web alone", () => {
+  it("swaps the daemon and the cli in together, and leaves dist/web alone when no web UI was staged", () => {
     const { distDir, cliDir } = staged();
     promoteStagedBuild(distDir, cliDir);
     expect(readFileSync(join(distDir, "coordinatord.mjs"), "utf8")).toBe("// new daemon\n");
     expect(readFileSync(join(distDir, "build-info.json"), "utf8")).toBe("new\n");
     expect(readFileSync(join(cliDir, "cli.mjs"), "utf8")).toBe("// new cli\n");
     expect(readFileSync(join(distDir, "web", "index.html"), "utf8")).toBe("web\n");
+    expect(readdirSync(distDir).sort()).toEqual(["build-info.json", "coordinatord.mjs", "web"]);
+  });
+
+  // #45：重新构建带了网页包时，它和 daemon 一起换进 dist/web。
+  it("swaps a staged web UI into dist/web together with the daemon", () => {
+    const { distDir, cliDir } = staged();
+    mkdirSync(join(stagingDistDir(distDir), "web"));
+    writeFileSync(join(stagingDistDir(distDir), "web", "index.html"), "new web\n");
+    promoteStagedBuild(distDir, cliDir);
+    expect(readFileSync(join(distDir, "web", "index.html"), "utf8")).toBe("new web\n");
+    expect(readFileSync(join(distDir, "coordinatord.mjs"), "utf8")).toBe("// new daemon\n");
     expect(readdirSync(distDir).sort()).toEqual(["build-info.json", "coordinatord.mjs", "web"]);
   });
 

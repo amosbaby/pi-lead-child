@@ -10,12 +10,17 @@
 //     （2026-11-02：修复合并后重启，跑的还是旧 dist）：维护在停机之前先从 HEAD 构建（buildDaemonDist），构建失败就不停机。
 //     构建到暂存目录 dist/.next（plc 的 cli 在 dist/.next/cli），备份成功、停机之前才和 daemon 一起换进去（promoteStagedBuild）。
 //     dist 来自别的分支、commit 不在仓库里、git 说不清的，照旧拒绝，不自动构建。
+//   · 有 dist/web（npm run build:web 的网页包）时，它要和 daemon 来自同一个 commit（#45，2026-11-05：升级时只从 HEAD 重建了
+//     daemon，dist/web 还是旧 commit 的，旧页面严格校验新 daemon 的回答，设置 → 记忆读不到 Hindsight 的状态）。
+//     不一致、没有记录或构建时有改动：要求重建；重新构建也构建网页包（buildDaemonDist 的 web），和 daemon 一起换进去。
+//     没有 dist/web 的 checkout（从没运行过 build:web）不受影响。
 // 「没提交的改动」只看会进构建的代码：packages/、apps/ 下的改动和没被忽略的新文件，以及仓库根目录下的文件
 // （package.json、package-lock.json、tsconfig.json 这类）。不算的：docs/、artifacts/、.scratch/、.claude/（它们不进 dist，
 // 而且有的测试会改写 artifacts/ 里的证据文件），以及测试文件（test/ 目录下的、*.test.* 和 *.spec.*）。
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
+import { parseWebBuildInfo, WEB_BUILD_FILE, type WebBuildInfo } from "@pi-lead-child/protocol";
 
 export const BUILD_INFO_FILE = "build-info.json";
 
@@ -152,7 +157,7 @@ export function cliDistDir(root: string): string {
 
 /**
  * 把暂存的构建换进 dist（daemon）和 cliDir（plc 的 cli）：逐个改名（同一个文件系统，每个都是原子的），daemon 的构建记录最后。
- * dist/web 不动。被换下的旧文件先挪进 dist/.prev-*；中途出错就按相反的顺序挪回去，旧 cli 和旧 daemon 都留在原处，然后抛出。
+ * 暂存目录里有 web/（重新构建带了网页包）时它也换进 dist/web；没有就不动 dist/web。被换下的旧文件先挪进 dist/.prev-*；中途出错就按相反的顺序挪回去，旧 cli 和旧 daemon 都留在原处，然后抛出。
  */
 export function promoteStagedBuild(distDir: string, cliDir: string): void {
   const staging = stagingDistDir(distDir);
@@ -217,6 +222,30 @@ export function readBuildProvenance(distDir: string): BuildProvenance | null {
   }
 }
 
+// npm run build:web 的产物：daemon 在网关的 / 下提供它（apps/daemon/scripts/build-web.ts）。
+export function webDistDir(distDir: string): string {
+  return join(distDir, "web");
+}
+
+/** dist/web 的构建记录（web-build.json）。没有 dist/web 时为 undefined，有 dist/web 但记录缺失或读不了时为 null。 */
+export function readWebBuild(distDir: string): WebBuildInfo | null | undefined {
+  const web = webDistDir(distDir);
+  if (!existsSync(web)) return undefined;
+  try {
+    return parseWebBuildInfo(JSON.parse(readFileSync(join(web, WEB_BUILD_FILE), "utf8")));
+  } catch {
+    return null;
+  }
+}
+
+/** 网页包不是 commit 的干净构建时，说明原因；是的话返回 null。web-build.json 里有改动的构建，build 不等于 commit。 */
+export function webBuildMismatch(web: WebBuildInfo | null, commit: string): string | null {
+  if (!web) return "dist/web 没有构建记录（web-build.json）";
+  if (web.build !== web.commit) return `dist/web 构建时源码有没提交的改动（${web.build}）`;
+  if (web.commit !== commit) return `dist/web 的网页包来自 ${web.commit}，daemon 来自 ${commit}`;
+  return null;
+}
+
 export interface DeployReadinessOptions {
   execGit?: GitExec;
   // 每条 git 命令最多等多久。默认 10 秒。
@@ -270,11 +299,16 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
         : `无法判断 dist 的构建 commit ${build.commit} 是否在这个仓库里（${gitFailureNote(kind, error)}）。先不部署，稍后再试。`);
     }
   }
-  const rebuild = clean && head !== null && (!build || (inHistory && (build.dirty || build.commit !== head)));
+  const web = readWebBuild(distDir);
+  const webMismatch = build && web !== undefined ? webBuildMismatch(web, build.commit) : null;
+  if (webMismatch) reasons.push(`${webMismatch}：网页包和 daemon 不是同一个 commit 的构建，页面可能读不懂 daemon 的回答。重新构建。`);
+  const rebuild = clean && head !== null && (!build || (inHistory && (build.dirty || build.commit !== head || webMismatch !== null)));
   return { ready: reasons.length === 0, reasons, head, build, rebuild };
 }
 
 const BUILD_TIMEOUT_MS = 5 * 60_000;
+// 网页包是 expo export --clear，比 esbuild 慢得多（2026-11-04 一次约 3 分钟）。
+const WEB_BUILD_TIMEOUT_MS = 10 * 60_000;
 const BUILD_KILL_GRACE_MS = 10_000;
 const BUILD_OUTPUT_KEPT = 4_096;
 // 构建只拿这几个环境变量：supervisor 的环境里有从钥匙串和 config.json 读进来的密钥（main.ts），构建用不着。
@@ -285,6 +319,9 @@ export interface BuildDistOptions {
   outdir?: string;
   // plc 的 cli 写到哪里。缺省是 apps/cli/dist；维护时是暂存目录里的 cli/（stagedCliDir）。
   cliOutdir?: string;
+  // 也构建网页包（apps/daemon/scripts/build-web.ts，等于 npm run build:web），写到 outdir 下的 web/。
+  // 维护时 dist/web 存在就要，网页包和 daemon 才是同一个 commit（#45）。
+  web?: boolean;
   // supervisor 停下时取消构建。
   signal?: AbortSignal;
   timeoutMs?: number;
@@ -293,24 +330,29 @@ export interface BuildDistOptions {
 
 /**
  * 从 root 当前的 checkout 构建 plc 的 cli 和 daemon 的 dist（等于 npm run build，daemon 最后，它写构建记录）。
+ * web 为 true 时 cli 之后还构建网页包（等于 npm run build:web）。
  * 失败时 reject，带上输出的最后几行。每一步到时先 SIGTERM，killGraceMs 后 SIGKILL，无论如何都会结束。
  */
 export async function buildDaemonDist(root: string, options: BuildDistOptions = {}): Promise<void> {
-  for (const app of ["cli", "daemon"]) {
-    if (options.signal?.aborted) throw new Error(`apps/${app} 构建被取消`);
-    const outdir = app === "daemon" ? options.outdir : options.cliOutdir;
+  const steps = [
+    { app: "cli", script: "build.ts", outdir: options.cliOutdir, label: "apps/cli", timeoutMs: BUILD_TIMEOUT_MS },
+    ...(options.web ? [{ app: "daemon", script: "build-web.ts", outdir: options.outdir, label: "apps/daemon 的网页包", timeoutMs: WEB_BUILD_TIMEOUT_MS }] : []),
+    { app: "daemon", script: "build.ts", outdir: options.outdir, label: "apps/daemon", timeoutMs: BUILD_TIMEOUT_MS },
+  ];
+  for (const { app, script, outdir, label, timeoutMs } of steps) {
+    if (options.signal?.aborted) throw new Error(`${label} 构建被取消`);
     const args = outdir ? ["--outdir", outdir] : [];
-    await runBuildScript(join(root, "apps", app), app, args, options);
+    await runBuildScript(join(root, "apps", app), label, script, args, { ...options, timeoutMs: options.timeoutMs ?? timeoutMs });
   }
 }
 
-function runBuildScript(cwd: string, app: string, args: string[], options: BuildDistOptions): Promise<void> {
+function runBuildScript(cwd: string, label: string, script: string, args: string[], options: BuildDistOptions): Promise<void> {
   const timeoutMs = options.timeoutMs ?? BUILD_TIMEOUT_MS;
   const killGraceMs = options.killGraceMs ?? BUILD_KILL_GRACE_MS;
   return new Promise((resolve, reject) => {
     const env = Object.fromEntries(BUILD_ENV_KEYS.flatMap((key) => (process.env[key] === undefined ? [] : [[key, process.env[key]]])));
     // 不用 tsx 命令行：它要开一个 IPC socket，沙箱里 listen 会 EPERM。
-    const child = spawn(process.execPath, ["--import", "tsx", "scripts/build.ts", ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, ["--import", "tsx", `scripts/${script}`, ...args], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     const keep = (chunk: Buffer) => { output = (output + chunk.toString("utf8")).slice(-BUILD_OUTPUT_KEPT); };
     child.stdout.on("data", keep);
@@ -329,7 +371,7 @@ function runBuildScript(cwd: string, app: string, args: string[], options: Build
     };
     // 取消：马上结束，子进程先 SIGTERM，不理的话 killGraceMs 后 SIGKILL。
     const onAbort = () => {
-      settle(new Error(`apps/${app} 构建被取消`));
+      settle(new Error(`${label} 构建被取消`));
       child.kill("SIGTERM");
       setTimeout(() => child.kill("SIGKILL"), killGraceMs).unref();
     };
@@ -337,13 +379,13 @@ function runBuildScript(cwd: string, app: string, args: string[], options: Build
     later(timeoutMs, () => child.kill("SIGTERM"));
     later(timeoutMs + killGraceMs, () => child.kill("SIGKILL"));
     // SIGKILL 以后 close 还没来（例如别的进程还占着输出管道）：也结束，不让维护一直卡着。
-    later(timeoutMs + 2 * killGraceMs, () => settle(new Error(`apps/${app} 构建超过时限 ${timeoutMs}ms，SIGKILL 以后还没结束`)));
+    later(timeoutMs + 2 * killGraceMs, () => settle(new Error(`${label} 构建超过时限 ${timeoutMs}ms，SIGKILL 以后还没结束`)));
     child.once("error", (error) => settle(error));
     child.once("close", (code, signal) => {
       if (code === 0) return settle();
       const tail = output.split("\n").map((line) => line.trim()).filter(Boolean).slice(-5).join(" | ");
       const how = signal ? `被 ${signal} 终止（时限 ${timeoutMs}ms）` : `退出码 ${code}`;
-      settle(new Error(`apps/${app} 构建${how}${tail ? `：${tail}` : ""}`));
+      settle(new Error(`${label} 构建${how}${tail ? `：${tail}` : ""}`));
     });
   });
 }

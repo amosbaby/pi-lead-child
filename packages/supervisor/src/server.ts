@@ -15,7 +15,8 @@ import {
   redactKnownValues, redactSecretText, secretEnvValues,
 } from "@pi-lead-child/protocol";
 import {
-  buildDaemonDist, cliDistDir, deployReadiness, discardStagedBuild, promoteStagedBuild, readBuildProvenance, stagedCliDir, stagingDistDir,
+  buildDaemonDist, cliDistDir, deployReadiness, discardStagedBuild, promoteStagedBuild, readBuildProvenance, readWebBuild, stagedCliDir, stagingDistDir,
+  webBuildMismatch, webDistDir,
   type DeployReadiness,
 } from "./deploy/readiness.js";
 import { backupSqlite } from "./deploy/backup.js";
@@ -554,7 +555,9 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
           let kind: MaintenanceFailureKind = "build_failed";
           buildAbort = new AbortController();
           try {
-            await (opts.buildDist ?? ((r, outdir, signal) => buildDaemonDist(r, { outdir, cliOutdir: stagedCliDir(distDir), signal })))(
+            // dist/web 存在时网页包也从 HEAD 构建，和 daemon 一起换进去（#45）。
+            const web = existsSync(webDistDir(distDir));
+            await (opts.buildDist ?? ((r, outdir, signal) => buildDaemonDist(r, { outdir, cliOutdir: stagedCliDir(distDir), web, signal })))(
               root, staging, buildAbort.signal,
             );
           } catch (error: any) {
@@ -565,6 +568,12 @@ async function runSupervisor(opts: SupervisorOptions, lock: InstanceLock): Promi
           const built = failure ? null : readBuildProvenance(staging);
           if (!failure && (!built || built.dirty || built.commit !== readiness.head)) {
             failure = `构建出来的不是 HEAD ${readiness.head}（${built ? `是 ${built.commit}${built.dirty ? "，有改动" : ""}` : "没有构建记录"}），构建期间 HEAD 可能变了`;
+            kind = "build_mismatch";
+          }
+          // #45：dist/web 存在，暂存目录里却没有同一个 commit 的网页包：换进去以后网页包和 daemon 又不一致了。
+          const webMismatch = !failure && existsSync(webDistDir(distDir)) ? webBuildMismatch(readWebBuild(staging) ?? null, readiness.head ?? "") : null;
+          if (webMismatch) {
+            failure = `构建出来的网页包不是 HEAD 的（${webMismatch}）`;
             kind = "build_mismatch";
           }
           if (failure) {
