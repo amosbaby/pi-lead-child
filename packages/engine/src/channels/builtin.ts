@@ -14,7 +14,8 @@ import type { ChannelAdapter } from "./types.js";
 
 export {
   compareSlackTs, createSlackChannelAdapter, SLACK_EVENT_KINDS, SLACK_MESSAGE_BLOCKS_MAX, SLACK_REPLY_METADATA_TYPE, SLACK_SECRET_NAMES,
-  SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_OWNER_REPLY_COLOR, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode, slackOwnerReplyMessages,
+  SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_OWNER_REPLY_COLOR, SLACK_OWNER_REPLY_COLORS, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode, slackOwnerReplyMessages,
+  slackNextOwnerReplyColor,
   slackCatchUpWindow, slackMemoryExclusion, slackMessageLink, slackMrkdwnFromMarkdown, slackTsOf, slackWorkspaceUrl,
   SLACK_CONFIRM_ACTION, SLACK_DECLINE_ACTION, slackConfirmAction, slackConfirmBlocks,
   SLACK_CHOOSE_ACTION, SLACK_CHOICE_BUTTONS_MAX, SLACK_CHOICE_BUTTON_LABEL_MAX, SLACK_CHOICES_PER_MESSAGE_MAX, slackChoiceBlocks, slackChoiceUsesButtons,

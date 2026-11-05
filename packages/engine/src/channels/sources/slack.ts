@@ -112,6 +112,10 @@ export const SLACK_TEXT_OBJECT_MAX = 3_000;
 export const SLACK_MESSAGE_BLOCKS_MAX = 50;
 // 回给用户本人的话的色条颜色：界面的主色（protocol 的 DEFAULT_DESIGN_COLORS.accent）。
 export const SLACK_OWNER_REPLY_COLOR = DEFAULT_DESIGN_COLORS.accent;
+// 同一段对话里连着发的两条换着用这两种颜色（#86，用户 2026-11-06：「相邻的两个消息左侧颜色条要不一样」）。色条只表示「这是 Lead 的话」，
+// 不带别的含义，所以第二种不用成功、警告、错误的颜色，用品红：和主色的亮度相近、色相差得远，
+// 在 Slack 的浅色（白底）和深色（#1A1D21）主题里和底色的对比度都在 3:1 以上。
+export const SLACK_OWNER_REPLY_COLORS = [SLACK_OWNER_REPLY_COLOR, "#DD2590"] as const;
 // 色条的 fallback 最多多少个字：照 chat.postMessage 对纯文字的建议（「For best results, limit the text field to 4,000 characters.」）。
 const SLACK_OWNER_REPLY_FALLBACK_MAX = 4_000;
 
@@ -175,7 +179,7 @@ export function slackDisclosureBlocks(parts: { byline: string; body: string | nu
  * Slack 把同一个人连发的消息排在一个头像下，分不清哪句是 Lead 的。所以每条回复包在一个带左侧色条的 attachment 里
  * （https://docs.slack.dev/legacy/legacy-messaging/legacy-secondary-message-attachments：color「Changes the color of the border on
  * the left side of this attachment」，blocks「An array of layout blocks in the same format as described in the building blocks guide」），
- * 色条里第一行是署名（context block，小号灰字），下面是正文（section，mrkdwn）。颜色是界面的主色。
+ * 色条里第一行是署名（context block，小号灰字），下面是正文（section，mrkdwn）。颜色和这段对话里上一条不同（previousColor，#86）。
  * 一个 section 的文字最多 3000 个字（SLACK_TEXT_OBJECT_MAX），所以正文按 3000 个字拆成几条消息，每条一段、各带色条和署名。
  * 不发顶层 text（#70，用户 2026-11-05：正文显示了两遍）：只有 attachments、没有顶层 blocks 时 Slack 把 text 当正文显示在色条外面
  * （https://docs.slack.dev/reference/methods/chat.postMessage：text「If you aren't [using blocks], this is the main body text of the message.」；
@@ -183,25 +187,45 @@ export function slackDisclosureBlocks(parts: { byline: string; body: string | nu
  * （legacy-secondary-message-attachments：fallback「A plain text summary of the attachment used in clients that don't show formatted text
  * (eg. IRC, mobile notifications).」），是这一条的纯文字（署名一行加这一段）。body 已经是 mrkdwn。
  */
-export function slackOwnerReplyMessages(parts: { byline: string; body: string | null }): Array<{ attachments: Array<Record<string, unknown>> }> {
+export function slackOwnerReplyMessages(
+  parts: { byline: string; body: string | null }, previousColor: string | null = null,
+): Array<{ attachments: Array<Record<string, unknown>> }> {
   const chunks = parts.body?.trim() ? slackChunks(parts.body, SLACK_TEXT_OBJECT_MAX).filter((chunk) => chunk.trim()) : [];
-  return (chunks.length ? chunks : [null]).map((chunk) => ({ attachments: [slackOwnerReplyBar({ byline: parts.byline, body: chunk })] }));
+  let color = previousColor;
+  return (chunks.length ? chunks : [null]).map((chunk) => {
+    color = slackNextOwnerReplyColor(color);
+    return { attachments: [slackOwnerReplyBar({ byline: parts.byline, body: chunk }, color)] };
+  });
+}
+
+/**
+ * 下一条色条用的颜色（#86）：和上一条不同，在 SLACK_OWNER_REPLY_COLORS 里轮着换。不知道上一条（这段对话还没发过、daemon 重启过）时用主色，
+ * 最多和重启前的最后一条同色一次。
+ */
+export function slackNextOwnerReplyColor(previousColor: string | null): string {
+  const index = previousColor === null ? -1 : SLACK_OWNER_REPLY_COLORS.findIndex((color) => sameColor(color, previousColor));
+  return SLACK_OWNER_REPLY_COLORS[(index + 1) % SLACK_OWNER_REPLY_COLORS.length]!;
+}
+
+// Slack 读回来的颜色可能不带「#」，大小写也可能不同。
+function sameColor(a: unknown, b: unknown): boolean {
+  const norm = (value: unknown) => (typeof value === "string" ? value.replace(/^#/u, "").toLowerCase() : null);
+  return norm(a) !== null && norm(a) === norm(b);
 }
 
 /**
  * 回给用户本人的话的色条（一个 attachment）：署名和正文在 blocks 里，fallback 是纯文字的退路。改这条回复（chat.update）时
  * 整段正文放进同一个色条（slackDisclosureBlocks 按 3000 个字分成几个 section），fallback 最多 4000 个字。
  */
-export function slackOwnerReplyBar(parts: { byline: string; body: string | null }): Record<string, unknown> {
+export function slackOwnerReplyBar(parts: { byline: string; body: string | null }, color: string = SLACK_OWNER_REPLY_COLOR): Record<string, unknown> {
   const fallback = parts.body ? `${parts.byline}\n${parts.body}` : parts.byline;
-  return { color: SLACK_OWNER_REPLY_COLOR, fallback: fallback.slice(0, SLACK_OWNER_REPLY_FALLBACK_MAX), blocks: slackDisclosureBlocks(parts) };
+  return { color, fallback: fallback.slice(0, SLACK_OWNER_REPLY_FALLBACK_MAX), blocks: slackDisclosureBlocks(parts) };
 }
 
-/** 一条消息是不是回给用户本人的话（带 slackOwnerReplyBar 的色条）。Slack 读回来的颜色可能不带「#」。 */
+/** 一条消息是不是回给用户本人的话（带 slackOwnerReplyBar 的色条，两种颜色都算）。 */
 export function slackIsOwnerReply(message: { attachments?: unknown[] }): boolean {
-  const color = (value: unknown) => (typeof value === "string" ? value.replace(/^#/u, "").toLowerCase() : null);
   return Array.isArray(message.attachments)
-    && message.attachments.some((attachment) => isRecord(attachment) && color(attachment.color) === color(SLACK_OWNER_REPLY_COLOR));
+    && message.attachments.some((attachment) => isRecord(attachment) && SLACK_OWNER_REPLY_COLORS.some((color) => sameColor(attachment.color, color)));
 }
 
 // 确认消息上的两个按钮（工单 #72）。action_id 认出是我们的按钮，value 是确认的对象（user_action 的 target）。
@@ -1262,6 +1286,19 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   // 推回来可能比 chat.postMessage 的回答还快，所以这个频道有正在发的消息时，先等它发完再认（最多等 POSTING_WAIT_MS）。
   const posted = new Set<string>();
   const posting = new Map<string, Set<Promise<unknown>>>();
+  // 色条的颜色（#86）：每段对话（频道和 thread）上一条用的颜色，和每条消息（频道:ts）用的颜色（改这条时照旧用它）。只记在内存里，
+  // daemon 重启后从主色重新开始。
+  const lastBarColor = new Map<string, string>();
+  const barColors = new Map<string, string>();
+
+  function rememberBarColor(channel: string, threadTs: string | undefined, ts: string, color: string): void {
+    const conversation = `${channel}:${threadTs ?? "main"}`;
+    lastBarColor.delete(conversation);
+    lastBarColor.set(conversation, color);
+    barColors.set(`${channel}:${ts}`, color);
+    while (lastBarColor.size > POSTED_MAX) lastBarColor.delete(lastBarColor.keys().next().value!);
+    while (barColors.size > POSTED_MAX) barColors.delete(barColors.keys().next().value!);
+  }
 
   function rememberPosted(channel: string, ts: string): void {
     posted.add(`${channel}:${ts}`);
@@ -2079,7 +2116,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
   ): Promise<ChannelOutboundResult> {
     let first: string | null = null;
     let duplicate = true;
-    for (const [index, message] of slackOwnerReplyMessages(parts).entries()) {
+    const previousColor = lastBarColor.get(`${channel}:${target.thread_ts ?? "main"}`) ?? null;
+    for (const [index, message] of slackOwnerReplyMessages(parts, previousColor).entries()) {
       const partKey = index === 0 ? key : `${key}#${index + 1}`;
       let ts = await findSent(target, partKey, context);
       if (ts) {
@@ -2094,6 +2132,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         if (!isString(result.ts)) throw new Error("slack chat.postMessage: no ts in the response");
         ts = result.ts;
         rememberPosted(channel, ts);
+        rememberBarColor(channel, target.thread_ts, ts, String(message.attachments[0]!.color));
         duplicate = false;
       }
       first ??= ts;
@@ -2489,10 +2528,10 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         // 同样的内容改两次结果一样，所以改写本身是幂等的。不带署名的样式时清掉原来的 blocks（不传时 Slack 会留着旧的）。
         // 回给用户本人的话（owner_reply）：带署名时只换色条，不发顶层 text（和发的时候一样，正文只显示一遍，#70）；
         // 换成不带署名的话时清掉色条（chat.update：「If you don't include attachments, the message's previous attachments will be retained.」
-        // 「To remove previous attachments, include an empty array for this field.」）。
+        // 「To remove previous attachments, include an empty array for this field.」）。色条照旧用这条发的时候的颜色（不知道时用主色）。
         const owner = request.style === "owner_reply";
         const result = await web.call("chat.update", owner && outgoing.parts
-          ? { channel, ts: request.target.ts, attachments: [slackOwnerReplyBar(outgoing.parts)] }
+          ? { channel, ts: request.target.ts, attachments: [slackOwnerReplyBar(outgoing.parts, barColors.get(`${channel}:${request.target.ts}`))] }
           : {
             channel, ts: request.target.ts, text: outgoing.text,
             blocks: outgoing.parts ? slackDisclosureBlocks(outgoing.parts) : [],

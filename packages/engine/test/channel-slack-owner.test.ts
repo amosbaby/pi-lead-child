@@ -7,12 +7,14 @@
 //   - 回复包在带色条的 attachment 里，色条里第一行是 Lead 的名字，和用户自己的话分开（用户 2026-11-05）；太长时拆成几条，每条都带色条。
 //   - 正文只在色条里出现一次：不发顶层 text（只有 attachments 时 Slack 把它当正文显示，#70），通知用 attachment 的 fallback；
 //     改这条回复时也一样。
+//   - 同一段对话里连着发的两条色条颜色不同（#86，用户 2026-11-06），改一条时颜色不变，推回来的两种颜色都认得出。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { openDb, type Db } from "@pi-lead-child/store";
 import {
-  ChannelHub, ChannelRegistry, createSlackChannelAdapter, SLACK_OWNER_REPLY_COLOR, slackMrkdwnFromMarkdown, type ChannelOwnerMessage,
+  ChannelHub, ChannelRegistry, createSlackChannelAdapter, SLACK_OWNER_REPLY_COLOR, SLACK_OWNER_REPLY_COLORS, slackMrkdwnFromMarkdown,
+  slackNextOwnerReplyColor, slackOwnerReplyMessages, type ChannelOwnerMessage,
 } from "../src/index.js";
 import { FakeSlack } from "../testing/index.js";
 
@@ -190,9 +192,10 @@ describe("how Lead's reply to the user's own DM looks", () => {
     expect(posted).toHaveLength(2);
     expect(posted.map((message) => barOf(message)!.fallback)).toEqual([`:robot_face: Fairy (Assistant)\n${first}`, `:robot_face: Fairy (Assistant)\n${second}`]);
     expect(posted.map((message) => visibleCopies(message, first) + visibleCopies(message, second))).toEqual([1, 1]);
+    // 拆出来的两条也挨着：颜色不同（#86）。
+    expect(posted.map((message) => barOf(message)!.color)).toEqual([...SLACK_OWNER_REPLY_COLORS]);
     for (const message of posted) {
       const bar = barOf(message)!;
-      expect(bar.color).toBe(SLACK_OWNER_REPLY_COLOR);
       expect(message.text).toBe("");
       expect(bar.blocks[0]).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: ":robot_face: Fairy (Assistant)" }] });
       expect(bar.blocks.slice(1).every((block) => block.type === "section" && block.text!.text.length <= 3_000)).toBe(true);
@@ -240,6 +243,75 @@ describe("how Lead's reply to the user's own DM looks", () => {
     ]);
     expect(posted.map((message) => message.attachments)).toEqual([undefined, undefined, undefined]);
     expect(posted.map((message) => message.blocks?.[0]?.type)).toEqual(["context", "context", undefined]);
+  });
+});
+
+describe("the bar color of Lead's replies in a row (#86)", () => {
+  const ownerHub = () => setup(() => true);
+  const colorsIn = (channel: string) => slack.messages
+    .filter((message) => message.channel === channel)
+    .map((message) => (message.attachments as Array<{ color: string }> | undefined)?.[0]?.color);
+
+  it("picks a color different from the previous one, and the accent when there is none", () => {
+    const [accent, other] = SLACK_OWNER_REPLY_COLORS;
+    expect(accent).toBe(SLACK_OWNER_REPLY_COLOR);
+    expect(other).not.toBe(accent);
+    expect(slackNextOwnerReplyColor(null)).toBe(accent);
+    expect(slackNextOwnerReplyColor(accent)).toBe(other);
+    expect(slackNextOwnerReplyColor(other)).toBe(accent);
+    // Slack 读回来的颜色可能不带「#」、大小写不同：照样认成同一种。
+    expect(slackNextOwnerReplyColor(accent.replace("#", "").toLowerCase())).toBe(other);
+    // 不认识的颜色：用主色。
+    expect(slackNextOwnerReplyColor("#000000")).toBe(accent);
+    // 一次拆成几条：从上一条之后接着换。
+    const parts = { byline: "Fairy", body: `${"甲".repeat(2_000)}\n${"乙".repeat(2_000)}\n${"丙".repeat(2_000)}` };
+    const colors = (previous: string | null) => slackOwnerReplyMessages(parts, previous).map((message) => message.attachments[0]!.color);
+    expect(colors(null)).toEqual([accent, other, accent]);
+    expect(colors(accent)).toEqual([other, accent, other]);
+  });
+
+  it("alternates the color of replies in a row in the same conversation", async () => {
+    const hub = ownerHub();
+    for (const turn of ["a", "b", "c", "d"]) await hub.replyToOwner(`slack:${SELF_DM}:main`, `回复 ${turn}`, `turn_${turn}`);
+    const colors = colorsIn(SELF_DM);
+    expect(colors).toHaveLength(4);
+    for (let index = 1; index < colors.length; index += 1) expect(colors[index]).not.toBe(colors[index - 1]);
+    expect(colors).toEqual([...SLACK_OWNER_REPLY_COLORS, ...SLACK_OWNER_REPLY_COLORS]);
+  });
+
+  it("keeps the alternation per conversation, and does not change color for a retry of the same reply", async () => {
+    const hub = ownerHub();
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第一条", "turn_1");
+    // 别的对话（另一个私信）自己从主色开始，不影响这里。
+    await hub.replyToOwner("slack:D0OTHER:main", "另一段对话", "turn_x");
+    // 同一个键重试：没有发新消息，下一条照样和第一条不同。
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第一条", "turn_1");
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第二条", "turn_2");
+    expect(colorsIn(SELF_DM)).toEqual([...SLACK_OWNER_REPLY_COLORS]);
+    expect(colorsIn("D0OTHER")).toEqual([SLACK_OWNER_REPLY_COLOR]);
+  });
+
+  it("keeps a message's color when Lead edits it", async () => {
+    const hub = ownerHub();
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第一条", "turn_1");
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第二条", "turn_2");
+    const second = slack.messages.filter((message) => message.channel === SELF_DM)[1]!;
+    await hub.editMessage(`slack:${SELF_DM}:main`, { ref: second.ts, text: "改过的第二条", words: "assistant", by: "lead", forUser: true });
+    expect(colorsIn(SELF_DM)).toEqual([...SLACK_OWNER_REPLY_COLORS]);
+  });
+
+  it("still reads replies of either color back as Lead's own replies", async () => {
+    const hub = ownerHub();
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第一条", "turn_1");
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "第二条", "turn_2");
+    // 来源读回这段对话时两种颜色都认成回给用户本人的话（改这条时靠它保留色条和署名）。
+    const adapter = createSlackChannelAdapter({ api: slack.api, now: () => clock });
+    const history = await adapter.history!({ objectKey: `slack:${SELF_DM}:main`, limit: 5 }, { credential: slack.credential } as never);
+    expect(history.map((entry) => entry.style)).toEqual(["owner_reply", "owner_reply"]);
+    // daemon 重启后（新的 hub，内存里没有颜色）改第二条：色条还在，颜色回到主色。
+    const second = slack.messages.filter((message) => message.channel === SELF_DM)[1]!;
+    await ownerHub().editMessage(`slack:${SELF_DM}:main`, { ref: second.ts, text: "重启后改的", words: "assistant", by: "lead", forUser: true });
+    expect(colorsIn(SELF_DM)).toEqual([SLACK_OWNER_REPLY_COLOR, SLACK_OWNER_REPLY_COLOR]);
   });
 });
 
