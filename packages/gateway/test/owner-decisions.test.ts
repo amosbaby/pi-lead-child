@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { CHANNEL_EVENT_KINDS, UI_ACTION_PERFORMED_KIND } from "@pi-lead-child/protocol";
 import {
-  channelOwnerBinding, createItem, createRun, getDecisionRequest, getLeadProfile, latestItemId, leadProfileFields, listEvents, openDb,
+  channelOwnerBinding, createItem, createRun, getDecisionRequest, recordTicketOrigin, getLeadProfile, latestItemId, leadProfileFields, listEvents, openDb,
   recordTurnTicketOrigins, updateRun, writeLeadProfile, type Binding, type Db,
 } from "@pi-lead-child/store";
 import {
@@ -20,7 +20,7 @@ import { FakeSlack } from "@pi-lead-child/engine/testing";
 import {
   choiceGroupsOfSurface, createOwnerDecisionPusher, resolveOwnerDecision, type OwnerDecisionPusher,
 } from "../src/owner-decisions.js";
-import { systemReplyForOwner } from "../src/owner-dm-relay.js";
+import { dispatchedTicketOf, systemReplyForOwner } from "../src/owner-dm-relay.js";
 
 const SELF_DM = "D0SELF";
 const CONVERSATION = `slack:${SELF_DM}:main`;
@@ -146,7 +146,7 @@ describe("(a) a ChoiceGroup drawn in the user's own Slack DM turn", () => {
     expect(blocksOf()).toContain("已决定");
     expect(blocksOf()).toContain("选了「周二」");
     // Lead 被叫醒以后为这张工单写给用户的话也回到这个私信（(c)）。
-    expect(systemReplyForOwner(db, { text: "按周二排好了。", entityKeys: [`ticket:${ticket}`] }).conversations).toEqual([CONVERSATION]);
+    expect(systemReplyForOwner(db, { text: "按周二排好了。", events: [{ entityKey: `ticket:${ticket}` }] }).conversations).toEqual([CONVERSATION]);
 
     // 旧客户端还显示着按钮，再点另一个：不再生效。
     await hub.receiveFromTransport("slack", slack.click({ ...messages()[0]!, blocks: [] }, `${SLACK_CHOOSE_ACTION}:1`));
@@ -288,19 +288,42 @@ describe("(b) an executor's decision for the user", () => {
 });
 
 describe("(c) results of what the user asked in the DM", () => {
+  it("relays Lead's words after a sub-agent task dispatched in the DM turn hands back, but not NO_REPLY", () => {
+    const floor = latestItemId(db);
+    // 派单器以 system 的名义建子 agent 工单（apps/daemon/src/agent-tasks.ts），按建单人认不出来。
+    const task = createItem(db, { title: "看一下 acme/x#12", brief: "b", createdBy: "system", purpose: "lookup" });
+    expect(recordTurnTicketOrigins(db, { afterItemId: floor, conversation: CONVERSATION, now: clock })).toEqual([]);
+    // dispatch_agent_task 的结果（channel-tools.ts 的 json：JSON 正文）里有工单编号。
+    const result = {
+      content: [{ type: "text", text: JSON.stringify({ ok: true, itemId: task, runId: 7, grant: ["读 acme/x"], dropped: [], next: "结果回到通道" }, null, 2) }],
+      details: {},
+    };
+    expect(dispatchedTicketOf("dispatch_agent_task", result)).toBe(task);
+    expect(dispatchedTicketOf("create_task", result)).toBeNull();
+    expect(dispatchedTicketOf("dispatch_agent_task", { content: [{ type: "text", text: JSON.stringify({ ok: false, error: "x" }) }] })).toBeNull();
+    expect(recordTicketOrigin(db, { itemId: task, conversation: CONVERSATION, now: clock })).toBe(true);
+
+    // 子 agent 交回：通道的 channel.task.finished 记在通道卡上，工单编号在 payload 里；轻子 agent 的 Run 结束记在 ticket:N 上。
+    const handedBack = [{ entityKey: "slack:C0ACME:1793000000.000100", payload: { itemId: task, runId: 7, status: "finished" } }];
+    expect(systemReplyForOwner(db, { text: "看完了：acme/x#12 可以合。", events: handedBack }))
+      .toEqual({ text: "看完了：acme/x#12 可以合。", conversations: [CONVERSATION] });
+    expect(systemReplyForOwner(db, { text: "看完了。", events: [{ entityKey: `ticket:${task}` }] }).conversations).toEqual([CONVERSATION]);
+    expect(systemReplyForOwner(db, { text: "NO_REPLY", events: handedBack }).conversations).toEqual([]);
+  });
+
   it("relays Lead's later words about a ticket made in the DM turn, including its subtickets, but not NO_REPLY", async () => {
     const floor = latestItemId(db);
     const made = createItem(db, { title: "查一下发布失败的原因", brief: "b", createdBy: "lead" });
     const child = createItem(db, { title: "子工单", brief: "b", createdBy: "lead", parentItemId: made });
     expect(recordTurnTicketOrigins(db, { afterItemId: floor, conversation: CONVERSATION, now: clock })).toEqual([made, child]);
 
-    expect(systemReplyForOwner(db, { text: "查到了：缓存没清。", entityKeys: [`ticket:${made}`] }))
+    expect(systemReplyForOwner(db, { text: "查到了：缓存没清。", events: [{ entityKey: `ticket:${made}` }] }))
       .toEqual({ text: "查到了：缓存没清。", conversations: [CONVERSATION] });
     // 纯内部的一轮。
-    expect(systemReplyForOwner(db, { text: "NO_REPLY", entityKeys: [`ticket:${made}`] }).conversations).toEqual([]);
-    expect(systemReplyForOwner(db, { text: "", entityKeys: [`ticket:${made}`] }).conversations).toEqual([]);
+    expect(systemReplyForOwner(db, { text: "NO_REPLY", events: [{ entityKey: `ticket:${made}` }] }).conversations).toEqual([]);
+    expect(systemReplyForOwner(db, { text: "", events: [{ entityKey: `ticket:${made}` }] }).conversations).toEqual([]);
     // 和私信里建的工单无关的事。
-    expect(systemReplyForOwner(db, { text: "别的事。", entityKeys: [`ticket:${ticket}`, "chat:main"] }).conversations).toEqual([]);
+    expect(systemReplyForOwner(db, { text: "别的事。", events: [{ entityKey: `ticket:${ticket}` }, { entityKey: "chat:main" }] }).conversations).toEqual([]);
 
     // 发出去和用户本人那一轮的回复走同一条路：Markdown 换成 Slack 的格式，带色条和署名。
     await hub.replyToOwner(CONVERSATION, "**查到了**：缓存没清。", "system:turn_9");

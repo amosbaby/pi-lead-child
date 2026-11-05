@@ -125,7 +125,9 @@ import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-chil
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
-import { latestItemId, ownerConversationOf, recordTurnTicketOrigins, rememberOwnerConversation } from "@pi-lead-child/store";
+import {
+  latestItemId, ownerConversationOf, recordTicketOrigin, recordTurnTicketOrigins, rememberOwnerConversation,
+} from "@pi-lead-child/store";
 import {
   classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
   LEAD_RESTART_INTERRUPTED_ERROR, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
@@ -157,7 +159,7 @@ import {
   isOwnerConfirmationAction, ownerConfirmationContent, resolveOwnerConfirmation, type OwnerConfirmationDeps,
 } from "@pi-lead-child/gateway";
 import {
-  choiceGroupsOfSurface, createOwnerDecisionPusher, resolveOwnerDecision, systemReplyForOwner, type OwnerDecisionPusher,
+  choiceGroupsOfSurface, createOwnerDecisionPusher, dispatchedTicketOf, resolveOwnerDecision, systemReplyForOwner, type OwnerDecisionPusher,
 } from "@pi-lead-child/gateway";
 import {
   persistLeadToolConversationEvent, repairStuckLeadToolOperations,
@@ -872,8 +874,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 正在跑的这一轮是不是用户本人的消息开的（不是系统事件、外部消息、到点的跟进叫醒的）：user-placement.ts 据此决定
   // 用户新发的消息插不插进来。
   let ownUserRun = false;
-  // 交给正在跑的这一轮的事提到的对象（事件的 entityKey，例如 ticket:12）。系统叫醒的一轮写给用户的话按它同步到私信（工单 #81）。
-  let runEntityKeys: string[] = [];
+  // 交给正在跑的这一轮的事（事件的 entityKey 和 payload）。系统叫醒的一轮写给用户的话按它找要同步的私信（工单 #81）。
+  let runEvents: Array<{ entityKey: string; payload?: unknown }> = [];
   // 交接和挂起（lead 的 scheduler/handoffs.ts，lead-scheduler spec P2）：这个单元做过的步骤、交接包、挂起的单元、
   // 子 agent 拥有的对象。extension（做过的步骤）、Lead 的 hand_off 和 resume_unit、daemon 共用这一个实例。
   const handoffs = new LeadHandoffs({
@@ -1106,6 +1108,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const channelOwnerChoices = new Map<string, Array<{ decisionId: number; recommended: string | null; reason: string | null }>>();
   // 用户私信的那一轮开始时最大的工单编号（工单 #81 的 (c)）：这一轮结束时，编号更大的、Lead 建的工单记下来源私信。
   const channelOwnerItemFloor = new Map<string, number>();
+  // 用户私信的那一轮里 Lead 用 dispatch_agent_task 派的子 agent 工单（工单 #81 的 (c)）：派单器以 system 的名义建单，
+  // 按编号范围认不出来，从工具结果里记下，这一轮结束时一起记下来源私信。
+  const channelOwnerDispatched = new Map<string, number[]>();
   const retriedUserTurns = new Set<string>();
   // 在等重试的轮次：at 为 null 时等网络恢复，否则到点再试（模型服务暂时连不上、限流）。
   const userTurnRetries = new Map<string, { at: number | null }>();
@@ -1489,6 +1494,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const floor = channelOwnerItemFloor.get(entry.turn.id);
       channelOwnerItemFloor.delete(entry.turn.id);
       if (floor !== undefined && !channelOwnerItemFloor.has(answeredWith.turn.id)) channelOwnerItemFloor.set(answeredWith.turn.id, floor);
+      const dispatched = channelOwnerDispatched.get(entry.turn.id);
+      channelOwnerDispatched.delete(entry.turn.id);
+      if (dispatched) channelOwnerDispatched.set(answeredWith.turn.id, [...(channelOwnerDispatched.get(answeredWith.turn.id) ?? []), ...dispatched]);
     } else if (owners) {
       replyToChannelOwner(entry.turn.id, note);
     }
@@ -2029,6 +2037,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (event.type === "tool_execution_end") streamedSurfaces.delete(event.toolCallId);
     // render_ui 画的卡片（generative UI）：结束之前先发一条带 surface 的 lead.tool.updated。
     // 事件类型表是冻结的，surface 只发给声明了 include=ui_surfaces 的客户端（protocol 的 gatewayEventOptIn）。
+    const dispatched = event.type === "tool_execution_end" && !event.isError && channelOwnerReplies.has(entry.turn.id)
+      ? dispatchedTicketOf(event.toolName, event.result)
+      : null;
+    if (dispatched !== null) channelOwnerDispatched.set(entry.turn.id, [...(channelOwnerDispatched.get(entry.turn.id) ?? []), dispatched]);
     const surface = event.type === "tool_execution_end" && !event.isError && event.toolName === "render_ui"
       ? event.result?.details?.surface
       : undefined;
@@ -4197,7 +4209,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       : { external: false, timer: null };
     ownUserRun = Boolean(channelTurn) && !options.system && !options.aish;
     if (channelTurn && channelOwnerReplies.has(channelTurn.turn.id)) channelOwnerItemFloor.set(channelTurn.turn.id, latestItemId(db));
-    runEntityKeys = [];
+    runEvents = [];
     let succeeded = false;
     let offline = false;
     // 这一轮被停机前的排空中断了（restartAbort）。
@@ -4232,7 +4244,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       deliveredInboxIds = delivered?.inboxIds ?? [];
       const deliveredEvents = delivered?.events ?? [];
       // 交给这一轮的事提到的对象（工单 #81 的 (c)）：系统叫醒的一轮写给用户的话，按它找要同步的私信。
-      runEntityKeys = deliveredEvents.map((event) => event.entityKey);
+      runEvents = deliveredEvents.map((event) => ({ entityKey: event.entityKey, payload: event.payload }));
       runOrigin = {
         ...withExternalEvents(runOrigin, deliveredEvents),
         timer: channelTurn ? null : userTimerOf(deliveredEvents),
@@ -6202,6 +6214,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     channelOwnerChoices.delete(turnId);
     const floor = channelOwnerItemFloor.get(turnId);
     channelOwnerItemFloor.delete(turnId);
+    const dispatched = channelOwnerDispatched.get(turnId) ?? [];
+    channelOwnerDispatched.delete(turnId);
     for (const conversation of new Set(conversations)) {
       // 这一轮里 Lead 建的工单记下来源私信（工单 #81 的 (c)）：之后系统叫醒的一轮为它写给用户的话发回这里。
       if (floor !== undefined) {
@@ -6209,6 +6223,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           recordTurnTicketOrigins(db, { afterItemId: floor, conversation, now: new Date() });
         } catch (error) {
           log(`[channels] could not record the tickets of turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      for (const itemId of dispatched) {
+        try {
+          recordTicketOrigin(db, { itemId, conversation, now: new Date() });
+        } catch (error) {
+          log(`[channels] could not record the dispatched ticket #${itemId} of turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
       const reply = text.trim()
@@ -6246,7 +6267,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (!hub) return;
     let relay: { text: string; conversations: string[] };
     try {
-      relay = systemReplyForOwner(db, { text: assistantText, entityKeys: runEntityKeys });
+      relay = systemReplyForOwner(db, { text: assistantText, events: runEvents });
     } catch (error) {
       log(`[channels] could not find where to relay turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
       return;
