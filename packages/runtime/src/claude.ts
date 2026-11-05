@@ -24,7 +24,7 @@ import {
   matchProviderFailure, residualFailureCode, typedFailure, type FailureEvidence,
 } from "./typed-failure.js";
 import {
-  claudeSandboxSettings, dataDir, sandboxCacheEnv, sandboxPolicy, sandboxTrustEnv, type TypedFailure,
+  claudeSandboxSettings, claudeUnsandboxedSettings, dataDir, sandboxCacheEnv, sandboxPolicy, sandboxTrustEnv, type TypedFailure,
   warmGitDirs, warmSandboxTrustBundle,
 } from "@pi-lead-child/core";
 import { adapterProfile, type RuntimeProfile } from "./profile.js";
@@ -641,9 +641,14 @@ export class ClaudeRuntime implements AgentRuntime {
   private buildArgs(request: RuntimeStartRequest, mcpConfigPath: string | null): string[] {
     // 沙箱（lead-tools-and-routing spec D2）：能写这次运行的工作目录和临时目录，不能读凭证，网络全开，密钥打码。
     // --settings 只取一个值，和用户自己的设置合并。设置里只有路径、域名和密钥的名字，没有值，可以放在命令行上。
-    const sandbox = claudeSandboxSettings(sandboxPolicy({
+    const policy = sandboxPolicy({
       role: request.role === "reviewer" ? "reviewer" : "executor", writable: [request.workdir], dataDir: dataDir(),
-    }));
+    });
+    // 用户给工单打开了「沙箱外执行」（工单 #62）：执行者关掉沙箱，底线用 permissions.deny 挡（core 的 claudeUnsandboxedSettings）。
+    // 核查员不认这个开关。
+    const sandbox = request.unsandboxed === true && request.role === "executor"
+      ? claudeUnsandboxedSettings(policy)
+      : claudeSandboxSettings(policy);
     const args = [
       ...this.prefixArgs,
       "-p",

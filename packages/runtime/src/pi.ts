@@ -1,7 +1,7 @@
 import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { projectRoot, runtimeAsset } from "@pi-lead-child/core";
+import { PLC_UNSANDBOXED_ENV, projectRoot, runtimeAsset } from "@pi-lead-child/core";
 import { RpcClient, type RpcResponse } from "./rpc-client.js";
 import {
   cliEffortValue, parsePiModelList, parsePiSettingsDefault, parsePiThinkingLevels, piProviders, runDiscoveryCommand, type ModelDiscovery,
@@ -26,6 +26,19 @@ import { daemonNodeLaunch, type RuntimeInterpreter } from "./interpreter.js";
 import { attachProcess, launchProcess, type LaunchedProcess } from "./launcher.js";
 import { createPiEventMapper } from "./pi-events.js";
 import { defaultChildSkillsRoot, piChildSkillArgs } from "./child-skills.js";
+
+/**
+ * 沙箱扩展（engine 的 extension/sandbox.ts）要的环境变量。PLC_SANDBOX_ROLE：按它定边界，例如只有执行者拿到 ssh-agent。
+ * 用户给工单打开了「沙箱外执行」（工单 #62）时只给执行者写 PLC_SANDBOX_OFF=1：扩展不给 bash 套沙箱，read、edit、write
+ * 照旧按底线挡。核查员不认这个开关。
+ */
+export function piSandboxEnv(request: Pick<RuntimeStartRequest, "role" | "unsandboxed">): Record<string, string> {
+  const role = request.role === "reviewer" ? "reviewer" : "executor";
+  return {
+    PLC_SANDBOX_ROLE: role,
+    ...(request.unsandboxed === true && role === "executor" ? { [PLC_UNSANDBOXED_ENV]: "1" } : {}),
+  };
+}
 
 export interface PiRuntimeOptions {
   bin?: string;
@@ -282,9 +295,9 @@ export class PiRuntime implements AgentRuntime {
     // 垫片读完全部输出才报告退出，所以 exit 事件里的 stderr 是完整的，退出码和信号也是真实的。
     const proc = await launchProcess({
       runId: request.runId, command: launch.command, args, cwd: request.workdir,
-      // PLC_SANDBOX_ROLE：沙箱扩展（engine 的 extension/sandbox.ts）按它定边界，例如只有执行者拿到 ssh-agent。
+      // 沙箱扩展要的变量（piSandboxEnv）。
       env: childEnvironment(this.profile.environment, this.options.env ?? {}, {
-        ...request.env, PLC_SANDBOX_ROLE: request.role === "reviewer" ? "reviewer" : "executor",
+        ...request.env, ...piSandboxEnv(request),
       }),
       stdin: true, baseDir: request.launchDir,
     });

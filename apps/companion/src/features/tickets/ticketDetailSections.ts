@@ -380,11 +380,11 @@ const REVIEW_AGAINST: BarLayout = { primary: ['rework'], secondary: [] };
 const HEADER_MORE: readonly TicketOperationId[] = ['set_priority', 'set_project', 'link'];
 
 // 在页面别处有入口的操作：头部「更多」、关系行尾的解除关联、工单信息的「设置」、验收方式旁的托管、
-// 验收标准的勾选、执行者和核查员两行的入口。打开交付的文件要一个文件，入口在交付的文件行（工单 13）。
+// 验收标准的勾选、执行者和核查员两行的入口、工单信息里的「沙箱外执行」。打开交付的文件要一个文件，入口在交付的文件行（工单 13）。
 // 其余能做的操作都放进底部的「更多」：清单里能做的，页面上都有入口（协调会话 2026-10-22 定的规则）。
 const PLACED_ELSEWHERE = new Set<string>([
   ...HEADER_MORE, 'unlink', 'set_due', 'set_budget', 'delegate', 'confirm_criterion', 'unconfirm_criterion',
-  'change_reviewer', 'set_run_profile', 'open_delivery_file',
+  'change_reviewer', 'set_run_profile', 'open_delivery_file', 'set_unsandboxed',
 ]);
 
 // 合并、开 PR、放弃改动要带上你看到的那份交付（expectedHead、expectedTarget）。交付还没读到时不能点。

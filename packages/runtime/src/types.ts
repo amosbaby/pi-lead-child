@@ -34,6 +34,10 @@ export interface RuntimeStartRequest {
   mcpServer?: { command: string; args: string[]; env?: Record<string, string> };
   // 启动垫片放文件的目录（工单 14）。没有给出时，垫片用系统临时目录，进程结束后删除。
   launchDir?: string;
+  // 这次不进沙箱（工单 #62）：用户给工单打开了「沙箱外执行」，内核只对执行者的执行 Run 给 true
+  // （engine 的 ticket-actions/unsandboxed.ts 的 runsUnsandboxed）。adapter 只在 role=executor 时认它：核查员总在沙箱里。
+  // 底线照留，挡不住的见 core 的 UNSANDBOXED_FLOOR_GAPS。
+  unsandboxed?: boolean;
 }
 
 // daemon 重启后接管一个还在跑或已经退出的 CLI（spec D7，工单 15）。

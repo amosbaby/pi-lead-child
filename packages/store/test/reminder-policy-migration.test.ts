@@ -17,10 +17,10 @@ describe("the v48 reminder policy migration", () => {
   it("adds the column in a new database and stores the settings of a new reminder", () => {
     const db = openDb(join(tempDir("plc-v48-fresh-"), "plc.db"));
     expect(columns(db, "items")).toContain("reminder_policy");
-    // 放在最后，老库用 ALTER 补在末尾。后来的 v64 把 token 的四部分加在它后面。
+    // 放在最后，老库用 ALTER 补在末尾。后来的 v64 把 token 的四部分加在它后面，v66 的 unsandboxed_execution（工单 #62）再在后面。
     const items = columns(db, "items");
     expect(items.slice(items.indexOf("reminder_policy"))).toEqual([
-      "reminder_policy", "uncached_input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens",
+      "reminder_policy", "uncached_input_tokens", "cache_write_tokens", "cache_read_tokens", "output_tokens", "unsandboxed_execution",
     ]);
     expect(db.prepare("SELECT name FROM schema_migrations WHERE version = 48").get()).toEqual({ name: "reminder-policy-v1" });
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(48);

@@ -1,6 +1,6 @@
 import type {
   DeliverySummary, KernelIntervention, KernelInterventionRef, TicketActionId as TicketOperationId, TicketActionRunRequest,
-  TicketAttachment, TicketReviewerInfo, TicketUsage,
+  TicketAttachment, TicketReviewerInfo, TicketSandboxInfo, TicketUsage,
 } from '@pi-lead-child/protocol';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -383,6 +383,17 @@ export function useTicketDetailModel(
     return () => controller.abort();
   }, [connected, Boolean(detail), usageKey, runtime, ticketId]);
   const usageParts = usage?.ticketId === ticketId ? usage.usage : null;
+  // 「沙箱外执行」授权（工单 #62，GET /v1/tickets/:id/sandbox）：工单更新时再读一次（开关会改工单的 updated_at）。
+  // 旧 daemon 没有这个接口时为 null，不显示这一行。
+  const [sandbox, setSandbox] = useState<TicketSandboxInfo | null>(null);
+  useEffect(() => {
+    if (!connected) return undefined;
+    const controller = new AbortController();
+    runtime.getTicketSandbox(ticketId, controller.signal)
+      .then((info) => setSandbox(info))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [connected, runtime, summary?.updatedAt, ticketId]);
   const facts = useMemo(() => detail ? {
     createdAt: detail.createdAt,
     createdBy: detail.createdBy ?? null,
@@ -393,7 +404,8 @@ export function useTicketDetailModel(
     tokenBudget: workbench?.budget?.tokenBudget ?? null,
     costBudgetUsd: workbench?.budget?.costBudgetUsd ?? null,
     usageParts,
-  } : null, [detail, summary?.dueAt, summary?.updatedAt, workbench?.budget, usageParts]);
+    unsandboxedExecution: sandbox?.ticketId === ticketId ? sandbox.unsandboxedExecution : null,
+  } : null, [detail, sandbox, summary?.dueAt, summary?.updatedAt, ticketId, workbench?.budget, usageParts]);
   // 执行者：最近一次执行 Run 用的 runtime、模型和强度。
   const executor = useMemo(() => {
     const latest = [...attempts].reverse().find((attempt) => attempt.role === 'executor');

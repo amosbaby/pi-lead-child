@@ -4,10 +4,15 @@
 //     和系统临时目录，不能读凭证。网络全开，密钥打码（沙箱里是占位值，发往绑定的主机时换成真值），见 core 的
 //     sandbox-policy.ts。执行者还能连 ssh-agent（推送）。沙箱起不来时命令不跑。
 //   - edit、write 和 bash 同一套边界（沙箱管不到这两个工具）。核查员本来就没有 edit、write（pi.ts 的 PI_REVIEWER_TOOL_ARGS）。
+//   - read 按沙箱的 denyRead 挡私钥、钥匙串和 plc 自己的配置、密钥（沙箱也管不到 pi 自带的 read）。
+//   - 用户给工单打开了「沙箱外执行」（工单 #62）时，runtime 的 pi.ts 只给执行者写 PLC_SANDBOX_OFF=1：bash 不套沙箱，
+//     read、edit、write 照旧按上面的边界挡（底线）。bash 挡不住的写在 core 的 UNSANDBOXED_FLOOR_GAPS.pi。
 import { isAbsolute, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createBashToolDefinition, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { sandboxPolicy, sandboxToolNote, sandboxWriteBlocker } from "@pi-lead-child/core";
+import {
+  PLC_UNSANDBOXED_ENV, sandboxPolicy, sandboxReadBlocker, sandboxToolNote, sandboxWriteBlocker,
+} from "@pi-lead-child/core";
 import { sandboxedBashOperations } from "../sandbox/bash.js";
 
 const WRITE_TOOLS = new Set(["edit", "write"]);
@@ -36,17 +41,26 @@ function installSandbox(pi: ExtensionAPI, cwd: string): void {
   // runtime 的 pi.ts 写进 child 的环境。没有时按执行者算（旧的 child）。
   const role = process.env.PLC_SANDBOX_ROLE === "reviewer" ? "reviewer" : "executor";
   const policy = () => sandboxPolicy({ role, writable: [cwd], dataDir: process.env.PLC_DATA_DIR || undefined });
-  const bash = createBashToolDefinition(cwd, { operations: sandboxedBashOperations(policy) });
-  pi.registerTool({
-    ...bash,
-    description: `${bash.description}\n${sandboxToolNote(policy(), `整个 home（挡住会在沙箱外执行的地方）、工作目录（${cwd}）`)}`,
-  });
+  // 沙箱外执行只给执行者（见文件头）。核查员即使环境里有这个变量也照旧进沙箱。
+  const unsandboxed = role === "executor" && process.env[PLC_UNSANDBOXED_ENV] === "1";
+  if (!unsandboxed) {
+    const bash = createBashToolDefinition(cwd, { operations: sandboxedBashOperations(policy) });
+    pi.registerTool({
+      ...bash,
+      description: `${bash.description}\n${sandboxToolNote(policy(), `整个 home（挡住会在沙箱外执行的地方）、工作目录（${cwd}）`)}`,
+    });
+  }
   pi.on("tool_call", (event) => {
-    if (!WRITE_TOOLS.has(event.toolName)) return undefined;
+    const isRead = event.toolName === "read";
+    if (!isRead && !WRITE_TOOLS.has(event.toolName)) return undefined;
     const input = event.input as Record<string, unknown>;
     const raw = typeof input.path === "string" ? input.path.trim().replace(/^@/, "") : "";
     if (!raw) return undefined;
     const absolute = resolve(cwd, expandHome(raw));
+    if (isRead) {
+      const blocker = sandboxReadBlocker(policy(), absolute);
+      return blocker ? { block: true, reason: `${blocker}。` } : undefined;
+    }
     // 和 bash 的沙箱同一套边界（core 的 sandboxWriteBlocker）。
     const blocker = sandboxWriteBlocker(policy(), absolute);
     if (!blocker) return undefined;

@@ -43,6 +43,10 @@ export {
   type ItemRestoreMode, type ItemRestorePreview, type ItemRestoreResult,
 } from "./restore.js";
 export { failedReviewAttempt } from "./review-failure.js";
+export {
+  decideRunSandbox, EXTERNAL_ORIGIN_DECISION, EXTERNAL_TICKET_REFUSAL, isExternalOriginTicket, RUN_UNSANDBOXED_DECISION,
+  RUN_UNSANDBOXED_KEY, runsUnsandboxed,
+} from "./unsandboxed.js";
 
 const UNDOABLE = new Set(OWNER_ACTIONS.filter((action) => action.undo === "conditional").map((action) => action.id));
 

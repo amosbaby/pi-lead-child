@@ -18,7 +18,7 @@ import type { RunOps } from "./ops-entry.js";
 import * as render from "./render.js";
 
 export type GatewayClient = Pick<ControlPlaneClient,
-  | "createTicket" | "listTickets" | "getTicket" | "getActivities" | "performTicketAction" | "performAttemptAction"
+  | "createTicket" | "listTickets" | "getTicket" | "getActivities" | "performTicketAction" | "performAttemptAction" | "runTicketAction"
   | "getLeadTrust" | "setLeadTrust" | "getLeadDelegation" | "setLeadDelegation" | "recheckRuntimes"
   | "createPairing" | "listBindings" | "revokeBinding" | "getAishStatus" | "forgetAish" | "getOwnBinding">;
 
@@ -261,6 +261,24 @@ export function buildProgram(deps: CliDeps): Command {
         `预检：${granted.preflight.status}${granted.preflight.warnings.length ? `，警告=${granted.preflight.warnings.length}` : ""}`,
         `当前生效：${active?.id ?? "-"}`,
       ].join("\n"));
+    }));
+
+  // 「沙箱外执行」授权（工单 #62）：和 App 工单详情里的开关是同一个工单操作（set_unsandboxed，只有用户本人能做）。
+  program.command("sandbox <ticket_id> <on|off>")
+    .description("打开或关闭工单的「沙箱外执行」：打开后这张工单之后的执行者不进沙箱（核查员照旧在沙箱里），从下一次执行生效")
+    .option("--reason <text>", "为什么打开或关闭")
+    .action(run(async (ticketIdText: string, mode: string, opts: { reason?: string }) => {
+      const ticketId = positiveId(ticketIdText, "ticket_id");
+      if (mode !== "on" && mode !== "off") throw new CliError("second argument must be on or off");
+      const enabled = mode === "on";
+      const { client } = await deps.gateway();
+      const response = await client.runTicketAction(ticketId, "set_unsandboxed", {
+        input: { enabled }, ...(opts.reason === undefined ? {} : { reason: opts.reason }),
+      });
+      const changed = (response.result as { changed?: boolean } | null)?.changed !== false;
+      deps.out(enabled
+        ? `${changed ? "已打开" : "本来就开着"}工单 #${ticketId} 的沙箱外执行：之后的执行者不进沙箱（正在跑的不受影响）`
+        : `${changed ? "已关闭" : "本来就关着"}工单 #${ticketId} 的沙箱外执行：之后的执行者照旧在沙箱里`);
     }));
 
   // 配对管理要 admin 权限：每次在 plc.sock 上换一个临时 admin token。配对出去的设备没有 admin。

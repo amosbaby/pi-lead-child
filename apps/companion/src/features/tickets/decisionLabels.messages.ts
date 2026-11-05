@@ -28,6 +28,9 @@ export const decisionLabelMessages = defineMessages({
       workspace_pr_opened: 'Opened a draft PR',
       workspace_push_refused: 'Did not push the branch: the check before the push did not pass',
       delivery_file_opened: 'Opened the delivered file on the computer',
+      unsandboxed_execution: 'Changed the permission to run outside the sandbox',
+      run_unsandboxed: 'This run is outside the sandbox',
+      ticket_external_origin: 'The ticket came from an external channel',
       review_request_expired: 'The review request is void',
       automatic_review_request_failed: 'The automatic review request failed',
       // 核查没做成（工单 11）
@@ -128,6 +131,9 @@ export const decisionLabelMessages = defineMessages({
       workspace_pr_opened: '开了草稿 PR',
       workspace_push_refused: '没有推送分支：推送前的检查没有通过',
       delivery_file_opened: '在电脑上打开了交付的文件',
+      unsandboxed_execution: '改了沙箱外执行的授权',
+      run_unsandboxed: '这次执行在沙箱外',
+      ticket_external_origin: '工单来自外部通道',
       review_request_expired: '核查请求已作废',
       automatic_review_request_failed: '自动派发核查失败',
       // 核查没做成（工单 11）

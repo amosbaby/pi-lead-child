@@ -27,6 +27,7 @@ import { ACCEPTANCE_CRITERIA_ACTIONS } from "./acceptance-criteria.js";
 import { DELEGATION_ACTIONS } from "./delegation.js";
 import { REVIEW_FAILURE_ACTIONS } from "./review-failure.js";
 import { RUN_PROFILE_ACTIONS } from "./run-profile.js";
+import { UNSANDBOXED_ACTIONS } from "./unsandboxed.js";
 import { behalfCursor, behalfFields } from "./attribution.js";
 import {
   activeUserReworkDispatchRequest, cancelItem, completeItem, confirmItem, pauseItemRun, requestReview, restoreItem, resumeItemRun,
@@ -852,4 +853,6 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
   ...REVIEW_FAILURE_ACTIONS,
   // 授权托管（工单 11）：只有你本人能做。定义在 delegation.ts。
   ...DELEGATION_ACTIONS,
+  // 沙箱外执行（工单 #62）：只有你本人能做。定义在 unsandboxed.ts。
+  ...UNSANDBOXED_ACTIONS,
 };

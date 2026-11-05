@@ -11,6 +11,7 @@ import { addActivity } from "@pi-lead-child/store";
 import { createIngestor } from "../pipeline/ingest.js";
 import { ticketAttachmentsPromptSection } from "../agent-tools/ticket-attachments.js";
 import { ensurePullRequestReviewGrant } from "./pr-review-grant.js";
+import { decideRunSandbox } from "../ticket-actions/unsandboxed.js";
 import { EXPRESSION_SECTION } from "@pi-lead-child/core";
 import { createRuntimeEventStore, recordSecurityAlert } from "@pi-lead-child/store";
 import {
@@ -756,11 +757,14 @@ async function runItemLifecycle(
     }).immediate());
   };
 
+  // 沙箱外执行（工单 #62）：只有执行者的执行 Run、工单打开了授权、不是外部通道的工单时为 true。在这个 Run 第一次启动时定下，
+  // 记在 Run 的 metadata 和活动里；同一个 Run 再启动沿用它（ticket-actions/unsandboxed.ts）。代查在进程内跑，不涉及沙箱。
+  const unsandboxed = purpose === "lookup" ? false : decideRunSandbox(db, runId, { role, purpose });
   // 接管的 Run 不是一次新的尝试。原来的 attempt_start 已经记下，结束时照常记 attempt_end。
   if (!adopt) {
     addActivity(db, {
       itemId, runId, actor: "system", kind: "attempt_start",
-      payload: { runtime: runtime.id, model: model ?? null, effort: effort ?? null },
+      payload: { runtime: runtime.id, model: model ?? null, effort: effort ?? null, ...(unsandboxed ? { unsandboxed: true } : {}) },
     });
   }
   db.prepare("UPDATE items SET last_activity_at=datetime('now'), updated_at=datetime('now') WHERE id=?")
@@ -804,6 +808,7 @@ async function runItemLifecycle(
     // 启动垫片的文件放在数据目录里（工单 14），daemon 重启后还能找到（工单 15）。
     launchDir: join(dataDir, "launches"),
     model, resumeSessionId,
+    ...(unsandboxed ? { unsandboxed: true } : {}),
     ...(effort ? { effort } : {}),
     ...(resumeSessionId && forkSession ? { forkSession: true } : {}),
     env: {

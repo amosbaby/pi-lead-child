@@ -202,6 +202,8 @@ const CASES: Case[] = [
   { action: "accept_without_review", authority: "on_behalf", ownerAction: "ticket.complete", fixture: (db) => ({ itemId: reviewFailed(db) }) },
   { action: "delegate", authority: "user_direct", ownerAction: "lead.delegation",
     fixture: (db) => ({ itemId: deliveredIndependent(db), input: { acceptWithoutReview: true, maxReworkCycles: 1 } }) },
+  // 沙箱外执行（工单 #62）：只有你本人能开关，不记主人操作，记活动和事件。
+  { action: "set_unsandboxed", authority: "user_direct", fixture: (db) => ({ itemId: ready(db), input: { enabled: true } }) },
   { action: "widen_grant", authority: "on_behalf", ownerAction: "run.grant", fixture: (db) => {
     const itemId = createItem(db, { title: "通道派的工单", brief: "b", createdBy: "system", purpose: "lookup" });
     const runId = createRun(db, { itemId, purpose: "lookup" });
@@ -402,7 +404,7 @@ describe("every ticket action leaves the same ledger from the page and from Lead
         // 页面上做成了；Lead 被拒，一行都没写，也没有记主人操作。
         expect(ledger(page.db, page.before).filter((row) => row.actor === "user").length).toBeGreaterThan(0);
         expect(ledger(lead.db, lead.before)).toEqual([]);
-        expect(ownerActions(page.db)).toEqual([test.ownerAction]);
+        expect(ownerActions(page.db)).toEqual(test.ownerAction ? [test.ownerAction] : []);
         expect(ownerActions(lead.db)).toEqual([]);
         return;
       }

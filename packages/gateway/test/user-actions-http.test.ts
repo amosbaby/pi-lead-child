@@ -423,6 +423,35 @@ describe("user control-plane actions over HTTP", () => {
       await server.close();
     }
   });
+  // 工单 #62：「沙箱外执行」授权。用户在页面上开关（工单操作 set_unsandboxed），GET /v1/tickets/:id/sandbox 读现在开没开；
+  // 外部通道派出的工单不能打开，回 409 并写明原因。
+  it("turns the run-outside-the-sandbox permission on and off, and reads it back", async () => {
+    const server = await start();
+    try {
+      const accessToken = await token(server.base, ["tickets:view", "tickets:create"]);
+      const headers = { authorization: `Bearer ${accessToken}`, "content-type": "application/json" };
+      const itemId = createItem(db, { title: "改构建脚本", brief: "b", createdBy: "user" });
+      const read = async (id: number) => (await fetch(`${server.base}/v1/tickets/${id}/sandbox`, { headers })).json();
+      const toggle = (id: number, enabled: boolean) => fetch(`${server.base}/v1/tickets/${id}/actions/set_unsandboxed`, {
+        method: "POST", headers, body: JSON.stringify({ input: { enabled } }),
+      });
+      expect(await read(itemId)).toEqual({ ticketId: itemId, unsandboxedExecution: false });
+      expect((await toggle(itemId, true)).status).toBe(200);
+      expect(await read(itemId)).toEqual({ ticketId: itemId, unsandboxedExecution: true });
+      expect((await toggle(itemId, false)).status).toBe(200);
+      expect(await read(itemId)).toEqual({ ticketId: itemId, unsandboxedExecution: false });
+
+      const agentTask = createItem(db, { title: "Slack 咨询：Nina 的请求", brief: "b", createdBy: "system", purpose: "lookup" });
+      const refused = await toggle(agentTask, true);
+      expect(refused.status).toBe(409);
+      expect(JSON.stringify(await refused.json())).toContain("外部通道");
+      expect(await read(agentTask)).toEqual({ ticketId: agentTask, unsandboxedExecution: false });
+      expect((await fetch(`${server.base}/v1/tickets/999999/sandbox`, { headers })).status).toBe(404);
+    } finally {
+      await server.close();
+    }
+  });
+
   // 2026-10-20：挂起的核查不再挡住用户。没有能用的核查员时请求挂起；用户重新启用 Claude Code 以后，
   // 在工单里选它当核查员（request-review 带 runtime），挂起的请求换过去、马上能被认领。
   it("lets the user move a suspended review to another reviewer, and shows the reviewer and the options", async () => {

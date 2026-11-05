@@ -2761,6 +2761,16 @@ export async function startPairedServer(
         return;
       }
 
+      // 「沙箱外执行」授权现在开没开（工单 #62）。只读，和工单详情一样只要 tickets:view。开关走工单操作 set_unsandboxed。
+      const sandboxMatch = url.pathname.match(/^\/v1\/tickets\/(\d+)\/sandbox$/);
+      if (req.method === "GET" && sandboxMatch) {
+        requireAuth(req, "tickets:view");
+        const item = getItem(bridge.db, Number(sandboxMatch[1]));
+        if (!item) throw new HttpError(404, "not_found", "ticket not found");
+        json(req, res, 200, { ticketId: item.id, unsandboxedExecution: item.unsandboxed_execution === 1 });
+        return;
+      }
+
       // 工单附件（工单 #231，protocol 的 ticket-attachments.ts）：列表和一个附件的内容。只读，和工单详情一样只要 tickets:view。
       const attachmentsMatch = url.pathname.match(/^\/v1\/tickets\/(\d+)\/attachments$/);
       if (req.method === "GET" && attachmentsMatch) {

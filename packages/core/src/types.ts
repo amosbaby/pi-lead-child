@@ -46,6 +46,9 @@ export interface Item {
   display_title: string | null;
   // 提醒的设置（v48，JSON，protocol 的 ReminderPolicy）：级别、提前提醒、重复推送、关联的工单。只有提醒有；NULL 是缺省设置。
   reminder_policy?: string | null;
+  // 「沙箱外执行」授权（v64，工单 #62）：1 时这张工单之后的执行 Run 不进沙箱。只有用户本人能开关（engine 的
+  // ticket-actions/unsandboxed.ts）。v64 之前的库、没开过的工单都是 0。
+  unsandboxed_execution: number;
   priority: ItemPriority; project: string | null;
   // root 可空：自根行走 insert-then-update 协议（items.ts createItem），
   // 两步之间它就是 NULL，类型不该断言一条 DDL 与写入协议都不保证的不变量。

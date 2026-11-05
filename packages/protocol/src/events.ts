@@ -357,6 +357,19 @@ export const INTERNAL_EVENT_KINDS: readonly EventKindDefinition[] = [
     description: "工单或提醒的 stage 变了（items.ts 的 transition）。",
   },
   {
+    // 「沙箱外执行」授权开了或关了（工单 #62，engine 的 ticket-actions/unsandboxed.ts）。只有用户本人能开关。
+    kind: "ticket.sandbox_changed",
+    sources: ["ticket"],
+    payload: Type.Object({
+      itemId: Id,
+      // true：之后的执行 Run 不进沙箱；false：照旧进沙箱。
+      unsandboxed: Type.Boolean(),
+      actor: Type.String(),
+      reason: Type.String(),
+    }),
+    description: "用户打开或关闭了一张工单的「沙箱外执行」授权：之后的执行 Run 进不进沙箱。",
+  },
+  {
     kind: "checkpoint.recorded",
     sources: ["ticket"],
     payload: Type.Object({

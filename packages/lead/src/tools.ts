@@ -120,7 +120,7 @@ import {
   createUiForm, listUiActions, permissionOf, ticketActionDefinition, TicketActionError,
   type PullRequestRunner, type TicketActionHost, type UiActionServices,
 } from "@pi-lead-child/engine";
-import { setAutoPullRequest, workspaceOfItem } from "@pi-lead-child/engine";
+import { EXTERNAL_ORIGIN_DECISION, setAutoPullRequest, workspaceOfItem } from "@pi-lead-child/engine";
 import {
   integrateIsolatedWorkspace, provisionWorkspace, provisionWorkspaceAsync, requestSharedWorkspace,
   runWorkspaceFactsReady, runWorkspaceRefusal, setPullRequestReviewTarget, warmRepositoryIdentity, warmRunWorkspaceFacts,
@@ -2175,6 +2175,18 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
                 verificationPolicy,
               });
           if (criteria.length) addAcceptanceCriteria(db, { itemId: createdId, texts: criteria, by: template ? "system" : "lead" });
+          // 外部消息叫醒的一轮里建的工单（和 bash 被拦的是同一种轮次，hands.ts 的 handsBlockedInTurn）：记下来源，
+          // 用户不能给它打开「沙箱外执行」（engine 的 ticket-actions/unsandboxed.ts，工单 #62）。
+          {
+            const origin = turnOriginOf(deps);
+            const live = origin.external && isLiveUserTurn(db, authorityTurnId(deps), "tickets:create");
+            if (handsBlockedInTurn(origin, live)) {
+              addActivity(db, {
+                itemId: createdId, actor: "lead", kind: "decision",
+                payload: { decision: EXTERNAL_ORIGIN_DECISION, reason: "Lead 在外部消息叫醒的一轮里建的工单" },
+              });
+            }
+          }
           // deferUntil / tokenBudget / due_at 走后置更新而不是塞进 createRootItem：
           // 那个入口是编排器与 lead 共用的，给它加 lead 专属参数会让两边的语义漂移。
           if (deferUntil !== undefined || params.budget !== undefined) {

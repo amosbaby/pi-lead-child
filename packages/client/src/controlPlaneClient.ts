@@ -221,6 +221,7 @@ import {
   TicketRelationMutationResultSchema,
   TicketReviewRequestResultSchema,
   TicketReviewerInfoSchema,
+  TicketSandboxInfoSchema,
   TicketUsageSchema,
   TicketSummarySchema,
   TicketDeliveryResponseSchema,
@@ -329,6 +330,7 @@ import {
   type TicketReviewRequestResult,
   type TicketReviewRequest,
   type TicketReviewerInfo,
+  type TicketSandboxInfo,
   type TicketUsage,
   type TicketSummary,
   type WorkspaceActionResult,
@@ -931,6 +933,11 @@ export class ControlPlaneClient {
 
   async getTicketReviewer(ticketId: number, signal?: AbortSignal): Promise<TicketReviewerInfo> {
     return this.request(`/v1/tickets/${ticketId}/reviewer`, TicketReviewerInfoSchema, { signal });
+  }
+
+  // 「沙箱外执行」授权现在开没开（工单 #62）。开关是工单操作 set_unsandboxed（runTicketAction）。
+  async getTicketSandbox(ticketId: number, signal?: AbortSignal): Promise<TicketSandboxInfo> {
+    return this.request(`/v1/tickets/${ticketId}/sandbox`, TicketSandboxInfoSchema, { signal });
   }
 
   async getActivities(ticketId: number, signal?: AbortSignal): Promise<ActivityDto[]> {

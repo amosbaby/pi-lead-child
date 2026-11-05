@@ -88,6 +88,9 @@ CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}${table} (
   cache_write_tokens    INTEGER NOT NULL DEFAULT 0,
   cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
   output_tokens         INTEGER NOT NULL DEFAULT 0,
+  -- 「沙箱外执行」授权（v66，工单 #62）：1 时这张工单之后的执行 Run 不进沙箱（核查、合并等别的 Run 照旧）。
+  -- 只有用户本人能开关（engine 的 ticket-actions/unsandboxed.ts）。和 reminder_policy 一样放在最后，不进 C2 的 CHECK。
+  unsandboxed_execution INTEGER NOT NULL DEFAULT 0 CHECK (unsandboxed_execution IN (0,1)),
 
   CHECK (kind = 'task' OR workflow_kind = 'generic'),
 

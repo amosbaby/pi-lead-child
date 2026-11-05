@@ -30,6 +30,8 @@ export const TICKET_ACTION_IDS = [
   "set_run_profile", "change_executor_runtime",
   "complete", "accept_without_review", "rework", "merge", "set_auto_pr", "open_pr", "abandon",
   "open_delivery_file",
+  // 「沙箱外执行」授权（工单 #62）：只有用户本人能开关（user_direct）。
+  "set_unsandboxed",
   // 验收标准（工单 05）：编辑、确认一条、取消确认。
   ...ACCEPTANCE_CRITERIA_ACTION_IDS,
 ] as const;
@@ -169,6 +171,8 @@ export const TICKET_ACTION_INPUT_SCHEMAS = {
     path: Type.String({ minLength: 1, maxLength: 1024 }),
     sequence: Type.Optional(Type.Integer({ minimum: 1 })),
   }),
+  // 「沙箱外执行」授权（工单 #62）：true 时这张工单之后的执行 Run 不进沙箱。
+  set_unsandboxed: StrictObject({ enabled: Type.Boolean() }),
   // 验收标准（工单 05）。
   ...ACCEPTANCE_CRITERIA_ACTION_INPUT_SCHEMAS,
 } as const satisfies Record<TicketActionId, TSchema>;

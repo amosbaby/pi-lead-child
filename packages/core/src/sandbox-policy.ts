@@ -535,6 +535,75 @@ export function claudeSandboxSettings(policy: SandboxPolicy): Record<string, unk
   };
 }
 
+// ── 不进沙箱时的底线（工单 #62）─────────────────────────────────────────────────────────
+// 用户给一张工单打开「沙箱外执行」以后，这张工单的执行者 Run 不进沙箱（engine 的 ticket-actions/unsandboxed.ts）。
+// 底线照留：读私钥、钥匙串和 plc 自己的配置和密钥，直接写 plc.db、config.json 和别的会在沙箱外执行的地方，各个 runtime
+// 用自己能用的办法挡。挡不住的照实写在 UNSANDBOXED_FLOOR_GAPS 里（交付说明和测试都读它），不假装挡住了。
+
+// pi 的执行者不进沙箱时 runtime 的 pi.ts 写进 child 环境的变量，沙箱扩展（engine 的 extension/sandbox.ts）读它。
+export const PLC_UNSANDBOXED_ENV = "PLC_SANDBOX_OFF";
+
+/** 各个 runtime 不进沙箱时挡不住的底线。键是 runtime，值是一句一条。 */
+export const UNSANDBOXED_FLOOR_GAPS: Readonly<Record<"claude" | "codex" | "pi", readonly string[]>> = {
+  claude: [
+    "Bash 里的命令（cat、sqlite3、cp 这类）不受 permissions.deny 管：Read、Edit 规则只挡 Claude Code 自带的文件工具。"
+      + "没有沙箱，命令能读私钥和 plc 的配置、密钥，也能直接写 plc.db 和 config.json。",
+    "环境变量里的密钥不再打码：命令 echo 出来是真值（沙箱里才有占位值和代理换值）。",
+  ],
+  codex: [
+    "danger-full-access 下 Codex 没有按路径挡读写的设置：私钥、plc 的配置和密钥能读，plc.db、config.json 能写，一条都挡不住。",
+    "环境变量里的密钥不再打码。",
+  ],
+  pi: [
+    "bash 不进沙箱，命令能读私钥和 plc 的配置、密钥，也能直接写 plc.db 和 config.json。"
+      + "只有 pi 自带的 read、edit、write 工具按同一套边界挡（扩展的 tool_call 钩子）。",
+    "环境变量里的密钥不再打码。",
+  ],
+};
+
+// Claude Code 的权限规则里，绝对路径写成 //开头（Claude Code 的权限文档：「//path」是文件系统的绝对路径）。
+// 目录再加一条 /**，挡住目录下面的文件。
+function claudePathRules(tool: "Read" | "Edit", paths: readonly string[]): string[] {
+  return [...new Set(paths.filter((path) => isAbsolute(path)).flatMap((path) => {
+    const rule = `${tool}(/${path})`;
+    return path.endsWith("*") ? [rule] : [rule, `${tool}(/${path}/**)`];
+  }))];
+}
+
+/**
+ * Claude Code 不进沙箱时的设置（--settings）：关掉它自带的沙箱，用 permissions.deny 挡住底线里它能挡的那部分：
+ * Read 挡私钥、钥匙串和 plc 的配置、密钥（policy.denyRead）；Edit 挡沙箱里不能写的那些（policy.denyWrite：plc.db、
+ * config.json、shell 的启动文件、git 的钩子……）和不能读的。挡不住的见 UNSANDBOXED_FLOOR_GAPS.claude。
+ */
+export function claudeUnsandboxedSettings(policy: SandboxPolicy): Record<string, unknown> {
+  return {
+    sandbox: { enabled: false },
+    permissions: {
+      deny: [
+        ...claudePathRules("Read", policy.denyRead),
+        ...claudePathRules("Edit", [...policy.denyWrite, ...policy.denyRead]),
+      ],
+    },
+  };
+}
+
+// 路径写法里的 * 只匹配一段里的字符（sandbox-runtime 在 macOS 上把 denyRead 当这样的通配，见 SANDBOX_DENY_READ_HOME）。
+function globMatches(pattern: string, path: string): boolean {
+  const source = pattern.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join("[^/]*");
+  const re = new RegExp(`^${source}(?:/.*)?$`);
+  return re.test(path);
+}
+
+/**
+ * 读文件的工具（pi 的 read）不经过沙箱：按 policy.denyRead 判断能不能读。能读时为 null，否则是给 agent 看的一句话。
+ * path 要是绝对路径。
+ */
+export function sandboxReadBlocker(policy: SandboxPolicy, path: string): string | null {
+  const target = realPath(resolve(path));
+  const denied = policy.denyRead.find((entry) => entry.includes("*") ? globMatches(entry, target) : within(target, resolve(entry)));
+  return denied ? `${denied} 不能读：是私钥、钥匙串，或者 plc 自己的配置和密钥` : null;
+}
+
 /** @anthropic-ai/sandbox-runtime 的配置（SandboxRuntimeConfig 的形状，这里不依赖那个包）。 */
 export function sandboxRuntimeConfig(policy: SandboxPolicy): {
   network: {

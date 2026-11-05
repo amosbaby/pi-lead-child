@@ -1036,10 +1036,9 @@ describe("schema version", () => {
     // v61（2026-10-30，自定义控件）：widgets（store/test/widgets-migration.test.ts）。
     // v62（2026-10-30，控件的数据源）：widget_sources（store/test/widgets-migration.test.ts）。
     // v63（2026-11-02，Lead 自己装本地 MCP）：connections.launch_json（store/test/connection-launch-migration.test.ts）。
-    // v64（2026-11-06，token 按计费拆开）：items 的 uncached_input_tokens、cache_write_tokens、cache_read_tokens、output_tokens
-    // （store/test/item-usage-parts-migration.test.ts）。
-    expect(LATEST_SCHEMA_VERSION).toBe(65);
-    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 65 });
+    // v64（2026-11-06，token 按计费拆开）、v65（后台检查的 host_run），v66（本地，工单 #62）：「沙箱外执行」授权 items.unsandboxed_execution。
+    expect(LATEST_SCHEMA_VERSION).toBe(66);
+    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 66 });
   });
 });
 

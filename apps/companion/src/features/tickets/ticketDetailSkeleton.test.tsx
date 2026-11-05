@@ -287,6 +287,50 @@ describe('the ticket detail skeleton', () => {
 });
 
 // 独立审查（2026-10-22）以后的修复。每条一个测试。
+describe('the run-outside-the-sandbox permission in the ticket detail', () => {
+  // 工单 #62：「沙箱外执行」在工单信息里显示当前状态，开关走清单里的 set_unsandboxed；外部通道的工单写明为什么不能开。
+  it('shows the run-outside-the-sandbox permission and turns it on and off from the action list', () => {
+    const facts = {
+      createdAt: '2026-10-21T07:02:00.000Z', createdBy: 'user' as const, updatedAt: '2026-10-21T07:06:00.000Z', dueAt: null,
+      totalTokens: 0, totalCostUsd: 0, tokenBudget: null, costBudgetUsd: null,
+    };
+    const onRunAction = vi.fn();
+    const off = renderThread(summary({ stage: 'active', status: 'active' }), {
+      facts: { ...facts, unsandboxedExecution: false },
+      actions: [ticketAction('set_unsandboxed', { label: '沙箱外执行' })],
+      onRunAction,
+    });
+    expect(within(off).getByTestId('ticket-section-info').textContent).toContain('Run outside the sandbox');
+    expect(within(off).getByTestId('ticket-section-info').textContent).toContain('The executor runs in the sandbox.');
+    fireEvent.click(within(off).getByTestId('ticket-unsandboxed-on'));
+    expect(onRunAction).toHaveBeenCalledWith('set_unsandboxed', { input: { enabled: true } });
+    cleanup();
+
+    const on = renderThread(summary({ stage: 'active', status: 'active' }), {
+      facts: { ...facts, unsandboxedExecution: true },
+      actions: [ticketAction('set_unsandboxed', { label: '沙箱外执行' })],
+      onRunAction,
+    }, 'zh');
+    expect(within(on).getByTestId('ticket-section-info').textContent).toContain('已打开：下一次执行起，执行者不进沙箱');
+    fireEvent.click(within(on).getByTestId('ticket-unsandboxed-off'));
+    expect(onRunAction).toHaveBeenCalledWith('set_unsandboxed', { input: { enabled: false } });
+    cleanup();
+
+    const external = renderThread(summary({ stage: 'active', status: 'active' }), {
+      facts: { ...facts, unsandboxedExecution: false },
+      actions: [ticketAction('set_unsandboxed', { label: '沙箱外执行', available: false, reason: '这张工单是外部通道派出的。' })],
+      onRunAction,
+    });
+    expect(within(external).getByTestId('ticket-unsandboxed-on').getAttribute('aria-disabled')).toBe('true');
+    expect(within(external).getByTestId('ticket-section-info').textContent).toContain('这张工单是外部通道派出的。');
+    cleanup();
+
+    // 旧 daemon 不发这个字段：不显示这一行。
+    const old = renderThread(summary({ stage: 'active', status: 'active' }), { actions: [] });
+    expect(within(old).getByTestId('ticket-section-info').textContent).not.toContain('Run outside the sandbox');
+  });
+});
+
 
 describe('ticketDetailSections', () => {
   const actions: TicketAction[] = [

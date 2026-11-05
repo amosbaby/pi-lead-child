@@ -158,7 +158,7 @@ export class CodexRuntime implements AgentRuntime {
     };
     const env = childEnvironment(this.profile.environment, this.env, request.env);
     const mcpEnvNames = request.mcpServer ? forwardMcpEnv(request.mcpServer, env) : [];
-    const args = [...this.prefixArgs, ...buildArgs(nativeRequest, mcpEnvNames)];
+    const args = [...this.prefixArgs, ...codexExecArgs(nativeRequest, mcpEnvNames)];
     // CLI 经启动垫片运行（工单 14）。daemon 进程退出时，Codex 不会因为管道断开而退出。
     const child = await launchProcess({
       runId: request.runId, command: this.bin, args, env, baseDir: request.launchDir,
@@ -475,12 +475,16 @@ function forwardMcpEnv(server: NonNullable<RuntimeStartRequest["mcpServer"]>, en
   return names;
 }
 
-// mcpEnvNames 是 forwardMcpEnv 写进 Codex 进程环境的变量名。
-function buildArgs(request: RuntimeStartRequest, mcpEnvNames: string[]): string[] {
+// mcpEnvNames 是 forwardMcpEnv 写进 Codex 进程环境的变量名。导出给测试：不起进程就能核对参数。
+export function codexExecArgs(request: RuntimeStartRequest, mcpEnvNames: string[]): string[] {
   const args = [
     "exec",
     "--json",
-    "--sandbox", request.role === "reviewer" ? "read-only" : "workspace-write",
+    // 用户给工单打开了「沙箱外执行」（工单 #62）：执行者用 danger-full-access。核查员总是 read-only。
+    // Codex 在 danger-full-access 下没有按路径挡读写的设置，底线一条都挡不住（core 的 UNSANDBOXED_FLOOR_GAPS.codex）。
+    "--sandbox", request.role === "reviewer"
+      ? "read-only"
+      : request.unsandboxed === true ? "danger-full-access" : "workspace-write",
     "-c", 'approval_policy="never"',
     "--skip-git-repo-check",
     "--cd", request.workdir,

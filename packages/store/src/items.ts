@@ -281,6 +281,35 @@ export function setItemDisplayTitle(db: Db, id: number, title: string | null): v
   if (result.changes === 0) throw new Error(`item #${id} not found`);
 }
 
+/**
+ * 打开或关闭「沙箱外执行」授权（工单 #62）。同一笔事务里改列、记一条活动（decision: unsandboxed_execution）、
+ * 写一条事件（ticket.sandbox_changed）。谁能开关、外部通道的工单能不能开，由调用方（engine 的 ticket-actions/unsandboxed.ts）判断。
+ * 值没变时什么也不写，返回 false。
+ */
+export function setItemUnsandboxedExecution(
+  db: Db, itemId: number, enabled: boolean,
+  by: { actor: "user" | "lead" | "system"; reason: string; extra?: Record<string, unknown>; sessionCursor?: string },
+): boolean {
+  return db.transaction(() => {
+    const item = db.prepare("SELECT unsandboxed_execution FROM items WHERE id = ?").get(itemId) as
+      { unsandboxed_execution: number } | undefined;
+    if (!item) throw new Error(`item ${itemId} not found`);
+    if ((item.unsandboxed_execution === 1) === enabled) return false;
+    db.prepare("UPDATE items SET unsandboxed_execution = ?, updated_at = datetime('now') WHERE id = ?").run(enabled ? 1 : 0, itemId);
+    addActivity(db, {
+      itemId, actor: by.actor, kind: "decision", ...(by.sessionCursor ? { sessionCursor: by.sessionCursor } : {}),
+      payload: { decision: "unsandboxed_execution", enabled, reason: by.reason, ...by.extra },
+    });
+    appendEventGuarded(db, () => ({
+      source: "ticket",
+      kind: "ticket.sandbox_changed",
+      entityKey: `ticket:${itemId}`,
+      payload: { itemId, unsandboxed: enabled, actor: by.actor, reason: by.reason },
+    }));
+    return true;
+  })();
+}
+
 export function appendBody(db: Db, id: number, text: string): void {
   db.prepare(
     `UPDATE items

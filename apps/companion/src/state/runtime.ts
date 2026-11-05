@@ -76,6 +76,7 @@ import type {
   Scope,
   StartConnectionResponse,
   TicketReviewerInfo,
+  TicketSandboxInfo,
   TicketUsage,
   DeliverySummary,
   TicketReviewRequest,
@@ -226,7 +227,7 @@ export type CompanionTransport = Pick<
   | 'ruleChangeConfirmation' | 'resolveRuleChangeConfirmation'
   | 'timerRequest' | 'resolveTimerRequest' | 'externalTimers' | 'watchTimers' | 'cancelTimer'
   | 'getOwnerAction' | 'disownOwnerAction'
-  | 'getTicketReviewer' | 'getTicketDeliveries' | 'getTicketUsage'
+  | 'getTicketReviewer' | 'getTicketSandbox' | 'getTicketDeliveries' | 'getTicketUsage'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
   | 'getChatImage' | 'getTicketAttachments' | 'getTicketAttachment'
   | 'getLeadModels' | 'switchLeadModel'
@@ -814,6 +815,14 @@ export class CompanionStateRuntime {
   async getTicketUsage(ticketId: number, signal?: AbortSignal): Promise<TicketUsage> {
     const read = this.dependencies.client.getTicketUsage;
     if (typeof read !== 'function') throw new Error('this connection cannot read the ticket usage');
+    return read.call(this.dependencies.client, ticketId, signal);
+  }
+
+  // 「沙箱外执行」授权现在开没开（工单 #62，GET /v1/tickets/:id/sandbox）。不放进工单快照，理由同上。
+  // 旧 daemon 没有这个接口时报错，工单详情不显示这一行。
+  async getTicketSandbox(ticketId: number, signal?: AbortSignal): Promise<TicketSandboxInfo> {
+    const read = this.dependencies.client.getTicketSandbox;
+    if (typeof read !== 'function') throw new Error('this connection cannot read the ticket sandbox permission');
     return read.call(this.dependencies.client, ticketId, signal);
   }
 

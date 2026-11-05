@@ -357,6 +357,15 @@ export const TicketUsageSchema = StrictObject({
 });
 export type TicketUsage = Static<typeof TicketUsageSchema>;
 
+// GET /v1/tickets/:id/sandbox：「沙箱外执行」授权现在开没开（工单 #62）。开关是工单操作 set_unsandboxed。
+// 单独一个只读接口，不放进工单对象：旧客户端严格校验工单，多一个字段就打不开工单（kernel-protocol-contract 测试）。
+export const TicketSandboxInfoSchema = StrictObject({
+  ticketId: Type.Integer({ minimum: 1 }),
+  // true：之后的执行者 Run 不进沙箱（核查员照旧在沙箱里）。
+  unsandboxedExecution: Type.Boolean(),
+});
+export type TicketSandboxInfo = Static<typeof TicketSandboxInfoSchema>;
+
 // POST /v1/tickets/:id/request-review 的响应：派出的那条 reviewer 请求，以及它核查的是哪次交付。
 export const TicketReviewRequestResultSchema = StrictObject({
   ticketId: Type.Integer({ minimum: 1 }),

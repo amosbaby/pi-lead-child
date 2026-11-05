@@ -114,6 +114,8 @@ export type TicketDetailFacts = {
   costBudgetUsd: number | null;
   // token 按计费拆开的几部分（GET /v1/tickets/:id/usage）。旧 daemon 没有这个接口时省略。
   usageParts?: UsageParts | null;
+  // 「沙箱外执行」授权（工单 #62）。null：旧 daemon 不发，不显示这一行。可选：旧的调用方不用改。
+  unsandboxedExecution?: boolean | null;
 };
 
 export type TicketOperationState = {
@@ -632,12 +634,29 @@ export function TicketThread({
       : ticket.verificationPolicy === 'independent_reviewer' && onSetLeadDelegation
         ? { action: { label: delegationBusy ? m.working : m.grantDelegation, onPress: () => onSetLeadDelegation(true), disabled: delegationBusy, testID: 'lead-delegation-grant' } }
         : {};
+  // 沙箱外执行（工单 #62）：只有你本人能开关（set_unsandboxed，user_direct）。能不能点、为什么不能点都按清单。
+  const unsandboxedAction = findAction(actions, 'set_unsandboxed');
+  const unsandboxedFact = (enabled: boolean): FactItem => ({
+    label: m.unsandboxed,
+    value: enabled ? m.unsandboxedOn : m.unsandboxedOff,
+    ...(unsandboxedAction ? {
+      action: {
+        label: pendingActionId === unsandboxedAction.id ? m.working : enabled ? m.turnOff : m.turnOn,
+        onPress: () => runAction(unsandboxedAction, { input: { enabled: !enabled } }),
+        // 关闭总是能点：外部通道的工单不能打开，但关闭不受影响。
+        disabled: enabled ? pendingActionId !== null || !onRunAction : !canRun(unsandboxedAction),
+        testID: enabled ? 'ticket-unsandboxed-off' : 'ticket-unsandboxed-on',
+      },
+      ...(!enabled && !unsandboxedAction.available && unsandboxedAction.reason ? { detail: unsandboxedAction.reason } : {}),
+    } : {}),
+  });
   const infoItems: FactItem[] = [
     ...(facts ? [{ label: m.created, value: m.createdValue(creatorName(facts.createdBy, leadName, m), clockText(facts.createdAt, undefined, locale)) }] : []),
     ...(facts ? [{ label: m.updated, value: clockText(facts.updatedAt, undefined, locale) }] : []),
     { label: m.dueAndReminders, value: facts?.dueAt ? clockText(facts.dueAt, undefined, locale) : m.none, ...delegatedEntry(actions, 'set_due', m.set, () => prefill(m.prefill.due(displayId))) },
     { label: m.budget, value: budgetText(facts, m), ...delegatedEntry(actions, 'set_budget', m.set, () => prefill(m.prefill.budget(displayId))) },
     { label: m.acceptance, value: acceptanceText(ticket, leadName, m), ...delegationEntry },
+    ...(typeof facts?.unsandboxedExecution === 'boolean' ? [unsandboxedFact(facts.unsandboxedExecution)] : []),
   ];
   const infoSection = (
     <Section

@@ -127,6 +127,40 @@ describe("ticket commands go through the gateway", () => {
   });
 });
 
+// 「沙箱外执行」授权（工单 #62）：和 App 工单详情里的开关是同一个工单操作。
+describe("plc sandbox", () => {
+  it("turns the permission on and off through the ticket action", async () => {
+    const h = harness({ runTicketAction: async (_id, _action, request) => ({
+      ticketId: 18, action: "set_unsandboxed", result: { enabled: request?.input && (request.input as { enabled: boolean }).enabled, changed: true }, ticket: null,
+    }) });
+    await h.run("sandbox", "18", "on", "--reason", "要装系统依赖");
+    await h.run("sandbox", "18", "off");
+    expect(h.calls).toEqual([
+      ["runTicketAction", 18, "set_unsandboxed", { input: { enabled: true }, reason: "要装系统依赖" }],
+      ["runTicketAction", 18, "set_unsandboxed", { input: { enabled: false } }],
+    ]);
+    expect(h.out[0]).toContain("已打开工单 #18 的沙箱外执行");
+    expect(h.out[1]).toContain("已关闭工单 #18 的沙箱外执行");
+  });
+
+  it("refuses anything but on or off without contacting the daemon", async () => {
+    const h = harness();
+    await h.run("sandbox", "18", "yes");
+    expect(h.exitCode()).toBe(1);
+    expect(h.err.join("\n")).toContain("on or off");
+    expect(h.gatewayCalls()).toBe(0);
+  });
+
+  it("shows the refusal for a ticket from an external channel", async () => {
+    const h = harness({
+      runTicketAction: async () => { throw new ControlPlaneClientError("这张工单是外部通道（别人在 Slack 这类通道里的消息）派出的", "conflict", 409); },
+    });
+    await h.run("sandbox", "18", "on");
+    expect(h.exitCode()).toBe(1);
+    expect(h.err.join("\n")).toContain("外部通道");
+  });
+});
+
 describe("trust, delegate and recheck", () => {
   it("reads, grants and revokes the lead trust", async () => {
     const grant = {
