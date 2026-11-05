@@ -65,6 +65,9 @@ export const CHANNEL_EVENT_KINDS = {
   // 用户在来源里点了确认消息上的按钮（「确认这一次」「不改」，工单 #72）：用户本人在自己的私信里点的照 App 里的卡执行，
   // 别人点的、不在用户自己私信里的被拒。两种都记一条，看得出是在来源里点的。
   ownerConfirmClicked: "channel.owner_confirm.clicked",
+  // 执行者要用户回答的决定请求没有推到用户自己的私信（工单 #81）：没有可推的私信（用户还没在私信里和 Lead 说过话、私信凭证撤销了）。
+  // 每条决定请求只记一次。
+  ownerDecisionSkipped: "channel.owner_decision.skipped",
 } as const;
 
 /**
@@ -566,7 +569,9 @@ export const CHANNEL_KERNEL_EVENT_KINDS: readonly EventKindDefinition[] = [
       channel: Type.String({ minLength: 1 }),
       // 按钮上的对象（user_action 的 target，例如 rule_change:rcc_x、connection_confirmation:cfm_x）。认不出时是 null。
       target: Nullable(Type.String({ minLength: 1, maxLength: 120 })),
-      decision: Nullable(Type.Union([Type.Literal("confirm"), Type.Literal("decline")])),
+      // choose：决定请求消息上选了一个选项（工单 #81），option 是选项的序号（从 0 开始，认不出时是 -1）。
+      decision: Nullable(Type.Union([Type.Literal("confirm"), Type.Literal("decline"), Type.Literal("choose")])),
+      option: Type.Optional(Type.Integer({ minimum: -1 })),
       // 点按钮的人在来源里的编号，和按钮所在的消息（例如 Slack 的频道和 ts）。
       by: Type.String(),
       message: Type.Record(Type.String(), Type.String()),
@@ -581,6 +586,19 @@ export const CHANNEL_KERNEL_EVENT_KINDS: readonly EventKindDefinition[] = [
       summary: Type.String(),
     }),
     description: "用户在外部来源（例如 Slack 自己的私信）里点了确认消息上的按钮：本人点的照 App 里的确认卡执行，别人点的被拒。",
+  },
+  {
+    kind: CHANNEL_EVENT_KINDS.ownerDecisionSkipped,
+    sources: ["system"],
+    payload: Type.Object({
+      decisionId: Id,
+      ticketId: Id,
+      // no_conversation：还没有用户自己的私信（用户没在私信里和 Lead 说过话，或者私信凭证在设置 → 设备里撤销了）；
+      // unavailable：来源现在不能发带按钮的消息（例如没接上、浏览器会话方式）。
+      reason: Type.Union([Type.Literal("no_conversation"), Type.Literal("unavailable")]),
+      summary: Type.String(),
+    }),
+    description: "执行者要用户回答的决定请求没有推到用户自己的私信：没有可推的私信，或者来源现在发不了。每条决定请求只记一次。",
   },
 ];
 

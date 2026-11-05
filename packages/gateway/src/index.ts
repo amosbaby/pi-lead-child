@@ -11,6 +11,8 @@ export * from "./lead-activity.js";
 export type { LeadAvatarService } from "./lead-avatar-routes.js";
 export * from "./memory-routes.js";
 export * from "./owner-confirmations.js";
+export * from "./owner-decisions.js";
+export * from "./owner-dm-relay.js";
 export * from "./runtime-settings-routes.js";
 export * from "./paired-server.js";
 export * from "./pairing-invitation.js";

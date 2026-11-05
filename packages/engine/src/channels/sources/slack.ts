@@ -65,7 +65,7 @@ import { ChannelFileNotFoundError, ChannelTargetGoneError } from "../types.js";
 import type {
   ChannelAdapter, ChannelAdapterContext, ChannelConnectionControl, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential,
   ChannelDelivery, ChannelFile, ChannelHistoryMessage, ChannelHistoryRequest, ChannelInbound, ChannelMarkLookup, ChannelMemorySpec,
-  ChannelOutboundRequest, ChannelOutboundResult, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransport, ChannelTransportContext,
+  ChannelOutboundRequest, ChannelOutboundResult, ChannelOwnerChoiceCard, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransport, ChannelTransportContext,
   ChannelTransportDeliver,
 } from "../types.js";
 import { createSlackSessionSettings, createSlackSettings } from "./slack-settings.js";
@@ -247,13 +247,94 @@ export function slackConfirmText(card: ChannelOwnerConfirmCard): string {
   return [card.byline, card.title, `${card.stateLabel}${card.result ? `${card.separator}${card.result}` : ""}`].join("\n").slice(0, SLACK_TEXT_OBJECT_MAX);
 }
 
+// 决定请求消息上的选项（工单 #81）。按钮的 action_id 是「plc_owner_choose:序号」（同一个 actions block 里 action_id 不能重复，
+// https://docs.slack.dev/reference/block-kit/block-elements/button-element），下拉框的是「plc_owner_choose」。
+// value 都是「decision:编号#序号」：只放序号，daemon 按序号换回选项（child 的选项 id 没有长度上限，下拉框的 value 最多 150 个字）。
+export const SLACK_CHOOSE_ACTION = "plc_owner_choose";
+const SLACK_CHOICE_VALUE = /^(decision:[1-9]\d{0,11})#(\d{1,3})$/u;
+// 按钮最多几个、标签最长几个字：「text may truncate with ~30 characters」，超过就换成下拉框。
+export const SLACK_CHOICE_BUTTONS_MAX = 5;
+export const SLACK_CHOICE_BUTTON_LABEL_MAX = 30;
+// 下拉框最多 100 个选项，选项的字最多 75 个（https://docs.slack.dev/reference/block-kit/block-elements/select-menu-element、
+// https://docs.slack.dev/reference/block-kit/composition-objects/option-object）。
+const SLACK_SELECT_OPTIONS_MAX = 100;
+const SLACK_OPTION_TEXT_MAX = 75;
+// 一条消息最多 50 个 block（https://docs.slack.dev/reference/block-kit/blocks）。一条决定请求最多占 4 个，加上署名和标题。
+export const SLACK_CHOICES_PER_MESSAGE_MAX = 8;
+
+/** 一条决定请求的选项用按钮还是下拉框：不超过 5 个、标签都不超过 30 个字时用按钮。 */
+export function slackChoiceUsesButtons(options: ReadonlyArray<{ label: string }>): boolean {
+  return options.length <= SLACK_CHOICE_BUTTONS_MAX
+    && options.every((option) => [...option.label.replace(/\s+/g, " ").trim()].length <= SLACK_CHOICE_BUTTON_LABEL_MAX);
+}
+
+function plainText(text: string, max: number): string {
+  const chars = [...text.replace(/\s+/g, " ").trim()];
+  return chars.length <= max ? chars.join("") : `${chars.slice(0, max - 1).join("")}…`;
+}
+
+/**
+ * 用户自己私信里的一条决定请求消息（工单 #81）：署名、标题，然后每条决定请求一段：问题和说明（选项的后果、推荐和理由），
+ * 等决定时下面是选项（不超过 5 个、标签短时是按钮，推荐的用 primary 样式；否则是下拉框），决定以后换成状态和结果。
+ * 要用户自己写回答的，在选项下面写一句去 App 里回答。几条之间用分隔线。
+ */
+export function slackChoiceBlocks(card: ChannelOwnerChoiceCard): Array<Record<string, unknown>> {
+  const line = (text: string, max: number) => escapeMrkdwn(text.replace(/\s+/g, " ").trim().slice(0, max));
+  const blocks: Array<Record<string, unknown>> = [
+    { type: "context", elements: [{ type: "mrkdwn", text: line(card.byline, 300) }] },
+    { type: "section", text: { type: "mrkdwn", text: `*${line(card.title, 300)}*` } },
+  ];
+  card.decisions.slice(0, SLACK_CHOICES_PER_MESSAGE_MAX).forEach((decision, index) => {
+    if (index > 0) blocks.push({ type: "divider" });
+    const body = [`*${line(decision.prompt, 900)}*`, ...decision.lines.filter((text) => text.trim()).map((text) => line(text, 600))]
+      .join("\n").slice(0, SLACK_TEXT_OBJECT_MAX);
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
+    if (!decision.pending) {
+      const result = decision.result ? `${decision.separator}${line(decision.result, 1_500)}` : "";
+      blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `*${line(decision.stateLabel, 40)}*${result}` }] });
+      return;
+    }
+    const value = (option: number) => `${decision.target}#${option}`;
+    if (decision.options.length && slackChoiceUsesButtons(decision.options)) {
+      blocks.push({
+        type: "actions", block_id: `${decision.target}:choose`,
+        elements: decision.options.map((option, position) => ({
+          type: "button", action_id: `${SLACK_CHOOSE_ACTION}:${position}`, value: value(position),
+          text: { type: "plain_text", text: plainText(option.label, SLACK_OPTION_TEXT_MAX) },
+          ...(option.recommended ? { style: "primary" } : {}),
+        })),
+      });
+    } else if (decision.options.length) {
+      blocks.push({
+        type: "actions", block_id: `${decision.target}:choose`,
+        elements: [{
+          type: "static_select", action_id: SLACK_CHOOSE_ACTION,
+          placeholder: { type: "plain_text", text: plainText(decision.placeholder, SLACK_OPTION_TEXT_MAX) },
+          options: decision.options.slice(0, SLACK_SELECT_OPTIONS_MAX).map((option, position) => ({
+            text: { type: "plain_text", text: plainText(option.label, SLACK_OPTION_TEXT_MAX) }, value: value(position),
+          })),
+        }],
+      });
+    }
+    if (decision.note) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: line(decision.note, 300) }] });
+  });
+  return blocks;
+}
+
+/** 决定请求消息的纯文字退路（通知、不显示 block 的客户端）。 */
+export function slackChoiceText(card: ChannelOwnerChoiceCard): string {
+  const states = card.decisions.map((decision) => `${decision.prompt}${decision.separator}${decision.stateLabel}`);
+  return [card.byline, card.title, ...states].join("\n").slice(0, SLACK_TEXT_OBJECT_MAX);
+}
+
 /**
  * 交互的回调（block_actions）里我们要的部分。Socket Mode 的 interactive 信封里是 JSON；推来的 HTTP 请求是
  * application/x-www-form-urlencoded，payload 字段是 JSON（https://docs.slack.dev/interactivity/handling-user-interaction）。
  * 不是 block_actions、没有我们的按钮时返回 null。
  */
 export function slackConfirmAction(body: string): {
-  user: string; team: string | null; channel: string; ts: string; threadTs: string | null; target: string; decision: "confirm" | "decline";
+  user: string; team: string | null; channel: string; ts: string; threadTs: string | null; target: string;
+  decision: "confirm" | "decline" | "choose"; option?: number;
 } | null {
   let payload: unknown;
   try {
@@ -263,8 +344,14 @@ export function slackConfirmAction(body: string): {
   }
   if (!isRecord(payload) || payload.type !== "block_actions" || !Array.isArray(payload.actions)) return null;
   const action = payload.actions.find((item): item is Record<string, unknown> => isRecord(item)
-    && (item.action_id === SLACK_CONFIRM_ACTION || item.action_id === SLACK_DECLINE_ACTION));
-  if (!action || !isString(action.value) || !SLACK_CONFIRM_TARGET.test(action.value)) return null;
+    && (item.action_id === SLACK_CONFIRM_ACTION || item.action_id === SLACK_DECLINE_ACTION || isChooseAction(item.action_id)));
+  if (!action) return null;
+  // 决定请求的选项（工单 #81）：按钮的 value，或者下拉框选中的那一项的 value。
+  const choice = isChooseAction(action.action_id)
+    ? SLACK_CHOICE_VALUE.exec(isString(action.value) ? action.value
+      : isRecord(action.selected_option) && isString(action.selected_option.value) ? action.selected_option.value : "")
+    : null;
+  if (isChooseAction(action.action_id) ? !choice : !isString(action.value) || !SLACK_CONFIRM_TARGET.test(action.value)) return null;
   const user = isRecord(payload.user) && isString(payload.user.id) ? payload.user.id : "";
   const team = isRecord(payload.team) && isString(payload.team.id) ? payload.team.id
     : isRecord(payload.user) && isString(payload.user.team_id) ? payload.user.team_id : null;
@@ -274,10 +361,15 @@ export function slackConfirmAction(body: string): {
   const ts = isString(container.message_ts) ? container.message_ts : isString(message.ts) ? message.ts : "";
   if (!channel || !ts) return null;
   const threadTs = isString(message.thread_ts) && message.thread_ts !== ts ? message.thread_ts : null;
+  if (choice) return { user, team, channel, ts, threadTs, target: choice[1]!, decision: "choose", option: Number(choice[2]) };
   return {
-    user, team, channel, ts, threadTs, target: action.value,
+    user, team, channel, ts, threadTs, target: action.value as string,
     decision: action.action_id === SLACK_CONFIRM_ACTION ? "confirm" : "decline",
   };
+}
+
+function isChooseAction(actionId: unknown): boolean {
+  return actionId === SLACK_CHOOSE_ACTION || (isString(actionId) && actionId.startsWith(`${SLACK_CHOOSE_ACTION}:`));
 }
 
 // 一行里不在行内代码中的部分换成 mrkdwn。顺序要紧：列表的「* 」先换成「• 」，单星号的斜体先换成 _x_，再换双星号的粗体。
@@ -1907,14 +1999,13 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     return { remoteRef: { channel, ts: first! }, duplicate, messageId: first! };
   }
 
-  // 用户自己私信里的确认消息（工单 #72）：reply 发一条新的（同一个幂等键只发一次，和别的回复一样先找有没有发过），
+  // 用户自己私信里的确认消息（工单 #72）和决定请求消息（工单 #81）：reply 发一条新的（同一个幂等键只发一次，和别的回复一样先找有没有发过），
   // edit 把点过的那条换成结果（不带按钮）。
   async function sendConfirm(
     channel: string, request: ChannelOutboundRequest, key: string, context: ChannelAdapterContext,
   ): Promise<ChannelOutboundResult> {
-    const card = request.confirm!;
-    const text = slackConfirmText(card);
-    const blocks = slackConfirmBlocks(card);
+    const text = request.choices ? slackChoiceText(request.choices) : slackConfirmText(request.confirm!);
+    const blocks = request.choices ? slackChoiceBlocks(request.choices) : slackConfirmBlocks(request.confirm!);
     if (request.action === "edit") {
       if (!isString(request.target.ts)) throw new Error("slack: nothing to edit (no ts)");
       const result = await web.call("chat.update", { channel, ts: request.target.ts, text, blocks }, context.credential.token);
@@ -2040,7 +2131,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         user: action.user, fromOwner, ownConversation,
         objectKey: placeOf(action.channel, "im", action.ts, action.threadTs ?? undefined).objectKey,
         message: { channel: action.channel, ts: action.ts },
-        target: action.target, decision: action.decision,
+        target: action.target, decision: action.decision, ...(action.option !== undefined ? { option: action.option } : {}),
       };
     },
 
@@ -2288,7 +2379,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         if (result.error === "already_reacted") return { remoteRef: { channel, ts: request.target.ts, emoji: request.emoji }, duplicate: true };
         throw new Error(`slack reactions.add: ${isString(result.error) ? result.error : "not ok"}`);
       }
-      if (request.confirm) return sendConfirm(channel, request, sendOptions.idempotencyKey, context);
+      if (request.confirm || request.choices) return sendConfirm(channel, request, sendOptions.idempotencyKey, context);
       if (!isString(request.text)) throw new Error("slack: a reply needs text");
       const outgoing = slackOutgoing(request.text, request.parts);
       if (request.action === "edit") {

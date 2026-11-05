@@ -311,6 +311,8 @@ export function startChannels(input: {
   owner?: ChannelHubOptions["owner"];
   // 用户本人在自己的私信里点了确认消息上的按钮（ChannelHubOptions.ownerConfirm，工单 #72）。
   ownerConfirm?: ChannelHubOptions["ownerConfirm"];
+  // 用户本人在自己的私信里选了决定请求消息上的选项（ChannelHubOptions.ownerChoose，工单 #81）。
+  ownerChoose?: ChannelHubOptions["ownerChoose"];
   // 上下文包（统一消息事件 spec D5，工单 04）：对话摘要的便宜模型、对象的状态、笔记的召回。
   contextPack?: ChannelHubOptions["contextPack"];
   // 来源的连接状态变了（channel-settings.ts 记下来给设置页看）。只报声明了凭据设置的来源。
@@ -356,6 +358,7 @@ export function startChannels(input: {
     ...(input.lead ? { lead: input.lead } : {}),
     ...(input.owner ? { owner: input.owner } : {}),
     ...(input.ownerConfirm ? { ownerConfirm: input.ownerConfirm } : {}),
+    ...(input.ownerChoose ? { ownerChoose: input.ownerChoose } : {}),
     ...(input.contextPack || contextPack ? { contextPack: { ...input.contextPack, ...contextPack } } : {}),
     ...tuning,
   });

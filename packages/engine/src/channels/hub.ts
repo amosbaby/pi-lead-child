@@ -63,7 +63,7 @@
 //   你这一轮开始以后对方又发来的，你说话时还没见过：卡不结束（seenBefore）。
 // 「正在处理」是对对方的一句承诺（用户 2026-10-26）：回复改写它；工作没有回复就结束了（卡结束、工单交给你、你说自己回），
 // 就删掉它（settleStatusNotices）。每一拍补收最近 24 小时漏下的（删失败了、daemon 重启了），有界、幂等。
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   CHANNEL_CARD_NOTE_MAX, CHANNEL_CARD_OPEN_STATES, CHANNEL_CARD_TEXT_MAX, CHANNEL_EMOJI_NAME_PATTERN, CHANNEL_EVENT_KINDS, CHANNEL_HANDLED_EMOJI, CHANNEL_DELIVERY_LABELS, CHANNEL_INTENT_LABELS,
   AGENT_TASK_LIMITS, AUTHORITY_INTENT_SITUATIONS, CHANNEL_AUTHORITY_ACTIONS, CHANNEL_AUTHORITY_DEFAULTS, CHANNEL_HANDBOOK_DEFAULTS, CHANNEL_LEAD_DECISIONS,
@@ -141,7 +141,7 @@ import type {
   ChannelAdapter, ChannelAdapterContext, ChannelCredential, ChannelCredentialSource, ChannelDelivery,
   ChannelConversationCandidate, ChannelInbound, ChannelInboundRole, ChannelInterest, ChannelOpenCard, ChannelOpenLane, ChannelReaction,
   ChannelConversationRead, ChannelEditedMessage, ChannelFile, ChannelMarkPreview, ChannelRecentConversation, ChannelSentMessage,
-  ChannelCatchUpReport, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransportContext,
+  ChannelCatchUpReport, ChannelOwnerChoiceCard, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransportContext,
 } from "./types.js";
 import { ChannelFileNotFoundError } from "./types.js";
 
@@ -210,6 +210,30 @@ export interface ChannelHubOptions {
   // 用户本人在自己的私信里点了确认消息上的按钮（工单 #72）：daemon 按 App 里点卡的同一份实现决定这一次，返回点完以后的确认消息
   // （不含署名，hub 补上）。不认识这个对象时返回 null。只有 hub 认过是用户本人、在用户自己的私信里点的才交过来。
   ownerConfirm?: (click: ChannelOwnerConfirmRequest) => Promise<OwnerConfirmCardContent | null>;
+  // 用户本人在自己的私信里选了决定请求消息上的一个选项（工单 #81）：daemon 按 App 里选的同一个操作回答，返回那条消息现在的样子
+  // （整条消息，可能合了几条决定请求；不含署名）。不认识这个对象时返回 null。只有 hub 认过的点击才交过来。
+  ownerChoose?: (click: ChannelOwnerChooseRequest) => Promise<OwnerChoiceCardContent | null>;
+}
+
+/** 用户本人在来源里选的一个选项（ChannelHubOptions.ownerChoose）。conversation 是那条消息所在的对话（对象键）。 */
+export interface ChannelOwnerChooseRequest {
+  source: string;
+  account: string;
+  conversation: string;
+  target: string;
+  option: number;
+}
+
+/** daemon 写好的决定请求消息（ChannelOwnerChoiceCard 去掉署名：署名由 hub 按这个来源的助手名补上）。 */
+export type OwnerChoiceCardContent = Omit<ChannelOwnerChoiceCard, "byline">;
+
+/**
+ * 改写决定请求消息的幂等键（工单 #81）：消息的位置加上每条决定请求的状态。点击以后 hub 改写、App 里答了以后 daemon 改写，
+ * 状态一样时是同一个键，只改一次；状态变了再改。
+ */
+export function ownerChoiceEditKey(message: Record<string, string>, content: Pick<OwnerChoiceCardContent, "decisions">): string {
+  const states = content.decisions.map((decision) => `${decision.target}=${decision.pending ? "pending" : decision.stateLabel}`).join(",");
+  return `owner-choice-result:${message.channel ?? ""}:${message.ts ?? ""}:${createHash("sha256").update(states).digest("hex").slice(0, 32)}`;
 }
 
 /** 用户本人在来源里点的一次确认（ChannelHubOptions.ownerConfirm）。account 是凭据里的用户本人，daemon 按它找私信的凭证。 */
@@ -747,6 +771,65 @@ export class ChannelHub {
     return { status: outcome.status };
   }
 
+  /**
+   * 在用户自己的私信里发一条决定请求消息（工单 #81）：一条或几条决定请求，每条带自己的选项。conversationId 是用户自己的私信
+   * （daemon 从用户写给 Lead 的那个对话记下来）。来源不支持按钮时返回 null，什么都不发。key 是幂等键：同一个键只发一次。
+   * 返回那条消息在来源里的位置（remoteRef），以后改写它。发不出去时抛 ChannelActionError。
+   */
+  async sendOwnerChoices(
+    conversationId: string, content: OwnerChoiceCardContent, key: string,
+  ): Promise<{ status: ChannelOutboundOutcome["status"]; remoteRef: Record<string, string> } | null> {
+    const found = await this.ownerConversation(conversationId);
+    if (!found) return null;
+    const { adapter, context, place } = found;
+    const choices = this.choiceCard(adapter, content);
+    const outcome = await this.outbox.perform(adapter, context, {
+      key: `owner-choice:${key}`, purpose: "auto_reply", cardId: null,
+      request: { action: "reply", objectKey: place.objectKey, target: place.target, text: choices.title, choices },
+    });
+    if (outcome.status === "failed" || !outcome.remoteRef) throw new ChannelActionError("outbound_failed", `没有发出去：${outcome.error ?? "未知原因"}`);
+    return { status: outcome.status, remoteRef: outcome.remoteRef };
+  }
+
+  /**
+   * 把发过的决定请求消息改成现在的样子（工单 #81）：合进了新的一条，或者有一条在 App 里答了、撤了、过期了。
+   * message 是 sendOwnerChoices 返回的位置。同样的状态只改一次（ownerChoiceEditKey）。来源不支持按钮时返回 null。
+   * 那条消息已经没了时返回 targetGone（不抛错）。
+   */
+  async editOwnerChoices(
+    conversationId: string, message: Record<string, string>, content: OwnerChoiceCardContent,
+  ): Promise<{ status: ChannelOutboundOutcome["status"]; targetGone?: true } | null> {
+    const found = await this.ownerConversation(conversationId);
+    if (!found) return null;
+    const { adapter, context, place } = found;
+    const choices = this.choiceCard(adapter, content);
+    const outcome = await this.outbox.perform(adapter, context, {
+      key: ownerChoiceEditKey(message, content), purpose: "auto_reply", cardId: null,
+      request: { action: "edit", objectKey: place.objectKey, target: message, text: choices.title, choices },
+    });
+    // 那条消息没了（例如用户删了）：再试也一样，不抛错，调用方不再改它。
+    if (outcome.status === "failed" && outcome.targetGone) return { status: outcome.status, targetGone: true };
+    if (outcome.status === "failed") throw new ChannelActionError("outbound_failed", `没有改成：${outcome.error ?? "未知原因"}`);
+    return { status: outcome.status };
+  }
+
+  private async ownerConversation(conversationId: string) {
+    const source = conversationId.split(":")[0] ?? "";
+    const adapter = this.options.registry.get(source);
+    if (!adapter?.capabilities.confirm || !adapter.resolveConversation) return null;
+    const context = await this.context(adapter);
+    if (!context) throw new ChannelActionError("unavailable", `来源 ${source} 现在没有接上`);
+    try {
+      return { adapter, context, place: await adapter.resolveConversation(conversationId, context) };
+    } catch (error) {
+      throw new ChannelActionError("not_found", errorText(error));
+    }
+  }
+
+  private choiceCard(adapter: ChannelAdapter, content: OwnerChoiceCardContent): ChannelOwnerChoiceCard {
+    return { ...content, byline: ownerReplyDisclosure(this.assistantFor(adapter), "").parts.byline };
+  }
+
   private confirmCard(adapter: ChannelAdapter, content: OwnerConfirmCardContent): ChannelOwnerConfirmCard {
     return { ...content, byline: ownerReplyDisclosure(this.assistantFor(adapter), "").parts.byline };
   }
@@ -755,17 +838,22 @@ export class ChannelHub {
   // 消息不动（按钮还在，用户本人照样能点）。本人点的交给 daemon（和 App 里点卡同一份实现），再把那条消息换成结果。
   // 已经处理过、过期的确认，daemon 返回它现在的状态，消息照样换成状态，不再执行。不抛错。
   private async ownerClick(adapter: ChannelAdapter, context: ChannelAdapterContext, click: ChannelOwnerClick): Promise<void> {
+    const choose = click.decision === "choose";
     const refusal = !click.fromOwner ? "not_owner" as const : !click.ownConversation ? "not_own_conversation" as const
-      : !this.options.ownerConfirm ? "unavailable" as const : null;
+      : !(choose ? this.options.ownerChoose : this.options.ownerConfirm) ? "unavailable" as const : null;
     if (refusal) {
       this.log(`[channels] ${adapter.id}: refused a button click on ${click.target} by ${click.user || "(unknown)"}: ${refusal}`);
       this.recordOwnerClick(adapter, click, { accepted: false, refusal, state: null });
       return;
     }
+    if (choose) {
+      await this.ownerChoice(adapter, context, click);
+      return;
+    }
     let content: OwnerConfirmCardContent | null = null;
     try {
       content = await this.options.ownerConfirm!({
-        source: adapter.id, account: context.credential.account, target: click.target, decision: click.decision,
+        source: adapter.id, account: context.credential.account, target: click.target, decision: click.decision as "confirm" | "decline",
       });
     } catch (error) {
       this.log(`[channels] ${adapter.id}: the button click on ${click.target} failed: ${scrubCredential(errorText(error), context)}`);
@@ -787,11 +875,37 @@ export class ChannelHub {
     if (outcome.status === "failed") this.log(`[channels] ${adapter.id}: could not update the confirmation message for ${click.target}`);
   }
 
+  // 决定请求消息上选了一个选项（工单 #81）：和确认按钮一样，交给 daemon（App 里选的同一个操作），再把那条消息换成现在的样子。
+  private async ownerChoice(adapter: ChannelAdapter, context: ChannelAdapterContext, click: ChannelOwnerClick): Promise<void> {
+    let content: OwnerChoiceCardContent | null = null;
+    try {
+      content = await this.options.ownerChoose!({
+        source: adapter.id, account: context.credential.account, conversation: click.objectKey, target: click.target, option: click.option ?? -1,
+      });
+    } catch (error) {
+      this.log(`[channels] ${adapter.id}: the choice on ${click.target} failed: ${scrubCredential(errorText(error), context)}`);
+      this.recordOwnerClick(adapter, click, { accepted: false, refusal: "unavailable", state: null });
+      return;
+    }
+    const chosen = content?.decisions.find((decision) => decision.target === click.target);
+    if (!content || !chosen) {
+      this.recordOwnerClick(adapter, click, { accepted: false, refusal: "unknown_target", state: null });
+      return;
+    }
+    this.recordOwnerClick(adapter, click, { accepted: true, refusal: null, state: chosen.stateLabel });
+    const choices = this.choiceCard(adapter, content);
+    const outcome = await this.outbox.perform(adapter, context, {
+      key: ownerChoiceEditKey(click.message, content), purpose: "auto_reply", cardId: null,
+      request: { action: "edit", objectKey: click.objectKey, target: click.message, text: choices.title, choices },
+    });
+    if (outcome.status === "failed") this.log(`[channels] ${adapter.id}: could not update the decision message for ${click.target}`);
+  }
+
   private recordOwnerClick(
     adapter: ChannelAdapter, click: ChannelOwnerClick,
     outcome: { accepted: boolean; refusal: "not_owner" | "not_own_conversation" | "unavailable" | "unknown_target" | null; state: string | null },
   ): void {
-    const verb = click.decision === "confirm" ? "确认这一次" : "不改";
+    const verb = click.decision === "confirm" ? "确认这一次" : click.decision === "decline" ? "不改" : `第 ${(click.option ?? -1) + 1} 个选项`;
     const summary = outcome.accepted
       ? `用户在 ${adapter.label} 自己的私信里点了「${verb}」：${click.target}，现在是「${outcome.state}」。`
       : `${adapter.label} 里有人点了确认按钮（${click.target}，点的人 ${click.user || "不知道"}），被拒绝：${outcome.refusal}。`;
@@ -800,7 +914,8 @@ export class ChannelHub {
         source: "system", kind: CHANNEL_EVENT_KINDS.ownerConfirmClicked, entityKey: `channel:${adapter.id}`, level: "record",
         occurredAt: this.now().toISOString(),
         payload: {
-          channel: adapter.id, target: click.target, decision: click.decision, by: click.user, message: { ...click.message },
+          channel: adapter.id, target: click.target, decision: click.decision, ...(click.option !== undefined ? { option: click.option } : {}),
+          by: click.user, message: { ...click.message },
           accepted: outcome.accepted, refusal: outcome.refusal, state: outcome.state, summary,
         },
       }))();

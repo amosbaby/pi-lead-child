@@ -339,6 +339,7 @@ const CONNECTION_LAUNCH_MIGRATION_VERSION = 63;
 const ITEM_USAGE_PARTS_MIGRATION_VERSION = 64;
 const WATCH_HOST_RUN_MIGRATION_VERSION = 65;
 const UNSANDBOXED_EXECUTION_MIGRATION_VERSION = 66;
+const CHANNEL_OWNER_DM_MIGRATION_VERSION = 67;
 
 // v23 的列补齐必须发生在 exec(SCHEMA) 前：当前 DDL/索引会读取这些列，而 SQLite 的
 // CREATE TABLE IF NOT EXISTS 不会给既有表补列。跨字段的 reminder/workflow 约束由 SCHEMA
@@ -754,6 +755,15 @@ function migrateWatchHostRun(db: Db): void {
   })();
 }
 
+// v67（本地，工单 #81；本地集成分支上原是 v65）：用户自己私信里的决定请求和工单的来源对话（工单 #81）。只加 channel_decision_pushes、channel_ticket_origins 两张表和索引
+// （schema.ts 的 CHANNEL_OWNER_DM_SCHEMA）。表由 SCHEMA 建，新库和老库一样；这里只记版本。不改任何已有的表和行，也不回填：
+// 以前的决定请求不会被推到私信（只推新的，见 channel-owner-dm.ts）。工单的生命周期字段一个都不动。
+function migrateChannelOwnerDm(db: Db): void {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(CHANNEL_OWNER_DM_MIGRATION_VERSION)) return;
+  db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)")
+    .run(CHANNEL_OWNER_DM_MIGRATION_VERSION, "channel-owner-dm-v1");
+}
+
 // v66（本地，工单 #62；本地集成分支上原是 v64）：「沙箱外执行」授权（工单 #62）。items 加一列 unsandboxed_execution，缺省 0（照旧进沙箱）。只加列，不重建 items：
 // 别的列和行原样保留，生命周期字段一个都不动，不回填。新库的列由 SCHEMA 建，这里跳过。
 function migrateUnsandboxedExecution(db: Db): void {
@@ -927,6 +937,7 @@ export function migrateDb(db: Db): void {
   migrateItemUsageParts(db);
   migrateWatchHostRun(db);
   migrateUnsandboxedExecution(db);
+  migrateChannelOwnerDm(db);
 }
 
 const ITEM_MODEL_MIGRATION_VERSION = 14;
@@ -938,7 +949,7 @@ const RELATION_EXECUTION_GATE_MIGRATION_VERSION = 19;
 const OUTCOME_SNAPSHOT_MIGRATION_VERSION = 20;
 const TICKET_AGENT_EXECUTION_CONTINUATION_MIGRATION_VERSION = 21;
 const OUTCOME_RECOVERY_SCOPE_MIGRATION_VERSION = 22;
-export const LATEST_SCHEMA_VERSION = UNSANDBOXED_EXECUTION_MIGRATION_VERSION;
+export const LATEST_SCHEMA_VERSION = CHANNEL_OWNER_DM_MIGRATION_VERSION;
 
 // 旧 status → 新 status。backlog 映射到 ready 而不是 draft：旧 backlog 是可以被直接派发的，
 // 映射到 draft 会让存量工单突然需要用户逐个确认，等于用迁移改变了既有行为。
@@ -2146,4 +2157,5 @@ export const SCHEMA_MIGRATION_VERSIONS: readonly number[] = [
   ITEM_USAGE_PARTS_MIGRATION_VERSION,
   WATCH_HOST_RUN_MIGRATION_VERSION,
   UNSANDBOXED_EXECUTION_MIGRATION_VERSION,
+  CHANNEL_OWNER_DM_MIGRATION_VERSION,
 ];

@@ -17,6 +17,7 @@ export {
   SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_OWNER_REPLY_COLOR, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode, slackOwnerReplyMessages,
   slackCatchUpWindow, slackMemoryExclusion, slackMessageLink, slackMrkdwnFromMarkdown, slackTsOf, slackWorkspaceUrl,
   SLACK_CONFIRM_ACTION, SLACK_DECLINE_ACTION, slackConfirmAction, slackConfirmBlocks,
+  SLACK_CHOOSE_ACTION, SLACK_CHOICE_BUTTONS_MAX, SLACK_CHOICE_BUTTON_LABEL_MAX, SLACK_CHOICES_PER_MESSAGE_MAX, slackChoiceBlocks, slackChoiceUsesButtons,
   slackAttachmentsOnly, slackDisplayText, slackMarkupIds, slackMessageText, SLACK_SESSION_SECRET_NAMES, slackSecretNames,
 } from "./sources/slack.js";
 export type { SlackChannelOptions, SlackConnection, SlackMemoryExclusion, SlackWebApi } from "./sources/slack.js";

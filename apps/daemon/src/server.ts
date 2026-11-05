@@ -64,7 +64,9 @@ import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { isStopCommand, LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import { CONVERSATION_TURN_INTERRUPTED_BY_STEER } from "@pi-lead-child/protocol";
-import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerConfirmRequest, ChannelOwnerMessage } from "@pi-lead-child/engine";
+import type {
+  ChannelHub, ChannelLookupCandidate, ChannelOwnerChooseRequest, ChannelOwnerConfirmRequest, ChannelOwnerMessage,
+} from "@pi-lead-child/engine";
 import {
   autoReplyDisclosure, disclosureAssistantName, disclosureOwnerName, fairyEyeReply, leadAvatarSlackEmoji, setLeadAvatarFairyEye,
   slackEmojiPreview,
@@ -123,6 +125,7 @@ import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-chil
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
+import { latestItemId, ownerConversationOf, recordTurnTicketOrigins, rememberOwnerConversation } from "@pi-lead-child/store";
 import {
   classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
   LEAD_RESTART_INTERRUPTED_ERROR, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
@@ -152,6 +155,9 @@ import {
 import { assistantMessageText, projectToolEvent } from "@pi-lead-child/gateway";
 import {
   isOwnerConfirmationAction, ownerConfirmationContent, resolveOwnerConfirmation, type OwnerConfirmationDeps,
+} from "@pi-lead-child/gateway";
+import {
+  choiceGroupsOfSurface, createOwnerDecisionPusher, resolveOwnerDecision, systemReplyForOwner, type OwnerDecisionPusher,
 } from "@pi-lead-child/gateway";
 import {
   persistLeadToolConversationEvent, repairStuckLeadToolOperations,
@@ -866,6 +872,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 正在跑的这一轮是不是用户本人的消息开的（不是系统事件、外部消息、到点的跟进叫醒的）：user-placement.ts 据此决定
   // 用户新发的消息插不插进来。
   let ownUserRun = false;
+  // 交给正在跑的这一轮的事提到的对象（事件的 entityKey，例如 ticket:12）。系统叫醒的一轮写给用户的话按它同步到私信（工单 #81）。
+  let runEntityKeys: string[] = [];
   // 交接和挂起（lead 的 scheduler/handoffs.ts，lead-scheduler spec P2）：这个单元做过的步骤、交接包、挂起的单元、
   // 子 agent 拥有的对象。extension（做过的步骤）、Lead 的 hand_off 和 resume_unit、daemon 共用这一个实例。
   const handoffs = new LeadHandoffs({
@@ -1094,6 +1102,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 外部通道里用户本人写给 Lead 的话开的一轮（acceptChannelOwnerMessage）→ 回复发回的对话。这一轮和后面的一轮一起答了时，
   // 对话交给后面那一轮（settleAnsweredTogether）。只在内存里：daemon 重启以后，重启前收的这种消息的回复只在 App 里看得到。
   const channelOwnerReplies = new Map<string, string[]>();
+  // 用户私信的那一轮里 Lead 画的 ChoiceGroup（工单 #81 的 (a)）：回复以后在私信里各发一条带选项的消息。
+  const channelOwnerChoices = new Map<string, Array<{ decisionId: number; recommended: string | null; reason: string | null }>>();
+  // 用户私信的那一轮开始时最大的工单编号（工单 #81 的 (c)）：这一轮结束时，编号更大的、Lead 建的工单记下来源私信。
+  const channelOwnerItemFloor = new Map<string, number>();
   const retriedUserTurns = new Set<string>();
   // 在等重试的轮次：at 为 null 时等网络恢复，否则到点再试（模型服务暂时连不上、限流）。
   const userTurnRetries = new Map<string, { at: number | null }>();
@@ -1344,7 +1356,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       )}\n`);
     }
     completeTurn(db, entry.turn.id);
-    replyToChannelOwner(entry.turn.id, entry.assistantText.trim() || (entry.drewSurface ? "回复是一张卡片，只在 App 里看得到。" : ""));
+    replyToChannelOwner(entry.turn.id, entry.assistantText.trim()
+      || (!entry.drewSurface ? "" : channelOwnerChoices.has(entry.turn.id) ? "在下面那条消息上选。" : "回复是一张卡片，只在 App 里看得到。"));
+    if (isSystemTurnOrigin(entry.turn.origin_kind)) relaySystemTurnToOwner(entry.turn.id, entry.assistantText);
     userTurnPrompts.delete(entry.turn.id);
     retriedUserTurns.delete(entry.turn.id);
     publishControlEvent({
@@ -1471,6 +1485,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (owners && answeredWith) {
       channelOwnerReplies.delete(entry.turn.id);
       channelOwnerReplies.set(answeredWith.turn.id, [...(channelOwnerReplies.get(answeredWith.turn.id) ?? []), ...owners]);
+      // 这一轮开始时记的工单编号也交给后面那一轮（工单 #81 的 (c)）。
+      const floor = channelOwnerItemFloor.get(entry.turn.id);
+      channelOwnerItemFloor.delete(entry.turn.id);
+      if (floor !== undefined && !channelOwnerItemFloor.has(answeredWith.turn.id)) channelOwnerItemFloor.set(answeredWith.turn.id, floor);
     } else if (owners) {
       replyToChannelOwner(entry.turn.id, note);
     }
@@ -2016,6 +2034,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       : undefined;
     if (surface && typeof surface === "object") {
       entry.drewSurface = true;
+      if (channelOwnerReplies.has(entry.turn.id)) noteOwnerTurnChoices(entry.turn.id, surface);
       persistLeadToolConversationEvent(db, {
         type: "lead.tool.updated",
         turnId: entry.turn.id,
@@ -4177,6 +4196,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       ? withExternalContent({ external: false, timer: null }, { via: "message", source: "aish" })
       : { external: false, timer: null };
     ownUserRun = Boolean(channelTurn) && !options.system && !options.aish;
+    if (channelTurn && channelOwnerReplies.has(channelTurn.turn.id)) channelOwnerItemFloor.set(channelTurn.turn.id, latestItemId(db));
+    runEntityKeys = [];
     let succeeded = false;
     let offline = false;
     // 这一轮被停机前的排空中断了（restartAbort）。
@@ -4210,6 +4231,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (delivered?.events.length) publishLeadQueue();
       deliveredInboxIds = delivered?.inboxIds ?? [];
       const deliveredEvents = delivered?.events ?? [];
+      // 交给这一轮的事提到的对象（工单 #81 的 (c)）：系统叫醒的一轮写给用户的话，按它找要同步的私信。
+      runEntityKeys = deliveredEvents.map((event) => event.entityKey);
       runOrigin = {
         ...withExternalEvents(runOrigin, deliveredEvents),
         timer: channelTurn ? null : userTimerOf(deliveredEvents),
@@ -4845,6 +4868,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     owner: (message) => acceptChannelOwnerMessage(message),
     // 用户本人在自己的私信里点了确认消息上的按钮（工单 #72）：hub 已经认过是本人、在本人的私信里。按 App 里点卡的同一份实现做。
     ownerConfirm: (click) => resolveChannelOwnerConfirmation(click),
+    // 用户本人在自己的私信里选了决定请求消息上的选项（工单 #81）：按 App 里选的同一个操作做。
+    ownerChoose: (click) => resolveChannelOwnerChoice(click),
   });
   channelHub = startedChannels?.hub ?? null;
   // 来源的连接方式（设置 → 消息通道，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道设置在通道接好以后才认得来源。
@@ -5230,6 +5255,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pollStep("triage-shadow", () => triageShadow?.tick());
     // 通道（工单 11）：闸门判断、「稍后」到点、没发成的回复。在后台跑，不阻塞这一拍。
     pollStep("channels", () => { void channelHub?.tick(); });
+    // 执行者要用户回答的决定请求推到用户自己的私信，状态变了的消息改成结果（工单 #81）。在后台跑，不阻塞这一拍。
+    pollStep("owner-decisions", () => { if (channelHub) void ownerDecisions.sync(ownerDecisionConversation()); });
     // 记忆沉淀（工单 07）：整理攒够了的对话。在后台跑，不阻塞这一拍。
     pollStep("channel-memory", () => { void channelMemory?.tick(); });
   }
@@ -6146,13 +6173,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       ...(turnId ? { turnId } : {}),
       context: `这条消息是用户本人在 ${label} 里发给自己的私信，系统凭 ${label} 的连接认出是用户本人：这一轮是用户本人的一轮，`
         + `和在 App 里说话一样。你这一轮的回复会发回那条私信，系统把 Markdown 换成 ${label} 的格式，照常用 Markdown 写，不用表格。`
-        + "render_ui 的卡片只在 App 里看得到：要用户在卡上点的，说清楚去 App 里点。"
         + (channelHub?.registry.get(message.source)?.capabilities.confirm
-          ? `例外：改规则的确认卡（confirm_rule_change）和写入确认（confirm_write），这一轮结束后系统在这条私信里另发一条带`
-            + `「确认这一次」「不改」按钮的消息，用户在 ${label} 里点就生效；回复里说一句「在下面那条消息上点」就够，不用重复卡上的内容。`
-          : ""),
+          ? "render_ui 的卡片大多只在 App 里看得到，有三种例外，这一轮结束后系统在这条私信里另发一条带按钮的消息，"
+            + `用户在 ${label} 里点就生效：改规则的确认卡（confirm_rule_change）和写入确认（confirm_write）带「确认这一次」「不改」；`
+            + `ChoiceGroup 带每个选项（选项多或者标签长时是下拉框），用户点了和在 App 里选一样，之后叫醒你。`
+            + `回复里说一句「在下面那条消息上点」就够，不用重复卡上的内容。要用户自己写回答的，${label} 里会请用户去 App 里答。`
+            + "别的卡片只在 App 里看得到：要用户在那种卡上点的，说清楚去 App 里点。"
+          : "render_ui 的卡片只在 App 里看得到：要用户在卡上点的，说清楚去 App 里点。")
+        + `这一轮里你建的工单，之后系统叫醒你、你为它写给用户的话，系统也会同步发到这条私信（回 NO_REPLY 的不发）。`,
     });
     channelOwnerReplies.set(accepted.turnId, [...(channelOwnerReplies.get(accepted.turnId) ?? []), message.conversation]);
+    // 用户自己的私信（工单 #81）：执行者要用户回答的决定请求主动推到这里。
+    rememberOwnerConversation(db, { source: message.source, conversation: message.conversation, bindingId: binding.id });
     return true;
   }
 
@@ -6166,7 +6198,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const hub = channelHub;
     if (!hub) return;
     const confirmations = turnUserActions.list().filter(isOwnerConfirmationAction);
+    const choices = channelOwnerChoices.get(turnId) ?? [];
+    channelOwnerChoices.delete(turnId);
+    const floor = channelOwnerItemFloor.get(turnId);
+    channelOwnerItemFloor.delete(turnId);
     for (const conversation of new Set(conversations)) {
+      // 这一轮里 Lead 建的工单记下来源私信（工单 #81 的 (c)）：之后系统叫醒的一轮为它写给用户的话发回这里。
+      if (floor !== undefined) {
+        try {
+          recordTurnTicketOrigins(db, { afterItemId: floor, conversation, now: new Date() });
+        } catch (error) {
+          log(`[channels] could not record the tickets of turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
       const reply = text.trim()
         ? hub.replyToOwner(conversation, text, `${turnId}:${conversation}`).catch((error: unknown) => {
           log(`[channels] could not send the reply of turn ${turnId} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
@@ -6180,8 +6224,69 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             log(`[channels] could not send the confirmation ${action.target} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
           });
         }
+        // 这一轮画的 ChoiceGroup（工单 #81 的 (a)）：每张卡一条带选项的消息。
+        // 来源不能发带按钮的消息时不发（Lead 的话里照旧请用户去 App 里点）。
+        if (choices.length && hub.registry.get(conversation.split(":")[0] ?? "")?.capabilities.confirm) {
+          await ownerDecisions.pushTurnChoices({ conversation, turnId, choices });
+        }
       });
     }
+  }
+
+  // render_ui 画好的卡里的 ChoiceGroup（gateway 的 choiceGroupsOfSurface）记下来，这一轮回复以后发到私信。
+  function noteOwnerTurnChoices(turnId: string, surface: unknown): void {
+    const found = choiceGroupsOfSurface(surface);
+    if (found.length) channelOwnerChoices.set(turnId, [...(channelOwnerChoices.get(turnId) ?? []), ...found]);
+  }
+
+  // 系统叫醒的一轮写给用户的话（工单 #81 的 (c)）：交给这一轮的事提到了用户在私信里让 Lead 建的工单时，同步发到那个私信。
+  // 回 NO_REPLY、什么都没说的不发。幂等键是轮次和对话，重试不会发两次。没发出去只记日志，话在 App 里照样有。
+  function relaySystemTurnToOwner(turnId: string, assistantText: string): void {
+    const hub = channelHub;
+    if (!hub) return;
+    let relay: { text: string; conversations: string[] };
+    try {
+      relay = systemReplyForOwner(db, { text: assistantText, entityKeys: runEntityKeys });
+    } catch (error) {
+      log(`[channels] could not find where to relay turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    for (const conversation of relay.conversations) {
+      void hub.replyToOwner(conversation, relay.text, `system:${turnId}:${conversation}`).catch((error: unknown) => {
+        log(`[channels] could not relay turn ${turnId} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  }
+
+  // 决定请求推到用户自己的私信（gateway 的 owner-decisions.ts，工单 #81）：发消息走通道的 hub，选项走和 App 一样的操作层。
+  const ownerDecisions: OwnerDecisionPusher = createOwnerDecisionPusher({
+    db, uiActions: { db, services: uiActionServices, log }, log,
+    transport: {
+      sendOwnerChoices: async (conversation, content, key) => (channelHub ? channelHub.sendOwnerChoices(conversation, content, key) : null),
+      editOwnerChoices: async (conversation, message, content) => (channelHub ? channelHub.editOwnerChoices(conversation, message, content) : null),
+    },
+  });
+
+  // 用户自己的私信：能发带按钮消息的来源里，用户在私信里和 Lead 说过话、私信凭证没撤销的那个。没有时是 null。
+  function ownerDecisionConversation(): string | null {
+    for (const adapter of channelHub?.registry.list() ?? []) {
+      if (!adapter.capabilities.confirm) continue;
+      const conversation = ownerConversationOf(db, adapter.id);
+      if (conversation) return conversation;
+    }
+    return null;
+  }
+
+  // 用户本人在通道自己的私信里选了决定请求消息上的一个选项：凭证是那个账号的私信凭证。用户撤销了它时拒绝。
+  async function resolveChannelOwnerChoice(click: ChannelOwnerChooseRequest) {
+    const label = channelHub?.registry.get(click.source)?.label ?? click.source;
+    const binding = channelOwnerBinding(db, { subject: `${click.source}:${click.account}`, name: `${label} 私信（你自己）` });
+    if (!binding) throw new Error(`${label} 私信的凭证在设置 → 设备里撤销了，选项不再生效`);
+    const content = await resolveOwnerDecision({ db, uiActions: { db, services: uiActionServices, log }, log }, {
+      target: click.target, option: click.option, binding, conversation: click.conversation,
+    });
+    log(`[channels] ${click.source}: the user chose option ${click.option} on ${click.target}`);
+    return content;
   }
 
   // 确认消息的内容和点按钮以后的处理（gateway 的 owner-confirmations.ts）：和 App 的路由用同一份操作层和连接中心。

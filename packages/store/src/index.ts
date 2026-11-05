@@ -6,6 +6,7 @@ export * from "./artifacts.js";
 export * from "./attention.js";
 export * from "./blockers.js";
 export * from "./channel-lookups.js";
+export * from "./channel-owner-dm.js";
 export * from "./channels.js";
 export * from "./channel-handbook.js";
 export * from "./chat-images.js";

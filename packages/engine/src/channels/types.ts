@@ -136,6 +136,9 @@ export interface ChannelOutboundRequest {
   // 发到用户自己私信里的确认消息（工单 #72）：reply 发一条新的，edit 把点过的那条换成结果。text 是不显示样式时的退路。
   // 只发给声明了 capabilities.confirm 的来源。
   confirm?: ChannelOwnerConfirmCard;
+  // 发到用户自己私信里的决定请求（工单 #81）：一条消息里一条或几条决定请求，每条带自己的选项。reply、edit 和 confirm 一样。
+  // 只发给声明了 capabilities.confirm 的来源。
+  choices?: ChannelOwnerChoiceCard;
 }
 
 /**
@@ -164,6 +167,38 @@ export interface ChannelOwnerConfirmCard {
 }
 
 /**
+ * 用户自己私信里的一条决定请求消息（工单 #81）：和 App 里的决定卡同一批决定请求。同一张工单的几条可以合在一条消息里。
+ * 都是写好的给人看的话（按界面语言），来源只负责排版：等用户决定时每条带自己的选项（按钮或者下拉框），决定以后换成结果。
+ */
+export interface ChannelOwnerChoiceCard {
+  // 署名（助手的名字），和回给用户本人的话一样放在最上面。
+  byline: string;
+  // 这条消息的标题，例如「#81 xxx：要你决定」。
+  title: string;
+  decisions: ChannelOwnerChoice[];
+}
+
+/** 消息里的一条决定请求。 */
+export interface ChannelOwnerChoice {
+  // 选项上的对象：decision:<编号>。点击带回它和选项的序号，daemon 按序号换回选项。
+  target: string;
+  prompt: string;
+  // 正文里的说明，一项一行：每个选项的后果、推荐和理由。按钮放不下这些字。
+  lines: string[];
+  // 选项，按顺序。recommended：推荐的那个（按钮用醒目的样式）。
+  options: Array<{ label: string; recommended: boolean }>;
+  // pending：带选项；其余状态不带，result 写结果。
+  pending: boolean;
+  // 要用户自己写回答时的一句提示（例如「这条要你写回答，去 App 里回答」）。没有时是 null。
+  note: string | null;
+  // 下拉框没选时显示的字（选项多或者标签长时用下拉框）。
+  placeholder: string;
+  stateLabel: string;
+  result: string | null;
+  separator: string;
+}
+
+/**
  * 有人点了确认消息上的按钮（ChannelAdapter.interaction，工单 #72）。点的人是谁、按钮在不在用户自己的私信里，
  * 由适配器按来源的事实认出来；hub 只接受用户本人在自己私信里点的。
  */
@@ -178,7 +213,9 @@ export interface ChannelOwnerClick {
   objectKey: string;
   message: Record<string, string>;
   target: string;
-  decision: "confirm" | "decline";
+  // choose：决定请求消息上选了一个选项（工单 #81），option 是选项的序号（从 0 开始）。
+  decision: "confirm" | "decline" | "choose";
+  option?: number;
 }
 
 /** 消息附带的一个文件（ChannelAdapter.readFile，2026-11-02：Lead 要能看别人发来的截图）。内容是不可信的外部资料。 */

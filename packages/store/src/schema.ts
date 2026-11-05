@@ -1374,6 +1374,33 @@ CREATE TABLE IF NOT EXISTS widgets (
 CREATE INDEX IF NOT EXISTS idx_widgets_position ON widgets(position, id);
 `;
 
+// 用户自己私信里的决定请求和工单的来源对话（v65，工单 #81，channel-owner-dm.ts）。
+// channel_decision_pushes：一行是推到私信里的一条决定请求（每条最多一行，所以只推一次）。同一条消息里的几条共用 message_key；
+// message_ref 是那条消息在来源里的位置（JSON，例如 Slack 的 channel、ts），发出去以后才有；shown_state 是消息上现在显示的状态，
+// 和决定请求的状态不一样时改写那条消息。recommended、recommend_reason：Lead 的 ChoiceGroup 写的推荐（决定请求里没有存）。
+// channel_ticket_origins：用户在自己私信那一轮里让 Lead 建的工单，记下那个私信对话；之后 Lead 在系统叫醒的一轮里为它写给用户的话
+// 同步发回那里。
+export const CHANNEL_OWNER_DM_SCHEMA = `
+CREATE TABLE IF NOT EXISTS channel_decision_pushes (
+  decision_id       INTEGER PRIMARY KEY REFERENCES decision_requests(id),
+  item_id           INTEGER NOT NULL REFERENCES items(id),
+  conversation      TEXT NOT NULL,
+  message_key       TEXT NOT NULL,
+  message_ref       TEXT CHECK (message_ref IS NULL OR json_valid(message_ref)),
+  shown_state       TEXT NOT NULL,
+  recommended       TEXT,
+  recommend_reason  TEXT,
+  created_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_channel_decision_pushes_message ON channel_decision_pushes(message_key);
+CREATE INDEX IF NOT EXISTS idx_channel_decision_pushes_item ON channel_decision_pushes(conversation, item_id, created_at);
+CREATE TABLE IF NOT EXISTS channel_ticket_origins (
+  item_id       INTEGER PRIMARY KEY REFERENCES items(id),
+  conversation  TEXT NOT NULL,
+  created_at    TEXT NOT NULL
+);
+`;
+
 // 控件的数据源（第二期，widgets.ts，spec D3）：一个控件最多一个。daemon 按 every_seconds 在 Lead 的 bash 沙箱里跑 command，
 // 用输出解析 template（带 {"$data": …} 绑定的模板），合格了写进 widgets.surface。连续出错 5 次暂停（paused=1）。
 export const WIDGET_SOURCES_SCHEMA = `
@@ -1868,6 +1895,7 @@ ${MEMORY_SYNC_SCHEMA}
 ${WIDGETS_SCHEMA}
 ${WIDGET_SOURCES_SCHEMA}
 ${SURFACE_ACTIONS_SCHEMA}
+${CHANNEL_OWNER_DM_SCHEMA}
 `;
 
 export const CHECKPOINT_CONTROL_PLANE_SCHEMA = `

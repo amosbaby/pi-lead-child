@@ -944,6 +944,33 @@ export class FakeSlack {
     return { headers: {}, body: JSON.stringify(payload) };
   }
 
+  /**
+   * 有人在一条消息的下拉框（static_select）里选了一项（工单 #81）：block_actions 里是 selected_option，没有 value。
+   * value 是要选的那一项的 value；不给时选第 index 项（缺省第一项）。user、team 和 click 一样可以换成别人。
+   */
+  select(message: FakeSlackMessage, options: { index?: number; value?: string; user?: string; team?: string } = {}): ChannelDelivery {
+    const select = (message.blocks ?? []).flatMap((block) => (block.type === "actions" && Array.isArray(block.elements) ? block.elements : []))
+      .find((element) => (element as { type?: unknown }).type === "static_select") as
+      { action_id?: string; options?: Array<{ text: unknown; value: string }> } | undefined;
+    const chosen = options.value !== undefined
+      ? { text: { type: "plain_text", text: options.value }, value: options.value }
+      : select?.options?.[options.index ?? 0];
+    const user = options.user ?? this.self.id;
+    const payload = {
+      type: "block_actions",
+      user: { id: user, team_id: options.team ?? this.teamId },
+      team: { id: options.team ?? this.teamId },
+      container: { type: "message", message_ts: message.ts, channel_id: message.channel, is_ephemeral: false },
+      channel: { id: message.channel },
+      message: { ts: message.ts, text: message.text },
+      actions: [{
+        type: "static_select", action_id: select?.action_id ?? "", block_id: "b1", selected_option: chosen,
+        action_ts: String(this.now().getTime() / 1000),
+      }],
+    };
+    return { headers: {}, body: JSON.stringify(payload) };
+  }
+
   /** Slack 把系统发出去的那条消息推回来。 */
   // options.metadata 为 false：推回来的事件里没有 metadata（Slack 的文档没有写明 message 事件带不带它）。
   echoOf(message: FakeSlackMessage, options: { metadata?: boolean } = {}): ChannelDelivery {
@@ -1095,19 +1122,43 @@ function validTextObject(value: unknown): boolean {
 
 function validBlocks(blocks: unknown): boolean {
   if (!Array.isArray(blocks) || blocks.length < 1 || blocks.length > 50) return false;
+  // block_id 最多 255 个字，一条消息里不能重复（https://docs.slack.dev/reference/block-kit/blocks）。
+  const blockIds = blocks.map((block) => (block as { block_id?: unknown } | null)?.block_id).filter((id) => id !== undefined);
+  if (blockIds.some((id) => typeof id !== "string" || id.length > 255) || new Set(blockIds).size !== blockIds.length) return false;
   return blocks.every((block: unknown) => {
     if (!block || typeof block !== "object") return false;
     const { type, text, elements } = block as { type?: unknown; text?: unknown; elements?: unknown };
     if (type === "section") return validTextObject(text);
+    if (type === "divider") return true;
     if (type === "context") return Array.isArray(elements) && elements.length >= 1 && elements.length <= 10 && elements.every(validTextObject);
-    // actions：1 到 25 个按钮（https://docs.slack.dev/reference/block-kit/blocks/actions-block）；按钮的字是 plain_text，最多 75 个字，
-    // action_id 最多 255 个字，value 最多 2000 个字（https://docs.slack.dev/reference/block-kit/block-elements/button-element）。
+    // actions：1 到 25 个元素（https://docs.slack.dev/reference/block-kit/blocks/actions-block），action_id 在同一个 block 里不能重复。
+    // 按钮的字是 plain_text，最多 75 个字，action_id 最多 255 个字，value 最多 2000 个字
+    // （https://docs.slack.dev/reference/block-kit/block-elements/button-element）。
+    // 下拉框（static_select，工单 #81）：1 到 100 个选项，选项的字最多 75 个、value 最多 150 个字，placeholder 最多 150 个字
+    // （https://docs.slack.dev/reference/block-kit/block-elements/select-menu-element、
+    // https://docs.slack.dev/reference/block-kit/composition-objects/option-object）。
     if (type === "actions") {
-      return Array.isArray(elements) && elements.length >= 1 && elements.length <= 25 && elements.every((element: unknown) => {
-        const button = element as { type?: unknown; action_id?: unknown; value?: unknown; text?: { type?: unknown; text?: unknown } };
-        return button.type === "button" && typeof button.action_id === "string" && button.action_id.length <= 255
-          && (button.value === undefined || (typeof button.value === "string" && button.value.length <= 2_000))
-          && button.text?.type === "plain_text" && typeof button.text.text === "string" && button.text.text.length >= 1 && button.text.text.length <= 75;
+      if (!Array.isArray(elements) || elements.length < 1 || elements.length > 25) return false;
+      const actionIds = elements.map((element) => (element as { action_id?: unknown }).action_id);
+      if (new Set(actionIds).size !== actionIds.length) return false;
+      const plain = (value: { type?: unknown; text?: unknown } | undefined, max: number) =>
+        value?.type === "plain_text" && typeof value.text === "string" && value.text.length >= 1 && value.text.length <= max;
+      return elements.every((element: unknown) => {
+        const item = element as {
+          type?: unknown; action_id?: unknown; value?: unknown; text?: { type?: unknown; text?: unknown }; placeholder?: { type?: unknown; text?: unknown };
+          options?: unknown;
+        };
+        if (typeof item.action_id !== "string" || item.action_id.length > 255) return false;
+        if (item.type === "button") {
+          return (item.value === undefined || (typeof item.value === "string" && item.value.length <= 2_000)) && plain(item.text, 75);
+        }
+        if (item.type === "static_select") {
+          return (item.placeholder === undefined || plain(item.placeholder, 150))
+            && Array.isArray(item.options) && item.options.length >= 1 && item.options.length <= 100
+            && item.options.every((option: { text?: { type?: unknown; text?: unknown }; value?: unknown }) =>
+              plain(option.text, 75) && typeof option.value === "string" && option.value.length >= 1 && option.value.length <= 150);
+        }
+        return false;
       });
     }
     return false;
