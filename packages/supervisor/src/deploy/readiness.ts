@@ -12,7 +12,7 @@
 //     dist 来自别的分支、commit 不在仓库里、git 说不清的，照旧拒绝，不自动构建。
 //   · 有 dist/web（npm run build:web 的网页包）时，它要和 daemon 来自同一个 commit（#45，2026-11-05：升级时只从 HEAD 重建了
 //     daemon，dist/web 还是旧 commit 的，旧页面严格校验新 daemon 的回答，设置 → 记忆读不到 Hindsight 的状态）。
-//     不一致、没有记录或构建时有改动：要求重建；重新构建也构建网页包（buildDaemonDist 的 web），和 daemon 一起换进去。
+//     不一致、没有记录或构建时有改动：要求重建（rebuild），但不算拒绝原因，daemon 照常能启动；重新构建也构建网页包（buildDaemonDist 的 web），和 daemon 一起换进去。
 //     没有 dist/web 的 checkout（从没运行过 build:web）不受影响。
 // 「没提交的改动」只看会进构建的代码：packages/、apps/ 下的改动和没被忽略的新文件，以及仓库根目录下的文件
 // （package.json、package-lock.json、tsconfig.json 这类）。不算的：docs/、artifacts/、.scratch/、.claude/（它们不进 dist，
@@ -42,6 +42,9 @@ export interface DeployReadiness {
   // 主 checkout 干净，dist 没有构建记录、构建时有改动，或者落后于 HEAD（构建的 commit 是 HEAD 的祖先）：
   // 维护会先从 HEAD 重新构建。不是拒绝。
   rebuild: boolean;
+  // dist/web 的网页包不是 daemon 那个 commit 的干净构建时，说明哪里不一致；一致或没有 dist/web 时为 null（#45）。
+  // 不算拒绝原因（不进 reasons，不影响 ready）：它不是没提交的代码，plc daemon start 照常启动；维护时它让 rebuild 为 true。
+  web: string | null;
 }
 
 const SOURCE_DIRS = ["packages/", "apps/"];
@@ -301,9 +304,11 @@ export function deployReadiness(root: string, distDir: string, options: DeployRe
   }
   const web = readWebBuild(distDir);
   const webMismatch = build && web !== undefined ? webBuildMismatch(web, build.commit) : null;
-  if (webMismatch) reasons.push(`${webMismatch}：网页包和 daemon 不是同一个 commit 的构建，页面可能读不懂 daemon 的回答。重新构建。`);
   const rebuild = clean && head !== null && (!build || (inHistory && (build.dirty || build.commit !== head || webMismatch !== null)));
-  return { ready: reasons.length === 0, reasons, head, build, rebuild };
+  return {
+    ready: reasons.length === 0, reasons, head, build, rebuild,
+    web: webMismatch && `${webMismatch}：网页包和 daemon 不是同一个 commit 的构建，页面可能读不懂 daemon 的回答。维护时会从 HEAD 一起重新构建，或者运行 npm run build:web。`,
+  };
 }
 
 const BUILD_TIMEOUT_MS = 5 * 60_000;

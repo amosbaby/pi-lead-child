@@ -146,6 +146,7 @@ describe("deploy readiness", () => {
 
 // #45（2026-11-05）：升级时只从 HEAD 重建了 daemon，dist/web 还是旧 commit 的网页包。旧页面严格校验新 daemon 的回答，
 // 设置 → 记忆读不到 Hindsight 的状态。daemon 和网页包不是同一个 commit 时，闸门要发现，并要求重建。
+// 返工（宿主机补跑 supervisor.test.ts）：不一致不能算拒绝原因，plc daemon start 只看 reasons，算了就连 daemon 都起不来。
 describe("deploy readiness of the web UI next to the daemon", () => {
   function writeWebBuild(source: { commit: string; dirty: boolean; builtAt: string }): void {
     mkdirSync(join(dist, "web"), { recursive: true });
@@ -159,28 +160,37 @@ describe("deploy readiness of the web UI next to the daemon", () => {
     git("commit", "-qam", "the fix");
     const built = writeBuildProvenance(checkout, dist);
     const result = readiness();
-    expect(result).toMatchObject({ ready: false, rebuild: true, head: built.commit, build: { commit: built.commit } });
-    expect(result.reasons.join("\n")).toContain(old.commit);
+    expect(result).toMatchObject({ rebuild: true, head: built.commit, build: { commit: built.commit } });
+    expect(result.web).toContain(old.commit);
+  });
+
+  it("does not count a web UI from another commit as a reason to refuse, so the daemon still starts", () => {
+    const old = writeBuildProvenance(checkout, dist);
+    writeWebBuild(old);
+    writeFileSync(join(checkout, "packages", "engine", "src", "index.ts"), "export const x = 10;\n");
+    git("commit", "-qam", "the fix");
+    writeBuildProvenance(checkout, dist);
+    expect(readiness()).toMatchObject({ ready: true, reasons: [], rebuild: true, web: expect.stringContaining(old.commit) });
   });
 
   it("asks for a rebuild when dist/web has no build record", () => {
     writeBuildProvenance(checkout, dist);
     mkdirSync(join(dist, "web"), { recursive: true });
     writeFileSync(join(dist, "web", "index.html"), "web\n");
-    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+    expect(readiness()).toMatchObject({ ready: true, rebuild: true, web: expect.stringContaining("web-build.json") });
   });
 
   it("asks for a rebuild when dist/web was built from uncommitted code", () => {
     const built = writeBuildProvenance(checkout, dist);
     writeWebBuild({ ...built, dirty: true });
-    expect(readiness()).toMatchObject({ ready: false, rebuild: true });
+    expect(readiness()).toMatchObject({ ready: true, rebuild: true, web: expect.stringContaining("改动") });
   });
 
   it("passes when dist/web and the daemon come from the same commit, or when there is no dist/web", () => {
     const built = writeBuildProvenance(checkout, dist);
-    expect(readiness()).toMatchObject({ ready: true, rebuild: false });
+    expect(readiness()).toMatchObject({ ready: true, rebuild: false, web: null });
     writeWebBuild(built);
-    expect(readiness()).toMatchObject({ ready: true, rebuild: false });
+    expect(readiness()).toMatchObject({ ready: true, rebuild: false, web: null });
   });
 });
 

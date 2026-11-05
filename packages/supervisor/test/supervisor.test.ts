@@ -510,13 +510,14 @@ describe("the deploy gate at the maintenance entry", () => {
     const dir = tempDir("plc-supervisor-staged-build-");
     const deployment = deployCheckout(dir);
     const base = deployment.git("rev-parse", "HEAD");
-    mkdirSync(join(deployment.distDir, "web"));
-    writeFileSync(join(deployment.distDir, "web", "index.html"), "web\n");
+    // #45：有 dist/web 时重新构建也产出网页包；备份失败时它和 daemon 一样留在暂存目录，不换进去。
+    writeWebBuild(deployment.distDir, base, "old web");
     const cli = oldCli(deployment);
     const outdirs: string[] = [];
     const pid = await start(dir, deployment, async () => { throw new Error("disk full"); }, async (root, outdir) => {
       outdirs.push(outdir);
       writeStagedBuild(root, outdir, deployment.distDir);
+      writeWebBuild(outdir, deployment.git("rev-parse", "HEAD"), "new web");
     });
     writeFileSync(join(deployment.root, "packages", "code.ts"), "export const x = 14;\n");
     deployment.git("commit", "-qam", "the fix");
@@ -529,6 +530,7 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(existsSync(join(deployment.distDir, "coordinatord.mjs"))).toBe(false);
     expect(JSON.parse(readFileSync(join(deployment.distDir, "build-info.json"), "utf8")).commit).toBe(base);
     expect(readFileSync(cli, "utf8")).toBe("// old cli\n");
+    expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("old web\n");
     expect(Number(failed.daemon?.pid)).toBe(pid);
   }, 45_000);
 
@@ -575,6 +577,18 @@ describe("the deploy gate at the maintenance entry", () => {
     expect(readFileSync(join(deployment.distDir, "web", "index.html"), "utf8")).toBe("new web\n");
     expect(done.deploy).toMatchObject({ ready: true, rebuild: false });
   }, 45_000);
+
+  // #45 返工：网页包和 daemon 不一致只要求重建，不是拒绝原因。以前 plc daemon start 因此被拒（宿主机补跑时发现）。
+  it("starts the daemon when dist/web is from another build, and reports that it needs a rebuild", async () => {
+    const dir = tempDir("plc-supervisor-web-start-");
+    const deployment = deployCheckout(dir);
+    mkdirSync(join(deployment.distDir, "web"));
+    writeFileSync(join(deployment.distDir, "web", "index.html"), "web without a record\n");
+    const pid = await start(dir, deployment);
+    expect(pid).toBeGreaterThan(0);
+    const status = await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: dir });
+    expect(status.deploy).toMatchObject({ ready: true, reasons: [], rebuild: true, web: expect.stringContaining("web-build.json") });
+  }, 30_000);
 
   // 重新构建没有产出同一个 commit 的网页包：不换、不停机，记成 build_mismatch。
   it("refuses before the stop when the rebuild leaves dist/web on an older commit", async () => {
