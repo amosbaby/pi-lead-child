@@ -183,10 +183,16 @@ export interface ChannelOwnerChoice {
   // 选项上的对象：decision:<编号>。点击带回它和选项的序号，daemon 按序号换回选项。
   target: string;
   prompt: string;
-  // 正文里的说明，一项一行：每个选项的后果、推荐和理由。按钮放不下这些字。
+  // 选项放不进一条消息、改用一排按钮或下拉框时，正文里列出的说明：有后果的选项一项一行（工单 #82）。
   lines: string[];
-  // 选项，按顺序。recommended：推荐的那个（按钮用醒目的样式）。
-  options: Array<{ label: string; recommended: boolean }>;
+  // 选项，按顺序。description：选项的后果（App 卡上的说明），没有时是 null。recommended：推荐的那个（标出来，按钮用醒目的样式）。
+  options: Array<{ label: string; description: string | null; recommended: boolean }>;
+  // 推荐和理由的一句话（例如「推荐：周二。周四有冻结」）。没有推荐时是 null。
+  recommendation: string | null;
+  // 推荐的选项旁边的标记（例如「推荐」）。
+  recommendedTag: string;
+  // 每个选项一块时，选项旁边按钮上的字（例如「选这个」）。
+  chooseLabel: string;
   // pending：带选项；其余状态不带，result 写结果。
   pending: boolean;
   // 要用户自己写回答时的一句提示（例如「这条要你写回答，去 App 里回答」）。没有时是 null。

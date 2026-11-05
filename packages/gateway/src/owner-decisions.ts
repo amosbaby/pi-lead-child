@@ -55,10 +55,9 @@ function choiceOf(push: DecisionPush, request: DecisionRequest, locale: Locale):
   const m = ownerDecisionMessages(locale);
   const pending = request.state === "pending";
   const recommended = request.options.find((option) => option.id === push.recommended) ?? null;
-  const lines = pending ? [
-    ...request.options.filter((option) => option.description?.trim()).map((option) => m.option(option.label, option.description!)),
-    ...(recommended ? [m.recommended(recommended.label, push.recommendReason)] : []),
-  ] : [];
+  const lines = pending
+    ? request.options.filter((option) => option.description?.trim()).map((option) => m.option(option.label, option.description!.trim()))
+    : [];
   const selected = request.options.find((option) => option.id === request.selectedOptionId);
   const result = request.state === "resolved"
     ? selected ? m.selected(selected.label) : request.resolutionText ? m.answered(request.resolutionText.slice(0, 300)) : null
@@ -69,7 +68,12 @@ function choiceOf(push: DecisionPush, request: DecisionRequest, locale: Locale):
     target: `decision:${request.id}`,
     prompt: request.prompt,
     lines,
-    options: request.options.map((option) => ({ label: option.label, recommended: option.id === push.recommended })),
+    options: request.options.map((option) => ({
+      label: option.label, description: option.description?.trim() || null, recommended: option.id === push.recommended,
+    })),
+    recommendation: pending && recommended ? m.recommended(recommended.label, push.recommendReason) : null,
+    recommendedTag: m.recommendedTag,
+    chooseLabel: m.choose,
     pending,
     // 要自己写回答的（没有选项，或者允许自己写），第一版在 Slack 里请用户去 App 里回答。
     note: !pending ? null : !request.options.length ? m.writeInApp : request.allowCustom ? m.customInApp : null,

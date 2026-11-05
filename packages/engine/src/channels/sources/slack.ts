@@ -69,7 +69,7 @@ import { ChannelFileNotFoundError, ChannelTargetGoneError } from "../types.js";
 import type {
   ChannelAdapter, ChannelAdapterContext, ChannelConnectionControl, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential,
   ChannelDelivery, ChannelFile, ChannelHistoryMessage, ChannelHistoryRequest, ChannelInbound, ChannelMarkLookup, ChannelMemorySpec,
-  ChannelOutboundRequest, ChannelOutboundResult, ChannelOwnerChoiceCard, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransport, ChannelTransportContext,
+  ChannelOutboundRequest, ChannelOutboundResult, ChannelOwnerChoice, ChannelOwnerChoiceCard, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransport, ChannelTransportContext,
   ChannelOutage, ChannelTransportDeliver,
 } from "../types.js";
 import { createSlackSessionSettings, createSlackSettings } from "./slack-settings.js";
@@ -263,8 +263,12 @@ export const SLACK_CHOICE_BUTTON_LABEL_MAX = 30;
 // https://docs.slack.dev/reference/block-kit/composition-objects/option-object）。
 const SLACK_SELECT_OPTIONS_MAX = 100;
 const SLACK_OPTION_TEXT_MAX = 75;
-// 一条消息最多 50 个 block（https://docs.slack.dev/reference/block-kit/blocks）。一条决定请求最多占 4 个，加上署名和标题。
+// 一条消息最多 50 个 block（https://docs.slack.dev/reference/block-kit/blocks）。放不下时一条决定请求收成 4 个，加上署名。
 export const SLACK_CHOICES_PER_MESSAGE_MAX = 8;
+// 每个选项一块（工单 #82）时，一条决定请求最多几个选项：再多就收成一排按钮或下拉框，说明在正文里列出。
+export const SLACK_CHOICE_ROWS_MAX = 10;
+// header block 的字最多 150 个（https://docs.slack.dev/reference/block-kit/blocks/header-block）：问题更长时用粗体的 section。
+const SLACK_HEADER_TEXT_MAX = 150;
 
 /** 一条决定请求的选项用按钮还是下拉框：不超过 5 个、标签都不超过 30 个字时用按钮。 */
 export function slackChoiceUsesButtons(options: ReadonlyArray<{ label: string }>): boolean {
@@ -277,28 +281,72 @@ function plainText(text: string, max: number): string {
   return chars.length <= max ? chars.join("") : `${chars.slice(0, max - 1).join("")}…`;
 }
 
+type SlackBlock = Record<string, unknown>;
+
 /**
- * 用户自己私信里的一条决定请求消息（工单 #81）：署名、标题，然后每条决定请求一段：问题和说明（选项的后果、推荐和理由），
- * 等决定时下面是选项（不超过 5 个、标签短时是按钮，推荐的用 primary 样式；否则是下拉框），决定以后换成状态和结果。
+ * 用户自己私信里的一条决定请求消息（工单 #81、#82）：署名和这条消息的标题，然后每条决定请求一段，问题作为标题放在最上面。
+ * 等决定时和 App 的卡一样，每个选项一块（粗体的选项名、一行说明，旁边一个按钮；推荐的那个有标记，按钮用 primary 样式），
+ * 下面写推荐的理由。选项太多（超过 10 个）或者整条消息超过 50 个 block 时，那条决定请求收成正文里列出说明、
+ * 下面一排按钮（不超过 5 个、标签短）或下拉框：每个选项都还能选到。决定以后选项换成状态和结果。
  * 要用户自己写回答的，在选项下面写一句去 App 里回答。几条之间用分隔线。
  */
-export function slackChoiceBlocks(card: ChannelOwnerChoiceCard): Array<Record<string, unknown>> {
-  const line = (text: string, max: number) => escapeMrkdwn(text.replace(/\s+/g, " ").trim().slice(0, max));
-  const blocks: Array<Record<string, unknown>> = [
-    { type: "context", elements: [{ type: "mrkdwn", text: line(card.byline, 300) }] },
-    { type: "section", text: { type: "mrkdwn", text: `*${line(card.title, 300)}*` } },
-  ];
-  card.decisions.slice(0, SLACK_CHOICES_PER_MESSAGE_MAX).forEach((decision, index) => {
-    if (index > 0) blocks.push({ type: "divider" });
-    const body = [`*${line(decision.prompt, 900)}*`, ...decision.lines.filter((text) => text.trim()).map((text) => line(text, 600))]
-      .join("\n").slice(0, SLACK_TEXT_OBJECT_MAX);
-    blocks.push({ type: "section", text: { type: "mrkdwn", text: body } });
-    if (!decision.pending) {
-      const result = decision.result ? `${decision.separator}${line(decision.result, 1_500)}` : "";
-      blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `*${line(decision.stateLabel, 40)}*${result}` }] });
-      return;
-    }
-    const value = (option: number) => `${decision.target}#${option}`;
+export function slackChoiceBlocks(card: ChannelOwnerChoiceCard): SlackBlock[] {
+  const line = (text: string, max: number) => escapeMrkdwn(plainText(text, max));
+  const decisions = card.decisions.slice(0, SLACK_CHOICES_PER_MESSAGE_MAX);
+  const top: SlackBlock = {
+    type: "context",
+    elements: [{ type: "mrkdwn", text: line(card.byline, 300) }, { type: "mrkdwn", text: `*${line(card.title, 300)}*` }],
+  };
+  const rows = decisions.map((decision) => decision.pending && decision.options.length > 0 && decision.options.length <= SLACK_CHOICE_ROWS_MAX);
+  const build = () => decisions.map((decision, index) => choiceBlocks(decision, rows[index]!, line));
+  let parts = build();
+  // 整条消息放不下时，从占块最多的那条起收成紧凑的样子，直到放得下（8 条都收起来最多 2 + 8 × 4 个）。
+  while (1 + parts.reduce((sum, blocks) => sum + blocks.length + 1, -1) > SLACK_MESSAGE_BLOCKS_MAX) {
+    let widest = -1;
+    parts.forEach((blocks, index) => {
+      if (rows[index] && (widest < 0 || blocks.length > parts[widest]!.length)) widest = index;
+    });
+    if (widest < 0) break;
+    rows[widest] = false;
+    parts = build();
+  }
+  return [top, ...parts.flatMap((blocks, index) => (index > 0 ? [{ type: "divider" }, ...blocks] : blocks))];
+}
+
+function choiceBlocks(decision: ChannelOwnerChoice, rows: boolean, line: (text: string, max: number) => string): SlackBlock[] {
+  const prompt = decision.prompt.replace(/\s+/g, " ").trim();
+  const blocks: SlackBlock[] = [[...prompt].length <= SLACK_HEADER_TEXT_MAX
+    ? { type: "header", text: { type: "plain_text", text: prompt || "…" } }
+    : { type: "section", text: { type: "mrkdwn", text: `*${line(prompt, 900)}*` } }];
+  if (!decision.pending) {
+    const result = decision.result ? `${decision.separator}${line(decision.result, 1_500)}` : "";
+    blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `*${line(decision.stateLabel, 40)}*${result}` }] });
+    return blocks;
+  }
+  const value = (option: number) => `${decision.target}#${option}`;
+  const recommendation = decision.recommendation?.trim() ? line(decision.recommendation, 600) : null;
+  if (rows) {
+    decision.options.forEach((option, position) => {
+      const tag = option.recommended ? `  ·  _${line(decision.recommendedTag, 40)}_` : "";
+      const description = option.description?.trim() ? `\n${line(option.description, 1_500)}` : "";
+      blocks.push({
+        type: "section", block_id: `${decision.target}:option:${position}`,
+        text: { type: "mrkdwn", text: `*${line(option.label, 900)}*${tag}${description}` },
+        accessory: {
+          type: "button", action_id: `${SLACK_CHOOSE_ACTION}:${position}`, value: value(position),
+          text: { type: "plain_text", text: plainText(decision.chooseLabel, SLACK_OPTION_TEXT_MAX) },
+          ...(option.recommended ? { style: "primary" } : {}),
+        },
+      });
+    });
+    if (recommendation) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: recommendation }] });
+  } else {
+    // 紧凑的样子：说明以文字列出，每一行按剩下的字数平分，整段不超过一个文字对象的上限。
+    const listed = decision.lines.filter((text) => text.trim());
+    const room = SLACK_TEXT_OBJECT_MAX - (recommendation?.length ?? 0) - listed.length - 2;
+    const each = Math.max(40, Math.min(600, Math.floor(room / Math.max(1, listed.length))));
+    const body = [...listed.map((text) => line(text, each)), ...(recommendation ? [recommendation] : [])].join("\n");
+    if (body) blocks.push({ type: "section", text: { type: "mrkdwn", text: body.slice(0, SLACK_TEXT_OBJECT_MAX) } });
     if (decision.options.length && slackChoiceUsesButtons(decision.options)) {
       blocks.push({
         type: "actions", block_id: `${decision.target}:choose`,
@@ -320,8 +368,8 @@ export function slackChoiceBlocks(card: ChannelOwnerChoiceCard): Array<Record<st
         }],
       });
     }
-    if (decision.note) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: line(decision.note, 300) }] });
-  });
+  }
+  if (decision.note) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: line(decision.note, 300) }] });
   return blocks;
 }
 

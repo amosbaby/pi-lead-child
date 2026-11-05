@@ -93,8 +93,10 @@ function ask(input: {
 
 const messages = () => slack.messages.filter((item) => item.channel === SELF_DM);
 const blocksOf = (index = -1) => JSON.stringify(messages().at(index)!.blocks);
-const elementsOf = (index = -1) => (messages().at(index)!.blocks ?? [])
-  .filter((block) => block.type === "actions").flatMap((block) => block.elements as Array<{ type: string; action_id: string; value?: string; style?: string }>);
+type Control = { type: string; action_id: string; value?: string; style?: string };
+// 能点的：actions 里的按钮、下拉框，和每个选项一块时 section 旁边的按钮（工单 #82）。
+const elementsOf = (index = -1) => (messages().at(index)!.blocks ?? []).flatMap((block) => (block.type === "actions" ? block.elements as Control[]
+  : block.type === "section" && block.accessory ? [block.accessory as Control] : []));
 const skipped = () => listEvents(db, { kind: CHANNEL_EVENT_KINDS.ownerDecisionSkipped, limit: 100 }).map((event) => event.payload as any);
 const later = (ms: number) => { clock = new Date(clock.getTime() + ms); };
 
@@ -121,7 +123,9 @@ describe("(a) a ChoiceGroup drawn in the user's own Slack DM turn", () => {
     expect(messages()).toHaveLength(1);
     expect(blocksOf()).toContain("#");
     expect(blocksOf()).toContain("发布清单：要你决定");
-    expect(blocksOf()).toContain("周二：赶上月初的活动");
+    // 每个选项一块：选项名、说明（App 卡上的 consequence），推荐的有标记。
+    expect(blocksOf()).toContain("*周二*  ·  _推荐_\\n赶上月初的活动");
+    expect(blocksOf()).toContain("发布窗口选哪天？");
     expect(blocksOf()).toContain("推荐：周二。周四有冻结");
     expect(elementsOf()).toEqual([
       expect.objectContaining({ action_id: `${SLACK_CHOOSE_ACTION}:0`, value: `decision:${decision}#0`, style: "primary" }),
@@ -267,13 +271,13 @@ describe("(b) an executor's decision for the user", () => {
   });
 
   it("uses a dropdown for many options and resolves the chosen one", async () => {
-    const options = Array.from({ length: 7 }, (_, index) => ({ id: `opt-${index}`, label: `方案 ${index + 1}` }));
+    const options = Array.from({ length: 11 }, (_, index) => ({ id: `opt-${index}`, label: `方案 ${index + 1}` }));
     const decision = ask({ options });
     await pusher.sync(CONVERSATION);
     expect(elementsOf()).toEqual([expect.objectContaining({ type: "static_select", action_id: SLACK_CHOOSE_ACTION })]);
-    await hub.receiveFromTransport("slack", slack.select(messages()[0]!, { index: 6 }));
-    expect(getDecisionRequest(db, decision)).toMatchObject({ state: "resolved", selectedOptionId: "opt-6" });
-    expect(blocksOf()).toContain("选了「方案 7」");
+    await hub.receiveFromTransport("slack", slack.select(messages()[0]!, { index: 10 }));
+    expect(getDecisionRequest(db, decision)).toMatchObject({ state: "resolved", selectedOptionId: "opt-10" });
+    expect(blocksOf()).toContain("选了「方案 11」");
   });
 
   it("refuses a click by someone else and records it, without resolving", async () => {

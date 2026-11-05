@@ -924,7 +924,9 @@ export class FakeSlack {
    * payload 字段是 JSON，带签名）；否则是 Socket Mode 的 interactive 信封里的 JSON（交给 receiveFromTransport）。
    */
   click(message: FakeSlackMessage, actionId: string, options: { user?: string; team?: string; form?: boolean } = {}): ChannelDelivery {
-    const button = (message.blocks ?? []).flatMap((block) => (block.type === "actions" && Array.isArray(block.elements) ? block.elements : []))
+    // 按钮在 actions block 里，或者是 section 旁边的 accessory（决定请求每个选项一块，工单 #82）。
+    const button = (message.blocks ?? []).flatMap((block) => (block.type === "actions" && Array.isArray(block.elements) ? block.elements
+      : block.type === "section" && block.accessory ? [block.accessory] : []))
       .find((element) => (element as { action_id?: unknown }).action_id === actionId) as { value?: string; text?: unknown } | undefined;
     const user = options.user ?? this.self.id;
     const payload = {
@@ -1109,9 +1111,21 @@ export class FakeSlack {
 }
 
 // Block Kit 的规则（https://docs.slack.dev/reference/block-kit/blocks）：一条消息 1 到 50 个 block；section 的 text 和
-// context 的元素是文字对象（mrkdwn 或 plain_text，1 到 3000 个字）；context 有 1 到 10 个元素。这里只认系统会发的两种 block，
+// context 的元素是文字对象（mrkdwn 或 plain_text，1 到 3000 个字）；context 有 1 到 10 个元素。这里只认系统会发的几种 block，
 // 别的类型也按不合规处理：系统发了没想到的 block 时测试要失败。
+// header 的字是 plain_text，1 到 150 个字（https://docs.slack.dev/reference/block-kit/blocks/header-block）；
+// section 旁边可以放一个按钮（accessory，工单 #82），按钮的规则和 actions 里的一样。
 const TEXT_TYPES = new Set(["mrkdwn", "plain_text"]);
+
+function validPlain(value: { type?: unknown; text?: unknown } | undefined, max: number): boolean {
+  return value?.type === "plain_text" && typeof value.text === "string" && value.text.length >= 1 && value.text.length <= max;
+}
+
+function validButton(element: unknown): boolean {
+  const item = (element ?? {}) as { type?: unknown; action_id?: unknown; value?: unknown; text?: { type?: unknown; text?: unknown } };
+  return item.type === "button" && typeof item.action_id === "string" && item.action_id.length <= 255
+    && (item.value === undefined || (typeof item.value === "string" && item.value.length <= 2_000)) && validPlain(item.text, 75);
+}
 
 function validTextObject(value: unknown): boolean {
   if (!value || typeof value !== "object") return false;
@@ -1127,8 +1141,9 @@ function validBlocks(blocks: unknown): boolean {
   if (blockIds.some((id) => typeof id !== "string" || id.length > 255) || new Set(blockIds).size !== blockIds.length) return false;
   return blocks.every((block: unknown) => {
     if (!block || typeof block !== "object") return false;
-    const { type, text, elements } = block as { type?: unknown; text?: unknown; elements?: unknown };
-    if (type === "section") return validTextObject(text);
+    const { type, text, elements, accessory } = block as { type?: unknown; text?: unknown; elements?: unknown; accessory?: unknown };
+    if (type === "section") return validTextObject(text) && (accessory === undefined || validButton(accessory));
+    if (type === "header") return validPlain(text as { type?: unknown; text?: unknown } | undefined, 150);
     if (type === "divider") return true;
     if (type === "context") return Array.isArray(elements) && elements.length >= 1 && elements.length <= 10 && elements.every(validTextObject);
     // actions：1 到 25 个元素（https://docs.slack.dev/reference/block-kit/blocks/actions-block），action_id 在同一个 block 里不能重复。
@@ -1141,22 +1156,18 @@ function validBlocks(blocks: unknown): boolean {
       if (!Array.isArray(elements) || elements.length < 1 || elements.length > 25) return false;
       const actionIds = elements.map((element) => (element as { action_id?: unknown }).action_id);
       if (new Set(actionIds).size !== actionIds.length) return false;
-      const plain = (value: { type?: unknown; text?: unknown } | undefined, max: number) =>
-        value?.type === "plain_text" && typeof value.text === "string" && value.text.length >= 1 && value.text.length <= max;
       return elements.every((element: unknown) => {
         const item = element as {
           type?: unknown; action_id?: unknown; value?: unknown; text?: { type?: unknown; text?: unknown }; placeholder?: { type?: unknown; text?: unknown };
           options?: unknown;
         };
         if (typeof item.action_id !== "string" || item.action_id.length > 255) return false;
-        if (item.type === "button") {
-          return (item.value === undefined || (typeof item.value === "string" && item.value.length <= 2_000)) && plain(item.text, 75);
-        }
+        if (item.type === "button") return validButton(item);
         if (item.type === "static_select") {
-          return (item.placeholder === undefined || plain(item.placeholder, 150))
+          return (item.placeholder === undefined || validPlain(item.placeholder, 150))
             && Array.isArray(item.options) && item.options.length >= 1 && item.options.length <= 100
             && item.options.every((option: { text?: { type?: unknown; text?: unknown }; value?: unknown }) =>
-              plain(option.text, 75) && typeof option.value === "string" && option.value.length >= 1 && option.value.length <= 150);
+              validPlain(option.text, 75) && typeof option.value === "string" && option.value.length >= 1 && option.value.length <= 150);
         }
         return false;
       });
