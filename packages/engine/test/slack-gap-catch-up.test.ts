@@ -27,7 +27,7 @@ let hub: ChannelHub;
 
 function setup(limits?: { windowMs?: number; messages?: number }): void {
   adapter = createSlackChannelAdapter({
-    api: slack.api, now: () => clock, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40 },
+    api: slack.api, now: () => clock, socket: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40, catchUpSpacingMs: 0 },
     ...(limits ? { catchUp: limits } : {}),
   });
   hub = new ChannelHub({
