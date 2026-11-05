@@ -35,7 +35,17 @@ async function waitStatus(
   let latest: SupervisorStatus | null = null;
   await vi.waitFor(async () => {
     latest = await supervisorRequest<SupervisorStatus>({ type: "status" }, { dataDir: dir });
-    expect(predicate(latest)).toBe(true);
+    // 超时时写出最后一次看到的状态：宿主机上的失败（#45 返工）只说了 false，看不出卡在维护的哪一步。
+    const seen = {
+      phase: latest.supervisor.phase,
+      maintenance: latest.supervisor.maintenance && {
+        state: latest.supervisor.maintenance.state, error: latest.supervisor.maintenance.error,
+        failureKind: latest.supervisor.maintenance.failureKind,
+      },
+      daemonPid: latest.daemon?.pid ?? null,
+      deploy: latest.deploy && { ready: latest.deploy.ready, rebuild: latest.deploy.rebuild, reasons: latest.deploy.reasons },
+    };
+    expect(predicate(latest), `last status: ${JSON.stringify(seen)}`).toBe(true);
   }, { timeout: 15_000, interval: 100 });
   return latest!;
 }
