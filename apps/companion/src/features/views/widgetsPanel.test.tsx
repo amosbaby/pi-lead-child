@@ -10,10 +10,12 @@ import { useState } from 'react';
 import { describe, expect, it, vi } from 'vitest';
 
 import { renderUI } from '../../../test/render';
+import { platformWidgetFoldMemory } from '../../data/platformWidgetFoldMemory';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import { createWorkspaceStore } from '../../state/workspace/store';
 import { LeadConversation } from '../chat/LeadConversation';
+import { resetFoldedWidgetsForTesting } from './useFoldedWidgets';
 import { ViewsPanel } from './ViewsPanel';
 import { currentView, everyText, movedOrder, widgetMetaLine, widgetSourceProblem, widgetTimeText } from './widgetsModel';
 
@@ -49,8 +51,8 @@ function setup(widgets: WidgetDto[]) {
 
 function renderPanel(widgets: WidgetDto[]) {
   const made = setup(widgets);
-  renderUI(<CompanionRuntimeProvider runtime={made.runtime}><ViewsPanel onClose={() => {}} /></CompanionRuntimeProvider>);
-  return made;
+  const { unmount } = renderUI(<CompanionRuntimeProvider runtime={made.runtime}><ViewsPanel onClose={() => {}} /></CompanionRuntimeProvider>);
+  return { ...made, unmount };
 }
 
 describe('the views panel', () => {
@@ -127,6 +129,36 @@ describe('the views panel', () => {
     expect((await screen.findByTestId('widget-move-up-5')).textContent).toContain('It is at the top');
     fireEvent.click(screen.getByTestId('widget-move-down-5'));
     await waitFor(() => expect(client.performUiAction).toHaveBeenCalledWith('widget_board', 'widgets', 'reorder', { input: { ids: [3, 9, 5] } }));
+  });
+});
+
+// 工单 #54（用户 2026-11-05「右侧自定义控件要可折叠」，选了每个控件单独折叠）。
+describe('folding a widget', () => {
+  it('folds one widget to its title row, keeps its menu, and remembers it on this device after a reload', async () => {
+    await platformWidgetFoldMemory.save('[]');
+    resetFoldedWidgetsForTesting();
+    const first = renderPanel([widget(5, '纳斯达克', '18,532'), widget(3, '天气', '21°')]);
+    const toggle = await screen.findByTestId('widget-toggle-5');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.getAttribute('aria-label')).toBe('纳斯达克, collapse');
+    fireEvent.click(toggle);
+    expect(screen.queryByTestId('surface-widget_5')).toBeNull();
+    expect(screen.getByTestId('widget-title-5').textContent).toBe('纳斯达克');
+    expect(screen.getByTestId('widget-more-5')).toBeTruthy();
+    expect(screen.getByTestId('widget-toggle-5').getAttribute('aria-expanded')).toBe('false');
+    expect(screen.getByTestId('surface-widget_3')).toBeTruthy();
+    expect(await platformWidgetFoldMemory.load()).toBe('[5]');
+    first.unmount();
+
+    // 刷新页面：内存清空，从这台设备上读回来。
+    resetFoldedWidgetsForTesting();
+    renderPanel([widget(5, '纳斯达克', '18,532'), widget(3, '天气', '21°')]);
+    await screen.findByTestId('widget-5');
+    await waitFor(() => expect(screen.queryByTestId('surface-widget_5')).toBeNull());
+    expect(screen.getByTestId('surface-widget_3')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('widget-toggle-5'));
+    expect(screen.getByTestId('surface-widget_5')).toBeTruthy();
+    expect(await platformWidgetFoldMemory.load()).toBe('[]');
   });
 });
 

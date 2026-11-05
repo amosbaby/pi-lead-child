@@ -15,6 +15,7 @@ export const viewsMessages = defineMessages({
     moving: 'Moving…',
     deleting: 'Deleting…',
     refreshing: 'Refreshing…',
+    foldToggle: (title: string, folded: boolean) => `${title}, ${folded ? 'expand' : 'collapse'}`,
     menuLabel: (title: string, refresh: boolean, views: readonly string[]) =>
       `Actions for "${title}": ${[...(refresh ? ['refresh now'] : []), 'move up', 'move down', ...views.map((view) => `move to "${view}"`), 'delete'].join(', ')}`,
     deleteConfirm: (title: string) => `Delete the widget "${title}"? You cannot restore it.`,
@@ -52,6 +53,7 @@ export const viewsMessages = defineMessages({
     moving: '正在移动…',
     deleting: '正在删掉…',
     refreshing: '正在刷新…',
+    foldToggle: (title, folded) => `${title}，${folded ? '展开' : '折叠'}`,
     menuLabel: (title, refresh, views) =>
       `「${title}」的操作：${refresh ? '立即刷新、' : ''}上移、下移${views.length ? `、移到${views.map((view) => `「${view}」`).join('')}` : ''}、删掉`,
     deleteConfirm: (title) => `删掉控件「${title}」？删了不能恢复。`,

@@ -1,5 +1,5 @@
 import {
-  Box, Button, Column, DetailHeader, Density, Icon, Popover, RecordRow, Row, ScrollArea, SegmentedControl, Text,
+  Box, Button, Column, DetailHeader, Density, Icon, Popover, Pressable, RecordRow, Row, ScrollArea, SegmentedControl, Text,
 } from '@pi-lead-child/components';
 import { viewLabel, WIDGET_SURFACE_RULES, widgetViews, type WidgetDto } from '@pi-lead-child/protocol';
 import { useState } from 'react';
@@ -10,6 +10,7 @@ import { useCompanionRuntime, useWorkspaceStore } from '@/state/CompanionStatePr
 import { useLeadName, useWidgets } from '@/state/hooks';
 import { DAEMON_OLDER_THAN_WEB, type ResourceState } from '@/state/types';
 
+import { useFoldedWidgets } from './useFoldedWidgets';
 import { viewsMessages } from './views.messages';
 import { currentView, movedOrder, widgetErrorText, widgetMetaLine, widgetsEmptyNote, widgetSourceProblem } from './widgetsModel';
 
@@ -18,6 +19,7 @@ import { currentView, movedOrder, widgetErrorText, widgetMetaLine, widgetsEmptyN
 // 面板上能做的是低频操作，收在每个控件标题右边的「⋯」里：立即刷新（有数据源时）、上移、下移、移到别的视图、删掉。
 // 有数据源的控件由 daemon 定时跑脚本更新（第二期），标题下面写多久更新一次；出错和暂停时写原因，内容是上一次成功的。
 // 删了不能恢复，所以删掉在菜单里就地确认一次（P5.3），不弹窗。
+// 点控件的标题行能把它折叠成只剩标题行（工单 #54，用户 2026-11-05），哪些折叠了记在这台设备上，刷新后不变。
 // 视图是控件的一个属性（用户 2026-10-30）：只有一个视图时不显示 tab；用户让 Lead 按类别分了以后才有 tab。
 // 控件用会话区域的密度：它们和会话里的 genui 卡片是同一种东西。
 export function ViewsPanel({ onClose, standalone = false }: { onClose: () => void; standalone?: boolean }) {
@@ -110,13 +112,31 @@ function WidgetBlock({ widget, widgets, views, leadName }: {
   const remove = () => run(m.deleting, () => runtime.widgetAction('widget', String(widget.id), 'delete', { confirm: true }));
   const refresh = () => run(m.refreshing, () => runtime.widgetAction('widget', String(widget.id), 'refresh'));
   const problem = widgetSourceProblem(widget, locale);
+  const [foldedIds, setFolded] = useFoldedWidgets();
+  const folded = foldedIds.includes(widget.id);
   return (
     <Column testID={`widget-${widget.id}`} gap="card-row">
       <Row items="flex-start" gap="side-item">
-        <Column flex={1} minW={0} gap="text-stack">
-          <Text testID={`widget-title-${widget.id}`} size="card-title" weight="semibold" numberOfLines={1}>{widget.title}</Text>
-          <Text testID={`widget-meta-${widget.id}`} size="meta" tone="secondary">{widgetMetaLine(widget, leadName, locale)}</Text>
-        </Column>
+        {/* 标题和箭头一起点：和工单详情里能折叠的块（Section）同一种箭头和读屏说法。「⋯」不在可点的范围里。 */}
+        <Pressable
+          testID={`widget-toggle-${widget.id}`}
+          aria-expanded={!folded}
+          aria-label={m.foldToggle(widget.title, folded)}
+          onPress={() => setFolded(widget.id, !folded)}
+          feedback="opacity"
+          flex={1}
+          minW={0}
+        >
+          <Row items="flex-start" gap="inline-item">
+            <Column flex={1} minW={0} gap="text-stack">
+              <Text testID={`widget-title-${widget.id}`} size="card-title" weight="semibold" numberOfLines={1}>{widget.title}</Text>
+              <Text testID={`widget-meta-${widget.id}`} size="meta" tone="secondary">{widgetMetaLine(widget, leadName, locale)}</Text>
+            </Column>
+            <Row self="center" shrink={0}>
+              <Icon name={folded ? 'chevron-right' : 'chevron-down'} size={12} color="text-secondary" weight="semibold" />
+            </Row>
+          </Row>
+        </Pressable>
         <WidgetMenu
           widget={widget}
           otherViews={views.filter((view) => view !== widget.view)}
@@ -128,8 +148,9 @@ function WidgetBlock({ widget, widgets, views, leadName }: {
           onDelete={remove}
         />
       </Row>
+      {/* 折叠时内容不画；数据源出错的提示照样显示，不能因为折叠就看不到更新停了。 */}
       {problem ? <Text testID={`widget-source-problem-${widget.id}`} size="note" tone="danger-dark">{problem}</Text> : null}
-      <SurfaceView surface={widget.surface} rules={WIDGET_SURFACE_RULES} />
+      {folded ? null : <SurfaceView surface={widget.surface} rules={WIDGET_SURFACE_RULES} />}
       {pending ? <Text testID={`widget-pending-${widget.id}`} size="note" tone="secondary">{pending}</Text> : null}
       {error ? <Text testID={`widget-error-${widget.id}`} size="note" tone="danger-dark">{error}</Text> : null}
     </Column>
