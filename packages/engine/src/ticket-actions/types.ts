@@ -14,8 +14,9 @@ export type OwnerCredential = Pick<Binding, "id" | "kind" | "display_name" | "or
 
 // 谁在调用。页面：你本人，网关带上发出请求的凭证和来源（记主人操作用）。Lead：带上当前这一轮的 id，
 // 只属于你的操作要凭它（store 的 activePairedUserTurn），Lead 改不了它。
+// confirmation：你在确认卡上确认了 Lead 发起的这一次（rule-change-confirmations.ts 执行存下的工单操作时带上卡号）。
 export type TicketActionCaller =
-  | { kind: "user"; credential?: OwnerCredential | null; source?: OwnerActionSource | null }
+  | { kind: "user"; credential?: OwnerCredential | null; source?: OwnerActionSource | null; confirmation?: string }
   // externalTurn：这一轮读过外部内容（Lead 的 turnOrigin().external）。原来要用户这一轮的操作这时做不了（authority.ts）。
   | { kind: "lead"; turnId: string | null; externalTurn?: boolean };
 
@@ -63,6 +64,8 @@ export interface TicketActionRun<I> {
   turnId: string | null;
   // 这次凭的配对凭证：页面入口是发出请求的凭证，Lead 代你做时是那一轮来自的凭证，Lead 自己做时为 null。
   bindingId: number | null;
+  // 这次是 Lead 发起、你在确认卡上确认的：卡号。别的时候没有。
+  confirmation?: string;
 }
 
 export interface TicketActionEffects {
@@ -93,6 +96,9 @@ export interface TicketActionDefinition<K extends TicketActionId = TicketActionI
   where?: string;
   // 你没写原因时账本里的说法。
   defaultReason: string;
+  // 只对 user_direct：Lead 可以在你本人正在说话的一轮里发起，你在确认卡上点了才做（工单 #71：沙箱外执行）。
+  // 给出确认卡上的标题和后果。没有时 Lead 调用照旧总是被拒。
+  leadRequest?(item: Item, input: TicketActionInputs[K]): { label: string; why: string };
   available(item: Item, env: TicketActionEnv): Availability | Promise<Availability>;
   // 只对 delegated：工单托管给 Lead，而且这一次在托管范围内（例如核查员对最新交付给了 PASS）。
   delegatedScope?(item: Item, env: TicketActionEnv): boolean;
@@ -116,8 +122,9 @@ export type TicketActionErrorCode =
   | "needs_confirmation" | "external_turn";
 
 // 操作层自己的拒绝。底层的错误（DeliveryError、ReviewerChangeError、状态机的错）原样抛出，由入口各自映射。
+// card：needs_user_turn 时确认卡上的标题（不给时 Lead 用「操作名（工单 #编号）」）。
 export class TicketActionError extends Error {
-  constructor(readonly code: TicketActionErrorCode, message: string) {
+  constructor(readonly code: TicketActionErrorCode, message: string, readonly card?: { label: string }) {
     super(message);
     this.name = "TicketActionError";
   }

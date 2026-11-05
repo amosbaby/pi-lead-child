@@ -237,6 +237,8 @@ const LEAD_TOOL_OPERATIONS: Readonly<Record<string, {
         caller: {
           kind: "user", credential: context.binding,
           source: { client: "web", deviceName: context.binding.display_name, loopback: false, fromThisMachine: false },
+          // 记下这是 Lead 发起、用户在这张卡上确认的（例如沙箱外执行，工单 #71）。
+          confirmation: context.id,
         },
         host: host.host,
         ...(host.pullRequestRunner ? { pullRequestRunner: host.pullRequestRunner } : {}),

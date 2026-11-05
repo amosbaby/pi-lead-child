@@ -3103,13 +3103,15 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           outcome = await runLeadTicketAction(params.ticket_id, params.action, params.input, `${params.reason}${basis?.line ?? ""}`);
         } catch (error) {
           // 要用户本人这一轮的操作（外部内容的一轮里的验收、只认用户这一轮的改预算这类）：不再是死路。系统存下这一个操作，
-          // 给用户一张确认卡，点了以后按用户本人的操作执行（兜底授权卡，用户 2026-10-29）。
+          // 给用户一张确认卡，点了以后按用户本人的操作执行（兜底授权卡，用户 2026-10-29）。Lead 在用户这一轮里发起的
+          // user_direct 操作（沙箱外执行，工单 #71）也走这里，卡上的标题由操作给（error.card）。
           if (error instanceof TicketActionError && error.code === "needs_user_turn") {
             const definition = ticketActionDefinition(params.action);
             const card = authorizationCardResult(db, deps, {
               tool: "ticket_action", code: "needs_user_turn",
               input: { ticket_id: params.ticket_id, action: params.action, ...(params.input !== undefined ? { input: params.input } : {}) },
-              label: `${definition?.label ?? params.action}（工单 #${params.ticket_id}）`, where: definition?.where ?? "工单详情",
+              label: error.card?.label ?? `${definition?.label ?? params.action}（工单 #${params.ticket_id}）`,
+              where: definition?.where ?? "工单详情",
               reason: params.reason, why: error.message,
             });
             if (card) return card;

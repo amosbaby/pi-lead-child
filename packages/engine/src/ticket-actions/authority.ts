@@ -39,6 +39,18 @@ import {
 
 export type { LeadAuthorityMode } from "../ui-actions/authority.js";
 
+/**
+ * user_direct 的操作里声明了 leadRequest 的（工单 #71：沙箱外执行）：Lead 在用户本人正在说话的一轮（App、plc、用户发给自己的
+ * Slack 私信）里调用时不直接做，存下这一次、交给用户在确认卡上确认（index.ts 的 runTicketAction）。外部消息叫醒的一轮、
+ * 用户设的跟进到点的一轮、Lead 自己的一轮都不是用户正在说话的一轮，照旧是 user_direct 的拒绝。
+ */
+export function leadMayRequest(
+  db: Db, definition: TicketActionDefinition<never> | TicketActionDefinition, item: Item, caller: TicketActionCaller,
+): boolean {
+  return caller.kind === "lead" && Boolean(definition.leadRequest) && permissionOf(definition, item) === "user_direct"
+    && isLiveUserTurn(db, caller.turnId, definition.scope);
+}
+
 /** 这个工单操作是不是仍然只认用户本人这一轮（见文件头）。 */
 export function isUserTurnOnlyTicketAction(id: string): boolean {
   return USER_TURN_ONLY_TICKET_ACTIONS.has(id);

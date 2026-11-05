@@ -288,8 +288,13 @@ export function setItemDisplayTitle(db: Db, id: number, title: string | null): v
  */
 export function setItemUnsandboxedExecution(
   db: Db, itemId: number, enabled: boolean,
-  by: { actor: "user" | "lead" | "system"; reason: string; extra?: Record<string, unknown>; sessionCursor?: string },
+  by: {
+    actor: "user" | "lead" | "system"; reason: string; extra?: Record<string, unknown>; sessionCursor?: string;
+    // Lead 发起、用户在确认卡上确认的（工单 #71）：确认卡号。
+    requestedBy?: "lead"; confirmation?: string;
+  },
 ): boolean {
+  const requested = by.requestedBy ? { requestedBy: by.requestedBy, ...(by.confirmation ? { confirmation: by.confirmation } : {}) } : {};
   return db.transaction(() => {
     const item = db.prepare("SELECT unsandboxed_execution FROM items WHERE id = ?").get(itemId) as
       { unsandboxed_execution: number } | undefined;
@@ -298,13 +303,13 @@ export function setItemUnsandboxedExecution(
     db.prepare("UPDATE items SET unsandboxed_execution = ?, updated_at = datetime('now') WHERE id = ?").run(enabled ? 1 : 0, itemId);
     addActivity(db, {
       itemId, actor: by.actor, kind: "decision", ...(by.sessionCursor ? { sessionCursor: by.sessionCursor } : {}),
-      payload: { decision: "unsandboxed_execution", enabled, reason: by.reason, ...by.extra },
+      payload: { decision: "unsandboxed_execution", enabled, reason: by.reason, ...by.extra, ...requested },
     });
     appendEventGuarded(db, () => ({
       source: "ticket",
       kind: "ticket.sandbox_changed",
       entityKey: `ticket:${itemId}`,
-      payload: { itemId, unsandboxed: enabled, actor: by.actor, reason: by.reason },
+      payload: { itemId, unsandboxed: enabled, actor: by.actor, reason: by.reason, ...requested },
     }));
     return true;
   })();

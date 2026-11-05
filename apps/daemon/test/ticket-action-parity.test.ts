@@ -155,7 +155,8 @@ interface Case {
   fixture(db: Db, dir: string): { itemId: number; input?: Record<string, unknown> };
   // Lead 凭什么做：on_behalf（只属于你的、对外的、不可逆的）或 lead（Lead 自己的权限）。
   // user_direct（授权托管，工单 11）：只有你本人能做，Lead 调用总是被拒，什么都不写。
-  authority: "on_behalf" | "lead" | "user_direct";
+  // user_confirms（沙箱外执行，工单 #71）：只有你本人能决定；Lead 在你这一轮里调用拿到确认卡，工单上什么都不写。
+  authority: "on_behalf" | "lead" | "user_direct" | "user_confirms";
   // 你本人做时记一次主人操作（「不是我」）；Lead 代你做时也记，记在那一轮来自的凭证名下。Lead 自己做的不记。
   ownerAction?: string;
 }
@@ -202,8 +203,8 @@ const CASES: Case[] = [
   { action: "accept_without_review", authority: "on_behalf", ownerAction: "ticket.complete", fixture: (db) => ({ itemId: reviewFailed(db) }) },
   { action: "delegate", authority: "user_direct", ownerAction: "lead.delegation",
     fixture: (db) => ({ itemId: deliveredIndependent(db), input: { acceptWithoutReview: true, maxReworkCycles: 1 } }) },
-  // 沙箱外执行（工单 #62）：只有你本人能开关，不记主人操作，记活动和事件。
-  { action: "set_unsandboxed", authority: "user_direct", fixture: (db) => ({ itemId: ready(db), input: { enabled: true } }) },
+  // 沙箱外执行（工单 #62）：只有你本人能开关，不记主人操作，记活动和事件。Lead 在你这一轮里只能发起（工单 #71）。
+  { action: "set_unsandboxed", authority: "user_confirms", fixture: (db) => ({ itemId: ready(db), input: { enabled: true } }) },
   { action: "widen_grant", authority: "on_behalf", ownerAction: "run.grant", fixture: (db) => {
     const itemId = createItem(db, { title: "通道派的工单", brief: "b", createdBy: "system", purpose: "lookup" });
     const runId = createRun(db, { itemId, purpose: "lookup" });
@@ -299,6 +300,8 @@ async function viaLead(test: Case): Promise<Side & { turnId: string; before: Mar
   } as never, undefined, undefined, undefined as never);
   expect(JSON.parse((result.content[0] as { text: string }).text)).toMatchObject(test.authority === "user_direct"
     ? { action: test.action, refused: true, refusal: { permission: "user_direct", where: expect.any(String) } }
+    : test.authority === "user_confirms"
+    ? { refused: true, kind: "needs_authorization", refusal: { code: "needs_user_turn" }, user_action: { kind: "confirm_rule_change" } }
     : { action: test.action, authority: test.authority });
   const side = { db, dir, before, turnId: turn.id, close: async () => { db.close(); } };
   opened.push(side);
@@ -396,12 +399,13 @@ describe("every ticket action leaves the same ledger from the page and from Lead
 
   for (const test of CASES) {
     const who = test.authority === "on_behalf" ? "same effect, Lead on the user's behalf"
-      : test.authority === "user_direct" ? "done from the page, Lead always refused" : "same effect, Lead on its own";
+      : test.authority === "user_direct" ? "done from the page, Lead always refused"
+      : test.authority === "user_confirms" ? "done from the page, Lead only gets a confirm card" : "same effect, Lead on its own";
     it(`${test.action}: ${who}`, async () => {
       const page = await viaPage(test);
       const lead = await viaLead(test);
-      if (test.authority === "user_direct") {
-        // 页面上做成了；Lead 被拒，一行都没写，也没有记主人操作。
+      if (test.authority === "user_direct" || test.authority === "user_confirms") {
+        // 页面上做成了；Lead 被拒（或者只拿到确认卡），一行都没写，也没有记主人操作。
         expect(ledger(page.db, page.before).filter((row) => row.actor === "user").length).toBeGreaterThan(0);
         expect(ledger(lead.db, lead.before)).toEqual([]);
         expect(ownerActions(page.db)).toEqual(test.ownerAction ? [test.ownerAction] : []);

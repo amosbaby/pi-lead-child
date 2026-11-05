@@ -366,6 +366,9 @@ export const INTERNAL_EVENT_KINDS: readonly EventKindDefinition[] = [
       unsandboxed: Type.Boolean(),
       actor: Type.String(),
       reason: Type.String(),
+      // Lead 发起、用户在确认卡上确认的这一次（工单 #71）：发起的是 Lead，确认卡号。
+      requestedBy: Type.Optional(Type.Literal("lead")),
+      confirmation: Type.Optional(Type.String()),
     }),
     description: "用户打开或关闭了一张工单的「沙箱外执行」授权：之后的执行 Run 进不进沙箱。",
   },

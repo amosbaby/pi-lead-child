@@ -18,7 +18,8 @@ import { Value } from "typebox/value";
 import { ticketDelivery, type PullRequestRunner, type TicketDelivery } from "../coordinator/delivery.js";
 import type { ActionAttribution } from "./attribution.js";
 import {
-  activeUserTurnReason, isUserTurnOnlyTicketAction, leadAuthorityMode, narrowCredentialTurn, resolveAuthority, type LeadAuthorityMode,
+  activeUserTurnReason, isUserTurnOnlyTicketAction, leadAuthorityMode, leadMayRequest, narrowCredentialTurn, resolveAuthority,
+  type LeadAuthorityMode,
 } from "./authority.js";
 import { userTurnRefusalText } from "../ui-actions/authority.js";
 import { TICKET_ACTIONS } from "./catalog.js";
@@ -138,6 +139,7 @@ export async function listLeadTicketActions(
       lead: mode,
       leadReady: ready,
       leadReason: !action.available ? action.reason
+        : mode === "user_direct" && definition.leadRequest ? `${LEAD_REQUEST_WORDS}别的时候请用户${definition.where ? `在${definition.where}` : "在工单详情里"}自己点。`
         : mode === "user_direct" ? `${why}。请用户${definition.where ? `在${definition.where}` : "在工单详情里"}自己点。`
         : mode === "user_turn" && turnBlocker !== null ? `${why}（${turnBlocker}）`
         : narrow ? `${userTurnRefusalText(narrow, definition.where ?? "工单详情")}。` : null,
@@ -210,6 +212,14 @@ export async function runTicketAction(db: Db, request: TicketActionRequest): Pro
   // 可能来自手机上的配对凭证，这里没有要求它来自本机的凭证。
   const local = request.caller.kind === "lead" || request.caller.source?.loopback === true;
   const env = createEnv(db, item, { ...request, local });
+  // Lead 在用户本人这一轮里发起、要用户在确认卡上点的操作（authority.ts 的 leadMayRequest）：现在能做时不动手，
+  // 拒绝成 needs_user_turn，带着卡上的标题和后果；Lead 那边存下这一次、发确认卡（packages/lead 的 tools.ts）。
+  if (leadMayRequest(db, definition, item, request.caller)) {
+    const availability = await definition.available(item, env);
+    if (!availability.available) throw new TicketActionError("unavailable", availability.reason ?? `${definition.label}现在不能做。`);
+    const card = definition.leadRequest!(item, input as never);
+    throw new TicketActionError("needs_user_turn", card.why, { label: card.label });
+  }
   // 先认人，再查状态、再动手：对外的操作在认人之前不碰任何东西（delivery.ts 的同一条规则）。
   const { by, authority } = resolveAuthority(db, definition, item, request.caller, env);
   const availability = await definition.available(item, env);
@@ -224,6 +234,7 @@ export async function runTicketAction(db: Db, request: TicketActionRequest): Pro
     by, authority,
     turnId: request.caller.kind === "lead" ? request.caller.turnId : null,
     bindingId: credential?.credential.id ?? null,
+    ...(request.caller.kind === "user" && request.caller.confirmation ? { confirmation: request.caller.confirmation } : {}),
   };
   const recordOwner = (result: unknown): string | null => {
     const owner = definition.ownerAction ? credential : null;
@@ -270,6 +281,10 @@ export async function runTicketAction(db: Db, request: TicketActionRequest): Pro
   return { ticketId: item.id, action: id, result, by, authority, ownerActionEventId };
 }
 
+// user_direct 里 Lead 可以发起的操作（定义里有 leadRequest，工单 #71）。
+const LEAD_REQUEST_WORDS = "只有用户本人能决定：在用户本人正在说话的一轮里（App、plc、用户发给自己的 Slack 私信）你可以发起，"
+  + "调用会得到一张确认卡，用户点了「确认这一次」才生效；你自己确认不了。";
+
 const PERMISSION_WORDS: Record<string, string> = {
   user_only: "只属于用户：只有用户在这一轮明确要求时代他做",
   lead_allowed: "你可以自己判断",
@@ -284,7 +299,8 @@ export function ticketActionCatalogText(): string {
     const schema = TICKET_ACTION_INPUT_SCHEMAS[id] as { properties?: Record<string, unknown> };
     const fields = Object.keys(schema.properties ?? {});
     // 2026-10-28：原来要用户这一轮的操作由 Lead 判断（authority.ts）；仍然只认用户这一轮的单独写明。
-    const who = definition.permission === "user_direct" ? PERMISSION_WORDS.user_direct
+    const who = definition.permission === "user_direct" && definition.leadRequest ? `${LEAD_REQUEST_WORDS}别的轮次被拒`
+      : definition.permission === "user_direct" ? PERMISSION_WORDS.user_direct
       : isUserTurnOnlyTicketAction(id) ? "只属于用户：只有用户在这一轮明确要求时代他做"
       : definition.external ? "对外的操作：你自己判断；读过外部内容的一轮里不能做"
       : definition.irreversible ? "不可逆的操作：你自己判断，先想清楚；读过外部内容的一轮里不能做"
