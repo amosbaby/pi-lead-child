@@ -318,7 +318,8 @@ export interface ChannelOpenLane {
  */
 // reason：设置页按它写给人看的话（两种语言）。signed_out：用户的登录已经失效（例如浏览器会话过期），要重新登录，不再自己重试。
 export type ChannelTransportStatus =
-  | { state: "connecting" }
+  // disconnectReason：连着的连接断了、正在重连时，断开的原因（日志里也有）。拿不到时写明不知道。
+  | { state: "connecting"; disconnectReason?: string }
   | { state: "connected" }
   | { state: "error"; error: string; reason?: "signed_out" };
 
