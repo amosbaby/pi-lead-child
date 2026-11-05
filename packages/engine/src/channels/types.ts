@@ -133,6 +133,52 @@ export interface ChannelOutboundRequest {
   style?: "owner_reply";
   // react、unreact：表情的名字，不带冒号。
   emoji?: string;
+  // 发到用户自己私信里的确认消息（工单 #72）：reply 发一条新的，edit 把点过的那条换成结果。text 是不显示样式时的退路。
+  // 只发给声明了 capabilities.confirm 的来源。
+  confirm?: ChannelOwnerConfirmCard;
+}
+
+/**
+ * 用户自己私信里的一条确认消息（工单 #72）：和 App 里的确认卡同一个对象、同样的标题、原因和参数。
+ * 都是写好的给人看的话（按界面语言），来源只负责排版：等用户决定时带两个按钮，按钮上带着 target；决定以后按钮换成结果。
+ */
+export interface ChannelOwnerConfirmCard {
+  // 按钮上的对象：user_action 的 target（rule_change:rcc_x、connection_confirmation:cfm_x）。
+  target: string;
+  // 署名（助手的名字），和回给用户本人的话一样放在最上面。
+  byline: string;
+  title: string;
+  // 要做什么：一项一行（对象、原因、为什么被拦……）。
+  facts: Array<{ label: string; value: string }>;
+  // 参数，原样照抄（命令整条显示）。没有时是空数组。
+  params: Array<{ name: string; value: string }>;
+  // pending：带「确认这一次」「不改」按钮；其余状态不带按钮，result 写结果。
+  pending: boolean;
+  confirmLabel: string;
+  declineLabel: string;
+  // 状态的名字（例如「等你确认」「已执行」）和结果的一句话。等决定时 result 是 null。
+  stateLabel: string;
+  result: string | null;
+  // 名字和值之间的标点（中文「：」，英文「: 」）。
+  separator: string;
+}
+
+/**
+ * 有人点了确认消息上的按钮（ChannelAdapter.interaction，工单 #72）。点的人是谁、按钮在不在用户自己的私信里，
+ * 由适配器按来源的事实认出来；hub 只接受用户本人在自己私信里点的。
+ */
+export interface ChannelOwnerClick {
+  // 点按钮的人在来源里的编号。
+  user: string;
+  // 是不是凭据里的用户本人（编号一样，来源有工作区之类的范围时也一样）。
+  fromOwner: boolean;
+  // 按钮所在的对话是不是用户发给自己的私信。
+  ownConversation: boolean;
+  // 按钮所在的对话（对象键），和改写那条消息用的目标（edit 的 target）。
+  objectKey: string;
+  message: Record<string, string>;
+  target: string;
+  decision: "confirm" | "decline";
 }
 
 /** 消息附带的一个文件（ChannelAdapter.readFile，2026-11-02：Lead 要能看别人发来的截图）。内容是不可信的外部资料。 */
@@ -479,13 +525,19 @@ export interface ChannelAdapter {
     secrets?: readonly string[];
   };
   // 能做的出站动作和能不能取历史。edit、react、history 不写时当作不能。
-  readonly capabilities: { reply: boolean; retract: boolean; edit?: boolean; react?: boolean; history?: boolean };
+  // confirm：能在用户自己的私信里发带按钮的确认消息，并收到按钮的点击（interaction，工单 #72）。
+  readonly capabilities: { reply: boolean; retract: boolean; edit?: boolean; react?: boolean; history?: boolean; confirm?: boolean };
   readonly eventKinds: readonly EventKindDefinition[];
   readonly standingOrders: readonly SystemStandingOrderSeed[];
   /** 鉴权：这次投递是不是真的来自这个来源（例如签名对不对、时间戳新不新）。 */
   verify(delivery: ChannelDelivery, context: ChannelAdapterContext): boolean;
   /** 从一次投递里认出几件事。和用户无关的（例如别人之间的闲聊）不返回。 */
   parse(delivery: ChannelDelivery, context: ChannelAdapterContext): Promise<ChannelInbound[]>;
+  /**
+   * 这次投递是不是有人点了确认消息上的按钮（工单 #72）。是时返回点击，hub 不再调 parse；不是时返回 null。
+   * 和 parse 一样在鉴权（verify，或者进程内的传输）以后调。capabilities.confirm 为 true 时才有。
+   */
+  interaction?(delivery: ChannelDelivery, context: ChannelAdapterContext): Promise<ChannelOwnerClick | null>;
   /** 出站动作。同一个幂等键重复调用，在来源里只做一次。 */
   send(request: ChannelOutboundRequest, options: { idempotencyKey: string }, context: ChannelAdapterContext): Promise<ChannelOutboundResult>;
   /** 只读：取一个对话前面的消息，从旧到新。capabilities.history 为 true 时才有。取不到时抛错，hub 用已有的上下文。 */

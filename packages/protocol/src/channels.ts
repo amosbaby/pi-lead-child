@@ -62,6 +62,9 @@ export const CHANNEL_EVENT_KINDS = {
   handbookDraftLabeled: "channel.handbook.draft.labeled",
   // 断线、daemon 重启以后的补拉没补全（2026-11-03）：超过时间窗或条数上限，或者调用失败。告诉 Lead 这段时间的消息可能缺。
   catchUpIncomplete: "channel.catch_up.incomplete",
+  // 用户在来源里点了确认消息上的按钮（「确认这一次」「不改」，工单 #72）：用户本人在自己的私信里点的照 App 里的卡执行，
+  // 别人点的、不在用户自己私信里的被拒。两种都记一条，看得出是在来源里点的。
+  ownerConfirmClicked: "channel.owner_confirm.clicked",
 } as const;
 
 /**
@@ -555,6 +558,29 @@ export const CHANNEL_KERNEL_EVENT_KINDS: readonly EventKindDefinition[] = [
       summary: Type.String(),
     }),
     description: "用户确认以后，代查的 review 以 COMMENT 发到了 PR 上（只留评论，不 approve、不 request changes）。",
+  },
+  {
+    kind: CHANNEL_EVENT_KINDS.ownerConfirmClicked,
+    sources: ["system"],
+    payload: Type.Object({
+      channel: Type.String({ minLength: 1 }),
+      // 按钮上的对象（user_action 的 target，例如 rule_change:rcc_x、connection_confirmation:cfm_x）。认不出时是 null。
+      target: Nullable(Type.String({ minLength: 1, maxLength: 120 })),
+      decision: Nullable(Type.Union([Type.Literal("confirm"), Type.Literal("decline")])),
+      // 点按钮的人在来源里的编号，和按钮所在的消息（例如 Slack 的频道和 ts）。
+      by: Type.String(),
+      message: Type.Record(Type.String(), Type.String()),
+      accepted: Type.Boolean(),
+      // 被拒的原因：not_owner 不是用户本人点的；not_own_conversation 按钮不在用户自己的私信里；
+      // unavailable 现在处理不了（例如没有接上确认的服务）；unknown_target 不认识这个对象。接受时是 null。
+      refusal: Nullable(Type.Union([
+        Type.Literal("not_owner"), Type.Literal("not_own_conversation"), Type.Literal("unavailable"), Type.Literal("unknown_target"),
+      ])),
+      // 点完以后这个确认的状态（pending、done、failed、declined、expired……）。被拒时是 null。
+      state: Nullable(Type.String()),
+      summary: Type.String(),
+    }),
+    description: "用户在外部来源（例如 Slack 自己的私信）里点了确认消息上的按钮：本人点的照 App 里的确认卡执行，别人点的被拒。",
   },
 ];
 

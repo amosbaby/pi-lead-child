@@ -918,6 +918,32 @@ export class FakeSlack {
     });
   }
 
+  /**
+   * 有人点了一条消息上的按钮（工单 #72）：block_actions 的回调（https://docs.slack.dev/reference/interaction-payloads/block_actions-payload）。
+   * 缺省是用户本人在自己的工作区点的；user、team 可以换成别人。form 为 true 时照 HTTP 的写法（application/x-www-form-urlencoded，
+   * payload 字段是 JSON，带签名）；否则是 Socket Mode 的 interactive 信封里的 JSON（交给 receiveFromTransport）。
+   */
+  click(message: FakeSlackMessage, actionId: string, options: { user?: string; team?: string; form?: boolean } = {}): ChannelDelivery {
+    const button = (message.blocks ?? []).flatMap((block) => (block.type === "actions" && Array.isArray(block.elements) ? block.elements : []))
+      .find((element) => (element as { action_id?: unknown }).action_id === actionId) as { value?: string; text?: unknown } | undefined;
+    const user = options.user ?? this.self.id;
+    const payload = {
+      type: "block_actions",
+      user: { id: user, team_id: options.team ?? this.teamId },
+      team: { id: options.team ?? this.teamId },
+      container: { type: "message", message_ts: message.ts, channel_id: message.channel, is_ephemeral: false },
+      channel: { id: message.channel },
+      message: { ts: message.ts, text: message.text, ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}) },
+      response_url: "https://hooks.slack.test/actions/x",
+      actions: [{
+        type: "button", action_id: actionId, block_id: "b1", value: button?.value ?? "", text: button?.text,
+        action_ts: String(this.now().getTime() / 1000),
+      }],
+    };
+    if (options.form) return this.sign(`payload=${encodeURIComponent(JSON.stringify(payload))}`, {});
+    return { headers: {}, body: JSON.stringify(payload) };
+  }
+
   /** Slack 把系统发出去的那条消息推回来。 */
   // options.metadata 为 false：推回来的事件里没有 metadata（Slack 的文档没有写明 message 事件带不带它）。
   echoOf(message: FakeSlackMessage, options: { metadata?: boolean } = {}): ChannelDelivery {
@@ -1074,6 +1100,16 @@ function validBlocks(blocks: unknown): boolean {
     const { type, text, elements } = block as { type?: unknown; text?: unknown; elements?: unknown };
     if (type === "section") return validTextObject(text);
     if (type === "context") return Array.isArray(elements) && elements.length >= 1 && elements.length <= 10 && elements.every(validTextObject);
+    // actions：1 到 25 个按钮（https://docs.slack.dev/reference/block-kit/blocks/actions-block）；按钮的字是 plain_text，最多 75 个字，
+    // action_id 最多 255 个字，value 最多 2000 个字（https://docs.slack.dev/reference/block-kit/block-elements/button-element）。
+    if (type === "actions") {
+      return Array.isArray(elements) && elements.length >= 1 && elements.length <= 25 && elements.every((element: unknown) => {
+        const button = element as { type?: unknown; action_id?: unknown; value?: unknown; text?: { type?: unknown; text?: unknown } };
+        return button.type === "button" && typeof button.action_id === "string" && button.action_id.length <= 255
+          && (button.value === undefined || (typeof button.value === "string" && button.value.length <= 2_000))
+          && button.text?.type === "plain_text" && typeof button.text.text === "string" && button.text.text.length >= 1 && button.text.text.length <= 75;
+      });
+    }
     return false;
   });
 }

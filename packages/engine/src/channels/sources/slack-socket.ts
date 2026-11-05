@@ -1,7 +1,7 @@
 // Slack 的 Socket Mode 传输（slack-takeover 工单 02，spec D11）：用 Slack 官方 SDK 的 SocketModeClient（@slack/socket-mode）。
 // SDK 负责：用 app-level token 调 apps.connections.open 拿地址、建 WebSocket、心跳（ping/pong 超时就断开）、
 // 处理 Slack 的 hello 和 disconnect 消息、回 ack。这里只做我们自己的几件事：
-//   1. 每个 envelope 先调 SDK 给的 ack()，再交给 hub 的进程内入口（deliver）。ack 失败也照样交：Slack 会重发，
+//   1. 每个 envelope（事件 events_api 和按钮的点击 interactive）先调 SDK 给的 ack()，再交给 hub 的进程内入口（deliver）。ack 失败也照样交：Slack 会重发，
 //      hub 按投递编号去重。投递按收到的顺序一个一个交：线程里的后续消息要等它前面那条（开道的那条）记完。
 //   2. 断了就重新连。不用 SDK 的自动重连（autoReconnectEnabled: false）：它在重连时调 start() 没有接住失败
 //      （SocketModeClient 的 delayReconnectAttempt 里 cb.apply(this).then(res)），令牌失效（invalid_auth）这类错误会变成
@@ -306,7 +306,9 @@ class SlackSocketTransport implements ChannelTransport {
     const acked = event.ack().catch((error: unknown) => {
       host.log(`socket: ack failed for an envelope (Slack will send it again): ${errorText(error)}`);
     });
-    if (event.type !== "events_api" || !event.body || typeof event.body !== "object") {
+    // events_api 是事件；interactive 是按钮的点击（工单 #72：用户自己私信里确认消息上的按钮），body 是 block_actions 的 payload。
+    // Socket Mode 文档：「you'll only receive events and interactive payloads over your WebSocket connections」。
+    if ((event.type !== "events_api" && event.type !== "interactive") || !event.body || typeof event.body !== "object") {
       void acked;
       host.log(`socket: ignored a ${event.type} envelope`);
       return;

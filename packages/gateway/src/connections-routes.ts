@@ -89,6 +89,28 @@ const KEY = /^[a-z][a-z0-9-]{0,39}$/;
 const FLOW_ID = /^flow_[A-Za-z0-9_-]{8,64}$/;
 const CONFIRMATION_ID = /^cfm_[A-Za-z0-9_-]{8,40}$/;
 
+/**
+ * 你对一次写入确认的决定：允许时执行存下的那一次调用（参数不变），不要时作废。App 的路由和 Slack 私信里的按钮（工单 #72）都调它。
+ * by 是做决定的凭证的名字（写进 resolvedBy）。返回确认现在的样子和要记的主人操作（凭证和来源由调用方补上）。
+ * 已经处理过、过期的确认不再执行，原样返回它现在的状态（ConnectionHub.resolveConfirmation）。
+ */
+export async function resolveConnectionConfirmationAsUser(
+  service: Pick<ConnectionsService, "resolveConfirmation">, id: string, approve: boolean, by: string, locale: Locale = DEFAULT_LOCALE,
+): Promise<{ confirmation: ConnectionConfirmationDto; ownerAction: OwnerActionInput }> {
+  const m = routeMessages(locale);
+  const confirmation = await service.resolveConfirmation(id, approve, `user via ${by}`);
+  return {
+    confirmation,
+    ownerAction: {
+      action: "connection.confirm",
+      target: { key: `connection_confirmation:${id}`, label: m.connectionConfirmationTarget(confirmation.label), ticketId: null },
+      summary: m.connectionConfirmed(approve, confirmation.label, confirmation.summary),
+      detail: { approve, tool: confirmation.tool, state: confirmation.state },
+      undo: { kind: "connection_confirmation", confirmationId: id, approve, state: confirmation.state },
+    },
+  };
+}
+
 // 处理了返回 true。不是连接的路由返回 false。认证失败、请求体不对时抛出网关自己的错误，由调用方回应。
 export async function handleConnectionRoute(ctx: ConnectionRouteContext): Promise<boolean> {
   const { req, url } = ctx;
@@ -151,15 +173,10 @@ export async function handleConnectionRoute(ctx: ConnectionRouteContext): Promis
         return true;
       }
       return run("approvals:respond", async (svc) => {
-        const approve = (body as { approve: boolean }).approve;
-        const confirmation = await svc.resolveConfirmation(id, approve, `user via ${by}`);
-        ctx.ownerAction?.({
-          action: "connection.confirm",
-          target: { key: `connection_confirmation:${id}`, label: m.connectionConfirmationTarget(confirmation.label), ticketId: null },
-          summary: m.connectionConfirmed(approve, confirmation.label, confirmation.summary),
-          detail: { approve, tool: confirmation.tool, state: confirmation.state },
-          undo: { kind: "connection_confirmation", confirmationId: id, approve, state: confirmation.state },
-        });
+        const { confirmation, ownerAction } = await resolveConnectionConfirmationAsUser(
+          svc, id, (body as { approve: boolean }).approve, by, locale,
+        );
+        ctx.ownerAction?.(ownerAction);
         return { confirmation };
       });
     }

@@ -94,8 +94,9 @@ export function slackAppManifest(ownerName?: string | null, assistantName?: stri
     "  event_subscriptions:",
     "    user_events:",
     ...SLACK_USER_EVENTS.map((event) => `      - ${event}`),
+    // 打开交互：用户自己私信里的确认消息带按钮（工单 #72），点击经 Socket Mode 送回来，不用填 Request URL。
     "  interactivity:",
-    "    is_enabled: false",
+    "    is_enabled: true",
     "  org_deploy_enabled: false",
     "  socket_mode_enabled: true",
     "  token_rotation_enabled: false",

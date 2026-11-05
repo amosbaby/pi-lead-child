@@ -77,6 +77,30 @@ describe('the confirm card for a refused rule change', () => {
     expect(screen.queryByTestId(`surface-rule-change-${ID}-decline`)).toBeNull();
   });
 
+  // 工单 #72：同一张卡在用户自己的 Slack 私信里也有按钮。用户在 Slack 里点了，App 里还开着的卡隔一会儿重读，跟着变。
+  it('follows a decision made in Slack while the card waits', async () => {
+    vi.useFakeTimers();
+    try {
+      const read = vi.fn()
+        .mockResolvedValueOnce(confirmation())
+        .mockResolvedValue(confirmation({
+          state: 'done', resolvedAt: '2026-10-27T01:05:00.000Z', resolvedBy: 'user via Slack 私信（你自己）（binding 7）', resultPreview: '已经生效',
+        }));
+      const { runtime } = runtimeWith({ ruleChangeConfirmation: read });
+      await act(async () => { renderWithRuntime(<SurfaceView surface={surface()} />, runtime); });
+      expect(screen.getByTestId(`surface-rule-change-${ID}-state`).textContent).toBe('Waiting for you');
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId(`surface-rule-change-${ID}-state`).textContent).toBe('Done');
+      expect(screen.queryByTestId(`surface-rule-change-${ID}-confirm`)).toBeNull();
+      // 有了结果就不再读。
+      await act(async () => { await vi.advanceTimersByTimeAsync(30_000); });
+      expect(read).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('keeps the rule as it is with 不改', async () => {
     const { runtime, client } = runtimeWith({
       ruleChangeConfirmation: vi.fn(async () => confirmation()),

@@ -183,6 +183,6 @@ describe("outbound: edit and react", () => {
   });
 
   it("declares what it can do", () => {
-    expect(setup().adapter.capabilities).toEqual({ reply: true, retract: true, edit: true, react: true, history: true });
+    expect(setup().adapter.capabilities).toEqual({ reply: true, retract: true, edit: true, react: true, history: true, confirm: true });
   });
 });

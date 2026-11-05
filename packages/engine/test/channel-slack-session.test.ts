@@ -268,7 +268,7 @@ describe("the session transport", () => {
 describe("the switch for sending on the user's behalf", () => {
   it("turns off every write in session mode while it is off, and says why", async () => {
     writes = false;
-    expect(adapter.capabilities).toEqual({ reply: false, retract: false, edit: false, react: false, history: true });
+    expect(adapter.capabilities).toEqual({ reply: false, retract: false, edit: false, react: false, history: true, confirm: false });
     expect(adapter.writesBlocked!()).toContain("「允许 Lead 代你发消息」关着");
     expect(hub.canSendMessage("slack")).toBe(false);
     expect(hub.writesBlocked("slack")).toContain("设置 → 消息通道 → Slack");
@@ -280,6 +280,8 @@ describe("the switch for sending on the user's behalf", () => {
     expect(slack.sessionCalls.filter((method) => method.startsWith("chat.") || method.startsWith("reactions."))).toEqual([]);
     writes = true;
     expect(adapter.capabilities.reply).toBe(true);
+    // 确认消息的按钮（工单 #72）只有应用方式有：会话方式没有应用收点击。
+    expect(adapter.capabilities.confirm).toBe(false);
     expect(adapter.writesBlocked!()).toBeNull();
     expect(hub.canSendMessage("slack")).toBe(true);
   });
@@ -288,7 +290,7 @@ describe("the switch for sending on the user's behalf", () => {
     const session = createSlackChannelAdapter({ api: slack.api, connection: "session" });
     expect(session.capabilities.reply).toBe(false);
     const app = createSlackChannelAdapter({ api: slack.api, connection: "app", sessionWrites: () => false });
-    expect(app.capabilities).toEqual({ reply: true, retract: true, edit: true, react: true, history: true });
+    expect(app.capabilities).toEqual({ reply: true, retract: true, edit: true, react: true, history: true, confirm: true });
     expect(app.writesBlocked!()).toBeNull();
   });
 });

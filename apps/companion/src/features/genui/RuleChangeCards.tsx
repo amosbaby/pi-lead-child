@@ -56,6 +56,9 @@ function settledText(confirmation: RuleChangeConfirmationDto, leadName: string, 
   }
 }
 
+const PENDING_POLL_MS = 10_000;
+const RUNNING_POLL_MS = 2_000;
+
 export function RuleChangeConfirmCard({ confirmation: id }: { confirmation: string }) {
   const runtime = useCompanionRuntime();
   // 连上 daemon 以后才读（刷新页面时设备可能还在重连）。
@@ -80,6 +83,18 @@ export function RuleChangeConfirmCard({ confirmation: id }: { confirmation: stri
     void load(controller.signal);
     return () => controller.abort();
   }, [load, ready]);
+
+  // 等你确认或者正在执行时隔一会儿再读：你可能在 Slack 自己的私信里点了按钮（工单 #72），卡要跟着变。
+  const state = value?.state ?? null;
+  useEffect(() => {
+    if (!ready || (state !== 'pending' && state !== 'running')) return undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => { void load(controller.signal); }, state === 'pending' ? PENDING_POLL_MS : RUNNING_POLL_MS);
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [load, ready, state, value]);
 
   if (gone) return <Text testID={`surface-rule-change-${id}-gone`} size="secondary" tone="secondary">{m.gone}</Text>;
   if (!value) {

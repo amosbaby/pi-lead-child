@@ -11,7 +11,9 @@ export const slackSettingsMessages = defineMessages({
     // 手建应用时最容易漏的两处（2026-11-02）。
     setupNote: (events: readonly string[]) => "Add the scopes under User Token Scopes, not Bot Token Scopes. "
       + `Subscribe to events on behalf of users must list ${events.join(", ")}. `
-      + "After you change scopes or events, click Reinstall to Workspace and paste the new User OAuth Token above.",
+      + "After you change scopes or events, click Reinstall to Workspace and paste the new User OAuth Token above. "
+      // 工单 #72：确认消息上的按钮要应用打开 Interactivity。以前建的应用（清单里是 is_enabled: false）要自己打开一次。
+      + "To use the Confirm buttons in your DM to yourself, turn on Interactivity & Shortcuts (no Request URL is needed with Socket Mode).",
     // 判不出是少了设置还是没人发消息（PR #2 审阅，2026-11-03）：先说可以忽略的情形，再列可能少的设置。
     noEvents: (events: readonly string[], scopes: readonly string[]) =>
       "Connected, but no Slack event has come in since you saved the tokens. If nobody messaged you or posted in your channels "
@@ -29,7 +31,8 @@ export const slackSettingsMessages = defineMessages({
     userTokenHint: "在应用的 OAuth & Permissions 点 Install to Workspace，授权以后复制 User OAuth Token（不是 Bot User OAuth Token）。",
     setupNote: (events) => "权限加在 User Token Scopes 里（不是 Bot Token Scopes）。"
       + `Subscribe to events on behalf of users 里要有 ${events.join("、")}。`
-      + "改了权限或事件以后，点 Reinstall to Workspace，把新的 User OAuth Token 填在上面。",
+      + "改了权限或事件以后，点 Reinstall to Workspace，把新的 User OAuth Token 填在上面。"
+      + "要在发给自己的私信里点确认按钮，打开 Interactivity & Shortcuts（用 Socket Mode 不用填 Request URL）。",
     noEvents: (events, scopes) =>
       "已经连上，但存了令牌以后一个 Slack 事件都没收到。如果这段时间没人给你发消息、你所在的频道里也没人说话（例如这台 Mac 在睡眠），"
       + "可以忽略；否则应用可能少了设置，在 api.slack.com/apps 打开这个应用："

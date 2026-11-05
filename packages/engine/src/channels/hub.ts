@@ -141,7 +141,7 @@ import type {
   ChannelAdapter, ChannelAdapterContext, ChannelCredential, ChannelCredentialSource, ChannelDelivery,
   ChannelConversationCandidate, ChannelInbound, ChannelInboundRole, ChannelInterest, ChannelOpenCard, ChannelOpenLane, ChannelReaction,
   ChannelConversationRead, ChannelEditedMessage, ChannelFile, ChannelMarkPreview, ChannelRecentConversation, ChannelSentMessage,
-  ChannelCatchUpReport, ChannelTransportContext,
+  ChannelCatchUpReport, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransportContext,
 } from "./types.js";
 import { ChannelFileNotFoundError } from "./types.js";
 
@@ -207,7 +207,21 @@ export interface ChannelHubOptions {
   // 用户本人写给 Lead 的话（role owner，例如 Slack 里发给自己的私信，用户 2026-10-30）：daemon 认出是用户本人以后，
   // 按用户本人的一轮交给 Lead，返回 true。返回 false（例如用户撤销了这个入口）、抛错或者不给时，hub 照用户本人的话（self_reply）处理。
   owner?: (message: ChannelOwnerMessage) => boolean | Promise<boolean>;
+  // 用户本人在自己的私信里点了确认消息上的按钮（工单 #72）：daemon 按 App 里点卡的同一份实现决定这一次，返回点完以后的确认消息
+  // （不含署名，hub 补上）。不认识这个对象时返回 null。只有 hub 认过是用户本人、在用户自己的私信里点的才交过来。
+  ownerConfirm?: (click: ChannelOwnerConfirmRequest) => Promise<OwnerConfirmCardContent | null>;
 }
+
+/** 用户本人在来源里点的一次确认（ChannelHubOptions.ownerConfirm）。account 是凭据里的用户本人，daemon 按它找私信的凭证。 */
+export interface ChannelOwnerConfirmRequest {
+  source: string;
+  account: string;
+  target: string;
+  decision: "confirm" | "decline";
+}
+
+/** daemon 写好的确认消息（ChannelOwnerConfirmCard 去掉署名：署名由 hub 按这个来源的助手名补上）。 */
+export type OwnerConfirmCardContent = Omit<ChannelOwnerConfirmCard, "byline">;
 
 /** 用户本人写给 Lead 的一句话（ChannelHubOptions.owner）。 */
 export interface ChannelOwnerMessage {
@@ -580,6 +594,20 @@ export class ChannelHub {
       this.log(`[channels] ${adapter.id}: rejected a delivery that failed authentication`);
       return { accepted: false, rejection: "unauthenticated", items: [] };
     }
+    // 确认消息上的按钮（工单 #72）：不是事件，不进道和卡。
+    if (adapter.capabilities.confirm && adapter.interaction) {
+      let click: ChannelOwnerClick | null = null;
+      try {
+        click = await adapter.interaction(delivery, context);
+      } catch (error) {
+        this.log(`[channels] ${adapter.id}: could not read a button click: ${scrubCredential(errorText(error), context)}`);
+        return { accepted: false, rejection: "unparseable", items: [] };
+      }
+      if (click) {
+        await this.ownerClick(adapter, context, click);
+        return { accepted: true, items: [] };
+      }
+    }
     let inbound: ChannelInbound[];
     try {
       inbound = await adapter.parse(delivery, context);
@@ -691,6 +719,94 @@ export class ChannelHub {
     });
     if (outcome.status === "failed") throw new ChannelActionError("outbound_failed", `没有发出去：${outcome.error ?? "未知原因"}`);
     return { objectKey: place.objectKey, status: outcome.status };
+  }
+
+  /**
+   * 在用户自己的私信里发一条带「确认这一次」「不改」按钮的确认消息（工单 #72）：conversationId 是用户写给 Lead 的那个对话
+   * （ChannelOwnerMessage.conversation），只发回那里。来源不支持按钮（capabilities.confirm）时返回 null，什么都不发。
+   * key 是幂等键：同一个对话、同一个确认只发一次。发不出去时抛 ChannelActionError。
+   */
+  async sendOwnerConfirmation(conversationId: string, content: OwnerConfirmCardContent, key: string): Promise<{ status: ChannelOutboundOutcome["status"] } | null> {
+    const source = conversationId.split(":")[0] ?? "";
+    const adapter = this.options.registry.get(source);
+    if (!adapter?.capabilities.confirm || !adapter.resolveConversation) return null;
+    const context = await this.context(adapter);
+    if (!context) throw new ChannelActionError("unavailable", `来源 ${source} 现在没有接上`);
+    let place;
+    try {
+      place = await adapter.resolveConversation(conversationId, context);
+    } catch (error) {
+      throw new ChannelActionError("not_found", errorText(error));
+    }
+    const confirm = this.confirmCard(adapter, content);
+    const outcome = await this.outbox.perform(adapter, context, {
+      key: `owner-confirm:${key}`, purpose: "auto_reply", cardId: null,
+      request: { action: "reply", objectKey: place.objectKey, target: place.target, text: confirm.title, confirm },
+    });
+    if (outcome.status === "failed") throw new ChannelActionError("outbound_failed", `没有发出去：${outcome.error ?? "未知原因"}`);
+    return { status: outcome.status };
+  }
+
+  private confirmCard(adapter: ChannelAdapter, content: OwnerConfirmCardContent): ChannelOwnerConfirmCard {
+    return { ...content, byline: ownerReplyDisclosure(this.assistantFor(adapter), "").parts.byline };
+  }
+
+  // 有人点了确认消息上的按钮。只认用户本人在自己私信里点的：别人点的、不在用户自己私信里的一律拒绝，记一条事件、写日志，
+  // 消息不动（按钮还在，用户本人照样能点）。本人点的交给 daemon（和 App 里点卡同一份实现），再把那条消息换成结果。
+  // 已经处理过、过期的确认，daemon 返回它现在的状态，消息照样换成状态，不再执行。不抛错。
+  private async ownerClick(adapter: ChannelAdapter, context: ChannelAdapterContext, click: ChannelOwnerClick): Promise<void> {
+    const refusal = !click.fromOwner ? "not_owner" as const : !click.ownConversation ? "not_own_conversation" as const
+      : !this.options.ownerConfirm ? "unavailable" as const : null;
+    if (refusal) {
+      this.log(`[channels] ${adapter.id}: refused a button click on ${click.target} by ${click.user || "(unknown)"}: ${refusal}`);
+      this.recordOwnerClick(adapter, click, { accepted: false, refusal, state: null });
+      return;
+    }
+    let content: OwnerConfirmCardContent | null = null;
+    try {
+      content = await this.options.ownerConfirm!({
+        source: adapter.id, account: context.credential.account, target: click.target, decision: click.decision,
+      });
+    } catch (error) {
+      this.log(`[channels] ${adapter.id}: the button click on ${click.target} failed: ${scrubCredential(errorText(error), context)}`);
+      this.recordOwnerClick(adapter, click, { accepted: false, refusal: "unavailable", state: null });
+      return;
+    }
+    if (!content) {
+      this.recordOwnerClick(adapter, click, { accepted: false, refusal: "unknown_target", state: null });
+      return;
+    }
+    this.recordOwnerClick(adapter, click, { accepted: true, refusal: null, state: content.stateLabel });
+    const confirm = this.confirmCard(adapter, content);
+    // 改写的键带上状态：同一个状态只改一次，状态变了（例如先显示正在执行，后来执行完）再改。
+    const outcome = await this.outbox.perform(adapter, context, {
+      key: `owner-confirm-result:${click.message.channel ?? ""}:${click.message.ts ?? ""}:${content.pending ? "pending" : content.stateLabel}`,
+      purpose: "auto_reply", cardId: null,
+      request: { action: "edit", objectKey: click.objectKey, target: click.message, text: confirm.title, confirm },
+    });
+    if (outcome.status === "failed") this.log(`[channels] ${adapter.id}: could not update the confirmation message for ${click.target}`);
+  }
+
+  private recordOwnerClick(
+    adapter: ChannelAdapter, click: ChannelOwnerClick,
+    outcome: { accepted: boolean; refusal: "not_owner" | "not_own_conversation" | "unavailable" | "unknown_target" | null; state: string | null },
+  ): void {
+    const verb = click.decision === "confirm" ? "确认这一次" : "不改";
+    const summary = outcome.accepted
+      ? `用户在 ${adapter.label} 自己的私信里点了「${verb}」：${click.target}，现在是「${outcome.state}」。`
+      : `${adapter.label} 里有人点了确认按钮（${click.target}，点的人 ${click.user || "不知道"}），被拒绝：${outcome.refusal}。`;
+    try {
+      this.db.transaction(() => appendEvent(this.db, {
+        source: "system", kind: CHANNEL_EVENT_KINDS.ownerConfirmClicked, entityKey: `channel:${adapter.id}`, level: "record",
+        occurredAt: this.now().toISOString(),
+        payload: {
+          channel: adapter.id, target: click.target, decision: click.decision, by: click.user, message: { ...click.message },
+          accepted: outcome.accepted, refusal: outcome.refusal, state: outcome.state, summary,
+        },
+      }))();
+    } catch (error) {
+      this.log(`[channels] ${adapter.id}: could not record a button click: ${errorText(error)}`);
+    }
   }
 
   // 别人发来的一条消息紧不紧急（urgency.ts）。用户本人的话、推回来的回复不问（null）。同一次投递正在问时共用那一次的回答；

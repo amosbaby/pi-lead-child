@@ -65,7 +65,8 @@ import { ChannelFileNotFoundError, ChannelTargetGoneError } from "../types.js";
 import type {
   ChannelAdapter, ChannelAdapterContext, ChannelConnectionControl, ChannelConversationCandidate, ChannelConversationTarget, ChannelCredential,
   ChannelDelivery, ChannelFile, ChannelHistoryMessage, ChannelHistoryRequest, ChannelInbound, ChannelMarkLookup, ChannelMemorySpec,
-  ChannelOutboundRequest, ChannelOutboundResult, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver,
+  ChannelOutboundRequest, ChannelOutboundResult, ChannelOwnerClick, ChannelOwnerConfirmCard, ChannelTransport, ChannelTransportContext,
+  ChannelTransportDeliver,
 } from "../types.js";
 import { createSlackSessionSettings, createSlackSettings } from "./slack-settings.js";
 import { createSlackSessionWebApi, SLACK_SESSION_COOKIE_PREFIX, SlackSessions, type SlackSessionNetwork } from "./slack-session.js";
@@ -197,6 +198,86 @@ export function slackIsOwnerReply(message: { attachments?: unknown[] }): boolean
   const color = (value: unknown) => (typeof value === "string" ? value.replace(/^#/u, "").toLowerCase() : null);
   return Array.isArray(message.attachments)
     && message.attachments.some((attachment) => isRecord(attachment) && color(attachment.color) === color(SLACK_OWNER_REPLY_COLOR));
+}
+
+// 确认消息上的两个按钮（工单 #72）。action_id 认出是我们的按钮，value 是确认的对象（user_action 的 target）。
+export const SLACK_CONFIRM_ACTION = "plc_owner_confirm";
+export const SLACK_DECLINE_ACTION = "plc_owner_decline";
+// 按钮的 value 最多 2000 个字（https://docs.slack.dev/reference/block-kit/block-elements/button-element）；我们的对象不到 120 个字。
+const SLACK_CONFIRM_TARGET = /^[a-z_]{1,40}:[A-Za-z0-9_-]{1,80}$/u;
+
+/**
+ * 用户自己私信里的一条确认消息（工单 #72）：最上面是署名（和回给用户本人的话一样），然后是标题、要做什么、参数（代码块，整条显示），
+ * 最后一行等决定时是「确认这一次」「不改」两个按钮（actions block，https://docs.slack.dev/reference/block-kit/blocks/actions-block），
+ * 决定以后换成状态和结果（context block）。文字都是写好的给人看的话：转义以后当 mrkdwn，名字不会被当成提到谁。
+ */
+export function slackConfirmBlocks(card: ChannelOwnerConfirmCard): Array<Record<string, unknown>> {
+  const line = (text: string, max: number) => escapeMrkdwn(text.replace(/\s+/g, " ").trim().slice(0, max));
+  const blocks: Array<Record<string, unknown>> = [
+    { type: "context", elements: [{ type: "mrkdwn", text: line(card.byline, 300) }] },
+    { type: "section", text: { type: "mrkdwn", text: `*${line(card.title, 300)}*` } },
+  ];
+  const facts = card.facts.filter((fact) => fact.value.trim()).map((fact) => `*${line(fact.label, 40)}*${card.separator}${line(fact.value, 900)}`);
+  if (facts.length) blocks.push({ type: "section", text: { type: "mrkdwn", text: facts.join("\n").slice(0, SLACK_TEXT_OBJECT_MAX) } });
+  if (card.params.length) {
+    // 代码块里的字不当 mrkdwn，但 & < > 照样要转义；三个反引号会提前结束代码块，换成别的字。
+    const body = card.params.map((param) => `${param.name} = ${param.value}`).join("\n").replace(/```/g, "ˋˋˋ");
+    blocks.push({ type: "section", text: { type: "mrkdwn", text: `\`\`\`${escapeMrkdwn(body).slice(0, SLACK_TEXT_OBJECT_MAX - 8)}\`\`\`` } });
+  }
+  if (card.pending) {
+    blocks.push({
+      type: "actions",
+      elements: [
+        {
+          type: "button", action_id: SLACK_CONFIRM_ACTION, style: "primary", value: card.target,
+          text: { type: "plain_text", text: card.confirmLabel.slice(0, 75) },
+        },
+        { type: "button", action_id: SLACK_DECLINE_ACTION, value: card.target, text: { type: "plain_text", text: card.declineLabel.slice(0, 75) } },
+      ],
+    });
+  } else {
+    const result = card.result ? `${card.separator}${line(card.result, 1_500)}` : "";
+    blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: `*${line(card.stateLabel, 40)}*${result}` }] });
+  }
+  return blocks;
+}
+
+/** 确认消息的纯文字退路（通知、不显示 block 的客户端）。 */
+export function slackConfirmText(card: ChannelOwnerConfirmCard): string {
+  return [card.byline, card.title, `${card.stateLabel}${card.result ? `${card.separator}${card.result}` : ""}`].join("\n").slice(0, SLACK_TEXT_OBJECT_MAX);
+}
+
+/**
+ * 交互的回调（block_actions）里我们要的部分。Socket Mode 的 interactive 信封里是 JSON；推来的 HTTP 请求是
+ * application/x-www-form-urlencoded，payload 字段是 JSON（https://docs.slack.dev/interactivity/handling-user-interaction）。
+ * 不是 block_actions、没有我们的按钮时返回 null。
+ */
+export function slackConfirmAction(body: string): {
+  user: string; team: string | null; channel: string; ts: string; threadTs: string | null; target: string; decision: "confirm" | "decline";
+} | null {
+  let payload: unknown;
+  try {
+    payload = body.startsWith("payload=") ? JSON.parse(new URLSearchParams(body).get("payload") ?? "") : JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (!isRecord(payload) || payload.type !== "block_actions" || !Array.isArray(payload.actions)) return null;
+  const action = payload.actions.find((item): item is Record<string, unknown> => isRecord(item)
+    && (item.action_id === SLACK_CONFIRM_ACTION || item.action_id === SLACK_DECLINE_ACTION));
+  if (!action || !isString(action.value) || !SLACK_CONFIRM_TARGET.test(action.value)) return null;
+  const user = isRecord(payload.user) && isString(payload.user.id) ? payload.user.id : "";
+  const team = isRecord(payload.team) && isString(payload.team.id) ? payload.team.id
+    : isRecord(payload.user) && isString(payload.user.team_id) ? payload.user.team_id : null;
+  const container = isRecord(payload.container) ? payload.container : {};
+  const message = isRecord(payload.message) ? payload.message : {};
+  const channel = isString(container.channel_id) ? container.channel_id : isRecord(payload.channel) && isString(payload.channel.id) ? payload.channel.id : "";
+  const ts = isString(container.message_ts) ? container.message_ts : isString(message.ts) ? message.ts : "";
+  if (!channel || !ts) return null;
+  const threadTs = isString(message.thread_ts) && message.thread_ts !== ts ? message.thread_ts : null;
+  return {
+    user, team, channel, ts, threadTs, target: action.value,
+    decision: action.action_id === SLACK_CONFIRM_ACTION ? "confirm" : "decline",
+  };
 }
 
 // 一行里不在行内代码中的部分换成 mrkdwn。顺序要紧：列表的「* 」先换成「• 」，单星号的斜体先换成 _x_，再换双星号的粗体。
@@ -1826,6 +1907,39 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     return { remoteRef: { channel, ts: first! }, duplicate, messageId: first! };
   }
 
+  // 用户自己私信里的确认消息（工单 #72）：reply 发一条新的（同一个幂等键只发一次，和别的回复一样先找有没有发过），
+  // edit 把点过的那条换成结果（不带按钮）。
+  async function sendConfirm(
+    channel: string, request: ChannelOutboundRequest, key: string, context: ChannelAdapterContext,
+  ): Promise<ChannelOutboundResult> {
+    const card = request.confirm!;
+    const text = slackConfirmText(card);
+    const blocks = slackConfirmBlocks(card);
+    if (request.action === "edit") {
+      if (!isString(request.target.ts)) throw new Error("slack: nothing to edit (no ts)");
+      const result = await web.call("chat.update", { channel, ts: request.target.ts, text, blocks }, context.credential.token);
+      if (result.ok === true) return { remoteRef: { channel, ts: request.target.ts }, duplicate: false, messageId: request.target.ts };
+      const error = isString(result.error) ? result.error : "not ok";
+      if (SLACK_EDIT_GONE.has(error)) throw new ChannelTargetGoneError(`slack chat.update: ${error}`);
+      throw new Error(`slack chat.update: ${error}`);
+    }
+    if (request.action !== "reply") throw new Error(`slack: a confirmation cannot be sent with ${request.action}`);
+    const existing = await findSent(request.target, key, context);
+    if (existing) {
+      rememberPosted(channel, existing);
+      return { remoteRef: { channel, ts: existing }, duplicate: true, messageId: existing };
+    }
+    const result = await trackPosting(channel, api("chat.postMessage", {
+      channel,
+      ...(request.target.thread_ts ? { thread_ts: request.target.thread_ts } : {}),
+      text, blocks,
+      metadata: { event_type: SLACK_REPLY_METADATA_TYPE, event_payload: { idempotency_key: key } },
+    }, context));
+    if (!isString(result.ts)) throw new Error("slack chat.postMessage: no ts in the response");
+    rememberPosted(channel, result.ts);
+    return { remoteRef: { channel, ts: result.ts }, duplicate: false, messageId: result.ts };
+  }
+
   // 记忆沉淀（channels/memory.ts）：频道和私有频道里的线程（道里的消息和订阅频道的普通消息都算），私信不算。
   // 用户本人的话（self_reply）也算：线程里用户说过的话也是事实。
   const memorySpec: ChannelMemorySpec = {
@@ -1857,9 +1971,10 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       },
     },
     // 浏览器会话方式下「代你发消息」关着时，写的几项都是 false（hub、卡片、Lead 的工具按它判断），原因见 writesBlocked。
+    // 确认消息的按钮（工单 #72）只有应用方式有：点击经 Socket Mode 的 interactive 信封送回来。浏览器会话方式没有应用，点了没人收。
     get capabilities() {
       const writes = writesBlocked() === null;
-      return { reply: writes, retract: writes, edit: writes, react: writes, history: true };
+      return { reply: writes, retract: writes, edit: writes, react: writes, history: true, confirm: writes && mode() === "app" };
     },
     writesBlocked,
     connection,
@@ -1904,6 +2019,29 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       const a = Buffer.from(expected);
       const b = Buffer.from(signature);
       return a.length === b.length && timingSafeEqual(a, b);
+    },
+
+    // 确认消息上的按钮被点了（工单 #72）。点的人要是凭据里的用户本人（编号一样；回调带工作区时工作区也一样），
+    // 按钮要在用户发给自己的私信里（conversations.info：im，对方是本人）。认不出时 hub 一律拒绝。
+    async interaction(delivery: ChannelDelivery, context: ChannelAdapterContext): Promise<ChannelOwnerClick | null> {
+      const action = slackConfirmAction(delivery.body);
+      if (!action) return null;
+      const self = context.credential.account;
+      const team = context.credential.team?.id ?? homeTeam;
+      const fromOwner = Boolean(self) && action.user === self && (!action.team || !team || action.team === team);
+      let ownConversation = false;
+      try {
+        const info = await conversation(action.channel, context);
+        ownConversation = info.type === "im" && Boolean(self) && info.user === self;
+      } catch (error) {
+        context.log(`could not look up the conversation of a button click: ${errorText(error)}`);
+      }
+      return {
+        user: action.user, fromOwner, ownConversation,
+        objectKey: placeOf(action.channel, "im", action.ts, action.threadTs ?? undefined).objectKey,
+        message: { channel: action.channel, ts: action.ts },
+        target: action.target, decision: action.decision,
+      };
     },
 
     async parse(delivery: ChannelDelivery, context: ChannelAdapterContext): Promise<ChannelInbound[]> {
@@ -2150,6 +2288,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         if (result.error === "already_reacted") return { remoteRef: { channel, ts: request.target.ts, emoji: request.emoji }, duplicate: true };
         throw new Error(`slack reactions.add: ${isString(result.error) ? result.error : "not ok"}`);
       }
+      if (request.confirm) return sendConfirm(channel, request, sendOptions.idempotencyKey, context);
       if (!isString(request.text)) throw new Error("slack: a reply needs text");
       const outgoing = slackOutgoing(request.text, request.parts);
       if (request.action === "edit") {

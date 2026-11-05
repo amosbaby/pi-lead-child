@@ -301,8 +301,9 @@ export function pairedBindingOrigin(
 
 // 请求来自哪种客户端（写进事件，给人看）：plc 和脚本、浏览器里的网页、手机 App，
 // 或者 Lead 在你这一轮对话里代你做（工单操作层，spec 5.11；凭证是那一轮来自的配对凭证），
-// 或者 Lead 派的子 agent 按权限清单做（landing.md C3；没有配对凭证，凭证编号是 0，名字是那张工单）。
-export type OwnerActionClient = "cli" | "web" | "phone" | "lead" | "agent" | "unknown";
+// 或者 Lead 派的子 agent 按权限清单做（landing.md C3；没有配对凭证，凭证编号是 0，名字是那张工单），
+// 或者你在消息通道里点的按钮（例如 Slack 里发给自己的私信上的「确认这一次」，工单 #72；凭证是那个通道的私信凭证）。
+export type OwnerActionClient = "cli" | "web" | "phone" | "lead" | "agent" | "channel" | "unknown";
 
 export interface OwnerActionSource {
   client: OwnerActionClient;

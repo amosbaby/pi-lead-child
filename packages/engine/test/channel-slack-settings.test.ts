@@ -61,13 +61,15 @@ describe("the Slack settings", () => {
     for (const locale of ["en", "zh"] as const) {
       const note = settings.setupNote!(locale);
       for (const part of ["User Token Scopes", "Bot Token Scopes", "Subscribe to events on behalf of users", "Reinstall to Workspace",
-        "User OAuth Token", ...SLACK_USER_EVENTS]) expect(note).toContain(part);
+        "User OAuth Token", "Interactivity & Shortcuts", ...SLACK_USER_EVENTS]) expect(note).toContain(part);
       expect(settings.secrets[1]!.hint(locale)).not.toContain("User Token Scopes");
     }
     // 应用名是助手名（Slack 在代发的消息下面写「Sent using @Paimon」），说明里写主人名。
     expect(settings.manifest).toContain('name: "Paimon"');
     expect(settings.manifest).toContain('description: "替 Leo 查资料'); 
     expect(settings.manifest).toContain("socket_mode_enabled: true");
+    // 确认消息的按钮（工单 #72）：点击经 Socket Mode 送回来，应用要打开交互。
+    expect(settings.manifest).toContain("  interactivity:\n    is_enabled: true");
     for (const scope of SLACK_USER_SCOPES) expect(settings.manifest).toContain(`      - ${scope}\n`);
     for (const event of ["message.channels", "message.groups", "message.im", "message.mpim"]) {
       expect(settings.manifest).toContain(`      - ${event}\n`);

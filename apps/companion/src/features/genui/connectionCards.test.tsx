@@ -136,6 +136,24 @@ describe('the write confirmation card', () => {
     expect(result.textContent).toContain('已建 ACME-142');
   });
 
+  // 工单 #72：写入确认在用户自己的 Slack 私信里也有按钮。用户在 Slack 里点了，App 里还开着的卡隔一会儿重读，跟着变。
+  it('follows a decision made in Slack while the card waits', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const { runtime, client } = connectionsRuntime([jira], { connectionConfirmation: vi.fn(async () => confirmation()) });
+      await act(async () => {
+        renderWithRuntime(<SurfaceView surface={surface('ConnectionConfirm', { confirmation: CONFIRMATION_ID })} />, runtime);
+      });
+      expect(screen.getByTestId('surface-confirmation-approve')).toBeTruthy();
+      client.connectionConfirmation.mockResolvedValue(confirmation({ state: 'rejected', resolvedBy: 'user via Slack 私信（你自己）（binding 7）' }));
+      await act(async () => { await vi.advanceTimersByTimeAsync(10_000); });
+      expect(screen.getByTestId('surface-confirmation-result').textContent).toBe('Rejected');
+      expect(screen.queryByTestId('surface-confirmation-approve')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('sends a rejection with 不要', async () => {
     const { runtime, client } = connectionsRuntime([jira], {
       connectionConfirmation: vi.fn(async () => confirmation()),

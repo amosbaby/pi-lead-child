@@ -10,6 +10,7 @@ export * from "./event-projection.js";
 export * from "./lead-activity.js";
 export type { LeadAvatarService } from "./lead-avatar-routes.js";
 export * from "./memory-routes.js";
+export * from "./owner-confirmations.js";
 export * from "./runtime-settings-routes.js";
 export * from "./paired-server.js";
 export * from "./pairing-invitation.js";

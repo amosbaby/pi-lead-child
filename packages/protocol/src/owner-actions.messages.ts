@@ -130,6 +130,7 @@ export const ownerActionMessages = defineMessages({
       phone: "Phone",
       lead: "{lead} did it for you in the conversation",
       agent: "A sub-agent from {lead} did it with its permission list",
+      channel: "A button in a message channel (for example your Slack DM to yourself)",
       unknown: "Unknown client",
     } satisfies Record<OwnerActionClient, string>,
     onBehalfUndoCredentialNote: (leadName: string) =>
@@ -204,7 +205,8 @@ export const ownerActionMessages = defineMessages({
       unknown: "v47 之前的凭证",
     },
     clients: {
-      cli: "CLI", web: "网页", phone: "手机", lead: "{lead} 在对话里代你做", agent: "{lead} 派的子 agent 按权限清单做", unknown: "未知客户端",
+      cli: "CLI", web: "网页", phone: "手机", lead: "{lead} 在对话里代你做", agent: "{lead} 派的子 agent 按权限清单做",
+      channel: "消息通道里的按钮（例如 Slack 里发给自己的私信）", unknown: "未知客户端",
     },
     onBehalfUndoCredentialNote: (leadName) =>
       `这是 ${leadName} 在对话里代你做的：只撤销了这次操作，没有作废凭证。如果那句话不是你说的，请到「设置 → 已配对设备」撤销那台设备。`,

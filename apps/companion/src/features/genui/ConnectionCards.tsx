@@ -17,6 +17,8 @@ import { genuiMessages } from './genui.messages';
 // 会话里的两张连接卡（方案 C）。卡片只带 key 或确认号：状态都从 daemon 实时读取，旧卡片不会显示过期的状态。
 
 const CONFIRM_POLL_MS = 2_000;
+// 等你确认时也隔一会儿读一次：你可能在 Slack 自己的私信里点了按钮（工单 #72），卡要跟着变。
+const PENDING_POLL_MS = 10_000;
 
 // Lead 请你连接一个账号（或者重新授权）。按钮走和设置页一样的连接流程。「以后再说」只在这台设备上收起这张卡。
 export function ConnectionConnectCard({ connection: key, reason }: { connection: string; reason?: string }) {
@@ -114,7 +116,7 @@ export function ConnectionConfirmCard({ confirmation: id }: { confirmation: stri
   }, [id, runtime]);
 
   useEffect(() => {
-    if (state !== 'running') return undefined;
+    if (state !== 'running' && state !== 'pending') return undefined;
     const controller = new AbortController();
     const timer = setTimeout(() => {
       runtime.connectionConfirmation(id, controller.signal).then(
@@ -124,7 +126,7 @@ export function ConnectionConfirmCard({ confirmation: id }: { confirmation: stri
           if (!controller.signal.aborted) setConfirmation((current) => current ? { ...current } : current);
         },
       );
-    }, CONFIRM_POLL_MS);
+    }, state === 'pending' ? PENDING_POLL_MS : CONFIRM_POLL_MS);
     return () => {
       controller.abort();
       clearTimeout(timer);

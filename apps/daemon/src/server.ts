@@ -64,7 +64,7 @@ import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { isStopCommand, LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import { CONVERSATION_TURN_INTERRUPTED_BY_STEER } from "@pi-lead-child/protocol";
-import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerMessage } from "@pi-lead-child/engine";
+import type { ChannelHub, ChannelLookupCandidate, ChannelOwnerConfirmRequest, ChannelOwnerMessage } from "@pi-lead-child/engine";
 import {
   autoReplyDisclosure, disclosureAssistantName, disclosureOwnerName, fairyEyeReply, leadAvatarSlackEmoji, setLeadAvatarFairyEye,
   slackEmojiPreview,
@@ -150,6 +150,9 @@ import {
   type LeadCapability, type LeadGrant, type LeadGrantChannel,
 } from "@pi-lead-child/store";
 import { assistantMessageText, projectToolEvent } from "@pi-lead-child/gateway";
+import {
+  isOwnerConfirmationAction, ownerConfirmationContent, resolveOwnerConfirmation, type OwnerConfirmationDeps,
+} from "@pi-lead-child/gateway";
 import {
   persistLeadToolConversationEvent, repairStuckLeadToolOperations,
 } from "@pi-lead-child/gateway";
@@ -4840,6 +4843,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     lead: { dispatcher: agentTasks, available: () => leadIncapacity() === null, taken: (seq) => leadInput.taken(seq) },
     // 用户本人在通道里写给 Lead 的话（例如发给自己的私信）：按用户本人的一轮交给 Lead（acceptChannelOwnerMessage）。
     owner: (message) => acceptChannelOwnerMessage(message),
+    // 用户本人在自己的私信里点了确认消息上的按钮（工单 #72）：hub 已经认过是本人、在本人的私信里。按 App 里点卡的同一份实现做。
+    ownerConfirm: (click) => resolveChannelOwnerConfirmation(click),
   });
   channelHub = startedChannels?.hub ?? null;
   // 来源的连接方式（设置 → 消息通道，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道设置在通道接好以后才认得来源。
@@ -6141,24 +6146,57 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       ...(turnId ? { turnId } : {}),
       context: `这条消息是用户本人在 ${label} 里发给自己的私信，系统凭 ${label} 的连接认出是用户本人：这一轮是用户本人的一轮，`
         + `和在 App 里说话一样。你这一轮的回复会发回那条私信，系统把 Markdown 换成 ${label} 的格式，照常用 Markdown 写，不用表格。`
-        + "render_ui 的卡片只在 App 里看得到：要用户在卡上点的，说清楚去 App 里点。",
+        + "render_ui 的卡片只在 App 里看得到：要用户在卡上点的，说清楚去 App 里点。"
+        + (channelHub?.registry.get(message.source)?.capabilities.confirm
+          ? `例外：改规则的确认卡（confirm_rule_change）和写入确认（confirm_write），这一轮结束后系统在这条私信里另发一条带`
+            + `「确认这一次」「不改」按钮的消息，用户在 ${label} 里点就生效；回复里说一句「在下面那条消息上点」就够，不用重复卡上的内容。`
+          : ""),
     });
     channelOwnerReplies.set(accepted.turnId, [...(channelOwnerReplies.get(accepted.turnId) ?? []), message.conversation]);
     return true;
   }
 
   // 用户本人写给 Lead 的话那一轮结束了：回复发回它来的对话。幂等键是轮次和对话，重试不会发两次。没发出去只记日志，回复在 App 里照样有。
+  // 这一轮里出现的改规则的确认卡和写入确认（工单 #72），回复之后在同一个对话里各发一条带「确认这一次」「不改」按钮的消息：
+  // 同一个对话、同一个确认只发一次（幂等键是对话和确认的对象），已经处理过、过期的不发。来源不支持按钮时不发，Lead 的话里照旧请用户去 App 里点。
   function replyToChannelOwner(turnId: string, text: string): void {
     const conversations = channelOwnerReplies.get(turnId);
     if (!conversations) return;
     channelOwnerReplies.delete(turnId);
     const hub = channelHub;
-    if (!text.trim() || !hub) return;
+    if (!hub) return;
+    const confirmations = turnUserActions.list().filter(isOwnerConfirmationAction);
     for (const conversation of new Set(conversations)) {
-      hub.replyToOwner(conversation, text, `${turnId}:${conversation}`).catch((error: unknown) => {
-        log(`[channels] could not send the reply of turn ${turnId} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
+      const reply = text.trim()
+        ? hub.replyToOwner(conversation, text, `${turnId}:${conversation}`).catch((error: unknown) => {
+          log(`[channels] could not send the reply of turn ${turnId} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
+        })
+        : Promise.resolve();
+      void reply.then(async () => {
+        for (const action of confirmations) {
+          const content = ownerConfirmationContent(ownerConfirmationDeps, action.target);
+          if (!content?.pending) continue;
+          await hub.sendOwnerConfirmation(conversation, content, `${conversation}:${action.target}`).catch((error: unknown) => {
+            log(`[channels] could not send the confirmation ${action.target} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
+          });
+        }
       });
     }
+  }
+
+  // 确认消息的内容和点按钮以后的处理（gateway 的 owner-confirmations.ts）：和 App 的路由用同一份操作层和连接中心。
+  const ownerConfirmationDeps: OwnerConfirmationDeps = {
+    db, uiActions: { db, services: uiActionServices, log }, connections, log,
+  };
+
+  // 用户本人在通道自己的私信里点了按钮：凭证是那个账号的私信凭证（和这条私信交给 Lead 的那一轮同一个）。用户撤销了它时拒绝。
+  async function resolveChannelOwnerConfirmation(click: ChannelOwnerConfirmRequest) {
+    const label = channelHub?.registry.get(click.source)?.label ?? click.source;
+    const binding = channelOwnerBinding(db, { subject: `${click.source}:${click.account}`, name: `${label} 私信（你自己）` });
+    if (!binding) throw new Error(`${label} 私信的凭证在设置 → 设备里撤销了，按钮不再生效`);
+    const content = await resolveOwnerConfirmation(ownerConfirmationDeps, { target: click.target, decision: click.decision, binding });
+    log(`[channels] ${click.source}: the user clicked ${click.decision} on ${click.target} → ${content?.stateLabel ?? "unknown"}`);
+    return content;
   }
 
   const { value: paired, host: gatewayHost } = await listenWithFallback((port, host) => startPairedServer({
