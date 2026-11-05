@@ -14,7 +14,7 @@ import type { ChannelAdapter } from "./types.js";
 
 export {
   compareSlackTs, createSlackChannelAdapter, SLACK_EVENT_KINDS, SLACK_MESSAGE_BLOCKS_MAX, SLACK_REPLY_METADATA_TYPE, SLACK_SECRET_NAMES,
-  SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode,
+  SLACK_ASSISTANT_EMOJI_DEFAULT, SLACK_EMOJI_SCOPE_MISSING, SLACK_OWNER_REPLY_COLOR, SLACK_SOURCE, SLACK_TEXT_OBJECT_MAX, slackDisclosureBlocks, slackEmojiCode, slackOwnerReplyMessages,
   slackCatchUpWindow, slackMemoryExclusion, slackMessageLink, slackMrkdwnFromMarkdown, slackTsOf, slackWorkspaceUrl,
   slackAttachmentsOnly, slackDisplayText, slackMarkupIds, slackMessageText, SLACK_SESSION_SECRET_NAMES, slackSecretNames,
 } from "./sources/slack.js";

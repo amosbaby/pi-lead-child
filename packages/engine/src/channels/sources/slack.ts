@@ -58,7 +58,7 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { Type } from "typebox";
 import { SLACK_APP_TOKEN_ENV, SLACK_SESSION_COOKIE_ENV, SLACK_USER_TOKEN_ENV } from "@pi-lead-child/core";
-import { formatAttachmentBytes, normalizeSlackEmojiCode, plainObjectLinks, SLACK_BYLINE_EMOJI_DEFAULT, type SenderTrust } from "@pi-lead-child/protocol";
+import { DEFAULT_DESIGN_COLORS, formatAttachmentBytes, normalizeSlackEmojiCode, plainObjectLinks, SLACK_BYLINE_EMOJI_DEFAULT, type SenderTrust } from "@pi-lead-child/protocol";
 import type { SystemStandingOrderSeed } from "@pi-lead-child/store";
 import { channelInboundPayload } from "../payload.js";
 import { ChannelFileNotFoundError, ChannelTargetGoneError } from "../types.js";
@@ -105,6 +105,8 @@ const POSTING_WAIT_MS = 10_000;
 // section 和 context 里的一个文字对象最多 3000 个字，一条消息最多 50 个 block。
 export const SLACK_TEXT_OBJECT_MAX = 3_000;
 export const SLACK_MESSAGE_BLOCKS_MAX = 50;
+// 回给用户本人的话的色条颜色：界面的主色（protocol 的 DEFAULT_DESIGN_COLORS.accent）。
+export const SLACK_OWNER_REPLY_COLOR = DEFAULT_DESIGN_COLORS.accent;
 
 // mrkdwn 里 &、<、> 要转义（https://docs.slack.dev/messaging/formatting-message-text）：署名是我们写的话，
 // 里面的名字不能被 Slack 当成提到谁、链接或者 @channel。
@@ -159,6 +161,31 @@ export function slackDisclosureBlocks(parts: { byline: string; body: string | nu
     }
   }
   return blocks;
+}
+
+/**
+ * 回给用户本人的话（request.style owner_reply，用户 2026-11-05）：用户在发给自己的私信里和 Lead 说话，回复用用户本人的账号发回去，
+ * Slack 把同一个人连发的消息排在一个头像下，分不清哪句是 Lead 的。所以每条回复包在一个带左侧色条的 attachment 里
+ * （https://docs.slack.dev/legacy/legacy-messaging/legacy-secondary-message-attachments：color「Changes the color of the border on
+ * the left side of this attachment」，blocks「An array of layout blocks in the same format as described in the building blocks guide」），
+ * 色条里第一行是署名（context block，小号灰字），下面是正文（section，mrkdwn）。颜色是界面的主色。
+ * 一个 section 的文字最多 3000 个字（SLACK_TEXT_OBJECT_MAX），所以正文按 3000 个字拆成几条消息，每条一段、各带色条和署名。
+ * 每条的顶层 text 是这一条的纯文字退路（署名一行加这一段），通知和搜索里看得到；一条最多三千多个字，在 chat.postMessage 建议的
+ * 4000 个字以内（https://docs.slack.dev/reference/methods/chat.postMessage：「For best results, limit the text field to 4,000 characters.」）。
+ * body 已经是 mrkdwn。
+ */
+export function slackOwnerReplyMessages(parts: { byline: string; body: string | null }): Array<{ text: string; attachments: Array<Record<string, unknown>> }> {
+  const chunks = parts.body?.trim() ? slackChunks(parts.body, SLACK_TEXT_OBJECT_MAX).filter((chunk) => chunk.trim()) : [];
+  return (chunks.length ? chunks : [null]).map((chunk) => {
+    const text = chunk ? `${parts.byline}\n${chunk}` : parts.byline;
+    return {
+      text,
+      attachments: [{
+        color: SLACK_OWNER_REPLY_COLOR, fallback: text,
+        blocks: slackDisclosureBlocks({ byline: parts.byline, body: chunk }),
+      }],
+    };
+  });
 }
 
 // 一行里不在行内代码中的部分换成 mrkdwn。顺序要紧：列表的「* 」先换成「• 」，单星号的斜体先换成 _x_，再换双星号的粗体。
@@ -1759,6 +1786,36 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     return found?.ts ?? null;
   }
 
+  // 回给用户本人的话（slackOwnerReplyMessages）：可能是几条。第一条用幂等键本身，后面的是「键#2」「键#3」…，每条各自认出已经发过的，
+  // 重试时只补没发出去的。结果指向第一条。
+  async function sendOwnerReply(
+    channel: string, target: Record<string, string>, parts: { byline: string; body: string | null }, key: string, context: ChannelAdapterContext,
+  ): Promise<ChannelOutboundResult> {
+    let first: string | null = null;
+    let duplicate = true;
+    for (const [index, message] of slackOwnerReplyMessages(parts).entries()) {
+      const partKey = index === 0 ? key : `${key}#${index + 1}`;
+      let ts = await findSent(target, partKey, context);
+      if (ts) {
+        rememberPosted(channel, ts);
+      } else {
+        const result = await trackPosting(channel, api("chat.postMessage", {
+          channel,
+          ...(target.thread_ts ? { thread_ts: target.thread_ts } : {}),
+          text: message.text,
+          attachments: message.attachments,
+          metadata: { event_type: SLACK_REPLY_METADATA_TYPE, event_payload: { idempotency_key: partKey } },
+        }, context));
+        if (!isString(result.ts)) throw new Error("slack chat.postMessage: no ts in the response");
+        ts = result.ts;
+        rememberPosted(channel, ts);
+        duplicate = false;
+      }
+      first ??= ts;
+    }
+    return { remoteRef: { channel, ts: first! }, duplicate, messageId: first! };
+  }
+
   // 记忆沉淀（channels/memory.ts）：频道和私有频道里的线程（道里的消息和订阅频道的普通消息都算），私信不算。
   // 用户本人的话（self_reply）也算：线程里用户说过的话也是事实。
   const memorySpec: ChannelMemorySpec = {
@@ -2097,6 +2154,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         if (SLACK_EDIT_GONE.has(error)) throw new ChannelTargetGoneError(`slack chat.update: ${error}`);
         throw new Error(`slack chat.update: ${error}`);
       }
+      if (request.style === "owner_reply" && outgoing.parts) return sendOwnerReply(channel, request.target, outgoing.parts, sendOptions.idempotencyKey, context);
       const existing = await findSent(request.target, sendOptions.idempotencyKey, context);
       if (existing) {
         rememberPosted(channel, existing);

@@ -128,6 +128,9 @@ export interface ChannelOutboundRequest {
   // 并且照样把 text 作为退路（通知、不显示样式的客户端）。不认识它的来源只发 text，署名也在。
   // 带署名的正文是助手按 Markdown 写的：来源发送时换成自己的格式（例如 Slack 的 mrkdwn）。
   parts?: { byline: string; body: string | null };
+  // owner_reply：回给用户本人的话（用户发给自己的私信那一轮，hub.replyToOwner）。和用户自己的话发在同一个对话、同一个账号下，
+  // 有自己样式的来源把它和用户的话分开（例如加一道色条）。不认识它的来源照常发。
+  style?: "owner_reply";
   // react、unreact：表情的名字，不带冒号。
   emoji?: string;
 }

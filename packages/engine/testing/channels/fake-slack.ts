@@ -450,10 +450,16 @@ export class FakeSlack {
       case "chat.postMessage": {
         // 和真的 Slack 一样检查 Block Kit：不合规就回 invalid_blocks，整条不发。
         if (args.blocks !== undefined && !validBlocks(args.blocks)) return { ok: false, error: "invalid_blocks" };
+        // attachment 里的 blocks 照同样的规则查。
+        if (args.attachments !== undefined && !(Array.isArray(args.attachments)
+          && args.attachments.every((attachment) => (attachment as { blocks?: unknown }).blocks === undefined || validBlocks((attachment as { blocks?: unknown }).blocks)))) {
+          return { ok: false, error: "invalid_attachments" };
+        }
         const message: FakeSlackMessage = {
           channel: String(args.channel), ts: this.ts(), user: this.self.id, text: String(args.text ?? ""), deleted: false,
           ...(typeof args.thread_ts === "string" ? { thread_ts: args.thread_ts } : {}),
           ...(Array.isArray(args.blocks) ? { blocks: args.blocks as Array<Record<string, unknown>> } : {}),
+          ...(Array.isArray(args.attachments) ? { attachments: args.attachments as unknown[] } : {}),
           ...(args.metadata ? { metadata: args.metadata as FakeSlackMessage["metadata"] } : {}),
         };
         this.messages.push(message);
@@ -910,6 +916,7 @@ export class FakeSlack {
       type: "message", channel: message.channel, channel_type: message.channel.startsWith("D") ? "im" : "channel",
       user: message.user, text: message.text, ts: message.ts, ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
       ...(message.blocks ? { blocks: message.blocks } : {}),
+      ...(message.attachments ? { attachments: message.attachments } : {}),
       ...(message.metadata && withMetadata ? { metadata: message.metadata } : {}),
     });
   }

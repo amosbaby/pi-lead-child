@@ -668,7 +668,8 @@ export class ChannelHub {
 
   /**
    * 回用户本人（用户写给 Lead 的话那一轮的回复，ChannelHubOptions.owner）：署上助手的名字，发回那个对话。
-   * Lead 写的 Markdown 由来源发送时换成自己的格式（带署名的话都这样）。key 是幂等键（daemon 用轮次的编号），重试不会发两次。
+   * Lead 写的 Markdown 由来源发送时换成自己的格式（带署名的话都这样），并且按 owner_reply 的样式和用户自己的话分开
+   * （用户 2026-11-05：同一个人连发的消息排在一个头像下，分不清哪句是 Lead 的）。key 是幂等键（daemon 用轮次的编号），重试不会发两次。
    * 没有经过卡、授权表和信心模型：这是用户本人和 Lead 的对话。发不出去时抛 ChannelActionError。
    */
   async replyToOwner(conversationId: string, text: string, key: string): Promise<{ objectKey: string; status: ChannelOutboundOutcome["status"] }> {
@@ -686,7 +687,7 @@ export class ChannelHub {
     const signed = ownerReplyDisclosure(this.assistantFor(adapter), text.trim());
     const outcome = await this.outbox.perform(adapter, context, {
       key: `owner:${key}`, purpose: "auto_reply", cardId: null,
-      request: { action: "reply", objectKey: place.objectKey, target: place.target, text: signed.text, parts: signed.parts },
+      request: { action: "reply", objectKey: place.objectKey, target: place.target, text: signed.text, parts: signed.parts, style: "owner_reply" },
     });
     if (outcome.status === "failed") throw new ChannelActionError("outbound_failed", `没有发出去：${outcome.error ?? "未知原因"}`);
     return { objectKey: place.objectKey, status: outcome.status };
