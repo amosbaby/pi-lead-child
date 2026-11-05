@@ -126,11 +126,12 @@ describe("create_task for a pull request review", () => {
     const prReview = { pr: "Acme/agent-app#101", focus: "看鉴权", acceptance: "每个问题指到行" };
     const itemIdOf = (result: any) => Number(/#(\d+)/.exec(result.content[0].text)![1]);
 
+    // 不写死 origin（#212）：记下 PR 所在的仓库，检出时按它的地址找远端。
     it("records the pull request from the template, so the run checks out its head", async () => {
       const result = await tool("create_task").execute("call", {
         title: "review via template", brief: "", workdir: repo, template: "pr_review", pr_review: prReview, runtime: "codex",
       });
-      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 101, remote: "origin" });
+      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 101, repository: "github.com/acme/agent-app" });
     });
 
     it("keeps an explicit review_pull_request and remote over the template's number", async () => {
@@ -138,7 +139,7 @@ describe("create_task for a pull request review", () => {
         title: "review via template, explicit", brief: "", workdir: repo, template: "pr_review", pr_review: prReview,
         review_pull_request: 55, pull_request_remote: "upstream", runtime: "codex",
       });
-      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 55, remote: "upstream" });
+      expect(pullRequestReviewTarget(db, itemIdOf(result))).toEqual({ number: 55, remote: "upstream", repository: "github.com/acme/agent-app" });
     });
 
     it("still creates the ticket, without a target, when the workdir is not a git repository", async () => {
