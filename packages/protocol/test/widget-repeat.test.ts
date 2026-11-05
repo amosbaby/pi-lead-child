@@ -29,9 +29,9 @@ function render(data: Record<string, unknown>) {
 
 describe("repeat in a widget template", () => {
   it("passes an https link cell from the data source and refuses an http one before the card is drawn (ticket #64)", () => {
-    const pr = (link: string) => ({ count: 1, repos: [{ name: "acme/x", prs: 1, rows: [[{ link, text: "acme/x#12" }]] }] });
+    const pr = (link: string) => ({ count: 1, repos: [{ name: "acme/x", prs: 1, rows: [[{ link, text: "#12" }]] }] });
     expect(render(pr("https://github.com/acme/x/pull/12")).nodes.find((node) => node.id === "table-0")!.props.rows)
-      .toEqual([[{ link: "https://github.com/acme/x/pull/12", text: "acme/x#12" }]]);
+      .toEqual([[{ link: "https://github.com/acme/x/pull/12", text: "#12" }]]);
     const resolved = resolveWidgetTemplate(template, pr("http://github.com/acme/x/pull/12"));
     if (!resolved.ok) throw new Error(resolved.error);
     expect(buildWidgetSurface(7, resolved.input).ok).toBe(false);

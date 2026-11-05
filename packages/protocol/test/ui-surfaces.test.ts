@@ -225,14 +225,14 @@ describe("a surface that shows information", () => {
   it("takes an https link cell and refuses any other link before the card is drawn (ticket #64)", () => {
     const withLink = (link: string): UiSurface => ({
       id: "s-link", catalogVersion: UI_CATALOG_VERSION, root: "table", fallbackText: "我的未合并 PR",
-      nodes: [{ id: "table", type: "DataTable", props: { columns: [{ label: "PR" }, { label: "链接" }], rows: [["#12", { link, text: "acme/x#12" }]] } }],
+      nodes: [{ id: "table", type: "DataTable", props: { columns: [{ label: "PR" }, { label: "评审" }], rows: [[{ link, text: "#12" }, { badge: "已批准", tone: "success" }]] } }],
     });
     const good = withLink("https://github.com/acme/x/pull/12");
     expect(validateUiSurface(good)).toEqual({ ok: true, surface: good });
     for (const bad of ["http://github.com/acme/x/pull/12", "javascript:alert(1)", "https://alice:secret@github.com/acme/x", "github.com/acme/x/pull/12"]) {
       const result = validateUiSurface(withLink(bad));
       expect(result.ok, bad).toBe(false);
-      if (!result.ok) expect(result.errors[0]?.path).toBe("/nodes/0/props/rows/0/1/link");
+      if (!result.ok) expect(result.errors[0]?.path).toBe("/nodes/0/props/rows/0/0/link");
     }
     const noText = validateUiSurface({ ...good, nodes: [{ ...good.nodes[0]!, props: { columns: [{ label: "链接" }], rows: [[{ link: "https://github.com/acme/x/pull/12" }]] } }] });
     expect(noText.ok).toBe(false);

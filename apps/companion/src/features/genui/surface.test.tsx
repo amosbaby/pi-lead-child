@@ -226,16 +226,16 @@ describe('a card that shows information', () => {
     expect(screen.getByText('1,234')).toBeTruthy();
   });
 
-  it('opens an https link cell, such as a pull request, in the browser (ticket #64)', async () => {
+  it('opens an https link cell, such as a pull request number in the first column, in the browser (ticket #64)', async () => {
     const open = vi.spyOn(window, 'open').mockReturnValue(null);
     renderSurface(info([{
       id: 'table', type: 'DataTable', props: {
-        columns: [{ label: 'PR' }, { label: '链接' }],
-        rows: [['#12', { link: 'https://github.com/acme/x/pull/12', text: 'acme/x#12' }]],
+        columns: [{ label: 'PR' }, { label: '评审' }],
+        rows: [[{ link: 'https://github.com/acme/x/pull/12', text: '#12' }, { badge: '已批准', tone: 'success' }]],
       },
     }]));
     const link = screen.getByTestId('surface-cell-link');
-    expect(link.textContent).toBe('acme/x#12');
+    expect(link.textContent).toBe('#12');
     expect(link.getAttribute('role')).toBe('link');
     fireEvent.click(link);
     await waitFor(() => expect(open).toHaveBeenCalled());
