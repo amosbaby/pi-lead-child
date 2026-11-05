@@ -15,7 +15,9 @@
 //      很快又重连时合并补拉：上一次补拉还在排队，这次就不再排；还在跑，跑完再补一次（只补一次，不管这期间重连了几次）；
 //      上一次补完不到 30 秒，等到满 30 秒再补。补拉每次从水位和道的最后一条往后读，到开始补的时刻为止，补完水位才往前推，
 //      所以合并以后的一次补拉盖住了这几次断线的时间段（并集），不会漏。没连着时不补，等连上再补。
-//   4. SDK 的日志只要 warn 以上，转到 hub 的日志，去掉令牌。
+//      交给补拉这几次断线的真实时段（outage：第一次断开的时刻、最后一次连上的时刻、断了几次），补拉写进不完整事件。
+//   4. SDK 的日志只要 warn 以上，转到 hub 的日志，去掉令牌。心跳超时（等不到 pong、ping）断开时，原因里带上 daemon
+//      事件循环最近的延迟（perf_hooks.monitorEventLoopDelay，2026-11-06）：分得清是网络的问题，还是 daemon 自己卡住了没回。
 //   5. 连接的状态（正在连、连上了、连不上）报给 host.status（设置页的通道状态，2026-10-20）。连不上以后再试时，
 //      状态仍然是上一次的错误，直到连上。
 //   6. 每次连上以后第一个用户本人能看到的事件报给 host.received（设置页：连上了却收不到事件时提醒检查订阅）。
@@ -23,9 +25,10 @@
 //   7. 停了以后能再开（设置页改了凭据以后 daemon 先 stop 再 start）。每次 start 是新的一代：上一代还没结束的连接
 //      看到换代就退出（连上了就断开），结束以后用新的凭据再连。
 // SDK 在第一次连接时才加载（加载要一秒左右；engine 被很多进程引用）。测试用 createClient 注入假的客户端。
+import { monitorEventLoopDelay, type IntervalHistogram } from "node:perf_hooks";
 import type { SocketModeOptions } from "@slack/socket-mode";
 import type {
-  ChannelAdapterContext, ChannelDelivery, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver, ChannelTransportStatus,
+  ChannelAdapterContext, ChannelDelivery, ChannelOutage, ChannelTransport, ChannelTransportContext, ChannelTransportDeliver, ChannelTransportStatus,
 } from "../types.js";
 import { scrubSlackText, slackSdkLogger, type SlackFetch } from "./slack-web-api.js";
 
@@ -76,6 +79,8 @@ export interface SlackSocketTransportInput {
     transport: ChannelTransportContext;
     deliver: ChannelTransportDeliver;
     active: () => boolean;
+    // 这次补拉盖住的真实断线。daemon 启动以后第一次连上时是 null。
+    outage: ChannelOutage | null;
   }) => Promise<void>;
 }
 
@@ -88,6 +93,10 @@ const STABLE_MS = 60_000;
 const DROP_BACKOFF_MAX_MS = 60_000;
 // 上一次补拉做完以后，至少隔多久才开始下一次。
 const CATCH_UP_SPACING_MS = 30_000;
+// 事件循环的延迟按多长一段统计（心跳超时时报这一段和上一段里的）：和等 pong 的时间一样长。
+const LOOP_WINDOW_MS = CLIENT_PING_TIMEOUT_MS;
+// SDK 等不到 pong、ping 时的警告（SlackWebSocket）。
+const HEARTBEAT_TIMEOUT = /wasn't received from the server before the timeout/;
 // 一次断开最多记几条原因、每条多长。
 const DROP_NOTES = 5;
 const DROP_NOTE_CHARS = 300;
@@ -105,6 +114,37 @@ const CLOSE_FRAME = /^WebSocket close frame received \(code: (\d+), reason: (.*)
 
 function partsText(parts: unknown[]): string {
   return parts.map((part) => (part instanceof Error ? part.message : typeof part === "string" ? part : String(part))).join(" ");
+}
+
+const ms = (nanoseconds: number) => Math.round(nanoseconds / 1e6);
+
+// daemon 的事件循环延迟：一段一段地统计，记最近两段（这一段和上一段）的最大值和 p99。
+class LoopDelay {
+  private readonly histogram: IntervalHistogram = monitorEventLoopDelay({ resolution: 20 });
+  private previous: { max: number; p99: number } | null = null;
+  private readonly timer: ReturnType<typeof setInterval>;
+
+  constructor() {
+    this.histogram.enable();
+    this.timer = setInterval(() => {
+      this.previous = { max: this.histogram.max, p99: this.histogram.percentile(99) };
+      this.histogram.reset();
+    }, LOOP_WINDOW_MS);
+    this.timer.unref?.();
+  }
+
+  text(): string {
+    const count = this.histogram.count;
+    const max = Math.max(count ? this.histogram.max : 0, this.previous?.max ?? 0);
+    const p99 = Math.max(count ? this.histogram.percentile(99) : 0, this.previous?.p99 ?? 0);
+    const window = Math.round((this.previous ? 2 : 1) * LOOP_WINDOW_MS / 1000);
+    return `daemon event loop delay in the last ${window}s: max ${ms(max)} ms, p99 ${ms(p99)} ms`;
+  }
+
+  stop(): void {
+    clearInterval(this.timer);
+    this.histogram.disable();
+  }
 }
 
 function errorText(error: unknown): string {
@@ -135,6 +175,11 @@ class SlackSocketTransport implements ChannelTransport {
   private connectedAt: number | null = null;
   private quickDrops = 0;
   private dropNotes: string[] = [];
+  // 还没补拉的断线：第一次断开的时刻和断了几次（补拉开始时交出去、清空）。
+  private outageSince: number | null = null;
+  private outageDrops = 0;
+  // 事件循环的延迟（开着时统计）。
+  private loopDelay: LoopDelay | null = null;
   // 补拉：waiting 是排着队或者等着隔够时间，running 是在跑；again 是跑的时候又连上了，跑完再补一次。
   private catchUpState: "idle" | "waiting" | "running" = "idle";
   private catchUpAgain = false;
@@ -168,6 +213,9 @@ class SlackSocketTransport implements ChannelTransport {
     this.quickDrops = 0;
     this.catchUpEndedAt = null;
     this.reported = null;
+    this.outageSince = null;
+    this.outageDrops = 0;
+    this.loopDelay ??= new LoopDelay();
     this.host = host;
     this.deliver = deliver;
     if (this.connecting) this.pendingConnect = true;
@@ -181,6 +229,8 @@ class SlackSocketTransport implements ChannelTransport {
     this.retryTimer = null;
     this.connectedAt = null;
     this.catchUpAgain = false;
+    this.loopDelay?.stop();
+    this.loopDelay = null;
     if (this.catchUpTimer) {
       clearTimeout(this.catchUpTimer);
       this.catchUpTimer = null;
@@ -362,7 +412,11 @@ class SlackSocketTransport implements ChannelTransport {
     this.dropNotes = [];
     const lived = this.connectedAt === null ? null : Date.now() - this.connectedAt;
     this.connectedAt = null;
-    if (lived !== null) this.quickDrops = lived < this.stableMs ? this.quickDrops + 1 : 0;
+    if (lived !== null) {
+      this.quickDrops = lived < this.stableMs ? this.quickDrops + 1 : 0;
+      this.outageSince ??= Date.now();
+      this.outageDrops += 1;
+    }
     // 连接断了以后的第一次重连不等（Slack 要我们换连接时就是这样）；连续很快又断时从第二次起退避；之后连不上再退避。
     const dropDelay = this.quickDrops <= 1 ? 0 : Math.min(this.retryBaseMs * 2 ** Math.min(this.quickDrops - 2, 20), DROP_BACKOFF_MAX_MS, this.retryMaxMs);
     const failureDelay = this.failures === 0 ? 0 : Math.min(this.retryBaseMs * 2 ** Math.min(this.failures - 1, 20), this.retryMaxMs);
@@ -376,9 +430,10 @@ class SlackSocketTransport implements ChannelTransport {
     else this.schedule(delay);
   }
 
-  // 记下这次连接断开的一条原因（去掉令牌，同样的只记一次）。
+  // 记下这次连接断开的一条原因（去掉令牌，同样的只记一次）。心跳超时带上事件循环的延迟。
   private noteDrop(text: string, token: string): void {
-    const note = scrubSlackText(text, [token]).slice(0, DROP_NOTE_CHARS);
+    const loop = HEARTBEAT_TIMEOUT.test(text) && this.loopDelay ? ` (${this.loopDelay.text()})` : "";
+    const note = scrubSlackText(text, [token]).slice(0, DROP_NOTE_CHARS - loop.length) + loop;
     if (this.dropNotes.length < DROP_NOTES && !this.dropNotes.includes(note)) this.dropNotes.push(note);
   }
 
@@ -437,7 +492,13 @@ class SlackSocketTransport implements ChannelTransport {
         const context = await host.context();
         if (!context || this.stopped) return;
         ran = true;
-        await afterReconnect({ context, transport: host, deliver: this.deliver!, active: () => !this.stopped });
+        // 交出这次补拉盖住的断线（合并的几次断开从第一次算起），清空：跑的时候又断了，下一次补拉交新的一段。
+        const outage = this.outageSince === null
+          ? null
+          : { disconnectedAt: new Date(this.outageSince), reconnectedAt: new Date(this.connectedAt ?? Date.now()), drops: this.outageDrops };
+        this.outageSince = null;
+        this.outageDrops = 0;
+        await afterReconnect({ context, transport: host, deliver: this.deliver!, active: () => !this.stopped, outage });
       } finally {
         this.catchUpState = "idle";
         if (ran) this.catchUpEndedAt = Date.now();
