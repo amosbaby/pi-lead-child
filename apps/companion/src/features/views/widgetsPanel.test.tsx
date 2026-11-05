@@ -64,6 +64,24 @@ describe('the views panel', () => {
     expect(screen.queryByTestId('views-tabs')).toBeNull();
   });
 
+  it('draws a widget with one Disclosure per repository (ticket #53), each opening on its own', async () => {
+    const repo = (name: string, index: number) => [
+      { id: `repo-${index}`, type: 'Disclosure', props: { label: name, lines: 1, detail: [`t-${index}`] }, children: [`line-${index}`, `t-${index}`] },
+      { id: `line-${index}`, type: 'Text', props: { text: `${name} · 1 个 PR` } },
+      { id: `t-${index}`, type: 'DataTable', props: { columns: [{ label: 'PR' }], rows: [[`#${index + 1}`]] } },
+    ];
+    renderPanel([{
+      ...widget(9, '我的未合并 PR', ''),
+      surface: {
+        id: 'widget_9', catalogVersion: UI_CATALOG_VERSION, root: 'r', fallbackText: '我的未合并 PR',
+        nodes: [{ id: 'r', type: 'Stack', props: {}, children: ['repo-0', 'repo-1'] }, ...repo('acme/api', 0), ...repo('acme/web', 1)],
+      },
+    }]);
+    await screen.findByTestId('surface-disclosure-repo-0');
+    expect(screen.getByTestId('surface-disclosure-repo-1')).toBeTruthy();
+    expect(screen.getByTestId('surface-widget_9').textContent).toContain('acme/web · 1 个 PR');
+  });
+
   it('tells the user how to get a widget when there is none', async () => {
     renderPanel([]);
     expect((await screen.findByTestId('views-empty')).textContent).toContain('Tell Paimon what you want to watch all the time');

@@ -3,7 +3,8 @@ import {
   dataToneBadge, dataToneText, type BadgeTone, type QuotedMessage, type SegmentItem, type TileEmphasis,
 } from '@pi-lead-child/components';
 import {
-  intlLocale, surfaceNeedsNewerCatalog, validateUiSurface, type UiBinding, type UiNode, type UiSurface, type UiTone, type UserActionRequest,
+  intlLocale, surfaceNeedsNewerCatalog, validateUiSurface, type UiBinding, type UiNode, type UiSurface, type UiSurfaceRules, type UiTone,
+  type UserActionRequest,
 } from '@pi-lead-child/protocol';
 import { createContext, useContext, type ReactNode } from 'react';
 
@@ -40,9 +41,12 @@ import { UserActionCard } from './UserActionCard';
 // 外观是方案 A 的决定卡：有待做的决定时整张卡是琥珀色的边，工单头写「等你决定」。
 // partial：模型还在写这张卡（流式），先画已经完整的部分，说一句「正在生成…」，选项先不能点。
 // callId：会话里画出这张卡的 render_ui 调用。有它时卡上的按钮做成以后收起成「已完成」，刷新、换设备也一样（工单 #263）。
-export function SurfaceView({ surface, partial = false, callId = null }: { surface: UiSurface; partial?: boolean; callId?: string | null }) {
+// rules：校验的场合，控件面板传 WIDGET_SURFACE_RULES（和服务端建控件时一样）。
+export function SurfaceView({ surface, partial = false, callId = null, rules }: {
+  surface: UiSurface; partial?: boolean; callId?: string | null; rules?: UiSurfaceRules;
+}) {
   const m = useMessages(genuiMessages).surface;
-  const checked = validateUiSurface(surface);
+  const checked = validateUiSurface(surface, rules);
   if (!checked.ok) {
     if (surfaceNeedsNewerCatalog(checked)) return <NeedsNewerApp fallbackText={surface.fallbackText} />;
     return <Text size="body">{surface.fallbackText}</Text>;

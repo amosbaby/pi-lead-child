@@ -1,7 +1,7 @@
 import {
   Box, Button, Column, DetailHeader, Density, Icon, Popover, RecordRow, Row, ScrollArea, SegmentedControl, Text,
 } from '@pi-lead-child/components';
-import { viewLabel, widgetViews, type WidgetDto } from '@pi-lead-child/protocol';
+import { viewLabel, WIDGET_SURFACE_RULES, widgetViews, type WidgetDto } from '@pi-lead-child/protocol';
 import { useState } from 'react';
 
 import { SurfaceView } from '@/features/genui/SurfaceView';
@@ -129,7 +129,7 @@ function WidgetBlock({ widget, widgets, views, leadName }: {
         />
       </Row>
       {problem ? <Text testID={`widget-source-problem-${widget.id}`} size="note" tone="danger-dark">{problem}</Text> : null}
-      <SurfaceView surface={widget.surface} />
+      <SurfaceView surface={widget.surface} rules={WIDGET_SURFACE_RULES} />
       {pending ? <Text testID={`widget-pending-${widget.id}`} size="note" tone="secondary">{pending}</Text> : null}
       {error ? <Text testID={`widget-error-${widget.id}`} size="note" tone="danger-dark">{error}</Text> : null}
     </Column>

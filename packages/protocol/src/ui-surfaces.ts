@@ -691,7 +691,11 @@ export type UiSurfaceErrorCode = "unknown_component" | "newer_catalog";
 export type UiSurfaceError = { path: string; message: string; code?: UiSurfaceErrorCode };
 export type UiSurfaceValidation = { ok: true; surface: UiSurface } | { ok: false; errors: UiSurfaceError[] };
 
-export function validateUiSurface(input: unknown): UiSurfaceValidation {
+// 校验的场合。manyOpeners：一张卡可以有多个能点开的块（Disclosure、带细节的 Item），只给控件用（工单 #53，
+// 控件在右侧面板里，每个块点开是各自的浮层；会话里的卡仍然最多一个）。别的规则都不变，能点开的块仍然不能互相嵌套。
+export type UiSurfaceRules = { manyOpeners?: boolean };
+
+export function validateUiSurface(input: unknown, rules: UiSurfaceRules = {}): UiSurfaceValidation {
   const errors: UiSurfaceError[] = [];
   const fail = (path: string, message: string, code?: UiSurfaceErrorCode): UiSurfaceValidation =>
     ({ ok: false, errors: [...errors, { path, message, ...(code ? { code } : {}) }] });
@@ -742,7 +746,7 @@ export function validateUiSurface(input: unknown): UiSurfaceValidation {
   if (graphError) return graphError;
   const orphan = surface.nodes.find((node) => !reached.has(node.id));
   if (orphan) return fail("/nodes", `节点 ${orphan.id} 从 root 走不到`);
-  const graph = graphRuleError(surface.nodes, byId);
+  const graph = graphRuleError(surface.nodes, byId, rules);
   if (graph) return fail(graph.path, graph.message);
   return { ok: true, surface };
 }
@@ -756,7 +760,7 @@ export function surfaceNeedsNewerCatalog(result: UiSurfaceValidation): boolean {
 }
 
 // 跨节点的规则（v3 积木）：Media 的两个子节点，每张卡里图块和引用的上限。path 相对于整张卡。
-function graphRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNode>): UiSurfaceError | null {
+function graphRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNode>, rules: UiSurfaceRules): UiSurfaceError | null {
   for (const [index, node] of nodes.entries()) {
     if (node.type !== "Media") continue;
     const children = node.children ?? [];
@@ -777,7 +781,7 @@ function graphRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNo
   if (tiles > UI_COMPONENT_LIMITS.tilesPerCard) return { path: "/nodes", message: `一张卡最多 ${UI_COMPONENT_LIMITS.tilesPerCard} 个 Tile，现在是 ${tiles} 个` };
   const messages = nodes.filter((node) => node.type === "Message").length;
   if (messages > UI_COMPONENT_LIMITS.messagesPerCard) return { path: "/nodes", message: `一张卡最多 ${UI_COMPONENT_LIMITS.messagesPerCard} 个 Message` };
-  return groupRuleError(nodes, byId) ?? disclosureRuleError(nodes, byId) ?? formPlacementError(nodes, byId) ?? actionRuleError(nodes, byId);
+  return groupRuleError(nodes, byId) ?? disclosureRuleError(nodes, byId, rules) ?? formPlacementError(nodes, byId) ?? actionRuleError(nodes, byId);
 }
 
 // Form：一张卡最多 1 个；不能放进 Disclosure、Item、Group（它会变高，展开态和组都在浮层里，提交后要收成一行）。
@@ -832,18 +836,23 @@ function subtree(id: string, byId: ReadonlyMap<string, UiNode>, into = new Set<s
   return into;
 }
 
-// Disclosure：最多 1 个、不能嵌套；detail 都是它的子节点，至少留一个子节点在收起态。Field 只能在展开态里（不占会话列表的高度）。
-function disclosureRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNode>): UiSurfaceError | null {
+// Disclosure：最多 1 个（控件不限，rules.manyOpeners）、不能嵌套；detail 都是它的子节点，至少留一个子节点在收起态。
+// Field 只能在展开态里（不占会话列表的高度）。
+function disclosureRuleError(nodes: readonly UiNode[], byId: ReadonlyMap<string, UiNode>, rules: UiSurfaceRules): UiSurfaceError | null {
   // 有细节的 Item 也会撑开成浮层：它的细节算展开态，它和 Disclosure 一起算「一张卡最多一个」、不能互相嵌套。
   const openers = nodes.filter((node) => node.type === "Disclosure"
     || (node.type === "Item" && (node.children ?? []).some((id) => byId.get(id)?.type !== "Action")));
-  if (openers.length > 1) return { path: "/nodes", message: "一张卡最多一个能点开的 Disclosure 或带细节的 Item" };
+  if (openers.length > 1 && !rules.manyOpeners) return { path: "/nodes", message: "一张卡最多一个能点开的 Disclosure 或带细节的 Item" };
+  for (const opener of openers) {
+    const inside = (opener.children ?? []).flatMap((id) => [...subtree(id, byId)]);
+    if (openers.some((other) => inside.includes(other.id))) return { path: "/nodes", message: "能点开的 Disclosure 和带细节的 Item 不能互相嵌套" };
+  }
   const expanded = new Set<string>();
   for (const item of openers.filter((node) => node.type === "Item")) {
     for (const id of item.children ?? []) if (byId.get(id)?.type !== "Action") for (const below of subtree(id, byId)) expanded.add(below);
   }
   const disclosures = nodes.map((node, index) => ({ node, index })).filter(({ node }) => node.type === "Disclosure");
-  if (disclosures.length > 1) return { path: "/nodes", message: "一张卡最多 1 个 Disclosure" };
+  if (disclosures.length > 1 && !rules.manyOpeners) return { path: "/nodes", message: "一张卡最多 1 个 Disclosure" };
   for (const { node, index } of disclosures) {
     const children = node.children ?? [];
     const detail = (node.props as { detail: string[] }).detail;

@@ -182,6 +182,42 @@ describe("widgets with a data source", () => {
     expect(getWidget(db, created.id)!.source!.lastError).toContain("卡不合格");
   });
 
+  it("repeats one Disclosure per item (工单 #53): 0 items still draws, a missing field keeps the last card", async () => {
+    const perRepo = {
+      root: "r",
+      nodes: [
+        { id: "r", type: "Stack", props: { gap: "sm" }, children: ["h", "repo"] },
+        { id: "h", type: "Text", props: { text: "{{count}} 个未合并 PR", variant: "caption" } },
+        { id: "repo", type: "Disclosure", props: { label: "{{item.repo}}", lines: 1, detail: ["t"] }, children: ["line", "t"], repeat: "repos" },
+        { id: "line", type: "Text", props: { text: "{{item.repo}} · {{item.prs}} 个 PR · 已批准 {{item.approved}} · 有评论 {{item.commented}}" } },
+        { id: "t", type: "DataTable", props: { columns: [{ label: "PR" }, { label: "标题" }], rows: { $data: "item.rows" } } },
+      ],
+      fallback_text: "我的未合并 PR",
+    };
+    const repo = (name: string, rows: string[][]) => ({ repo: name, prs: rows.length, approved: 1, commented: 0, rows });
+    outputs = [json({ count: 3, repos: [repo("acme/api", [["#1", "修登录"]]), repo("acme/web", [["#2", "改样式"], ["#3", "加测试"]])] })];
+    const created = (await runUiAction(db, {
+      target: board, action: "create", input: { title: "我的未合并 PR", surface: perRepo, source: { command: "prs.sh", every_seconds: 180 } },
+      caller: user, now: clock, services: services(),
+    })).result as WidgetDto;
+    expect(created.surface.nodes.filter((node) => node.type === "Disclosure").map((node) => node.props.label)).toEqual(["acme/api", "acme/web"]);
+    expect(created.surface.nodes.find((node) => node.id === "line-1")!.props.text).toBe("acme/web · 2 个 PR · 已批准 1 · 有评论 0");
+    expect(getWidgetSource(db, created.id)).toMatchObject({ template: perRepo });
+
+    const runner = createWidgetSourceRunner(db, { runCommand: fakeRun, now: () => clock });
+    clock = new Date("2026-10-30T08:03:00.000Z");
+    outputs = [json({ count: 0, repos: [] })];
+    await runner.tick();
+    expect(getWidget(db, created.id)!.surface.nodes.map((node) => node.id)).toEqual(["r", "h"]);
+    const empty = getWidget(db, created.id)!.surface;
+
+    clock = new Date("2026-10-30T08:06:00.000Z");
+    outputs = [json({ count: 1, repos: [{ repo: "acme/api", prs: 1, rows: [["#1", "修登录"]] }] })];
+    await runner.tick();
+    expect(getWidget(db, created.id)!.surface).toEqual(empty);
+    expect(getWidget(db, created.id)!.source!.lastError).toContain("repos.0.approved");
+  });
+
   it("restarts a run that a daemon restart interrupted", async () => {
     const widget = await createNasdaq();
     db.prepare("UPDATE widget_sources SET running_since = ?, next_run_at = ? WHERE widget_id = ?").run(clock.toISOString(), "2099-01-01T00:00:00.000Z", widget.id);

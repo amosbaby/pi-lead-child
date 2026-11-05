@@ -163,6 +163,9 @@ export const WIDGET_BOARD_ACTIONS = {
       + `标准输出只能是一个 JSON 对象（最多 ${WIDGET_SOURCE_LIMITS.outputBytes} 字节，${WIDGET_SOURCE_LIMITS.timeoutSeconds} 秒内跑完，`
       + `间隔至少 ${WIDGET_SOURCE_LIMITS.minEverySeconds} 秒）。surface 这时是模板：属性的整个值写 {"$data": "字段"}（例如 Tile 的 value、`
       + "BarChart 的 bars），文字里写 {{字段}}（例如 caption 写 \"更新于 {{time}}\"），路径用点分，数组用数字下标。涨跌颜色、格式化都在命令里算好。"
+      + "数目会变的一组（例如每个仓库一块）：节点写 repeat: \"字段\"（数据里的一个数组），每一项生成一份这个节点和它下面的节点，"
+      + "这一份里用 {{item.字段}}、{\"$data\": \"item.字段\"} 取这一项；0 项时这一块不出现，"
+      + `最多 ${WIDGET_SOURCE_LIMITS.repeatItems} 项，不能嵌套。控件里可以有多个 Disclosure（例如每项一个），会话里的卡仍然最多一个。`
       + "建的时候系统先跑一次，跑不通就不建。之后刷新不叫醒你，不花 token；连续出错 5 次会暂停并叫醒你一次。"
       + "不要用后台检查（watch）加你重画来刷新控件",
     defaultReason: "用户要一个常驻的控件",

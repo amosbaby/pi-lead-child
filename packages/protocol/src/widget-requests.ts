@@ -30,6 +30,8 @@ export const WIDGET_SOURCE_LIMITS = {
   // 连续出错几次就暂停，并叫醒 Lead 一次。
   maxConsecutiveErrors: 5,
   command: 4_000,
+  // 模板里一个 repeat 最多重复几份（工单 #53）。整张卡还受 64 个节点、16 KB 的限制。
+  repeatItems: 20,
 } as const;
 
 export const WidgetSourceInputSchema = StrictObject({
@@ -61,6 +63,8 @@ export const WidgetSurfaceInputSchema = StrictObject({
     type: Type.String({ minLength: 1 }),
     props: Type.Record(Type.String(), Type.Unknown()),
     children: Type.Optional(Type.Array(Type.String())),
+    // 按数据里的一个数组重复这个节点和它下面的节点（只在带数据源的模板里用，widgets.ts 的 resolveWidgetTemplate 展开）。
+    repeat: Type.Optional(Type.String({ minLength: 1, maxLength: 200 })),
   }), { minItems: 1 }),
   fallback_text: Type.String({ minLength: 1, maxLength: 2_000 }),
 });

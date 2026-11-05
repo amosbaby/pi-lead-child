@@ -2,6 +2,7 @@ import { Type, type Static, type TProperties } from "typebox";
 import { Value } from "typebox/value";
 import {
   redactUiSurface, UI_CATALOG_VERSION, UiSurfaceSchema, validateUiSurface, type UiComponentType, type UiSurface, type UiSurfaceError,
+  type UiSurfaceRules,
 } from "./ui-surfaces.ts";
 import {
   DEFAULT_VIEW, WIDGET_LIMITS, WIDGET_SOURCE_LIMITS, WidgetSurfaceInputSchema, type WidgetSurfaceInput,
@@ -81,13 +82,20 @@ export function widgetViews(widgets: readonly Pick<WidgetDto, "id" | "view">[]):
 
 export type WidgetSurfaceResult = { ok: true; surface: UiSurface } | { ok: false; errors: UiSurfaceError[] };
 
+// 控件的校验规则：一张卡可以有多个能点开的块（工单 #53，例如每个仓库一个 Disclosure）。服务端建卡和页面画控件都用它。
+export const WIDGET_SURFACE_RULES: UiSurfaceRules = { manyOpeners: true };
+
 /**
- * 把操作的 input 里的模板变成控件的 surface：先去掉密钥，再用和 render_ui 同一个 validateUiSurface 校验，
+ * 把操作的 input 里的模板变成控件的 surface：先去掉密钥，再用和 render_ui 同一个 validateUiSurface 校验（控件的规则 WIDGET_SURFACE_RULES），
  * 再查控件不能用的组件（WIDGET_EXCLUDED_COMPONENTS）。不合格时返回带路径的错误，和 render_ui 给 Lead 的一样。
  */
 export function buildWidgetSurface(widgetId: number, input: unknown): WidgetSurfaceResult {
   if (!Value.Check(WidgetSurfaceInputSchema, input)) {
     return { ok: false, errors: [{ path: "/surface", message: "模板的结构不对：要有 root、nodes 和 fallback_text，写法和 render_ui 一样" }] };
+  }
+  const repeated = input.nodes.findIndex((node) => node.repeat !== undefined);
+  if (repeated >= 0) {
+    return { ok: false, errors: [{ path: `/nodes/${repeated}/repeat`, message: "repeat 只能用在带数据源（source）的模板里" }] };
   }
   const draft: UiSurface = {
     id: widgetSurfaceId(widgetId),
@@ -96,7 +104,7 @@ export function buildWidgetSurface(widgetId: number, input: unknown): WidgetSurf
     fallbackText: input.fallback_text,
     nodes: input.nodes.map((node) => ({ ...node, props: { ...node.props } })),
   };
-  const checked = validateUiSurface(redactUiSurface(draft));
+  const checked = validateUiSurface(redactUiSurface(draft), WIDGET_SURFACE_RULES);
   if (!checked.ok) return checked;
   const excluded = checked.surface.nodes.findIndex((node) => WIDGET_EXCLUDED_COMPONENTS.has(node.type as UiComponentType));
   if (excluded >= 0) {
@@ -154,8 +162,96 @@ const PLACEHOLDER = /\{\{\s*([A-Za-z0-9_.-]+)\s*\}\}/g;
 
 export type WidgetTemplateResult = { ok: true; input: WidgetSurfaceInput } | { ok: false; error: string };
 
+type TemplateNode = WidgetSurfaceInput["nodes"][number];
+
+// 节点的 props 里引用别的节点 id 的字段：Disclosure 的 detail、Field 的 for。重复出来的一份里跟着换成这一份的 id。
+const ID_REFERENCE_PROPS = ["detail", "for"] as const;
+
+// 这个节点和它下面的所有节点的 id（按 children）。
+function templateSubtree(id: string, byId: ReadonlyMap<string, TemplateNode>, into = new Set<string>()): Set<string> {
+  if (into.has(id)) return into;
+  into.add(id);
+  for (const child of byId.get(id)?.children ?? []) templateSubtree(child, byId, into);
+  return into;
+}
+
+// 文字里的 {{item.x}} 和 {"$data": "item.x"} 换成这一项在数据里的路径（repos.2.x）；别的路径不动。
+function scopeItemPaths(value: unknown, base: string): unknown {
+  const scoped = (path: string) => (path === "item" ? base : path.startsWith("item.") ? `${base}${path.slice(4)}` : path);
+  if (typeof value === "string") return value.replace(PLACEHOLDER, (_whole, path: string) => `{{${scoped(path)}}}`);
+  if (Array.isArray(value)) return value.map((child) => scopeItemPaths(child, base));
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    if (entries.length === 1 && entries[0]![0] === "$data" && typeof entries[0]![1] === "string") return { $data: scoped(entries[0]![1]) };
+    return Object.fromEntries(entries.map(([key, child]) => [key, scopeItemPaths(child, base)]));
+  }
+  return value;
+}
+
+type ExpandResult = { ok: true; nodes: TemplateNode[] } | { ok: false; error: string };
+
 /**
- * 用数据解析模板：属性值是 {"$data": "路径"} 的整个换成那个字段的值；文字里的 {{路径}} 换成那个字段的文字。
+ * 按数组重复节点（工单 #53）：节点写 repeat: "路径"，数据里那个数组的每一项生成一份这个节点和它下面的节点。
+ * 这一份里 {{item.字段}}、{"$data": "item.字段"} 指这一项。id 加上 -序号，children、detail、for 跟着换；
+ * 上一层的 children 和 detail 里这个节点换成生成的那几份，0 项时去掉。不能嵌套，最多 WIDGET_SOURCE_LIMITS.repeatItems 项。
+ */
+function expandRepeats(template: WidgetSurfaceInput, data: Record<string, unknown>): ExpandResult {
+  if (!template.nodes.some((node) => node.repeat !== undefined)) return { ok: true, nodes: template.nodes };
+  const byId = new Map(template.nodes.map((node) => [node.id, node]));
+  const owner = new Map<string, string>();
+  const copies = new Map<string, TemplateNode[]>();
+  const replaced = new Map<string, string[]>();
+  for (const node of template.nodes) {
+    if (node.repeat === undefined) continue;
+    if (node.id === template.root) return { ok: false, error: `root 节点 ${node.id} 不能写 repeat` };
+    const below = templateSubtree(node.id, byId);
+    for (const id of below) {
+      if (id !== node.id && byId.get(id)?.repeat !== undefined) return { ok: false, error: `repeat 不能嵌套：${id} 在 ${node.id} 下面` };
+      if (owner.has(id)) return { ok: false, error: `节点 ${id} 同时在两个 repeat 下面` };
+      owner.set(id, node.id);
+    }
+    const outside = template.nodes.find((other) => !below.has(other.id) && [...below].some((id) => id !== node.id && (
+      other.children?.includes(id) || ID_REFERENCE_PROPS.some((key) => [other.props[key]].flat().includes(id)))));
+    if (outside) return { ok: false, error: `${outside.id} 引用了 repeat 节点 ${node.id} 下面的节点` };
+    const items = valueAt(data, node.repeat);
+    if (items === MISSING) return { ok: false, error: `数据里没有 ${node.repeat}` };
+    if (!Array.isArray(items)) return { ok: false, error: `${node.repeat} 要是一个数组` };
+    if (items.length > WIDGET_SOURCE_LIMITS.repeatItems) {
+      return { ok: false, error: `${node.repeat} 有 ${items.length} 项，repeat 最多 ${WIDGET_SOURCE_LIMITS.repeatItems} 项` };
+    }
+    const order = template.nodes.filter((other) => below.has(other.id));
+    const generated: TemplateNode[] = [];
+    for (let index = 0; index < items.length; index += 1) {
+      const rename = (id: string) => (below.has(id) ? `${id}-${index}` : id);
+      for (const { repeat: _repeat, ...source } of order) {
+        const props = scopeItemPaths(source.props, `${node.repeat}.${index}`) as Record<string, unknown>;
+        for (const key of ID_REFERENCE_PROPS) {
+          const ref = props[key];
+          if (typeof ref === "string") props[key] = rename(ref);
+          else if (Array.isArray(ref)) props[key] = ref.map((id) => (typeof id === "string" ? rename(id) : id));
+        }
+        generated.push({ ...source, id: rename(source.id), props, ...(source.children ? { children: source.children.map(rename) } : {}) });
+      }
+    }
+    copies.set(node.id, generated);
+    replaced.set(node.id, items.map((_item, index) => `${node.id}-${index}`));
+  }
+  const swap = (ids: readonly string[]) => ids.flatMap((id) => replaced.get(id) ?? [id]);
+  const nodes: TemplateNode[] = [];
+  for (const node of template.nodes) {
+    const repeatOf = owner.get(node.id);
+    if (repeatOf !== undefined) {
+      if (repeatOf === node.id) nodes.push(...copies.get(node.id)!);
+      continue;
+    }
+    const props = Array.isArray(node.props.detail) ? { ...node.props, detail: swap(node.props.detail as string[]) } : node.props;
+    nodes.push({ ...node, props, ...(node.children ? { children: swap(node.children) } : {}) });
+  }
+  return { ok: true, nodes };
+}
+
+/**
+ * 用数据解析模板：先展开 repeat（expandRepeats），再把属性值是 {"$data": "路径"} 的整个换成那个字段的值，文字里的 {{路径}} 换成那个字段的文字。
  * 路径在数据里找不到时不解析，返回原因（这一次算出错，控件留着上一次的内容）。解析出来的还要过 buildWidgetSurface 的校验。
  */
 export function resolveWidgetTemplate(template: WidgetSurfaceInput, data: Record<string, unknown>): WidgetTemplateResult {
@@ -186,17 +282,19 @@ export function resolveWidgetTemplate(template: WidgetSurfaceInput, data: Record
     }
     return value;
   };
+  const expanded = expandRepeats(template, data);
+  if (!expanded.ok) return expanded;
   const input: WidgetSurfaceInput = {
     root: template.root,
     fallback_text: text(template.fallback_text),
-    nodes: template.nodes.map((node) => ({ ...node, props: resolve(node.props) as Record<string, unknown> })),
+    nodes: expanded.nodes.map((node) => ({ ...node, props: resolve(node.props) as Record<string, unknown> })),
   };
   if (missing.size) return { ok: false, error: `数据里没有 ${[...missing].slice(0, 5).join("、")}` };
   return { ok: true, input };
 }
 
-/** 模板里有没有绑定（{"$data": …} 或 {{…}}）。没有绑定的模板加数据源没有意义。 */
+/** 模板里有没有绑定（{"$data": …}、{{…}} 或 repeat）。没有绑定的模板加数据源没有意义。 */
 export function widgetTemplateBinds(template: WidgetSurfaceInput): boolean {
   const json = JSON.stringify(template);
-  return json.includes('"$data"') || /\{\{\s*[A-Za-z0-9_.-]+\s*\}\}/.test(json);
+  return template.nodes.some((node) => node.repeat !== undefined) || json.includes('"$data"') || /\{\{\s*[A-Za-z0-9_.-]+\s*\}\}/.test(json);
 }
