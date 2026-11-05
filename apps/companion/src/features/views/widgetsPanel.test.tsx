@@ -160,6 +160,15 @@ describe('folding a widget', () => {
     expect(screen.getByTestId('surface-widget_5')).toBeTruthy();
     expect(await platformWidgetFoldMemory.load()).toBe('[]');
   });
+
+  it('centres the fold arrow and the「⋯」on the two-line title block, like RecordRow (ticket #64)', async () => {
+    resetFoldedWidgetsForTesting();
+    renderPanel([widget(5, '纳斯达克', '18,532')]);
+    const head = await screen.findByTestId('widget-head-5');
+    expect(getComputedStyle(head).alignItems).toBe('center');
+    expect(head.contains(screen.getByTestId('widget-toggle-5'))).toBe(true);
+    expect(head.contains(screen.getByTestId('widget-more-5'))).toBe(true);
+  });
 });
 
 describe('widgets with a data source', () => {

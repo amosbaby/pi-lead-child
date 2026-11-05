@@ -226,6 +226,23 @@ describe('a card that shows information', () => {
     expect(screen.getByText('1,234')).toBeTruthy();
   });
 
+  it('opens an https link cell, such as a pull request, in the browser (ticket #64)', async () => {
+    const open = vi.spyOn(window, 'open').mockReturnValue(null);
+    renderSurface(info([{
+      id: 'table', type: 'DataTable', props: {
+        columns: [{ label: 'PR' }, { label: '链接' }],
+        rows: [['#12', { link: 'https://github.com/acme/x/pull/12', text: 'acme/x#12' }]],
+      },
+    }]));
+    const link = screen.getByTestId('surface-cell-link');
+    expect(link.textContent).toBe('acme/x#12');
+    expect(link.getAttribute('role')).toBe('link');
+    fireEvent.click(link);
+    await waitFor(() => expect(open).toHaveBeenCalled());
+    expect(open.mock.calls[0]?.[0]).toBe('https://github.com/acme/x/pull/12');
+    open.mockRestore();
+  });
+
   it('shows the ticket status that is true now, not a status copied into the card', async () => {
     const { ticketSummaryToTicket } = await import('../workspace/model');
     renderSurface(info([{ id: 'table', type: 'DataTable', props: { columns: [{ label: '工单' }], rows: [[{ ticket: 66 }]] } }]));

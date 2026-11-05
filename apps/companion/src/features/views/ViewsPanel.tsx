@@ -116,7 +116,8 @@ function WidgetBlock({ widget, widgets, views, leadName }: {
   const folded = foldedIds.includes(widget.id);
   return (
     <Column testID={`widget-${widget.id}`} gap="card-row">
-      <Row items="flex-start" gap="side-item">
+      {/* 箭头和「⋯」都和标题、更新说明这两行垂直居中，和 RecordRow 的行尾内容、行尾动作一样（P16.8）。 */}
+      <Row testID={`widget-head-${widget.id}`} items="center" gap="side-item">
         {/* 标题和箭头一起点：和工单详情里能折叠的块（Section）同一种箭头和读屏说法。「⋯」不在可点的范围里。 */}
         <Pressable
           testID={`widget-toggle-${widget.id}`}

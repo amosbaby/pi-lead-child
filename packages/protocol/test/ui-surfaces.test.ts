@@ -222,6 +222,22 @@ describe("a surface that shows information", () => {
 
   // partial-json 把正在写的一项解析成 {} 或缺字段的对象。整个节点因此不合格时，表格会在流式中途消失再出现。
   // 去掉正在写的最后一项再校验：表格一行一行地出来，列表一项一项地出来。
+  it("takes an https link cell and refuses any other link before the card is drawn (ticket #64)", () => {
+    const withLink = (link: string): UiSurface => ({
+      id: "s-link", catalogVersion: UI_CATALOG_VERSION, root: "table", fallbackText: "我的未合并 PR",
+      nodes: [{ id: "table", type: "DataTable", props: { columns: [{ label: "PR" }, { label: "链接" }], rows: [["#12", { link, text: "acme/x#12" }]] } }],
+    });
+    const good = withLink("https://github.com/acme/x/pull/12");
+    expect(validateUiSurface(good)).toEqual({ ok: true, surface: good });
+    for (const bad of ["http://github.com/acme/x/pull/12", "javascript:alert(1)", "https://alice:secret@github.com/acme/x", "github.com/acme/x/pull/12"]) {
+      const result = validateUiSurface(withLink(bad));
+      expect(result.ok, bad).toBe(false);
+      if (!result.ok) expect(result.errors[0]?.path).toBe("/nodes/0/props/rows/0/1/link");
+    }
+    const noText = validateUiSurface({ ...good, nodes: [{ ...good.nodes[0]!, props: { columns: [{ label: "链接" }], rows: [[{ link: "https://github.com/acme/x/pull/12" }]] } }] });
+    expect(noText.ok).toBe(false);
+  });
+
   it("streams a table row by row: the row that is still being written waits until it is whole", async () => {
     const { partialUiSurface } = await import("../src/index.js");
     const streaming = (rows: unknown[]) => partialUiSurface({

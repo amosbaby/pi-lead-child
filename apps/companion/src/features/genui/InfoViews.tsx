@@ -1,8 +1,8 @@
 import {
-  Badge, BarChart, DataTable, Pressable, Progress, Row, Sparkline, Stats, Steps, Text, Timeline,
+  Badge, BarChart, DataTable, Link, Pressable, Progress, Row, Sparkline, Stats, Steps, Text, Timeline,
   dataToneBadge, estimatedTextWidth, formatNumber, isNumericColumn, tableColumnWidth,
 } from '@pi-lead-child/components';
-import type { UiStepState, UiTableCell, UiTone } from '@pi-lead-child/protocol';
+import { sourceLink, type UiStepState, type UiTableCell, type UiTone } from '@pi-lead-child/protocol';
 
 import { useTicketRef } from './useTicketRef';
 
@@ -48,6 +48,7 @@ function cellText(cell: UiTableCell): string {
   if (typeof cell === 'string') return cell;
   if (typeof cell === 'number') return formatNumber(cell);
   if ('badge' in cell) return cell.badge;
+  if ('link' in cell) return cell.text;
   return '';
 }
 
@@ -84,9 +85,17 @@ export function DataTableView({ id, columns, rows }: DataTableProps & { id: stri
 
 function TableCell({ cell, numeric }: { cell: UiTableCell; numeric: boolean }) {
   if (typeof cell === 'object' && 'ticket' in cell) return <TicketCell ticketId={cell.ticket} />;
+  if (typeof cell === 'object' && 'link' in cell) return <LinkCell href={cell.link} text={cell.text} />;
   if (typeof cell === 'object') return <Badge label={cell.badge} tone={dataToneBadge[cell.tone ?? 'neutral']} />;
   if (numeric) return <Text mono size="body">{cellText(cell)}</Text>;
   return <Text size="body">{cellText(cell)}</Text>;
+}
+
+// 外部链接（工单 #64）：协议只放行 https；打开以前再过一遍 sourceLink，不合格时只显示文字。
+function LinkCell({ href, text }: { href: string; text: string }) {
+  const safe = sourceLink(href);
+  if (!safe) return <Text size="body" numberOfLines={1}>{text}</Text>;
+  return <Link testID="surface-cell-link" href={safe} size="body" numberOfLines={1}>{text}</Link>;
 }
 
 function TicketCell({ ticketId }: { ticketId: number }) {
