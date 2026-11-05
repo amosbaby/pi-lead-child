@@ -107,6 +107,8 @@ export const SLACK_TEXT_OBJECT_MAX = 3_000;
 export const SLACK_MESSAGE_BLOCKS_MAX = 50;
 // 回给用户本人的话的色条颜色：界面的主色（protocol 的 DEFAULT_DESIGN_COLORS.accent）。
 export const SLACK_OWNER_REPLY_COLOR = DEFAULT_DESIGN_COLORS.accent;
+// 色条的 fallback 最多多少个字：照 chat.postMessage 对纯文字的建议（「For best results, limit the text field to 4,000 characters.」）。
+const SLACK_OWNER_REPLY_FALLBACK_MAX = 4_000;
 
 // mrkdwn 里 &、<、> 要转义（https://docs.slack.dev/messaging/formatting-message-text）：署名是我们写的话，
 // 里面的名字不能被 Slack 当成提到谁、链接或者 @channel。
@@ -170,22 +172,31 @@ export function slackDisclosureBlocks(parts: { byline: string; body: string | nu
  * the left side of this attachment」，blocks「An array of layout blocks in the same format as described in the building blocks guide」），
  * 色条里第一行是署名（context block，小号灰字），下面是正文（section，mrkdwn）。颜色是界面的主色。
  * 一个 section 的文字最多 3000 个字（SLACK_TEXT_OBJECT_MAX），所以正文按 3000 个字拆成几条消息，每条一段、各带色条和署名。
- * 每条的顶层 text 是这一条的纯文字退路（署名一行加这一段），通知和搜索里看得到；一条最多三千多个字，在 chat.postMessage 建议的
- * 4000 个字以内（https://docs.slack.dev/reference/methods/chat.postMessage：「For best results, limit the text field to 4,000 characters.」）。
- * body 已经是 mrkdwn。
+ * 不发顶层 text（#70，用户 2026-11-05：正文显示了两遍）：只有 attachments、没有顶层 blocks 时 Slack 把 text 当正文显示在色条外面
+ * （https://docs.slack.dev/reference/methods/chat.postMessage：text「If you aren't [using blocks], this is the main body text of the message.」；
+ * 「The text field is not enforced as required when using blocks or attachments.」）。通知和不显示格式的客户端看 attachment 的 fallback
+ * （legacy-secondary-message-attachments：fallback「A plain text summary of the attachment used in clients that don't show formatted text
+ * (eg. IRC, mobile notifications).」），是这一条的纯文字（署名一行加这一段）。body 已经是 mrkdwn。
  */
-export function slackOwnerReplyMessages(parts: { byline: string; body: string | null }): Array<{ text: string; attachments: Array<Record<string, unknown>> }> {
+export function slackOwnerReplyMessages(parts: { byline: string; body: string | null }): Array<{ attachments: Array<Record<string, unknown>> }> {
   const chunks = parts.body?.trim() ? slackChunks(parts.body, SLACK_TEXT_OBJECT_MAX).filter((chunk) => chunk.trim()) : [];
-  return (chunks.length ? chunks : [null]).map((chunk) => {
-    const text = chunk ? `${parts.byline}\n${chunk}` : parts.byline;
-    return {
-      text,
-      attachments: [{
-        color: SLACK_OWNER_REPLY_COLOR, fallback: text,
-        blocks: slackDisclosureBlocks({ byline: parts.byline, body: chunk }),
-      }],
-    };
-  });
+  return (chunks.length ? chunks : [null]).map((chunk) => ({ attachments: [slackOwnerReplyBar({ byline: parts.byline, body: chunk })] }));
+}
+
+/**
+ * 回给用户本人的话的色条（一个 attachment）：署名和正文在 blocks 里，fallback 是纯文字的退路。改这条回复（chat.update）时
+ * 整段正文放进同一个色条（slackDisclosureBlocks 按 3000 个字分成几个 section），fallback 最多 4000 个字。
+ */
+export function slackOwnerReplyBar(parts: { byline: string; body: string | null }): Record<string, unknown> {
+  const fallback = parts.body ? `${parts.byline}\n${parts.body}` : parts.byline;
+  return { color: SLACK_OWNER_REPLY_COLOR, fallback: fallback.slice(0, SLACK_OWNER_REPLY_FALLBACK_MAX), blocks: slackDisclosureBlocks(parts) };
+}
+
+/** 一条消息是不是回给用户本人的话（带 slackOwnerReplyBar 的色条）。Slack 读回来的颜色可能不带「#」。 */
+export function slackIsOwnerReply(message: { attachments?: unknown[] }): boolean {
+  const color = (value: unknown) => (typeof value === "string" ? value.replace(/^#/u, "").toLowerCase() : null);
+  return Array.isArray(message.attachments)
+    && message.attachments.some((attachment) => isRecord(attachment) && color(attachment.color) === color(SLACK_OWNER_REPLY_COLOR));
 }
 
 // 一行里不在行内代码中的部分换成 mrkdwn。顺序要紧：列表的「* 」先换成「• 」，单星号的斜体先换成 _x_，再换双星号的粗体。
@@ -1802,7 +1813,6 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
         const result = await trackPosting(channel, api("chat.postMessage", {
           channel,
           ...(target.thread_ts ? { thread_ts: target.thread_ts } : {}),
-          text: message.text,
           attachments: message.attachments,
           metadata: { event_type: SLACK_REPLY_METADATA_TYPE, event_payload: { idempotency_key: partKey } },
         }, context));
@@ -2066,6 +2076,7 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
           ref: message.ts!,
           at: new Date(Number(message.ts) * 1000).toISOString(),
           role: ours ? "assistant" : mine ? "me" : "them",
+          ...(ours && slackIsOwnerReply(message) ? { style: "owner_reply" as const } : {}),
           sender: { id, name: mine ? "你" : isString(message.user) ? await userName(message.user, context) : id },
           text: (await displayText(slackMessageText(message), context)).slice(0, MESSAGE_TEXT_MAX),
           target: { channel, ts: message.ts! },
@@ -2144,10 +2155,17 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (request.action === "edit") {
         if (!isString(request.target.ts)) throw new Error("slack: nothing to edit (no ts)");
         // 同样的内容改两次结果一样，所以改写本身是幂等的。不带署名的样式时清掉原来的 blocks（不传时 Slack 会留着旧的）。
-        const result = await web.call("chat.update", {
-          channel, ts: request.target.ts, text: outgoing.text,
-          blocks: outgoing.parts ? slackDisclosureBlocks(outgoing.parts) : [],
-        }, context.credential.token);
+        // 回给用户本人的话（owner_reply）：带署名时只换色条，不发顶层 text（和发的时候一样，正文只显示一遍，#70）；
+        // 换成不带署名的话时清掉色条（chat.update：「If you don't include attachments, the message's previous attachments will be retained.」
+        // 「To remove previous attachments, include an empty array for this field.」）。
+        const owner = request.style === "owner_reply";
+        const result = await web.call("chat.update", owner && outgoing.parts
+          ? { channel, ts: request.target.ts, attachments: [slackOwnerReplyBar(outgoing.parts)] }
+          : {
+            channel, ts: request.target.ts, text: outgoing.text,
+            blocks: outgoing.parts ? slackDisclosureBlocks(outgoing.parts) : [],
+            ...(owner ? { attachments: [] } : {}),
+          }, context.credential.token);
         if (result.ok === true) return { remoteRef: { channel, ts: request.target.ts }, duplicate: false, messageId: request.target.ts };
         const error = isString(result.error) ? result.error : "not ok";
         // 消息没了、不是自己的、过了能改的时间：再试也一样。

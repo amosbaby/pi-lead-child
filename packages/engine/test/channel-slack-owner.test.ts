@@ -5,6 +5,8 @@
 //   - daemon 不收时照用户本人的话处理；
 //   - 回复按 Slack 的 mrkdwn 发回那条私信，推回来时认成 echo，不会再交给 Lead；
 //   - 回复包在带色条的 attachment 里，色条里第一行是 Lead 的名字，和用户自己的话分开（用户 2026-11-05）；太长时拆成几条，每条都带色条。
+//   - 正文只在色条里出现一次：不发顶层 text（只有 attachments 时 Slack 把它当正文显示，#70），通知用 attachment 的 fallback；
+//     改这条回复时也一样。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
@@ -41,6 +43,16 @@ function setup(owner?: (message: ChannelOwnerMessage) => boolean): ChannelHub {
 }
 
 const SELF_DM = "D0SELF";
+
+// 一段文字在一条消息里显示了几次：顶层 text、顶层 blocks、attachment 里的 blocks 都算（fallback 只在通知里，不算）。
+function visibleCopies(message: { text: string; blocks?: unknown[]; attachments?: unknown[] }, words: string): number {
+  const shown = [
+    message.text,
+    JSON.stringify(message.blocks ?? []),
+    JSON.stringify((message.attachments ?? []).map((attachment) => (attachment as { blocks?: unknown }).blocks ?? [])),
+  ].join("\n");
+  return shown.split(words).length - 1;
+}
 
 describe("the user's own Slack DM to themself", () => {
   it("hands the message to the daemon as the user's own words, and records no channel event", async () => {
@@ -87,9 +99,9 @@ describe("the user's own Slack DM to themself", () => {
     expect(sent).toEqual({ objectKey: `slack:${SELF_DM}:main`, status: "sent" });
     const posted = slack.messages.filter((message) => message.channel === SELF_DM);
     expect(posted).toHaveLength(1);
-    expect(posted[0]!.text).toBe(":robot_face: Fairy (Assistant)\n*结论*\n*今天不发布*，见 <https://cal.test/x|日历>。");
+    expect(posted[0]!.text).toBe("");
     expect(posted[0]!.attachments).toEqual([{
-      color: SLACK_OWNER_REPLY_COLOR, fallback: posted[0]!.text,
+      color: SLACK_OWNER_REPLY_COLOR, fallback: ":robot_face: Fairy (Assistant)\n*结论*\n*今天不发布*，见 <https://cal.test/x|日历>。",
       blocks: [
         { type: "context", elements: [{ type: "mrkdwn", text: ":robot_face: Fairy (Assistant)" }] },
         { type: "section", text: { type: "mrkdwn", text: "*结论*\n*今天不发布*，见 <https://cal.test/x|日历>。" } },
@@ -112,6 +124,62 @@ describe("how Lead's reply to the user's own DM looks", () => {
   type Bar = { color: string; fallback: string; blocks: Array<{ type: string; text?: { text: string }; elements?: Array<{ text: string }> }> };
   const barOf = (message: { attachments?: unknown[] }) => (message.attachments as Bar[] | undefined)?.[0];
 
+  it("shows the reply once, inside the bar, with the fallback for notifications (#70)", async () => {
+    await ownerHub().replyToOwner(`slack:${SELF_DM}:main`, "今天不发布，周五再看。", "turn_once");
+    const [message] = inSelfDm();
+    // 只有 attachments 时 Slack 把顶层 text 当正文显示：不发它，正文只在色条里。
+    expect(message!.text).toBe("");
+    expect(message!.blocks).toBeUndefined();
+    expect(visibleCopies(message!, "今天不发布，周五再看。")).toBe(1);
+    // 通知和不显示格式的客户端看 fallback。
+    expect(barOf(message!)!.fallback).toBe(":robot_face: Fairy (Assistant)\n今天不发布，周五再看。");
+    // Lead 读这段对话时照样读得到这条回复。
+    const history = await ownerHub().readConversation(`slack:${SELF_DM}:main`, 5);
+    expect(history.messages.map((entry) => entry.text)).toContainEqual(expect.stringContaining("今天不发布，周五再看。"));
+  });
+
+  it("keeps the reply once, inside the bar, after Lead edits it (#70)", async () => {
+    const hub = ownerHub();
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "旧的回复", "turn_edit");
+    const [posted] = inSelfDm();
+    await hub.editMessage(`slack:${SELF_DM}:main`, { ref: posted!.ts, text: "**新的**回复", words: "assistant", by: "lead", forUser: true });
+    const [edited] = inSelfDm();
+    expect(edited!.edits).toBe(1);
+    expect(edited!.text).toBe("");
+    expect(edited!.blocks).toBeUndefined();
+    expect(edited!.attachments).toHaveLength(1);
+    expect(visibleCopies(edited!, "*新的*回复")).toBe(1);
+    expect(visibleCopies(edited!, "旧的回复")).toBe(0);
+    expect(barOf(edited!)).toEqual({
+      color: SLACK_OWNER_REPLY_COLOR, fallback: ":robot_face: Fairy (Assistant)\n*新的*回复",
+      blocks: [
+        { type: "context", elements: [{ type: "mrkdwn", text: ":robot_face: Fairy (Assistant)" }] },
+        { type: "section", text: { type: "mrkdwn", text: "*新的*回复" } },
+      ],
+    });
+    // 换成用户的原话：不带署名、不带色条，正文也只有一份。
+    await hub.editMessage(`slack:${SELF_DM}:main`, { ref: posted!.ts, text: "我自己改的", words: "user", by: "user", forUser: true });
+    const [plain] = inSelfDm();
+    expect(plain!.text).toBe("我自己改的");
+    expect(plain!.attachments).toBeUndefined();
+    expect(visibleCopies(plain!, "我自己改的")).toBe(1);
+  });
+
+  it("edits a long reply into one message, still once and inside the bar (#70)", async () => {
+    const hub = ownerHub();
+    await hub.replyToOwner(`slack:${SELF_DM}:main`, "短的", "turn_edit_long");
+    const [posted] = inSelfDm();
+    const first = "甲".repeat(2_000);
+    const second = "乙".repeat(2_000);
+    await hub.editMessage(`slack:${SELF_DM}:main`, { ref: posted!.ts, text: `${first}\n${second}`, words: "assistant", by: "lead", forUser: true });
+    const [edited] = inSelfDm();
+    expect(edited!.text).toBe("");
+    expect(visibleCopies(edited!, first)).toBe(1);
+    expect(visibleCopies(edited!, second)).toBe(1);
+    expect(barOf(edited!)!.blocks.slice(1).every((block) => block.type === "section" && block.text!.text.length <= 3_000)).toBe(true);
+    expect(barOf(edited!)!.fallback.startsWith(":robot_face: Fairy (Assistant)\n甲")).toBe(true);
+  });
+
   it("splits a long reply at Slack's limit into several messages, each with the bar and the name", async () => {
     // 两段各 2000 个字：合起来超过一个 section 的 3000 个字。
     const first = "甲".repeat(2_000);
@@ -120,11 +188,12 @@ describe("how Lead's reply to the user's own DM looks", () => {
     expect(sent.status).toBe("sent");
     const posted = inSelfDm();
     expect(posted).toHaveLength(2);
-    expect(posted.map((message) => message.text)).toEqual([`:robot_face: Fairy (Assistant)\n${first}`, `:robot_face: Fairy (Assistant)\n${second}`]);
+    expect(posted.map((message) => barOf(message)!.fallback)).toEqual([`:robot_face: Fairy (Assistant)\n${first}`, `:robot_face: Fairy (Assistant)\n${second}`]);
+    expect(posted.map((message) => visibleCopies(message, first) + visibleCopies(message, second))).toEqual([1, 1]);
     for (const message of posted) {
       const bar = barOf(message)!;
       expect(bar.color).toBe(SLACK_OWNER_REPLY_COLOR);
-      expect(bar.fallback).toBe(message.text);
+      expect(message.text).toBe("");
       expect(bar.blocks[0]).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: ":robot_face: Fairy (Assistant)" }] });
       expect(bar.blocks.slice(1).every((block) => block.type === "section" && block.text!.text.length <= 3_000)).toBe(true);
     }
@@ -156,7 +225,7 @@ describe("how Lead's reply to the user's own DM looks", () => {
       { type: "context", elements: [{ type: "mrkdwn", text: ":robot_face: Red Bull (Assistant)" }] },
       { type: "context", elements: [{ type: "mrkdwn", text: ":robot_face: Nina (Assistant)" }] },
     ]);
-    expect(inSelfDm().map((message) => message.text)).toEqual([":robot_face: Red Bull (Assistant)\n好的", ":robot_face: Nina (Assistant)\n收到"]);
+    expect(inSelfDm().map((message) => barOf(message)!.fallback)).toEqual([":robot_face: Red Bull (Assistant)\n好的", ":robot_face: Nina (Assistant)\n收到"]);
   });
 
   it("leaves messages to other people as they were: no bar on confirmed-by and auto-reply", async () => {

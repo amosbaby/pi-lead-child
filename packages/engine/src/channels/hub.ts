@@ -2192,8 +2192,12 @@ export class ChannelHub {
     if (found.role === "them") {
       throw new ChannelActionError("invalid_action", `消息 ${input.ref} 是 ${found.sender.name} 发的：只能改用户自己的账号发的消息（用户本人或者 Lead 发的）`);
     }
-    const signed = !input.forUser ? autoReplyDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), text)
-      : input.words === "assistant" ? confirmedDraftDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), text) : null;
+    // 回给用户本人的话（replyToOwner）改的时候还是那个样式：署名和发的时候一样，来源照 owner_reply 排版（#70）。
+    const ownerReply = found.style === "owner_reply";
+    const signed = input.words === "user" && input.forUser ? null
+      : ownerReply ? ownerReplyDisclosure(this.assistantFor(adapter), text)
+      : !input.forUser ? autoReplyDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), text)
+      : confirmedDraftDisclosure(this.assistantFor(adapter), this.ownerNameFor(adapter), text);
     const message = signed ? maskOutgoing({ ...signed, key: "", fromDraft: true, by: input.forUser ? "user" : "auto" }) : { text, masked: 0 };
     if (message.masked) this.log(`[channels] ${adapter.id}: masked ${message.masked} email address(es) in an edit in ${place.objectKey}`);
     const outcome = await this.outbox.perform(adapter, context, {
@@ -2201,6 +2205,7 @@ export class ChannelHub {
       request: {
         action: "edit", objectKey: place.objectKey, target: found.target, text: message.text,
         ...("parts" in message && message.parts ? { parts: message.parts } : {}),
+        ...(ownerReply ? { style: "owner_reply" as const } : {}),
       },
     });
     if (outcome.status === "failed") {

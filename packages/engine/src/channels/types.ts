@@ -269,6 +269,8 @@ export interface ChannelHistoryMessage {
   text: string;
   // 改这条消息时出站动作的目标（edit，2026-11-02），例如 Slack 的 { channel, ts }。来源不能改消息时没有。
   target?: Record<string, string>;
+  // owner_reply：这条是回给用户本人的话（ChannelOutboundRequest.style）。改它时照同样的样式改（#70）。
+  style?: "owner_reply";
   // 整段对话里的根消息下面有 thread 时：几条回复和这个 thread 的对话编号（回复都进 thread，2026-11-02）。回复本身不在整段对话里。
   thread?: { replies: number; objectKey: string };
 }

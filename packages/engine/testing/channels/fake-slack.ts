@@ -455,6 +455,10 @@ export class FakeSlack {
           && args.attachments.every((attachment) => (attachment as { blocks?: unknown }).blocks === undefined || validBlocks((attachment as { blocks?: unknown }).blocks)))) {
           return { ok: false, error: "invalid_attachments" };
         }
+        // 和真的 Slack 一样：text、blocks、attachments 至少要有一个（https://docs.slack.dev/reference/methods/chat.postMessage）。
+        const hasContent = (typeof args.text === "string" && args.text.length > 0)
+          || (Array.isArray(args.blocks) && args.blocks.length > 0) || (Array.isArray(args.attachments) && args.attachments.length > 0);
+        if (!hasContent) return { ok: false, error: "no_text" };
         const message: FakeSlackMessage = {
           channel: String(args.channel), ts: this.ts(), user: this.self.id, text: String(args.text ?? ""), deleted: false,
           ...(typeof args.thread_ts === "string" ? { thread_ts: args.thread_ts } : {}),
@@ -475,7 +479,8 @@ export class FakeSlack {
         if (message.user !== this.self.id) return { ok: false, error: "cant_update_message" };
         const hasText = typeof args.text === "string" && args.text.length > 0;
         const hasBlocks = Array.isArray(args.blocks) && args.blocks.length > 0;
-        if (!hasText && !hasBlocks) return { ok: false, error: "no_text" };
+        const hasAttachments = Array.isArray(args.attachments) && args.attachments.length > 0;
+        if (!hasText && !hasBlocks && !hasAttachments) return { ok: false, error: "no_text" };
         if (args.blocks !== undefined && !(Array.isArray(args.blocks) && args.blocks.length === 0) && !validBlocks(args.blocks)) {
           return { ok: false, error: "invalid_blocks" };
         }
@@ -484,6 +489,11 @@ export class FakeSlack {
         if (Array.isArray(args.blocks)) {
           if (args.blocks.length) message.blocks = args.blocks as Array<Record<string, unknown>>;
           else delete message.blocks;
+        }
+        // attachments 也一样：不传时留着原来的，传空数组时清掉（https://docs.slack.dev/reference/methods/chat.update）。
+        if (Array.isArray(args.attachments)) {
+          if (args.attachments.length) message.attachments = args.attachments as unknown[];
+          else delete message.attachments;
         }
         message.edits = (message.edits ?? 0) + 1;
         return { ok: true, channel: message.channel, ts: message.ts, text: message.text };
