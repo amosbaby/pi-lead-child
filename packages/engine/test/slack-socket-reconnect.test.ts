@@ -3,12 +3,16 @@
 //   - 断开时日志和状态里写明原因（Slack 的 disconnect 消息、SDK 的警告、WebSocket 的 close code），拿不到时写明不知道；
 //   - 很快又重连时合并补拉：在跑的补拉跑完以后只再补一次，断线期间的消息都补到；上一次补完不久时等一会儿再补；
 //   - 连续很快又断时重连退避，第一次断开立刻重连。
+// 2026-11-06（#85）：
+//   - 补拉拿到真实的断线时段：合并的几次断开从第一次断开算到最后一次连上，记下断了几次；
+//   - 心跳超时断开时，原因里带上 daemon 事件循环最近的延迟（分得清网络的问题和 daemon 自己卡住）。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { listEvents, openDb, type Db } from "@pi-lead-child/store";
 import {
-  ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelAdapter, type ChannelTransportStatus, type SlackSocketOptions,
+  ChannelHub, ChannelRegistry, createSlackChannelAdapter, createSlackSocketTransport, type ChannelAdapter, type ChannelOutage, type ChannelTransport,
+  type ChannelTransportStatus, type SlackSocketOptions,
 } from "../src/index.js";
 import { FAKE_SLACK_APP_TOKEN, FakeSlack } from "../testing/index.js";
 
@@ -39,7 +43,11 @@ beforeEach(() => {
   statuses = [];
 });
 
+let bare: ChannelTransport | null = null;
+
 afterEach(async () => {
+  await bare?.stop();
+  bare = null;
   await adapter?.transport?.stop();
   db.close();
 });
@@ -91,6 +99,72 @@ describe("Socket Mode on a shaky network", () => {
     expect(statuses.filter((status) => status.state === "connecting").at(-1)).toEqual({
       state: "connecting", disconnectReason: "reason unknown: neither Slack nor the SDK said why",
     });
+  });
+
+  it("adds the daemon's event loop delay to a heartbeat timeout, so a stuck daemon shows apart from the network", async () => {
+    setup();
+    start();
+    await vi.waitFor(() => expect(slack.connections).toBe(1));
+    // daemon 自己卡了 300 毫秒（同步的忙等），然后 SDK 报等不到 pong。
+    const until = Date.now() + 300;
+    while (Date.now() < until) { /* 卡住事件循环 */ }
+    await sleep(60);
+    const client = slack.socket()!;
+    client.logger!.warn("A pong wasn't received from the server before the timeout of 20000ms!");
+    client.logger!.warn("something else went wrong");
+    slack.dropConnection();
+    await vi.waitFor(() => expect(slack.connections).toBe(2));
+    const line = disconnectLogs()[0]!;
+    const delay = /pong wasn't received[^;]*\(daemon event loop delay in the last \d+s: max (\d+) ms, p99 \d+ ms\)/.exec(line);
+    expect(delay).not.toBeNull();
+    expect(Number(delay![1])).toBeGreaterThanOrEqual(250);
+    // 别的警告不带。
+    expect(line).toContain("SDK warning: something else went wrong");
+    expect(line.match(/event loop delay/g)).toHaveLength(1);
+    expect(statuses.filter((status) => status.state === "connecting").at(-1)).toMatchObject({ disconnectReason: expect.stringContaining("event loop delay") });
+  });
+
+  it("hands each catch-up the real outage: from the first drop to the last reconnect, with the drops it merged", async () => {
+    setup();
+    const outages: Array<ChannelOutage | null> = [];
+    let gate: Promise<void> = Promise.resolve();
+    bare = createSlackSocketTransport({
+      options: { createClient: slack.createSocketClient, retryBaseMs: 5, retryMaxMs: 40, catchUpSpacingMs: 0 },
+      appToken: () => FAKE_SLACK_APP_TOKEN,
+      afterReconnect: async ({ outage }) => {
+        outages.push(outage);
+        await gate;
+      },
+    });
+    bare.start(hub.transportContext("slack"), async () => {});
+    // 第一次连上：断开的是 daemon 自己，没有断线时段。
+    await vi.waitFor(() => expect(outages).toEqual([null]));
+
+    // 断一次：补拉拿到这一次，卡住不放。
+    let release!: () => void;
+    gate = new Promise((resolve) => { release = resolve; });
+    const firstDrop = Date.now();
+    slack.dropConnection();
+    await vi.waitFor(() => expect(outages).toHaveLength(2));
+    expect(outages[1]).toMatchObject({ drops: 1 });
+    expect(outages[1]!.disconnectedAt.getTime()).toBeGreaterThanOrEqual(firstDrop);
+    expect(outages[1]!.reconnectedAt.getTime()).toBeGreaterThanOrEqual(outages[1]!.disconnectedAt.getTime());
+
+    // 补拉还在跑时又断了两次：跑完以后的那一次补拉盖住这两次，从其中第一次断开算起。
+    await sleep(20);
+    const secondDrop = Date.now();
+    slack.dropConnection();
+    await vi.waitFor(() => expect(slack.connections).toBe(3));
+    await sleep(20);
+    slack.dropConnection();
+    await vi.waitFor(() => expect(slack.connections).toBe(4));
+    gate = Promise.resolve();
+    release();
+    await vi.waitFor(() => expect(outages).toHaveLength(3));
+    expect(outages[2]).toMatchObject({ drops: 2 });
+    expect(outages[2]!.disconnectedAt.getTime()).toBeGreaterThanOrEqual(secondDrop);
+    expect(outages[2]!.disconnectedAt.getTime()).toBeGreaterThan(outages[1]!.reconnectedAt.getTime());
+    expect(outages[2]!.reconnectedAt.getTime() - outages[2]!.disconnectedAt.getTime()).toBeGreaterThanOrEqual(15);
   });
 
   it("catches up once more after the running catch-up, however many times it reconnected, and misses nothing", async () => {
