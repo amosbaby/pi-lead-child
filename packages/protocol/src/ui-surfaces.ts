@@ -4,7 +4,9 @@ import { sourceLink } from "./channels.ts";
 import { DEFAULT_LOCALE, type Locale } from "./i18n.ts";
 import { redactSecretText } from "./redaction.ts";
 import { TICKET_ACTION_INPUT_SCHEMAS } from "./ticket-actions.ts";
-import { UI_ACTION_INPUT_SCHEMAS, UI_ACTION_TARGET_TYPES, isUiActionTargetType, type UiActionTargetType } from "./ui-actions.ts";
+import {
+  CiAutofixRefSchema, UI_ACTION_INPUT_SCHEMAS, UI_ACTION_TARGET_TYPES, isUiActionTargetType, pullRequestTargetId, type UiActionTargetType,
+} from "./ui-actions.ts";
 import { UserActionRequestSchema, userActionProblems } from "./user-actions.ts";
 import {
   UI_FORM_ID_PATTERN, UI_FORM_LIMITS, UiFormFieldSchema, isSecretActionParam, uiFormFieldRuleProblem, type UiFormField,
@@ -167,11 +169,15 @@ const AlignSchema = Type.Union([Type.Literal("left"), Type.Literal("center"), Ty
 // 标签用于外部系统的状态（例如 CI 通过、服务异常），这些不是账本里的事实。
 // 链接（2026-11-05，工单 #64：未合并 PR 的表格要能点开 GitHub）：只认 https，规则和「在来源里打开」一样（sourceLink），
 // 在 propsRuleError 里校验；text 是格子里显示的字。
+// CI 失败的标签可以带「Auto fix」按钮（2026-11-06，工单 #99）：autofix 是结构化的参数（仓库、PR 编号、head 提交号），
+// 按下是用户本人做操作层的 pull_request.auto_fix_ci。只能和 danger 的标签一起出现（CI 通过、还在跑的不给按钮）；
+// 拼成的目标编号不能太长，在 propsRuleError 里校验。
 const TableCellSchema = Type.Union([
   Type.String({ maxLength: 200 }),
   Type.Number(),
   StrictObject({ ticket: Type.Integer({ minimum: 1 }) }),
   StrictObject({ badge: Type.String({ minLength: 1, maxLength: 40 }), tone: Type.Optional(ToneSchema) }),
+  StrictObject({ badge: Type.String({ minLength: 1, maxLength: 40 }), tone: Type.Literal("danger"), autofix: CiAutofixRefSchema }),
   StrictObject({ link: Type.String({ minLength: 1, maxLength: 2048 }), text: Type.String({ minLength: 1, maxLength: 200 }) }),
 ]);
 export type UiTableCell = Static<typeof TableCellSchema>;
@@ -579,7 +585,8 @@ export const UI_CATALOG_USAGE: Readonly<Record<UiComponentType, string>> = {
     + "contains 取包含这句原话的那一段（要逐字抄）。转述子 agent 的报告、核查结论、checkpoint 时用它，不要重新打一遍",
   DataTable: `DataTable { columns: [{ label, align?: left|center|right }], rows: [[格子, …]] }：表格，最多 ${UI_COMPONENT_LIMITS.tableColumns} 列、`
     + `${UI_COMPONENT_LIMITS.tableRows} 行，每行的格数和 columns 一样。格子是文字、数字、{ ticket }（工单编号，实时显示标题和状态）`
-    + "或 { badge, tone? }（外部系统的状态，例如 CI 通过），或 { link, text }（外部链接，只能是 https，例如 PR 的地址；text 是显示的字）。数字列自动右对齐",
+    + "或 { badge, tone? }（外部系统的状态，例如 CI 通过），或 { link, text }（外部链接，只能是 https，例如 PR 的地址；text 是显示的字），"
+    + "或 { badge, tone: danger, autofix: { repo: owner/name, pr, sha } }（CI 失败的标签加「Auto fix」按钮，sha 是 PR head 的 40 位提交号）。数字列自动右对齐",
   Stats: `Stats { items: [{ label, value, unit?, change?, tone? }] }：一组数字指标块，最多 ${UI_COMPONENT_LIMITS.stats} 个；`
     + "change 写和以前比的变化，tone 给 change 上色",
   Steps: `Steps { items: [{ label, state: done|current|pending|failed|skipped, detail? }] }：步骤，最多 ${UI_COMPONENT_LIMITS.steps} 步`,
@@ -1041,6 +1048,9 @@ function propsRuleError(node: UiNode): UiSurfaceError | null {
       for (const [c, cell] of cells.entries()) {
         if (typeof cell === "object" && "link" in cell && !sourceLink(cell.link)) {
           return { path: `/rows/${r}/${c}/link`, message: "链接格子只能是 https 地址，不能带用户名和密码" };
+        }
+        if (typeof cell === "object" && "autofix" in cell && !pullRequestTargetId(cell.autofix)) {
+          return { path: `/rows/${r}/${c}/autofix`, message: "Auto fix 的仓库名太长，拼成的编号超过了 128 个字符" };
         }
       }
     }

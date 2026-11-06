@@ -24,7 +24,7 @@ describe("skills split out of the Lead system prompt", () => {
     mkdirSync(agentDir, { recursive: true });
     const loader = new DefaultResourceLoader({ cwd: dir, agentDir, additionalSkillPaths: [LEAD_SKILLS_DIR] });
     await loader.reload();
-    for (const name of ["channel-replies", "pr-review", "ticket-acceptance", "run-supervision", "scheduling", "ticket-planning"]) {
+    for (const name of ["channel-replies", "pr-review", "ticket-acceptance", "run-supervision", "scheduling", "ticket-planning", "ci-autofix"]) {
       const skill = loader.getSkills().skills.find((entry) => entry.name === name);
       expect(skill?.filePath).toBe(join(LEAD_SKILLS_DIR, name, "SKILL.md"));
       expect(skill?.disableModelInvocation).toBe(false);

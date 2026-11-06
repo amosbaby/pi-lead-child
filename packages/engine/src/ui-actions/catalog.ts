@@ -37,6 +37,7 @@ import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.
 import { MEMORY_SETTINGS_ACTIONS, MEMORY_SETTINGS_TARGET } from "./memory-settings.js";
 import { CORE_MEMORY_ACTIONS, CORE_MEMORY_CHANGE_ACTIONS, CORE_MEMORY_CHANGE_TARGET, CORE_MEMORY_TARGET } from "./core-memory.js";
 import { MEMORY_FACT_ACTIONS, MEMORY_FACT_TARGET } from "./memory-facts.js";
+import { PULL_REQUEST_ACTIONS, PULL_REQUEST_TARGET } from "./pull-requests.js";
 import { SETUP_HINT_ACTIONS, SETUP_HINT_TARGET } from "./setup-hints.js";
 import { RULE_CHANGE_ACTIONS, RULE_CHANGE_TARGET } from "./rule-change-confirmations.js";
 import { WIDGET_ACTIONS, WIDGET_BOARD_ACTIONS, WIDGET_BOARD_TARGET, WIDGET_TARGET } from "./widgets.js";
@@ -1227,6 +1228,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   host_bypass: HOST_BYPASS_TARGET,
   busy_placement: BUSY_PLACEMENT_TARGET,
   owner_dm_sync: OWNER_DM_SYNC_TARGET,
+  pull_request: PULL_REQUEST_TARGET,
 };
 
 export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<string, UiActionDefinition>> } = {
@@ -1278,4 +1280,6 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   busy_placement: BUSY_PLACEMENT_ACTIONS,
   // 不在看 App 时同步到 Slack 私信的开关（2026-11-06，工单 #88）。定义在 owner-dm-sync.ts。
   owner_dm_sync: OWNER_DM_SYNC_ACTIONS,
+  // 「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」（2026-11-06，工单 #99）。定义在 pull-requests.ts。
+  pull_request: PULL_REQUEST_ACTIONS,
 };

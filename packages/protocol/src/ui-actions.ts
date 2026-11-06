@@ -96,12 +96,14 @@ export const ActionPermissionSchema = Type.Union([
 //   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
 //   owner_dm_sync  「我不在看 App 时，把 Lead 的消息同步到我的 Slack 私信」开关（设置 → 消息通道，2026-11-06，工单 #88）。
 //     编号只有 user。
+//   pull_request  GitHub 上的一个 PR 的一个提交（「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」，2026-11-06，工单 #99）。
+//     编号是 pullRequestTargetId 拼的 <owner>_<repo>_<PR 编号>_<head sha>，例如 acme_web_12_<40 位 sha>。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement", "owner_dm_sync",
+  "busy_placement", "owner_dm_sync", "pull_request",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -110,6 +112,38 @@ export function isUiActionTargetType(value: string): value is UiActionTargetType
 }
 
 const Empty = StrictObject({});
+
+// ── PR 的一个提交（pull_request 目标）────────────────────────────────────────────────
+
+// 控件格子里「Auto fix」按钮带的参数（工单 #99）：仓库、PR 编号、head 的提交号，都是结构化的，没有任意文字。
+// 规则照 GitHub：owner 是字母数字和 -（最长 39），仓库名是字母数字和 . _ -（最长 100），提交号是 40 位小写十六进制。
+export const PULL_REQUEST_LIMITS = { targetId: 128 } as const;
+export const CiAutofixRefSchema = StrictObject({
+  repo: Type.String({ pattern: "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$" }),
+  pr: Type.Integer({ minimum: 1, maximum: 9_999_999_999 }),
+  sha: Type.String({ pattern: "^[0-9a-f]{40}$" }),
+});
+export type CiAutofixRef = Static<typeof CiAutofixRefSchema>;
+
+// 编号只用 encodeURIComponent 不转义、网关路由也认的字符（字母数字、_、.、-），所以用 _ 分段：
+// owner 里没有 _，提交号和 PR 编号的长度固定在末尾，中间剩下的就是仓库名（仓库名里可以有 _）。
+const PULL_REQUEST_ID = /^([A-Za-z0-9][A-Za-z0-9-]{0,38})_([A-Za-z0-9._-]{1,100})_([1-9][0-9]{0,9})_([0-9a-f]{40})$/;
+
+/** 按钮参数拼成 pull_request 目标的编号。参数不合格时返回 null。 */
+export function pullRequestTargetId(ref: CiAutofixRef): string | null {
+  const [owner, name] = ref.repo.split("/");
+  const id = `${owner}_${name}_${ref.pr}_${ref.sha}`;
+  return id.length <= PULL_REQUEST_LIMITS.targetId && parsePullRequestTargetId(id) ? id : null;
+}
+
+/** pull_request 目标的编号拆回仓库、PR 编号和提交号。格式不对时返回 null。 */
+export function parsePullRequestTargetId(id: string): CiAutofixRef | null {
+  if (id.length > PULL_REQUEST_LIMITS.targetId) return null;
+  const match = PULL_REQUEST_ID.exec(id);
+  if (!match) return null;
+  const pr = Number(match[3]);
+  return Number.isSafeInteger(pr) ? { repo: `${match[1]}/${match[2]}`, pr, sha: match[4]! } : null;
+}
 // 来源的连接方式的名字（例如 app、session）。
 const ConnectionMode = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" });
 // 外部消息卡的动作都可以带「看到的版本」：卡已经变了时拒绝，免得按旧的样子做决定（页面的按钮带它，Lead 可以不带）。
@@ -391,6 +425,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     enable: Empty,
     // 关掉：只在 App 里看。
     disable: Empty,
+  },
+  pull_request: {
+    // 交给 Lead 分析这个提交的 CI 失败：能修就修好推到 PR 的分支，修不了就建工单。参数全在编号里，不带文字。
+    auto_fix_ci: Empty,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

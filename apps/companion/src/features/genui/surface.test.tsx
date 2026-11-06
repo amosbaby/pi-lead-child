@@ -243,6 +243,54 @@ describe('a card that shows information', () => {
     open.mockRestore();
   });
 
+  it('puts an Auto fix button only next to a failed CI badge, and shows that it is in progress after a press (ticket #99)', async () => {
+    const sha = '0123456789abcdef0123456789abcdef01234567';
+    const targetId = `acme_web_12_${sha}`;
+    const runtime = emptyRuntime();
+    runtime.control.setState({ phase: 'ready', connectionState: 'connected' });
+    let queued = false;
+    const autofixView = (): UiActionView => ({
+      target: { type: 'pull_request', id: targetId }, id: 'auto_fix_ci', label: 'Auto fix', permission: 'lead_allowed',
+      external: false, irreversible: false, where: '自定义视图', confirm: null, available: !queued,
+      reason: queued ? '已经交给 Lead 处理，这个提交不会再开一次分析' : null,
+    });
+    const list = vi.spyOn(runtime, 'listUiActions').mockImplementation(async () => [autofixView()]);
+    const perform = vi.spyOn(runtime, 'performUiAction').mockImplementation(async () => {
+      queued = true;
+      return { target: { type: 'pull_request', id: targetId }, action: 'auto_fix_ci', result: null };
+    });
+    renderUI(<CompanionRuntimeProvider runtime={runtime}><SurfaceView surface={info([{
+      id: 'table', type: 'DataTable', props: {
+        columns: [{ label: 'PR' }, { label: 'CI' }],
+        rows: [
+          ['#12', { badge: 'CI 失败', tone: 'danger', autofix: { repo: 'acme/web', pr: 12, sha } }],
+          ['#13', { badge: 'CI 通过', tone: 'success' }],
+          ['#14', { badge: 'CI 进行中', tone: 'warning' }],
+        ],
+      },
+    }])} /></CompanionRuntimeProvider>);
+
+    // 只有 CI 失败的那一行有按钮。
+    const button = await screen.findByRole('button', { name: 'Auto fix' });
+    expect(screen.getAllByRole('button', { name: 'Auto fix' })).toHaveLength(1);
+    await waitFor(() => expect((button as HTMLButtonElement).disabled).toBe(false));
+    expect(list).toHaveBeenCalledWith('pull_request', targetId);
+
+    // 按下：参数全在目标编号里，请求体不带文字。
+    await act(async () => { fireEvent.click(button); });
+    expect(perform).toHaveBeenCalledTimes(1);
+    const [type, id, action, request] = perform.mock.calls[0]!;
+    expect([type, id, action]).toEqual(['pull_request', targetId, 'auto_fix_ci']);
+    expect(request).toEqual({ input: {} });
+
+    // 交出去以后：按钮写「处理中」、停用，下面写原因；再点不会再发请求。
+    const busy = await screen.findByRole('button', { name: 'In progress' });
+    expect((busy as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId(`surface-action-autofix-${targetId}-reason`).textContent).toBe('已经交给 Lead 处理，这个提交不会再开一次分析');
+    fireEvent.click(busy);
+    expect(perform).toHaveBeenCalledTimes(1);
+  });
+
   it('shows the ticket status that is true now, not a status copied into the card', async () => {
     const { ticketSummaryToTicket } = await import('../workspace/model');
     renderSurface(info([{ id: 'table', type: 'DataTable', props: { columns: [{ label: '工单' }], rows: [[{ ticket: 66 }]] } }]));

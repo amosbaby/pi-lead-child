@@ -315,6 +315,11 @@ export function listInbox(
   ).all(...vals) as InboxRow[];
 }
 
+/** 这个 scope 最早的一行（任何状态）。用来认「这件事已经交给过 Lead」，例如同一个提交的 Auto fix（工单 #99）。 */
+export function firstInboxOfScope(db: Db, scope: string): InboxRow | null {
+  return (db.prepare("SELECT * FROM inbox WHERE dedup_scope = ? ORDER BY id LIMIT 1").get(scope) as InboxRow | undefined) ?? null;
+}
+
 export function markInbox(db: Db, ids: number[], state: "delivered" | "consumed"): void {
   if (!ids.length) return;
   const qs = ids.map(() => "?").join(",");

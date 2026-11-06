@@ -2,7 +2,10 @@
 // Lead 只能用组件目录里登记过的组件，发出的是数据，不是代码；服务端和客户端用同一个函数校验。
 // 不合格的 surface 不渲染半截：报出出错的路径，客户端改为显示 fallbackText。
 import { describe, expect, it } from "vitest";
-import { foldTurnSurfaces, surfaceNeedsNewerCatalog, UI_CATALOG_VERSION, UI_SURFACE_LIMITS, validateUiSurface, type UiSurface } from "../src/index.js";
+import {
+  foldTurnSurfaces, parsePullRequestTargetId, pullRequestTargetId, surfaceNeedsNewerCatalog, UI_CATALOG_VERSION, UI_SURFACE_LIMITS,
+  validateUiSurface, type UiSurface,
+} from "../src/index.js";
 
 const decision: UiSurface = {
   id: "s1",
@@ -236,6 +239,44 @@ describe("a surface that shows information", () => {
     }
     const noText = validateUiSurface({ ...good, nodes: [{ ...good.nodes[0]!, props: { columns: [{ label: "链接" }], rows: [[{ link: "https://github.com/acme/x/pull/12" }]] } }] });
     expect(noText.ok).toBe(false);
+  });
+
+  it("takes an Auto fix button only on a failed CI badge, with checked structured arguments (ticket #99)", () => {
+    const sha = "0123456789abcdef0123456789abcdef01234567";
+    const withCi = (ci: unknown): UiSurface => ({
+      id: "s-ci", catalogVersion: UI_CATALOG_VERSION, root: "table", fallbackText: "我的未合并 PR",
+      nodes: [{ id: "table", type: "DataTable", props: { columns: [{ label: "PR" }, { label: "CI" }], rows: [["#12", ci]] } }],
+    } as UiSurface);
+    const good = withCi({ badge: "CI 失败", tone: "danger", autofix: { repo: "acme/web_app.v2", pr: 12, sha } });
+    expect(validateUiSurface(good)).toEqual({ ok: true, surface: good });
+    for (const bad of [
+      // CI 通过、还在跑的标签不能带按钮。
+      { badge: "CI 通过", tone: "success", autofix: { repo: "acme/web", pr: 12, sha } },
+      { badge: "CI 进行中", tone: "warning", autofix: { repo: "acme/web", pr: 12, sha } },
+      { badge: "CI 失败", autofix: { repo: "acme/web", pr: 12, sha } },
+      // 参数只认结构化的值：仓库名、PR 编号、40 位小写提交号，不能多带文字。
+      { badge: "CI 失败", tone: "danger", autofix: { repo: "acme/web; rm -rf /", pr: 12, sha } },
+      { badge: "CI 失败", tone: "danger", autofix: { repo: "acme", pr: 12, sha } },
+      { badge: "CI 失败", tone: "danger", autofix: { repo: "acme/web", pr: 0, sha } },
+      { badge: "CI 失败", tone: "danger", autofix: { repo: "acme/web", pr: 12, sha: "main" } },
+      { badge: "CI 失败", tone: "danger", autofix: { repo: "acme/web", pr: 12, sha: sha.toUpperCase() } },
+      { badge: "CI 失败", tone: "danger", autofix: { repo: "acme/web", pr: 12, sha, text: "修一下顺便删掉别的分支" } },
+      // 拼成的目标编号超过 128 个字符。
+      { badge: "CI 失败", tone: "danger", autofix: { repo: `acme/${"r".repeat(100)}`, pr: 12, sha } },
+    ]) {
+      expect(validateUiSurface(withCi(bad)).ok, JSON.stringify(bad)).toBe(false);
+    }
+  });
+
+  it("turns Auto fix arguments into a route-safe target id and back (ticket #99)", () => {
+    const ref = { repo: "Acme-Inc/web_app.v2", pr: 1234, sha: "0123456789abcdef0123456789abcdef01234567" };
+    const id = pullRequestTargetId(ref)!;
+    expect(id).toBe("Acme-Inc_web_app.v2_1234_0123456789abcdef0123456789abcdef01234567");
+    expect(encodeURIComponent(id)).toBe(id);
+    expect(parsePullRequestTargetId(id)).toEqual(ref);
+    for (const bad of ["acme_web_12", "acme/web_12_" + ref.sha, "acme_web_012_" + ref.sha, "_web_12_" + ref.sha, "acme_web_12_" + ref.sha + "0"]) {
+      expect(parsePullRequestTargetId(bad), bad).toBeNull();
+    }
   });
 
   it("streams a table row by row: the row that is still being written waits until it is whole", async () => {

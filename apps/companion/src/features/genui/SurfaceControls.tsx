@@ -199,6 +199,8 @@ export type ActionProps = {
   confirmText?: string;
   /** 参数选了一个时刻以后的按钮文字，{value} 换成那个时刻（例如「改到{value}」→「改到周五 14:00」）。 */
   labelWithValue?: string;
+  /** 现在不能按时的按钮文字，例如表格里 Auto fix 交出去以后写「处理中」（工单 #99）。原因照旧写在按钮下面。 */
+  unavailableLabel?: string;
 };
 
 type Availability = { label: string; available: boolean; reason: string | null; confirm: string | null; loaded: boolean };
@@ -241,7 +243,7 @@ const ROLE = {
 } as const;
 
 // 一个按钮按下以后做什么：能不能按、要不要先确认、执行、出错。按钮自己和操作组的确认行共用。
-function useActionRunner({ id, target, action, input, label, confirmText, labelWithValue }: ActionProps) {
+function useActionRunner({ id, target, action, input, label, confirmText, labelWithValue, unavailableLabel }: ActionProps) {
   const runtime = useCompanionRuntime();
   const locale = useLocale();
   const form = useContext(FormContext);
@@ -276,7 +278,8 @@ function useActionRunner({ id, target, action, input, label, confirmText, labelW
   const picked = Object.values(filled).map((value) => resolveDatetimePreset(value) ?? null).find(Boolean);
   return {
     availability, busy, error, run, done: surface.done, refreshDone: surface.refresh,
-    text: labelWithValue && picked ? labelWithValue.replace('{value}', shortTimeWords(new Date(picked), Date.now(), locale)) : label ?? availability.label,
+    text: unavailableLabel && availability.loaded && !availability.available ? unavailableLabel
+      : labelWithValue && picked ? labelWithValue.replace('{value}', shortTimeWords(new Date(picked), Date.now(), locale)) : label ?? availability.label,
     needsConfirm: confirmText !== undefined || availability.confirm !== null || action === 'cancel',
     confirmText: confirmText ?? availability.confirm,
     danger: action === 'cancel',

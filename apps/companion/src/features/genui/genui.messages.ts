@@ -100,6 +100,8 @@ export const genuiMessages = defineMessages({
       done: 'Done',
       doneAt: (label: string, when: string) => `Done: ${label} (${when})`,
       failed: (reason: string) => `Failed: ${reason}`,
+      autofix: 'Auto fix',
+      autofixQueued: 'In progress',
     },
     surface: {
       generating: 'Generating…',
@@ -229,6 +231,8 @@ export const genuiMessages = defineMessages({
       done: '已完成',
       doneAt: (label, when) => `已完成：${label}（${when}）`,
       failed: (reason) => `没有做成：${reason}`,
+      autofix: 'Auto fix',
+      autofixQueued: '处理中',
     },
     surface: {
       generating: '正在生成…',

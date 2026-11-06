@@ -2,8 +2,11 @@ import {
   Badge, BarChart, DataTable, Link, Pressable, Progress, Row, Sparkline, Stats, Steps, Text, Timeline,
   dataToneBadge, estimatedTextWidth, formatNumber, isNumericColumn, tableColumnWidth,
 } from '@pi-lead-child/components';
-import { sourceLink, type UiStepState, type UiTableCell, type UiTone } from '@pi-lead-child/protocol';
+import { pullRequestTargetId, sourceLink, type UiStepState, type UiTableCell, type UiTone } from '@pi-lead-child/protocol';
 
+import { useMessages } from '@/i18n';
+import { genuiMessages } from './genui.messages';
+import { ActionButton } from './SurfaceControls';
 import { useTicketRef } from './useTicketRef';
 
 // 组件目录 v2（2026-10-19 用户决定）：复杂的信息也用组件画，不只用在要用户做决定的地方。
@@ -43,6 +46,8 @@ export type BarChartProps = {
 
 // 工单格子里有编号、标题和状态标签，按这个宽度排；放不下时标题截断。
 const TICKET_COLUMN_WIDTH = 300;
+// CI 格子里「Auto fix」小按钮的估宽（标签右边）。
+const AUTOFIX_BUTTON_WIDTH = 88;
 
 function cellText(cell: UiTableCell): string {
   if (typeof cell === 'string') return cell;
@@ -65,6 +70,7 @@ export function DataTableView({ id, columns, rows }: DataTableProps & { id: stri
       ...rows.map((row) => {
         const cell = row[index];
         const text = estimatedTextWidth(cell === undefined ? '' : cellText(cell));
+        if (typeof cell === 'object' && 'autofix' in cell) return text + 20 + AUTOFIX_BUTTON_WIDTH;
         return typeof cell === 'object' && 'badge' in cell ? text + 20 : text;
       }),
     );
@@ -86,6 +92,7 @@ export function DataTableView({ id, columns, rows }: DataTableProps & { id: stri
 function TableCell({ cell, numeric }: { cell: UiTableCell; numeric: boolean }) {
   if (typeof cell === 'object' && 'ticket' in cell) return <TicketCell ticketId={cell.ticket} />;
   if (typeof cell === 'object' && 'link' in cell) return <LinkCell href={cell.link} text={cell.text} />;
+  if (typeof cell === 'object' && 'autofix' in cell) return <AutofixCell cell={cell} />;
   if (typeof cell === 'object') return <Badge label={cell.badge} tone={dataToneBadge[cell.tone ?? 'neutral']} />;
   if (numeric) return <Text mono size="body">{cellText(cell)}</Text>;
   return <Text size="body">{cellText(cell)}</Text>;
@@ -96,6 +103,29 @@ function LinkCell({ href, text }: { href: string; text: string }) {
   const safe = sourceLink(href);
   if (!safe) return <Text size="body" numberOfLines={1}>{text}</Text>;
   return <Link testID="surface-cell-link" href={safe} size="body" numberOfLines={1}>{text}</Link>;
+}
+
+// CI 失败的标签加「Auto fix」（工单 #99）：按下是你本人做操作层的 pull_request.auto_fix_ci，参数全在目标编号里，不带文字。
+// 能不能按由操作层同一个函数说（ActionButton 读 /v1/actions/pull_request/<编号>）：这个提交交给过 Lead 时按钮写「处理中」、停用，
+// 原因写在下面。编号拼不出来（协议已经拦过）时只显示标签。
+function AutofixCell({ cell }: { cell: Extract<UiTableCell, { autofix: unknown }> }) {
+  const m = useMessages(genuiMessages).controls;
+  const targetId = pullRequestTargetId(cell.autofix);
+  return (
+    <Row items="center" gap="inline-item" flexWrap="wrap">
+      <Badge label={cell.badge} tone={dataToneBadge[cell.tone]} />
+      {targetId ? (
+        <ActionButton
+          id={`autofix-${targetId}`}
+          target={{ type: 'pull_request', id: targetId }}
+          action="auto_fix_ci"
+          label={m.autofix}
+          unavailableLabel={m.autofixQueued}
+          role="default"
+        />
+      ) : null}
+    </Row>
+  );
 }
 
 function TicketCell({ ticketId }: { ticketId: number }) {
