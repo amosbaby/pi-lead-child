@@ -7,11 +7,12 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { isLiveUserTurn } from "@pi-lead-child/engine";
+import { isLiveUserTurn, runTicketAction } from "@pi-lead-child/engine";
 import { FakeSlack } from "@pi-lead-child/engine/testing";
-import { DEFAULT_SCOPES, openDb, revokeBinding, type Db } from "@pi-lead-child/store";
+import { authorityTurnId } from "@pi-lead-child/lead";
+import { createItem, DEFAULT_SCOPES, getItem, openDb, revokeBinding, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
-import { fakePiLead } from "./fake-pi-session.js";
+import { deferred, fakePiLead } from "./fake-pi-session.js";
 
 let dir: string;
 let dbPath: string;
@@ -89,5 +90,54 @@ describe("the user's own Slack DM to themself in the daemon", () => {
     expect(after.items).toMatchObject([{ role: "self_reply" }]);
     expect(turnsFromSlack()).toHaveLength(1);
     expect(db.prepare("SELECT COUNT(*) AS n FROM bindings WHERE origin = 'channel_owner'").get()).toEqual({ n: 1 });
+  }, 30_000);
+
+  // 回归（#265）：Lead 正在忙时，用户在 Slack 里给自己发「可以，按你说的加」。这条消息插进 Lead 正在跑的那一轮，
+  // 轮次停在 steered；Lead 在插话这一轮里调 set_budget，被判成「turn … is no longer active」。插话这一轮还没有结局，
+  // 是用户本人正在说话的一轮，和 App 里的一轮一样能代做只属于用户的操作。
+  it("lets Lead set the budget in the user's own Slack DM that steered into a busy Lead", async () => {
+    const slack = new FakeSlack();
+    const itemId = createItem(db, { title: "预算不够的工单", brief: "b", createdBy: "lead", hold: true });
+    const busy = deferred();
+    const firstHeard = deferred();
+    const results: Array<{ turnId: string | null; state: string | null; outcome: unknown }> = [];
+    const lead = fakePiLead(async (call) => {
+      const inputs = call.inputs.join("\n");
+      if (inputs.includes("这张单的预算不够了")) {
+        firstHeard.resolve();
+        return { say: ["要把预算调高吗？", busy.promise] };
+      }
+      if (!inputs.includes("可以，按你说的加")) return { say: "好的。" };
+      const turnId = authorityTurnId(lead.deps());
+      const state = (db.prepare("SELECT state FROM channel_turns WHERE id = ?").get(turnId) as { state: string } | undefined)?.state ?? null;
+      const outcome = await runTicketAction(db, {
+        itemId, action: "set_budget", input: { tokenBudget: 30_000_000 }, reason: "用户在 Slack 里说「可以，按你说的加」",
+        caller: { kind: "lead", turnId, externalTurn: Boolean(lead.deps().turnOrigin?.().external) },
+      }).catch((error: unknown) => error);
+      results.push({ turnId, state, outcome });
+      return { say: "调好了。" };
+    });
+    daemon = await startDaemon({
+      dataDir: dir, dbPath, log: () => {}, notifyDesktop: () => {}, triageShadow: false,
+      sessionFactory: lead.factory as never,
+      channels: {
+        sources: { slack: { api: slack.api } },
+        credentials: { credential: async (provider) => (provider === "slack" ? slack.credential : null) },
+      },
+    });
+
+    await daemon.channels!.receive("slack", slack.selfReply("D0SELF", "这张单的预算不够了"));
+    await firstHeard.promise;
+    // Lead 还在答上一条：这一条插进正在跑的那一轮。
+    await daemon.channels!.receive("slack", slack.selfReply("D0SELF", "可以，按你说的加"));
+    await vi.waitFor(() => expect(lead.queued().steering).toHaveLength(1), { timeout: 10_000 });
+    busy.resolve();
+
+    await vi.waitFor(() => expect(results).toHaveLength(1), { timeout: 10_000 });
+    const steered = turnsFromSlack().find((turn) => turn.user_text === "可以，按你说的加")!;
+    expect(results[0]).toMatchObject({ turnId: steered.id, state: "steered" });
+    expect(results[0]!.outcome).toMatchObject({ authority: "on_behalf", by: { actor: "lead", onBehalfOf: { sourceTurnId: steered.id } } });
+    expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
+    await vi.waitFor(() => expect(turnsFromSlack().map((turn) => turn.state)).toEqual(["completed", "completed"]), { timeout: 10_000 });
   }, 30_000);
 });

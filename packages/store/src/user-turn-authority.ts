@@ -74,6 +74,17 @@ export class UserTurnScopeError extends Error {
   }
 }
 
+// 插进正在跑的那一轮的用户消息（Lead 忙时的插话，conversations.ts 的 markTurnInserted）：轮次停在 steered，Lead 接下来说的话
+// 就是对它的回答（#265：用户在 Slack 里给自己发私信同意改预算，消息插进了一个系统回合，Lead 接着改预算被拒）。这时它还在进行。
+// steered 也是几种结局的终态（和别的消息一起答了、被下一条接替、取消了）：那时 user.message 已经有处置，不再算。
+// 没有 user.message 的轮次（daemon 自己答的命令）不算。
+function steerAwaitingAnswer(db: Db, turnId: string): boolean {
+  const row = db.prepare(
+    "SELECT disposition FROM events WHERE source = 'user' AND source_ref = ?",
+  ).get(`turn:${turnId}`) as { disposition: string | null } | undefined;
+  return row !== undefined && row.disposition === null;
+}
+
 /**
  * 当前已认证的配对用户轮次，并且这一轮的凭证有这个操作要的 scope（scope：用户自己点这个操作时，页面入口要的 scope）。
  * 不是时抛错；凭证不够时抛 UserTurnScopeError。
@@ -100,7 +111,7 @@ export function activePairedUserTurn(db: Db, turnId: string | null, label: strin
   if (!turn || turn.origin_binding_id === null || !turn.origin_kind.startsWith("paired:")) {
     throw new Error(`${label} must come from an authenticated paired user turn`);
   }
-  if (!["queued", "streaming"].includes(turn.state)) {
+  if (!["queued", "streaming"].includes(turn.state) && !(turn.state === "steered" && steerAwaitingAnswer(db, turn.id))) {
     throw new Error(`${label} turn ${turn.id} is no longer active`);
   }
   if (turn.binding_status !== "active") {

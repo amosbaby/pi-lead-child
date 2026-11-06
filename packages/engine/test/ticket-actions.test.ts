@@ -13,9 +13,9 @@ import {
   checkGrantCall, computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS, TICKET_ACTION_IDS, type TicketActionId,
 } from "@pi-lead-child/protocol";
 import {
-  completeTurn, createItem, createLoopbackBinding, createRun, createTurn, getItem, getRun, getRunGrant, grantDelegationPolicy,
-  insertOutcomeSnapshot, insertRunGrant, linkTickets, listActivities, listEvents, listRunGrantChanges, normalizeOutcomePayload, openDb,
-  revokeBinding, transition, updateRun, type Db,
+  channelOwnerBinding, completeTurn, createItem, createLoopbackBinding, createRun, createTurn, getItem, getRun, getRunGrant, grantDelegationPolicy,
+  insertOutcomeSnapshot, insertRunGrant, linkTickets, listActivities, listEvents, listRunGrantChanges, markTurnInserted, normalizeOutcomePayload,
+  openDb, revokeBinding, settleTurnAnsweredWith, transition, updateRun, type Db,
 } from "@pi-lead-child/store";
 import { liveChildren } from "../src/children/manager.js";
 import { updateDesignPreferences } from "../src/design-preferences.js";
@@ -145,6 +145,27 @@ describe("Lead acting for the user", () => {
       }))).code).toBe("needs_user_turn");
     }
     expect(getItem(db, runningItem)!.token_budget).toBeNull();
+  });
+
+  // 回归（#265）：Lead 忙时，用户在 Slack 里给自己发「可以，按你说的加」，消息插进正在跑的那一轮，轮次停在 steered。
+  // Lead 在这一轮里改预算，被判成「turn … is no longer active」。插话还没有结局时，它就是用户本人正在说话的一轮。
+  it("sets the budget in the user's own Slack DM that steered into a running turn", async () => {
+    const binding = channelOwnerBinding(db, { subject: "slack:U000TEST", name: "Slack 私信（你自己）" })!;
+    const turn = createTurn(db, { id: "turn_slack_steered", originBindingId: binding.id, originKind: "paired:slack", userText: "可以，按你说的加", state: "queued" });
+    markTurnInserted(db, turn.id);
+    const { itemId } = running();
+    const outcome = await runTicketAction(db, {
+      itemId, action: "set_budget", input: { tokenBudget: 30_000_000 }, caller: lead(turn.id), reason: "用户在 Slack 里说「可以，按你说的加」",
+    });
+    expect(outcome).toMatchObject({ authority: "on_behalf", by: { actor: "lead", onBehalfOf: { sourceTurnId: turn.id } } });
+    expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
+
+    // 和别的消息一起答过以后（用户的消息有了结局），这一轮不再算。
+    settleTurnAnsweredWith(db, turn.id, { answeredWith: null, note: "答过了" });
+    expect((await refusal(runTicketAction(db, {
+      itemId, action: "set_budget", input: { tokenBudget: 40_000_000 }, caller: lead(turn.id), reason: "再加",
+    }))).message).toMatch(/is no longer active/);
+    expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
   });
 
   it("refuses these decisions in a turn that read outside content", async () => {
