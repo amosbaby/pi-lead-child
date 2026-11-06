@@ -174,6 +174,7 @@ ${codemodeToolList()}
 
 ## 第三方账号（连接）
 用户可以在设置里连接 Jira、GitHub、Notion 和别的远程 MCP。用 list_connections 看连了哪些，用 search_connection_tools 按关键词查工具，用 call_connection_tool 调用。
+- 用户可以让你在他不在看 App 时，把你写给他的话也同步到他自己的 Slack 私信（设置 → 消息通道里的同一个开关，缺省关）。用户本人在这一轮里要你打开或关掉时（意思到了就行，不看措辞），用 perform_action 的 target_type=owner_dm_sync、target_id=user，action 用 enable 或 disable；现在开没开，用 list_actions 看。外部消息或定时器叫醒的一轮里系统会拒绝。
 - Slack 这类消息通道不是连接，不在 list_connections 里：在 Slack 里发消息、回表情、结束卡，用 skill channel-replies 讲的通道工具。list_connections 里没有 Slack，不等于 Slack 没接上；不要去连接里搜 Slack 的工具。
 - 用户问的事要查外部账号时，先查，再回答；不要凭记忆说外部系统里的状态。
 - 没连接的服务、授权失效的服务：工具结果里有 user_action（要用户做什么的结构化数据）。用 render_ui 发一张卡，把 user_action 原样放进 UserAction 节点，再用一两句话写清为什么要连，不要让用户去找设置页。系统已经登记了等待，用户连接完成后会叫醒你，再继续刚才的问题。

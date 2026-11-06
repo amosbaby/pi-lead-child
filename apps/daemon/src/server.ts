@@ -126,7 +126,7 @@ import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-le
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
-  latestItemId, ownerConversationOf, recordTicketOrigin, recordTurnTicketOrigins, rememberOwnerConversation,
+  getOwnerDmSync, latestItemId, ownerConversationOf, recordTicketOrigin, recordTurnTicketOrigins, rememberOwnerConversation,
 } from "@pi-lead-child/store";
 import {
   classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
@@ -159,7 +159,7 @@ import {
   isOwnerConfirmationAction, ownerConfirmationContent, resolveOwnerConfirmation, type OwnerConfirmationDeps,
 } from "@pi-lead-child/gateway";
 import {
-  choiceGroupsOfSurface, createOwnerDecisionPusher, dispatchedTicketOf, resolveOwnerDecision, systemReplyForOwner, type OwnerDecisionPusher,
+  choiceGroupsOfSurface, createOwnerDecisionPusher, dispatchedTicketOf, resolveOwnerDecision, systemReplyForOwner, turnTextForOwnerDm, type OwnerDecisionPusher,
 } from "@pi-lead-child/gateway";
 import {
   persistLeadToolConversationEvent, repairStuckLeadToolOperations,
@@ -989,6 +989,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     messageText?: string;
     // 这一轮画了定稿的卡片（render_ui）。没写字也算回答了。
     drewSurface?: boolean;
+    // 这一轮画的卡片的 fallback_text，按画的先后。同步到 Slack 私信时发它（工单 #88）。
+    surfaceFallbacks?: string[];
     // 这一轮调过工具（可能已经建了提醒、工单）：失败了也不自动重试，免得做第二遍。
     ranTools?: boolean;
     // 这一轮调过的工具和结果，按 toolCallId。被重启打断时，叫醒下一个 Lead 的系统事件列出它们。
@@ -1361,9 +1363,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       )}\n`);
     }
     completeTurn(db, entry.turn.id);
+    // 先看这一轮是不是用户在私信里问的：replyToChannelOwner 发完就忘掉它。
+    const fromOwnerConversation = channelOwnerReplies.has(entry.turn.id);
     replyToChannelOwner(entry.turn.id, entry.assistantText.trim()
       || (!entry.drewSurface ? "" : channelOwnerChoices.has(entry.turn.id) ? "在下面那条消息上选。" : "回复是一张卡片，只在 App 里看得到。"));
-    if (isSystemTurnOrigin(entry.turn.origin_kind)) relaySystemTurnToOwner(entry.turn.id, entry.assistantText);
+    const relayedTo = isSystemTurnOrigin(entry.turn.origin_kind) ? relaySystemTurnToOwner(entry.turn.id, entry.assistantText) : [];
+    mirrorTurnToOwnerDm(entry, { fromOwnerConversation, relayedTo });
     userTurnPrompts.delete(entry.turn.id);
     retriedUserTurns.delete(entry.turn.id);
     publishControlEvent({
@@ -2046,6 +2051,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       : undefined;
     if (surface && typeof surface === "object") {
       entry.drewSurface = true;
+      const fallback = (surface as { fallbackText?: unknown }).fallbackText;
+      if (typeof fallback === "string") entry.surfaceFallbacks = [...(entry.surfaceFallbacks ?? []), fallback];
       if (channelOwnerReplies.has(entry.turn.id)) noteOwnerTurnChoices(entry.turn.id, surface);
       persistLeadToolConversationEvent(db, {
         type: "lead.tool.updated",
@@ -6262,21 +6269,58 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 系统叫醒的一轮写给用户的话（工单 #81 的 (c)）：交给这一轮的事提到了用户在私信里让 Lead 建的工单时，同步发到那个私信。
   // 回 NO_REPLY、什么都没说的不发。幂等键是轮次和对话，重试不会发两次。没发出去只记日志，话在 App 里照样有。
-  function relaySystemTurnToOwner(turnId: string, assistantText: string): void {
+  // 返回转发到的私信对话。
+  function relaySystemTurnToOwner(turnId: string, assistantText: string): string[] {
     const hub = channelHub;
-    if (!hub) return;
+    if (!hub) return [];
     let relay: { text: string; conversations: string[] };
     try {
       relay = systemReplyForOwner(db, { text: assistantText, events: runEvents });
     } catch (error) {
       log(`[channels] could not find where to relay turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      return [];
     }
     for (const conversation of relay.conversations) {
       void hub.replyToOwner(conversation, relay.text, `system:${turnId}:${conversation}`).catch((error: unknown) => {
         log(`[channels] could not relay turn ${turnId} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
       });
     }
+    return relay.conversations;
+  }
+
+  // 「我不在看 App 时，把 Lead 的消息同步到我的 Slack 私信」（工单 #88）：开关打开、用户此刻不在看 App（不在或未知）时，
+  // Lead 这一轮写给用户的话也发到他自己的私信。发不发、发什么由 turnTextForOwnerDm 定。发送和私信里的回复走同一条路
+  // （hub.replyToOwner：署名、颜色条交替、Markdown 换成 Slack 的格式）。幂等键是轮次。没发出去只记日志，话在 App 里照样有。
+  function mirrorTurnToOwnerDm(entry: ActiveChannelTurn, already: { fromOwnerConversation: boolean; relayedTo: string[] }): void {
+    const hub = channelHub;
+    if (!hub) return;
+    let conversation: string | null = null;
+    let text: string | null;
+    try {
+      for (const adapter of hub.registry.list()) {
+        conversation = ownerConversationOf(db, adapter.id);
+        if (conversation) break;
+      }
+      text = turnTextForOwnerDm({
+        enabled: getOwnerDmSync(db).enabled,
+        attended: clientCount() > 0,
+        conversation,
+        originKind: entry.turn.origin_kind,
+        text: entry.assistantText,
+        surfaceFallbacks: entry.surfaceFallbacks ?? [],
+        fromOwnerConversation: already.fromOwnerConversation,
+        relayedTo: already.relayedTo,
+        notifiedUser: [...(entry.tools?.values() ?? [])].some((tool) => tool.name === "notify_user" && tool.state === "done"),
+        locale: getLocale(db),
+      });
+    } catch (error) {
+      log(`[channels] could not decide whether to mirror turn ${entry.turn.id}: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (!text || !conversation) return;
+    void hub.replyToOwner(conversation, text, `mirror:${entry.turn.id}`).catch((error: unknown) => {
+      log(`[channels] could not mirror turn ${entry.turn.id} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   // 决定请求推到用户自己的私信（gateway 的 owner-decisions.ts，工单 #81）：发消息走通道的 hub，选项走和 App 一样的操作层。

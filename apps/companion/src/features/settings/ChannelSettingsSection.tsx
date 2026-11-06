@@ -19,6 +19,7 @@ import {
   type ChannelStatusTone, type SecretForm,
 } from './channelSettingsModel';
 import { HandbookSection } from './HandbookSection';
+import { OwnerDmSyncCard } from './OwnerDmSyncCard';
 import { isDevicePaired } from './settingsNav';
 import { UnpairedNotice } from './UnpairedNotice';
 import { useServerForm } from './useServerForm';
@@ -59,6 +60,8 @@ export function ChannelSettingsSection() {
     <Column testID="channels-section" gap="page-section">
       {/* 表单不按服务端的值加 key：连上、断开时卡片不重新挂载，没保存的输入和检查结果都留着。 */}
       {channelSettings.sources.map((source) => <ChannelSourceCard key={source.source} source={source} />)}
+      {/* 不在看 App 时同步到 Slack 私信（工单 #88）：一个开关，对用户自己的私信生效。 */}
+      <OwnerDmSyncCard />
       {/* 自动代你处理（交接说明，2026-10-30）：一份，对所有来源生效。开关、预演一条消息、交接说明正文。打开以后，开关那张卡里还有代回复风格。 */}
       <HandbookSection />
     </Column>

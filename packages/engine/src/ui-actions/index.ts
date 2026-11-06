@@ -193,7 +193,9 @@ export async function listLeadUiActions(
       definition, resolved.value, env, ruleCeilingOf(db, definition, resolved.value, env, options.turnId, externalContent),
     );
     // 这一轮能不能凭：还要看这一轮的凭证有没有这个操作的 scope。
-    const turnBlocker = mode === "user_turn" ? activeUserTurnBlocker(db, options.turnId, definition.scope) : null;
+    const turnBlocker = mode === "user_turn"
+      ? activeUserTurnBlocker(db, options.turnId, definition.scope) ?? liveUserTurnBlocker(db, definition, options.turnId)
+      : null;
     const narrow = mode === "own" ? narrowCredentialTurn(db, definition, resolved.value, options.turnId) : null;
     const leadReady = view.available && mode !== "user_direct" && mode !== "external_turn"
       && (mode !== "user_turn" || turnBlocker === null) && narrow === null;
@@ -297,6 +299,8 @@ function resolveUiAuthority(
   } catch (error) {
     throw refusal("needs_user_turn", `${definition.label}（${name}）：${why}。${userTurnRefusalText(error, where)}。`);
   }
+  const notLive = liveUserTurnBlocker(db, definition, caller.turnId);
+  if (notLive) throw refusal("needs_user_turn", `${definition.label}（${name}）：${notLive}。等用户自己说，或者请他在 ${where} 里自己点。`);
   // 插进用户这一轮的事件（例如 child 刚要的审批）也在这一轮里：用户说话时还没见过它，不能算他要求的。
   if (definition.appearedAt && !(definition.appearedAt(target.value) < turn.startedAt)) {
     throw refusal(
@@ -306,6 +310,12 @@ function resolveUiAuthority(
     );
   }
   return { by: { actor: "lead", onBehalfOf: turn.onBehalfOf }, authority: "on_behalf", turnStartedAt: turn.startedAt };
+}
+
+// 只认用户本人正在说话的这一轮的操作（定义里的 liveUserTurnOnly）：这一轮不是时说原因（不带句号），是时为 null。
+function liveUserTurnBlocker(db: Db, definition: UiActionDefinition, turnId: string | null): string | null {
+  if (!definition.liveUserTurnOnly || isLiveUserTurn(db, turnId, definition.scope)) return null;
+  return "这个操作只认用户本人正在说话的这一轮，定时器（包括用户设的跟进）叫醒的一轮不算";
 }
 
 /**

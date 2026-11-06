@@ -177,3 +177,40 @@ export function ownerConversationOf(db: Db, source: string): string | null {
   const binding = db.prepare("SELECT status FROM bindings WHERE id = ?").get(bindingId) as { status: string } | undefined;
   return binding && binding.status !== "revoked" ? conversation : null;
 }
+
+// 「我不在看 App 时，把 Lead 的消息同步到我的 Slack 私信」开关（工单 #88）。存在 kv，缺省关。
+// 读到的值坏了（手改、截断）时按关算。改它走 engine 的操作层 owner_dm_sync（页面和 Lead 调同一个函数）。
+export const OWNER_DM_SYNC_KEY = "channel.owner_dm_sync";
+
+export interface OwnerDmSyncSetting {
+  enabled: boolean;
+  // 最近一次修改。从没改过时都是 null。
+  updatedAt: string | null;
+  updatedBy: "user" | "lead" | null;
+}
+
+/** 开关现在的样子。从没改过、读不到时是关。 */
+export function getOwnerDmSync(db: Db): OwnerDmSyncSetting {
+  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(OWNER_DM_SYNC_KEY) as { value: string } | undefined;
+  if (!row) return { enabled: false, updatedAt: null, updatedBy: null };
+  try {
+    const stored = JSON.parse(row.value) as { enabled?: unknown; updatedAt?: unknown; updatedBy?: unknown };
+    return {
+      enabled: stored.enabled === true,
+      updatedAt: typeof stored.updatedAt === "string" ? stored.updatedAt : null,
+      updatedBy: stored.updatedBy === "user" || stored.updatedBy === "lead" ? stored.updatedBy : null,
+    };
+  } catch {
+    return { enabled: false, updatedAt: null, updatedBy: null };
+  }
+}
+
+/** 写入开关。返回写入以后的样子。 */
+export function writeOwnerDmSync(db: Db, enabled: boolean, meta: { by: "user" | "lead"; at: Date }): OwnerDmSyncSetting {
+  const setting: OwnerDmSyncSetting = { enabled, updatedAt: meta.at.toISOString(), updatedBy: meta.by };
+  db.prepare(
+    `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(OWNER_DM_SYNC_KEY, JSON.stringify(setting));
+  return setting;
+}

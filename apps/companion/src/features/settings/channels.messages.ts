@@ -108,6 +108,13 @@ export const channelsMessages = defineMessages({
     signInAgain: 'Sign in again',
     useMode: (name: string) => `Use the ${name}`,
     connectionFailed: (reason: string) => `Could not change the connection: ${reason}`,
+    ownerDmSyncTitle: 'Sync to your Slack DM',
+    ownerDmSyncLabel: (leadName: string) => `When I'm not looking at the App, also send ${leadName}'s messages to my Slack DM`,
+    ownerDmSyncDescription: (leadName: string) =>
+      `While you are away from the App, what ${leadName} writes to you also goes to your own Slack DM. Cards are sent as text. `
+      + `Replies to messages you sent in Slack go there anyway. Takes effect right away. You can also ask ${leadName} to turn it on or off.`,
+    ownerDmSyncLoadFailed: (reason: string) => `Could not load this setting: ${reason}`,
+    ownerDmSyncFailed: (reason: string) => `Could not change this setting: ${reason}`,
   },
   zh: {
     description: (leadName) => `外部的消息来源。${leadName} 用你本人的账号读这里的消息，替你查资料，有把握时代你回复。`,
@@ -204,5 +211,12 @@ export const channelsMessages = defineMessages({
     // 中文和英文之间空一格：「改用 Slack 应用」「改用浏览器会话」。
     useMode: (name) => `改用${/^[A-Za-z]/.test(name) ? ' ' : ''}${name}`,
     connectionFailed: (reason) => `没有改成连接方式：${reason}`,
+    ownerDmSyncTitle: '同步到 Slack 私信',
+    ownerDmSyncLabel: (leadName) => `我不在看 App 时，把 ${leadName} 的消息同步到我的 Slack 私信`,
+    ownerDmSyncDescription: (leadName) =>
+      `你不在看 App 时，${leadName} 写给你的话也发到你自己的 Slack 私信。卡片发成文字。你在 Slack 里问的，回复本来就发回去。`
+      + `改了马上生效。也可以直接让 ${leadName} 打开或关掉。`,
+    ownerDmSyncLoadFailed: (reason) => `没有读到这个设置：${reason}`,
+    ownerDmSyncFailed: (reason) => `没有改成这个设置：${reason}`,
   },
 });

@@ -357,6 +357,9 @@ export interface UiActionDefinition<T = any, I = any> {
   // 按目标算时返回一句话（不带句号），写给 Lead 看：为什么这一次要用户本人；返回 null 表示这次不受限。例如外部消息派的执行
   // 要的审批（工单 #246 第 6 节）。这时用户本人正在说话的一轮读过外部内容也不例外（拒绝，带确认卡）。
   userTurnOnly?: boolean | ((target: T, env: UiActionEnv) => string | null);
+  // 和 userTurnOnly 一起写：还要是用户本人正在说话的这一轮（authority.ts 的 isLiveUserTurn）。用户设的跟进到点叫醒的一轮
+  // （timer:<编号>）也不算，例如「同步到 Slack 私信」开关（用户 2026-11-06，工单 #88：定时器叫醒的一轮不能改）。
+  liveUserTurnOnly?: boolean;
   // 改规则的操作（external-content.ts）：授权表、投递规则（常设指令）、连接配置、设置页的选项。外部的一轮里 Lead 做不了。
   // 每个操作都要写明。新加的操作属于这几类时写 true。
   changesRules: boolean;

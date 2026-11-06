@@ -94,12 +94,14 @@ export const ActionPermissionSchema = Type.Union([
 //   skill  PLC 装的一个 skill：卸载。编号是 skill 的名字。
 //   host_bypass  「用户本人发话时免沙箱」开关（设置 → 免沙箱，工单 #246，host-bypass.ts）。编号只有 lead。
 //   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
+//   owner_dm_sync  「我不在看 App 时，把 Lead 的消息同步到我的 Slack 私信」开关（设置 → 消息通道，2026-11-06，工单 #88）。
+//     编号只有 user。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement",
+  "busy_placement", "owner_dm_sync",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -383,6 +385,12 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   busy_placement: {
     // 选 Lead 忙时你发的消息怎么放：followUp（排队，缺省）或 steer（插话）。改规则：读过外部内容的一轮里不能做。
     set: SetBusyPlacementRequestSchema,
+  },
+  owner_dm_sync: {
+    // 打开：用户不在看 App 时，Lead 写给用户的话也发到他自己的 Slack 私信。只认用户本人正在说话的这一轮。
+    enable: Empty,
+    // 关掉：只在 App 里看。
+    disable: Empty,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

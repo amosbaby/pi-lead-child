@@ -30,6 +30,7 @@ import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
+import { OWNER_DM_SYNC_ACTIONS, OWNER_DM_SYNC_TARGET } from "./owner-dm-sync.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
 import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.js";
@@ -1225,6 +1226,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   skill: SKILL_TARGET,
   host_bypass: HOST_BYPASS_TARGET,
   busy_placement: BUSY_PLACEMENT_TARGET,
+  owner_dm_sync: OWNER_DM_SYNC_TARGET,
 };
 
 export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<string, UiActionDefinition>> } = {
@@ -1274,4 +1276,6 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   host_bypass: HOST_BYPASS_ACTIONS,
   // Lead 忙时你发的消息怎么放（2026-11-09）：排队或插话。改规则，Lead 也能改。定义在 busy-placement.ts。
   busy_placement: BUSY_PLACEMENT_ACTIONS,
+  // 不在看 App 时同步到 Slack 私信的开关（2026-11-06，工单 #88）。定义在 owner-dm-sync.ts。
+  owner_dm_sync: OWNER_DM_SYNC_ACTIONS,
 };
