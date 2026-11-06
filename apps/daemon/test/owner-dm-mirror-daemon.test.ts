@@ -36,6 +36,10 @@ afterEach(async () => {
 
 const turnState = (id: string) => (db.prepare("SELECT state FROM channel_turns WHERE id = ?").get(id) as { state: string } | undefined)?.state;
 
+// 用户自己私信里的回复（#70）：顶层 text 是空的，署名和正文在色条（attachments[0]）里；fallback 是通知里显示的那一份，「署名\n正文」。
+type OwnerReplyBar = { color: string; fallback: string };
+const barOf = (message: { text: string; attachments?: unknown[] }) => (message.attachments as OwnerReplyBar[] | undefined)?.[0];
+
 describe("syncing Lead's messages to the user's Slack DM while the user is away from the App", () => {
   it("sends App replies to the DM only when the switch is on and nobody is looking at the App", async () => {
     const slack = new FakeSlack();
@@ -78,7 +82,12 @@ describe("syncing Lead's messages to the user's Slack DM while the user is away 
     expect(getOwnerDmSync(db)).toMatchObject({ enabled: true, updatedBy: "user" });
     await ask("问题B");
     await vi.waitFor(() => expect(slack.sent("D0SELF")).toHaveLength(2), { timeout: 10_000 });
-    expect(slack.sent("D0SELF")[1]!.text).toMatch(/^.+ \(Assistant\)\n回答B$/u);
+    // 和私信里的回复一样：顶层 text 是空的，署名和正文在色条里，色条和上一条换了颜色（#86）。
+    const [first, mirrored] = slack.sent("D0SELF");
+    expect(mirrored!.text).toBe("");
+    expect(barOf(mirrored!)?.fallback).toMatch(/^.+ \(Assistant\)\n回答B$/u);
+    expect(barOf(mirrored!)?.color).toBeTruthy();
+    expect(barOf(mirrored!)?.color).not.toBe(barOf(first!)?.color);
 
     // 这一轮用 notify_user 推过即时通知：不再发一遍。
     await ask("要推通知");

@@ -38,6 +38,10 @@ const turnsFromSlack = () => db.prepare(
   "SELECT id, origin_kind, origin_binding_id, state, user_text FROM channel_turns WHERE origin_kind = 'paired:slack' ORDER BY created_at",
 ).all() as Array<{ id: string; origin_kind: string; origin_binding_id: number; state: string; user_text: string }>;
 
+// 用户自己私信里的回复（#70）：顶层 text 是空的，署名和正文在色条（attachments[0]）里；fallback 是通知里显示的那一份，「署名\n正文」。
+type OwnerReplyBar = { color: string; fallback: string };
+const barOf = (message: { text: string; attachments?: unknown[] }) => (message.attachments as OwnerReplyBar[] | undefined)?.[0];
+
 describe("the user's own Slack DM to themself in the daemon", () => {
   it("opens the user's own turn with Companion's permissions and replies in mrkdwn to the same DM", async () => {
     const slack = new FakeSlack();
@@ -62,7 +66,8 @@ describe("the user's own Slack DM to themself in the daemon", () => {
 
     // 回复换成 mrkdwn，署上 Lead 的名字，发回那条私信。
     await vi.waitFor(() => expect(slack.sent("D0SELF")).toHaveLength(1), { timeout: 10_000 });
-    expect(slack.sent("D0SELF")[0]!.text).toMatch(/^.+ \(Assistant\)\n\*结论\*\n\*今天不发布\*，见 <https:\/\/cal\.test\/x\|日历>。$/u);
+    expect(slack.sent("D0SELF")[0]!.text).toBe("");
+    expect(barOf(slack.sent("D0SELF")[0]!)?.fallback).toMatch(/^.+ \(Assistant\)\n\*结论\*\n\*今天不发布\*，见 <https:\/\/cal\.test\/x\|日历>。$/u);
 
     // 这一轮是用户本人的一轮：凭证是这个 Slack 账号的，权限和 Companion 一样，Lead 在这一轮里有用户本人的权限。
     const [turn] = turnsFromSlack();
