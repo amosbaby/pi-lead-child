@@ -65,7 +65,7 @@ export function MessagePartView({
   if (part.kind === 'artifact') return <ArtifactMessagePart artifactId={part.artifactId} />;
 
   // Lead 用 render_ui 画的富交互卡片（generative UI）。
-  if (part.kind === 'surface') return <SurfaceView surface={part.surface} partial={part.partial} />;
+  if (part.kind === 'surface') return <SurfaceView surface={part.surface} partial={part.partial} callId={part.callId} />;
 
   // 你发的图片画在气泡上面一排（LeadConversation 的 UserMessageImages），不在气泡里。
   if (part.kind === 'image') return null;

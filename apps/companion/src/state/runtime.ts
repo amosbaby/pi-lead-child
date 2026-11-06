@@ -88,6 +88,7 @@ import type {
   TicketActionId as TicketOperationId,
   TicketActionRunRequest,
   TicketActionRunResponse,
+  SurfaceActionDone,
   UiActionRunRequest,
   UiActionRunResponse,
   UiActionView,
@@ -198,7 +199,7 @@ export type CompanionTransport = Pick<
   | 'getOlderConversationTurns' | 'getConversationTurnsById'
   | 'getLeadQueue' | 'leadQueueAction' | 'followUpAction'
   | 'rescheduleReminder' | 'checkConnection' | 'connectionLost' | 'getOwnBinding' | 'listBindings' | 'revokeBinding'
-  | 'listUiActions' | 'performUiAction'
+  | 'listUiActions' | 'performUiAction' | 'getSurfaceActions'
   | 'createLoopbackInvitation' | 'getLoopbackInvitationStatus' | 'cancelLoopbackInvitation'
   | 'listConnections' | 'startConnection' | 'addCustomConnection' | 'connectionFlow' | 'updateConnectionSettings'
   | 'testConnection' | 'disconnectConnection' | 'connectionTools' | 'connectionConfirmation' | 'resolveConnectionConfirmation'
@@ -683,6 +684,13 @@ export class CompanionStateRuntime {
     const { client } = this.dependencies;
     if (typeof client.listUiActions !== 'function') return [];
     return client.listUiActions(type, id);
+  }
+
+  // 会话卡片上做成了的按钮（工单 #263，protocol 的 surface-actions.ts）。旧服务端没有这条路由时是空数组：按钮照旧画。
+  async getSurfaceActions(callIds: readonly string[]): Promise<SurfaceActionDone[]> {
+    const { client } = this.dependencies;
+    if (typeof client.getSurfaceActions !== 'function' || !callIds.length) return [];
+    return client.getSurfaceActions(callIds);
   }
 
   // 执行它：和 Lead 的 perform_action 同一个函数，actor 是你本人。做完以后重取这个对象相关的资源（提醒是那条提醒、通知和日程）。

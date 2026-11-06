@@ -1391,6 +1391,22 @@ CREATE TABLE IF NOT EXISTS widget_sources (
 CREATE INDEX IF NOT EXISTS idx_widget_sources_due ON widget_sources(paused, next_run_at);
 `;
 
+// 会话卡片上做成了的按钮（工单 #263，protocol 的 surface-actions.ts）：一行是一张卡（render_ui 调用）上的一个 Action 按钮。
+// 按钮的操作成功以后写；同一个按钮再做成一次时更新时刻。卡片打开时按 call_id 读，显示「已完成」。
+// 老库靠 CREATE IF NOT EXISTS 自然获得，无需 migrate。
+export const SURFACE_ACTIONS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS surface_actions (
+  call_id      TEXT NOT NULL CHECK (length(call_id) BETWEEN 1 AND 200),
+  node_id      TEXT NOT NULL CHECK (length(node_id) BETWEEN 1 AND 64),
+  target_type  TEXT NOT NULL,
+  target_id    TEXT NOT NULL,
+  action       TEXT NOT NULL,
+  binding_id   INTEGER,
+  done_at      TEXT NOT NULL,
+  PRIMARY KEY (call_id, node_id)
+);
+`;
+
 export const SCHEMA = `
 ${itemsTableSql("items", true)}
 ${ITEMS_CONSTRAINTS_SCHEMA}
@@ -1847,6 +1863,7 @@ ${WATCHES_SCHEMA}
 ${MEMORY_SYNC_SCHEMA}
 ${WIDGETS_SCHEMA}
 ${WIDGET_SOURCES_SCHEMA}
+${SURFACE_ACTIONS_SCHEMA}
 `;
 
 export const CHECKPOINT_CONTROL_PLANE_SCHEMA = `

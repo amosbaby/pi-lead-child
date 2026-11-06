@@ -59,6 +59,7 @@ export * from "./run-grants.js";
 export * from "./runtime-events.js";
 export * from "./runtime-health.js";
 export * from "./stages.js";
+export * from "./surface-actions.js";
 export * from "./standing-order-changes.js";
 export * from "./standing-order-seeds.js";
 export * from "./standing-orders.js";

@@ -1,4 +1,4 @@
-import { Box, Button, Column, ConfirmBar, OptionPills, Row, Text, TextField, type DataTone } from '@pi-lead-child/components';
+import { Box, Button, Column, ConfirmBar, Dot, OptionPills, Row, Text, TextField, type DataTone } from '@pi-lead-child/components';
 import {
   DEFAULT_LOCALE, intlLocale, resolveDatetimePreset, ticketNeedsUser,
   type Locale, type TicketSummary, type UiActionButtonTarget, type UiActionView, type UiBinding,
@@ -11,6 +11,7 @@ import { useCompanionRuntime } from '../../state/CompanionStateProvider';
 import { useConversationItemDetail, useTicketActions, useTicketSummary } from '../../state/hooks';
 import { FormContext } from './Disclosure';
 import { genuiMessages } from './genui.messages';
+import { useSurfaceActionDone } from './surfaceActions';
 
 // 收起和展开、参数状态在 Disclosure.tsx（不依赖运行时，系统卡也用）。这里照旧导出，原来的引用不用改。
 export { DisclosureView, SurfaceFormProvider, usePendingValue, type ActionTargets, type DisclosureProps } from './Disclosure';
@@ -245,6 +246,8 @@ function useActionRunner({ id, target, action, input, label, confirmText, labelW
   const locale = useLocale();
   const form = useContext(FormContext);
   const availability = useAvailability(target, action);
+  // 会话卡片上的按钮：做成了没有、执行时带上卡片的来源（surfaceActions.tsx，工单 #263）。
+  const surface = useSurfaceActionDone(id, target, action);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const filled = form.values[id] ?? {};
@@ -255,8 +258,10 @@ function useActionRunner({ id, target, action, input, label, confirmText, labelW
     setError(null);
     try {
       const type: string = target.type;
-      if (type === 'ticket') await runtime.runTicketAction(Number(target.id), action as never, { input: merged });
-      else await runtime.performUiAction(type, String(target.id as string | number), action, { input: merged });
+      const origin = surface.origin ? { origin: surface.origin } : {};
+      if (type === 'ticket') await runtime.runTicketAction(Number(target.id), action as never, { input: merged, ...origin });
+      else await runtime.performUiAction(type, String(target.id as string | number), action, { input: merged, ...origin });
+      surface.markDone();
       availability.reload();
       form.done();
       return true;
@@ -270,12 +275,41 @@ function useActionRunner({ id, target, action, input, label, confirmText, labelW
   };
   const picked = Object.values(filled).map((value) => resolveDatetimePreset(value) ?? null).find(Boolean);
   return {
-    availability, busy, error, run,
+    availability, busy, error, run, done: surface.done, refreshDone: surface.refresh,
     text: labelWithValue && picked ? labelWithValue.replace('{value}', shortTimeWords(new Date(picked), Date.now(), locale)) : label ?? availability.label,
     needsConfirm: confirmText !== undefined || availability.confirm !== null || action === 'cancel',
     confirmText: confirmText ?? availability.confirm,
     danger: action === 'cancel',
   };
+}
+
+// sm 按钮的高度（Button.shared.ts 的 SIZES.sm）：完成行和按钮一样高，卡片原地换状态时不变高（P1.3）。
+const BUTTON_ROW_HEIGHT = 32;
+
+// 按钮做成以后的样子（P5.5、主题 C-13）：按钮收起，原地一行绿点、「已完成」和按钮上的那句话。读屏时带上做成的时刻。
+function ActionDone({ id, label, at }: { id: string; label: string; at: string }) {
+  const m = useMessages(genuiMessages).controls;
+  const locale = useLocale();
+  const when = new Date(at);
+  return (
+    <Row testID={`surface-action-${id}-done`} items="center" gap="icon-label" minH={BUTTON_ROW_HEIGHT} minW={0} shrink={1}>
+      <Dot color="success" size={7} accessibilityLabel={m.doneAt(label, Number.isNaN(when.getTime()) ? at : shortTimeWords(when, Date.now(), locale))} />
+      <Text size="label" weight="semibold" tone="success-dark" shrink={0}>{m.done}</Text>
+      <Text size="label" tone="secondary" numberOfLines={1} minW={0} shrink={1}>{label}</Text>
+    </Row>
+  );
+}
+
+// 别的设备上按了这个按钮：工单变了（ticket.updated 推来新的 TicketSummary）时重读一次这张卡的记录。
+function useDoneFromOtherDevices(target: UiActionButtonTarget, refresh: () => void) {
+  const ticketId = target.type === 'ticket' ? Number(target.id) : null;
+  const updatedAt = useTicketSummary(ticketId ?? 0)?.updatedAt ?? null;
+  const [seen, setSeen] = useState(updatedAt);
+  useEffect(() => {
+    if (updatedAt === seen) return;
+    setSeen(updatedAt);
+    if (seen !== null) refresh();
+  }, [updatedAt, seen, refresh]);
 }
 
 // 卡片上的按钮。不能按时变灰并写上原因，不消失（布局不变）。要就地确认的操作（取消、不可逆）：
@@ -285,6 +319,8 @@ export function ActionButton(props: ActionProps & { onConfirmRequest?: () => voi
   const runner = useActionRunner(props);
   const m = useMessages(genuiMessages).controls;
   const [confirming, setConfirming] = useState(false);
+  useDoneFromOtherDevices(props.target, runner.refreshDone);
+  if (runner.done) return <ActionDone id={id} label={runner.text} at={runner.done.at} />;
   if (confirming) {
     return (
       <ConfirmBar
@@ -312,7 +348,7 @@ export function ActionButton(props: ActionProps & { onConfirmRequest?: () => voi
         disabled={disabled}
         onPress={() => (runner.needsConfirm ? (onConfirmRequest ? onConfirmRequest() : setConfirming(true)) : void runner.run())}
       />
-      {runner.error ? <Text testID={`surface-action-${id}-error`} size="meta" tone="danger-dark">{runner.error}</Text>
+      {runner.error ? <Text testID={`surface-action-${id}-error`} size="meta" tone="danger-dark">{m.failed(runner.error)}</Text>
         : !partial && runner.availability.loaded && !runner.availability.available && runner.availability.reason
           ? <Text testID={`surface-action-${id}-reason`} size="meta" tone="secondary">{runner.availability.reason}</Text>
           : null}
@@ -339,7 +375,7 @@ function ConfirmRow({ action, onCancel }: { action: ActionProps; onCancel: () =>
           testID={`surface-action-${action.id}-confirm-ok`}
         />
       </Row>
-      {runner.error ? <Text size="meta" tone="danger-dark">{runner.error}</Text> : null}
+      {runner.error ? <Text testID={`surface-action-${action.id}-error`} size="meta" tone="danger-dark">{m.failed(runner.error)}</Text> : null}
     </Column>
   );
 }

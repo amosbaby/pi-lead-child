@@ -27,6 +27,7 @@ import { ReminderRescheduleRequestSchema } from "./reminders.ts";
 import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from "./reply-style.ts";
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
+import { SurfaceActionOriginSchema } from "./surface-actions.ts";
 import { TimerRequestDecisionSchema } from "./timer-origins.ts";
 import {
   ViewRenameRequestSchema, WidgetCreateRequestSchema, WidgetReorderRequestSchema, WidgetUpdateRequestSchema,
@@ -419,6 +420,8 @@ export type UiActionsResponse = Static<typeof UiActionsResponseSchema>;
 export const UiActionRunRequestSchema = StrictObject({
   input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   reason: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
+  // 从会话卡片上的按钮按下时，按钮所在的卡片（surface-actions.ts）。成功以后服务端记下，卡片显示已完成。
+  origin: Type.Optional(SurfaceActionOriginSchema),
 });
 export type UiActionRunRequest = Static<typeof UiActionRunRequestSchema>;
 

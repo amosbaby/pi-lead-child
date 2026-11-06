@@ -27,6 +27,7 @@ import {
   type ActionProps, type ActionTargets, type DisclosureProps, type FieldProps,
 } from './SurfaceControls';
 import { StandingOrderChangeConfirmCard } from './StandingOrderCards';
+import { SurfaceActionsProvider } from './surfaceActions';
 import { useTicketRef } from './useTicketRef';
 import { UserActionCard } from './UserActionCard';
 
@@ -37,7 +38,8 @@ import { UserActionCard } from './UserActionCard';
 // 工单和决策只按编号引用：状态从 TicketSummary 和决策请求实时读取，旧卡片不会显示过期的状态。
 // 外观是方案 A 的决定卡：有待做的决定时整张卡是琥珀色的边，工单头写「等你决定」。
 // partial：模型还在写这张卡（流式），先画已经完整的部分，说一句「正在生成…」，选项先不能点。
-export function SurfaceView({ surface, partial = false }: { surface: UiSurface; partial?: boolean }) {
+// callId：会话里画出这张卡的 render_ui 调用。有它时卡上的按钮做成以后收起成「已完成」，刷新、换设备也一样（工单 #263）。
+export function SurfaceView({ surface, partial = false, callId = null }: { surface: UiSurface; partial?: boolean; callId?: string | null }) {
   const m = useMessages(genuiMessages).surface;
   const checked = validateUiSurface(surface);
   if (!checked.ok) {
@@ -64,12 +66,14 @@ export function SurfaceView({ surface, partial = false }: { surface: UiSurface; 
       {...(bleed ? {} : { px: 'card' as const, py: 'card' as const })}
     >
       <CardInfo.Provider value={cardInfo(valid.nodes, byId)}>
-        <SurfaceFormProvider>
-          <Column gap="card-row">
-            <SurfaceNode node={root} byId={byId} partial={partial} bleed={bleed} />
-            {partial ? <Text size="note" tone="secondary">{m.generating}</Text> : null}
-          </Column>
-        </SurfaceFormProvider>
+        <SurfaceActionsProvider callId={callId} enabled={!partial && valid.nodes.some((node) => node.type === 'Action')}>
+          <SurfaceFormProvider>
+            <Column gap="card-row">
+              <SurfaceNode node={root} byId={byId} partial={partial} bleed={bleed} />
+              {partial ? <Text size="note" tone="secondary">{m.generating}</Text> : null}
+            </Column>
+          </SurfaceFormProvider>
+        </SurfaceActionsProvider>
       </CardInfo.Provider>
     </Card>
   );

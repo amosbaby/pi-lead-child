@@ -157,6 +157,7 @@ Lead 碰不到的维度，不写进 skill；写进本文，约束写组件的人
 ## 9. 交互
 
 - 只有决定卡、确认卡和 UserAction 有按钮（`UI_ACTIONABLE_COMPONENTS`）。用户的选择走决策请求或者确认接口，授权照常；选完叫醒 Lead 去执行。
+- 会话里卡片上的 Action 按钮做成以后，原地换成一行「已完成」（主题 11.10）。执行请求带上卡片的来源（`origin`：render_ui 的 callId 和按钮节点），服务端成功以后记一条，`GET /v1/conversation/surface-actions` 读回，所以刷新、换设备打开也是已完成。失败不记，按钮下面写原因（2026-11-05，工单 #263，protocol 的 `surface-actions.ts`）。
 - 卡片要用户做事时，必须至少有一个能点的控件，render_ui 会检查。
 - 工单引用可以点：打开工单；提醒打开日程。
 - 不加推测性的「下一步」按钮。

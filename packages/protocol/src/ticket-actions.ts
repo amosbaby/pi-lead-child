@@ -13,6 +13,7 @@ import { KernelRuntimeIdSchema } from "./runtime-ids.ts";
 import { ACCEPTANCE_CRITERIA_ACTION_IDS, ACCEPTANCE_CRITERIA_ACTION_INPUT_SCHEMAS } from "./acceptance-criteria.ts";
 import { ACTION_PERMISSIONS, ActionPermissionSchema, type ActionPermission } from "./ui-actions.ts";
 import { GrantScopeSchema } from "./run-grants.ts";
+import { SurfaceActionOriginSchema } from "./surface-actions.ts";
 
 const StrictObject = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -213,6 +214,8 @@ export const TicketActionRunRequestSchema = StrictObject({
   input: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
   // 为什么做。返工时是给执行 agent 的意见，取消时是原因，关联时是理由。不给时用一句默认的话。
   reason: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
+  // 从会话卡片上的按钮按下时，按钮所在的卡片（surface-actions.ts）。成功以后服务端记下，卡片显示已完成。
+  origin: Type.Optional(SurfaceActionOriginSchema),
 });
 export type TicketActionRunRequest = Static<typeof TicketActionRunRequestSchema>;
 

@@ -97,6 +97,9 @@ export const genuiMessages = defineMessages({
       confirmTitle: (label: string) => `${label}?`,
       confirm: (label: string) => `Confirm: ${label}`,
       cancel: 'Never mind',
+      done: 'Done',
+      doneAt: (label: string, when: string) => `Done: ${label} (${when})`,
+      failed: (reason: string) => `Failed: ${reason}`,
     },
     surface: {
       generating: 'Generating…',
@@ -223,6 +226,9 @@ export const genuiMessages = defineMessages({
       confirmTitle: (label) => `${label}？`,
       confirm: (label) => `确认${label}`,
       cancel: '算了',
+      done: '已完成',
+      doneAt: (label, when) => `已完成：${label}（${when}）`,
+      failed: (reason) => `没有做成：${reason}`,
     },
     surface: {
       generating: '正在生成…',

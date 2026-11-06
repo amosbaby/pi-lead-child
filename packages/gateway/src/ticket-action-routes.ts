@@ -1,14 +1,14 @@
 // 工单操作的页面入口（spec 5.11）。实现在 engine 的 ticket-actions/，这里只做认证、请求体校验和错误映射。
 //   - GET  /v1/tickets/:id/actions          tickets:view：每个操作现在能不能做、为什么。只在本机生效的操作（打开文件）
 //     按请求是不是从回环地址来算。
-//   - POST /v1/tickets/:id/actions/:action  每个操作自己的 scope：执行。请求体 { input?, reason? }。
+//   - POST /v1/tickets/:id/actions/:action  每个操作自己的 scope：执行。请求体 { input?, reason?, origin? }。
 // 页面入口一律以你本人的名义：请求体里没有「谁做的」，Lead 走自己的工具（packages/lead 的 ticket_action）。
 // 旧的路由（/confirm、/complete、/rework、/cancel、/request-review、/relations、/delivery/merge、/runs/:id/pause……）
 // 在 paired-server.ts 里转调 performUserTicketAction，所以它们和新路由做同样的检查，记同样的账本。
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { Value } from "typebox/value";
-import { TicketActionRunRequestSchema, type OwnerActionSource, type Scope } from "@pi-lead-child/protocol";
-import type { Binding, Db } from "@pi-lead-child/store";
+import { TicketActionRunRequestSchema, type OwnerActionSource, type Scope, type SurfaceActionOrigin } from "@pi-lead-child/protocol";
+import { recordSurfaceAction, type Binding, type Db } from "@pi-lead-child/store";
 import {
   listTicketActions, runTicketAction, ticketActionDefinition,
   type PullRequestRunner, type TicketActionHost, type TicketActionOutcome,
@@ -84,13 +84,15 @@ export async function handleTicketActionRoute(ctx: TicketActionRouteContext): Pr
     const binding = ctx.requireAuth(definition?.scope ?? "tickets:create");
     const body = req.headers["content-length"] === "0" ? {} : (await ctx.readBody()) ?? {};
     if (!Value.Check(TicketActionRunRequestSchema, body)) {
-      ctx.invalid("body must be { input?: object, reason?: string }");
+      ctx.invalid("body must be { input?: object, reason?: string, origin?: { callId, node } }");
     }
-    const { input, reason } = body as { input?: Record<string, unknown>; reason?: string };
+    const { input, reason, origin } = body as { input?: Record<string, unknown>; reason?: string; origin?: SurfaceActionOrigin };
     const outcome = await performUserTicketAction(ctx, {
       itemId: ticketId, action, ...(input !== undefined ? { input } : {}), ...(reason ? { reason } : {}),
       binding, source: ctx.requestSource(binding),
     });
+    // 从会话卡片的按钮按下的：记下这个按钮做成了（surface-actions.ts），刷新、换设备打开时卡片显示已完成。
+    if (origin) recordSurfaceAction(ctx.db, { origin, target: { type: "ticket", id: ticketId }, action: outcome.action, bindingId: binding.id });
     ctx.flush();
     ctx.json(200, { ticketId, action: outcome.action, result: outcome.result, ticket: ctx.ticket(ticketId) });
     return true;

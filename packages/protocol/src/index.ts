@@ -1249,6 +1249,7 @@ export * from "./prototype-fidelity.ts";
 export * from "./conversation-cards.ts";
 export * from "./lead-activity.ts";
 export * from "./ui-surfaces.ts";
+export * from "./surface-actions.ts";
 export * from "./admin.ts";
 export * from "./loopback-pairing.ts";
 export * from "./connections.ts";

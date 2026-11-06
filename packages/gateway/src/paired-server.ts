@@ -90,6 +90,7 @@ import {
   TicketReviewRequestSchema,
   type TicketReviewRequest,
   UiActionRunRequestSchema,
+  SURFACE_ACTIONS_QUERY_LIMIT,
   type UiActionRunRequest,
   bindingOriginOf,
   originMayDecide,
@@ -130,7 +131,9 @@ import { handleHostBypassRoute } from "./host-bypass-routes.js";
 import { handleRuleChangeRoute } from "./rule-change-routes.js";
 import { handleTimerRoute } from "./timer-routes.js";
 import type { LeadCapability, LeadGrant, LeadGrantChannel } from "@pi-lead-child/store";
-import { findClientMessageTurn, getChatImage, getItem, listWidgets, loadSetupStatus, recordClientMessageTurn, type ChatImageData } from "@pi-lead-child/store";
+import {
+  findClientMessageTurn, getChatImage, getItem, listSurfaceActions, listWidgets, loadSetupStatus, recordClientMessageTurn, recordSurfaceAction, type ChatImageData,
+} from "@pi-lead-child/store";
 import { TicketAttachmentError } from "@pi-lead-child/store";
 import { decodeChatImages } from "./chat-images.js";
 import { setProjectStatus } from "@pi-lead-child/store";
@@ -2385,12 +2388,15 @@ export async function startPairedServer(
           const body = req.headers["content-length"] === "0" ? {} : parseJson(await readBody(req, maxBodyBytes)) ?? {};
           assertUserActor(body);
           const { actor: _actor, ...request } = body as Record<string, unknown>;
-          if (!Value.Check(UiActionRunRequestSchema, request)) throw new HttpError(400, "invalid_request", "body is { input?, reason? }");
+          if (!Value.Check(UiActionRunRequestSchema, request)) throw new HttpError(400, "invalid_request", "body is { input?, reason?, origin? }");
+          const run = request as UiActionRunRequest;
           const outcome = await performUiActionAsUser(req, auth, {
             target, action,
-            ...((request as UiActionRunRequest).input !== undefined ? { input: (request as UiActionRunRequest).input } : {}),
-            ...((request as UiActionRunRequest).reason ? { reason: (request as UiActionRunRequest).reason! } : {}),
+            ...(run.input !== undefined ? { input: run.input } : {}),
+            ...(run.reason ? { reason: run.reason } : {}),
           });
+          // 从会话卡片的按钮按下的：记下这个按钮做成了（protocol 的 surface-actions.ts）。
+          if (run.origin) recordSurfaceAction(bridge.db, { origin: run.origin, target: outcome.target, action: outcome.action, bindingId: auth.binding.id });
           flushGatewayOutbox();
           json(req, res, 200, { target: outcome.target, action: outcome.action, result: outcome.result ?? null });
           return;
@@ -2529,6 +2535,17 @@ export async function startPairedServer(
         }
         service().syncLeadActivity(publish);
         json(req, res, 200, { interrupt });
+        return;
+      }
+
+      // 会话卡片上做成了的按钮（工单 #263，protocol 的 surface-actions.ts）：?call=<render_ui 的 callId>，可以给多个。
+      if (req.method === "GET" && url.pathname === "/v1/conversation/surface-actions") {
+        requireAuth(req, "chat");
+        const calls = [...new Set(url.searchParams.getAll("call").flatMap((value) => value.split(",")).filter(Boolean))];
+        if (!calls.length || calls.length > SURFACE_ACTIONS_QUERY_LIMIT || calls.some((call) => call.length > 200)) {
+          throw new HttpError(400, "invalid_request", `call: 1 to ${SURFACE_ACTIONS_QUERY_LIMIT} render_ui call ids`);
+        }
+        json(req, res, 200, { actions: listSurfaceActions(bridge.db, calls) });
         return;
       }
 

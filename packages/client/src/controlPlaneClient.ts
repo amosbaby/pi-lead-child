@@ -244,6 +244,9 @@ import {
   TicketActionsResponseSchema,
   UiActionRunResponseSchema,
   UiActionsResponseSchema,
+  SurfaceActionsResponseSchema,
+  type SurfaceActionDone,
+  type SurfaceActionsResponse,
   type UiActionRunRequest,
   type UiActionRunResponse,
   type UiActionsResponse,
@@ -1487,6 +1490,16 @@ export class ControlPlaneClient {
       body: JSON.stringify(request),
       ...(options.signal ? { signal: options.signal } : {}),
     });
+  }
+
+  // 会话卡片上做成了的按钮（工单 #263，protocol 的 surface-actions.ts）：callIds 是卡片的 render_ui 调用。
+  async getSurfaceActions(callIds: readonly string[], options: { signal?: AbortSignal } = {}): Promise<SurfaceActionDone[]> {
+    const query = new URLSearchParams();
+    for (const callId of callIds) query.append('call', callId);
+    const response = await this.request<SurfaceActionsResponse>(`/v1/conversation/surface-actions?${query.toString()}`, SurfaceActionsResponseSchema, {
+      ...(options.signal ? { signal: options.signal } : {}),
+    });
+    return response.actions;
   }
 
   // 这张工单现在能做的操作（工单 03 的操作层，spec 5.11）：每个操作能不能做、为什么。页面按这份清单决定按钮能不能点，
