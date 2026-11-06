@@ -330,10 +330,29 @@ describe("(d) Lead's own card while the user looks at the App, then leaves (#101
     const decision = ask({ origin: "lead" });
     await pusher.sync(CONVERSATION, { userAway: true });
     expect(elementsOf()).toHaveLength(2);
+    // 他回到 App 里答了。私信里那条在下一拍才改：之前按钮还在，选项名「周四」本来就在消息里
+    // （daemon 层的测试不能等「周四」出现，要等按钮没了，#101 返工）。
     coordinator().resolveDecision({ requestId: decision, decision: "select", optionId: "thu", actor: { kind: "user", resolvedBy: "user via page" } });
+    expect(blocksOf()).toContain("周四");
+    expect(elementsOf()).toHaveLength(2);
     await pusher.sync(CONVERSATION, { userAway: false });
     expect(elementsOf()).toEqual([]);
     expect(blocksOf()).toContain("选了「周四」");
+    expect(messages()).toHaveLength(1);
+    expect(messages()[0]!.edits).toBe(1);
+    // 之后几拍不再改。
+    await pusher.sync(CONVERSATION, { userAway: true });
+    expect(messages()[0]!.edits).toBe(1);
+  });
+
+  it("folds the pushed card in English too, the daemon's default language", async () => {
+    updateDesignPreferences(db, { request: { locale: "en" }, caller: { kind: "user" } });
+    const decision = ask({ origin: "lead" });
+    await pusher.sync(CONVERSATION, { userAway: true });
+    coordinator().resolveDecision({ requestId: decision, decision: "select", optionId: "thu", actor: { kind: "user", resolvedBy: "user via page" } });
+    await pusher.sync(CONVERSATION, { userAway: false });
+    expect(blocksOf()).not.toContain("plc_owner_choose");
+    expect(blocksOf()).toContain('Chose \\"周四\\"');
   });
 
   it("does not push a card the user answered while still in the App", async () => {

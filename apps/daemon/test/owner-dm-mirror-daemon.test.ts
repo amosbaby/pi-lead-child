@@ -164,8 +164,12 @@ describe("syncing Lead's messages to the user's Slack DM while the user is away 
     // 他回到 App 里选了周四：私信里那条改成结果，按钮收起。
     await setAttended(true, "back");
     coordinator.resolveDecision({ requestId: decision, decision: "select", optionId: "thu", actor: { kind: "user", resolvedBy: "user via page" } });
-    await vi.waitFor(() => expect(JSON.stringify(slack.sent("D0SELF")[1]!.blocks)).toContain("周四"), { timeout: 10_000 });
-    expect(JSON.stringify(slack.sent("D0SELF")[1]!.blocks)).not.toContain(`decision:${decision}#1`);
+    // 改写在下一拍（sync）才到：等按钮没了再看。不能等「周四」出现：它是选项名，没改写的消息里本来就有（#101 返工）。
+    await vi.waitFor(() => expect(JSON.stringify(slack.sent("D0SELF")[1]!.blocks)).not.toContain("plc_owner_choose"), { timeout: 10_000 });
+    // 是同一条消息改了一次，写着他选了哪个（daemon 缺省英文），不是删掉或另发。
+    expect(slack.sent("D0SELF")).toHaveLength(2);
+    expect(slack.sent("D0SELF")[1]!.edits).toBe(1);
+    expect(JSON.stringify(slack.sent("D0SELF")[1]!.blocks)).toMatch(/Chose \\"周四\\"|选了「周四」/u);
 
     // 一直在看 App 并且答了的卡：离开以后也不推。
     const answered = card("回滚脚本谁来写？");
