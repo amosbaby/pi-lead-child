@@ -50,6 +50,7 @@ import { updateRun } from "@pi-lead-child/store";
 import { agentMcpServer, buildChildPrompt, buildReviewerPrompt, sessionDir } from "@pi-lead-child/core";
 import { buildOutcomeRepairPrompt } from "@pi-lead-child/engine";
 import { executionPlanText } from "@pi-lead-child/engine";
+import { sandboxHealth } from "@pi-lead-child/engine";
 import { acceptanceCriteriaText, recordedDeliverySnapshot } from "@pi-lead-child/engine";
 import { ACCEPTANCE_CRITERIA_LIMITS, addAcceptanceCriteria, normalizeCriterionTexts } from "@pi-lead-child/store";
 import { localIso, projectRoot, readTailLines } from "@pi-lead-child/core";
@@ -2662,6 +2663,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "最近维护请求、故障状态，以及当前 child runtime 目录（可执行文件探活、能力与已配置模型）。"
         + "runtimeHealth 列出健康账本里不可用的 runtime 和模型：故障编号、需要用户做什么、派发为什么挂起。"
         + "degraded 表示瞬时失败的自动重试刚刚到了上限：派发照常进行，recoverAt 之后不再列出。"
+        + "sandbox 是你自己 bash 的沙箱：status=unavailable 表示这台机器此刻起不了进程，fault 写着真实原因"
+        + "（EAGAIN、EMFILE、超时）、第一次和最近一次出现的时间和失败次数；recoveredAt 不为空表示之后已经恢复。"
         + "只读，不返回密钥、环境变量值或原始宿主日志。",
       parameters: Type.Object({}),
       execute: async () => {
@@ -2673,6 +2676,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           childRuntimes: resolveLeadCatalog(deps),
           // 用户在设置里停用的 runtime（设置 → 执行器）。派发、核查和选型都跳过它们。
           disabledRuntimes: disabledRuntimes(),
+          // 你自己 bash 的沙箱起不了进程的故障（工单 #270）。只在 daemon 内存里，重启后重新看。
+          sandbox: sandboxHealth(),
           // 健康账本（工单 03）。不返回原始证据和配置目录，只返回故障的结论。
           runtimeHealth: listUnhealthyRuntimeTargets(db).map((entry) => ({
             runtime: entry.runtime,

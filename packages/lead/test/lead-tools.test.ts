@@ -16,6 +16,7 @@ import {
   type LeadDeps,
 } from "../src/tools.js";
 import { createDispatcher } from "@pi-lead-child/engine";
+import { recordSandboxSpawnFailure, resetSandboxHealthForTests } from "@pi-lead-child/engine";
 import type { AgentRuntime, RuntimeEvent, RuntimeHandle, RuntimeStartRequest } from "@pi-lead-child/runtime";
 import { buildChildPrompt, buildReviewerPrompt, type RunPurpose, type RuntimeId } from "@pi-lead-child/core";
 import { RuntimeRegistry } from "@pi-lead-child/runtime";
@@ -1055,11 +1056,21 @@ describe("lead tools", () => {
     };
     deps = { ...deps, supervisor };
 
+    resetSandboxHealthForTests();
     const health = await tool("get_runtime_health").execute("health", {});
     expect(JSON.parse(health.content[0].text)).toMatchObject({
       schemaVersion: 18,
       childRuntimes: { entries: expect.any(Array) },
+      sandbox: { status: "healthy", fault: null },
     });
+    // 工单 #270：bash 的沙箱起不了进程时，get_runtime_health 看得到真实原因。
+    recordSandboxSpawnFailure({ errno: "EAGAIN", evidence: "spawnSync /usr/bin/true EAGAIN" });
+    const failing = await tool("get_runtime_health").execute("health", {});
+    expect(JSON.parse(failing.content[0].text).sandbox).toMatchObject({
+      status: "unavailable",
+      fault: { code: "sandbox_spawn_failed", errno: "EAGAIN", failures: 1, recoveredAt: null },
+    });
+    resetSandboxHealthForTests();
     const result = await tool("request_runtime_maintenance").execute("maintenance", {
       action: "upgrade",
       reason: "schema upgrade",

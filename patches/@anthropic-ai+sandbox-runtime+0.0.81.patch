@@ -1,0 +1,123 @@
+diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js
+index 0e598b6..fc84dfd 100644
+--- a/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js
++++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js
+@@ -2,7 +2,7 @@ import { quote } from '../utils/shell-quote.js';
+ import { spawn } from 'child_process';
+ import * as path from 'path';
+ import { logForDebugging } from '../utils/debug.js';
+-import { whichSync } from '../utils/which.js';
++import { whichSyncDetailed } from '../utils/which.js';
+ import { buildJavaToolOptions } from './java-proxy-agent.js';
+ import { normalizePathForSandbox, generateProxyEnvVars, buildPosixGitSafeDirEnv, attributionKeyFor, encodeSandboxedCommand, decodeSandboxedCommand, containsGlobChars, isAtOrUnder, isStrictlyUnder as isPathStrictlyUnder, nameLocation, pathSpellings, DANGEROUS_FILES, getDangerousDirectories, } from './sandbox-utils.js';
+ import { denyGlobRegex, escapeRegexLiteral, globToRegex, } from './glob-pattern.js';
+@@ -1154,7 +1154,14 @@ export function wrapCommandWithSandboxMacOS(params) {
+     // Use the user's shell (zsh, bash, etc.) to ensure aliases/snapshots work
+     // Resolve the full path to the shell binary
+     const shellName = binShell || 'bash';
+-    const shell = whichSync(shellName);
++    const lookup = whichSyncDetailed(shellName);
++    if (lookup.failure) {
++        // `which` could not run (EAGAIN, EMFILE, a timeout): the shell may well exist.
++        const error = new Error(`Could not look up shell '${shellName}': ${lookup.failure.errno} (${lookup.failure.message})`);
++        error.code = lookup.failure.errno;
++        throw error;
++    }
++    const shell = lookup.path;
+     if (!shell) {
+         throw new Error(`Shell '${shellName}' not found in PATH`);
+     }
+diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.d.ts b/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.d.ts
+index a990e9b..04fb202 100644
+--- a/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.d.ts
++++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.d.ts
+@@ -6,4 +6,21 @@
+  * @returns The full path to the executable, or null if not found
+  */
+ export declare function whichSync(bin: string): string | null;
+-//# sourceMappingURL=which.d.ts.map
+\ No newline at end of file
++export interface WhichFailure {
++    /** errno of the failed lookup, for example EAGAIN, EMFILE or ETIMEDOUT. */
++    errno: string;
++    message: string;
++}
++/**
++ * Like whichSync, but tells a failed lookup apart from a missing executable.
++ * An absolute path to an executable file is returned as is, without a child process.
++ */
++export declare function whichSyncDetailed(bin: string, spawn?: (command: string, args: string[], options: object) => {
++    status: number | null;
++    signal?: NodeJS.Signals | null;
++    stdout?: string | Buffer | null;
++    error?: (Error & { code?: string }) | undefined;
++}): {
++    path: string | null;
++    failure: WhichFailure | null;
++};
+diff --git a/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.js b/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.js
+index cc87700..96ad28a 100644
+--- a/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.js
++++ b/node_modules/@anthropic-ai/sandbox-runtime/dist/utils/which.js
+@@ -1,4 +1,6 @@
+ import { spawnSync } from 'node:child_process';
++import { accessSync, constants, statSync } from 'node:fs';
++import { isAbsolute } from 'node:path';
+ /**
+  * Find the path to an executable, similar to the `which` command.
+  * Uses Bun.which when running in Bun, falls back to spawnSync for Node.js.
+@@ -7,19 +9,48 @@ import { spawnSync } from 'node:child_process';
+  * @returns The full path to the executable, or null if not found
+  */
+ export function whichSync(bin) {
++    return whichSyncDetailed(bin).path;
++}
++function isExecutableFile(path) {
++    try {
++        accessSync(path, constants.X_OK);
++        return statSync(path).isFile();
++    }
++    catch {
++        return false;
++    }
++}
++/**
++ * Like whichSync, but tells a failed lookup apart from a missing executable.
++ * An absolute path to an executable file is returned as is, without a child process.
++ * When `which` itself could not run (EAGAIN, EMFILE, a timeout), `failure` holds the errno.
++ *
++ * @param bin - The name of the executable to find, or an absolute path
++ * @param spawn - spawnSync, replaceable in tests
++ */
++export function whichSyncDetailed(bin, spawn = spawnSync) {
++    if (isAbsolute(bin) && isExecutableFile(bin)) {
++        return { path: bin, failure: null };
++    }
+     // Check if we're running in Bun
+     if (typeof globalThis.Bun !== 'undefined') {
+-        return globalThis.Bun.which(bin);
++        return { path: globalThis.Bun.which(bin), failure: null };
+     }
+     // Fallback to Node.js implementation
+-    const result = spawnSync('which', [bin], {
++    const result = spawn('which', [bin], {
+         encoding: 'utf8',
+         stdio: ['ignore', 'pipe', 'ignore'],
+         timeout: 1000,
+     });
++    if (result.error) {
++        const errno = result.error.code || 'UNKNOWN';
++        return { path: null, failure: { errno, message: result.error.message || String(result.error) } };
++    }
++    if (result.status === null && result.signal) {
++        return { path: null, failure: { errno: 'SIGNAL', message: `which was killed by ${result.signal}` } };
++    }
+     if (result.status === 0 && result.stdout) {
+-        return result.stdout.trim();
++        return { path: result.stdout.trim(), failure: null };
+     }
+-    return null;
++    return { path: null, failure: null };
+ }
+-//# sourceMappingURL=which.js.map
+\ No newline at end of file

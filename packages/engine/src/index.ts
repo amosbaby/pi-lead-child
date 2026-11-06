@@ -84,5 +84,8 @@ export * from "./installs/skill-scan.js";
 export * from "./installs/skills.js";
 export * from "./memory/memory-facts.js";
 export { initSandbox, resetSandboxForTests, sandboxedBashOperations } from "./sandbox/bash.js";
+export {
+  recordSandboxSpawnFailure, resetSandboxHealthForTests, sandboxHealth, type SandboxFault, type SandboxHealth,
+} from "./sandbox/health.js";
 export { hostBashOperations, type HostBashCall } from "./sandbox/host-bash.js";
 export * from "./host-commands/screen.js";
