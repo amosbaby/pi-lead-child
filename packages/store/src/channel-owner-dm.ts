@@ -103,16 +103,17 @@ export function decisionMessagesToSync(db: Db, args: { unsentSince: Date }): str
 }
 
 /**
- * 还没推过、要用户回答的执行者决定请求（受众是 user、还在等、since 以后提的），按编号。只要 Lead 判断的（lead、lead_or_user）不推，
- * Lead 在会话里画的卡（origin lead）由那一轮自己发。
+ * 还没推过、要用户回答的执行者决定请求（受众是 user、还在等、since 以后提的），按编号。只要 Lead 判断的（lead、lead_or_user）不推。
+ * Lead 在会话里画的卡（origin lead）平时由那一轮自己发（私信那一轮）；lead 为 true 时也算上（工单 #101：用户在 App 里看着它建出来、
+ * 没回答就离开了 App，同步到 Slack 私信开着）。
  */
-export function unpushedUserDecisions(db: Db, args: { since: Date }): Array<{ id: number; itemId: number }> {
+export function unpushedUserDecisions(db: Db, args: { since: Date; lead?: boolean }): Array<{ id: number; itemId: number; origin: "agent" | "lead" }> {
   return (db.prepare(
-    `SELECT d.id AS id, d.item_id AS itemId FROM decision_requests d
-     WHERE d.origin = 'agent' AND d.audience = 'user' AND d.state = 'pending' AND d.created_at >= ?
+    `SELECT d.id AS id, d.item_id AS itemId, d.origin AS origin FROM decision_requests d
+     WHERE (d.origin = 'agent' OR (? = 1 AND d.origin = 'lead')) AND d.audience = 'user' AND d.state = 'pending' AND d.created_at >= ?
        AND NOT EXISTS (SELECT 1 FROM channel_decision_pushes p WHERE p.decision_id = d.id)
      ORDER BY d.id`,
-  ).all(args.since.toISOString()) as Array<{ id: number; itemId: number }>);
+  ).all(args.lead ? 1 : 0, args.since.toISOString()) as Array<{ id: number; itemId: number; origin: "agent" | "lead" }>);
 }
 
 /** 记下这张工单是用户在哪个私信对话里让 Lead 建的。已经记过时不改，返回 false。 */

@@ -5275,7 +5275,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 通道（工单 11）：闸门判断、「稍后」到点、没发成的回复。在后台跑，不阻塞这一拍。
     pollStep("channels", () => { void channelHub?.tick(); });
     // 执行者要用户回答的决定请求推到用户自己的私信，状态变了的消息改成结果（工单 #81）。在后台跑，不阻塞这一拍。
-    pollStep("owner-decisions", () => { if (channelHub) void ownerDecisions.sync(ownerDecisionConversation()); });
+    // 用户在看 App 时 Lead 画的卡，他没回答就离开了：同步到 Slack 私信开着时补推（工单 #101）。私信那一轮画的卡由那一轮自己发。
+    pollStep("owner-decisions", () => {
+      if (!channelHub) return;
+      void ownerDecisions.sync(ownerDecisionConversation(), {
+        userAway: clientCount() === 0 && getOwnerDmSync(db).enabled,
+        holding: new Set([...channelOwnerChoices.values()].flat().map((choice) => choice.decisionId)),
+      });
+    });
     // 记忆沉淀（工单 07）：整理攒够了的对话。在后台跑，不阻塞这一拍。
     pollStep("channel-memory", () => { void channelMemory?.tick(); });
   }

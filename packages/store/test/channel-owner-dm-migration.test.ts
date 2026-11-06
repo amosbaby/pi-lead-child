@@ -49,7 +49,7 @@ describe("the v65 channel owner DM migration", () => {
     expect(snapshot(upgraded)).toEqual(before);
     // 以前的决定请求没有推过；按「最近一小时」的窗口才会推。
     const at = new Date("2026-11-05T10:00:00.000Z");
-    expect(unpushedUserDecisions(upgraded, { since: new Date(at.getTime() - 60 * 60_000) })).toEqual([{ id: decision.id, itemId: open }]);
+    expect(unpushedUserDecisions(upgraded, { since: new Date(at.getTime() - 60 * 60_000) })).toEqual([{ id: decision.id, itemId: open, origin: "agent" }]);
     expect(insertDecisionPush(upgraded, {
       decisionId: decision.id, itemId: open, conversation: "slack:D0SELF:main", messageKey: `push:${decision.id}`, shownState: "pending", now: at,
     })).toBe(true);

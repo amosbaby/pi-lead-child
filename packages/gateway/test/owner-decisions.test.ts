@@ -291,6 +291,75 @@ describe("(b) an executor's decision for the user", () => {
   });
 });
 
+describe("(d) Lead's own card while the user looks at the App, then leaves (#101)", () => {
+  // 工单 #101 的时间线（时间是编的）：Lead 在 App 那一轮里画了 ChoiceGroup，用户那时在看 App；24 秒后他离开 App，没有回答。
+  // daemon 每一拍调 sync：userAway 是「同步到 Slack 私信开着、此刻没人在看 App」。
+  it("pushes the card once with its buttons after the user leaves without answering", async () => {
+    clock = new Date("2026-11-05T06:19:04.000Z");
+    const decision = ask({ origin: "lead" });
+    // 用户在看 App：不推。
+    await pusher.sync(CONVERSATION, { userAway: false });
+    later(10_000);
+    await pusher.sync(CONVERSATION, { userAway: false });
+    expect(messages()).toHaveLength(0);
+
+    // 24 秒后离开 App，没回答：下一拍补推一次，带选项按钮。
+    later(14_000);
+    await pusher.sync(CONVERSATION, { userAway: true });
+    expect(messages()).toHaveLength(1);
+    expect(blocksOf()).toContain("发布窗口选哪天？");
+    expect(elementsOf().map((element) => element.value)).toEqual([`decision:${decision}#0`, `decision:${decision}#1`]);
+
+    // 只推一次：之后他回来又离开，也不再发。
+    const edits = messages()[0]!.edits;
+    later(60_000);
+    await pusher.sync(CONVERSATION, { userAway: false });
+    later(60_000);
+    await pusher.sync(CONVERSATION, { userAway: true });
+    expect(messages()).toHaveLength(1);
+    expect(messages()[0]!.edits).toBe(edits);
+
+    // 他在 Slack 里选了周二：等同在 App 里选（App 读的是同一条决定请求），消息换成结果、按钮收起。
+    await hub.receiveFromTransport("slack", slack.click(messages()[0]!, `${SLACK_CHOOSE_ACTION}:0`));
+    expect(getDecisionRequest(db, decision)).toMatchObject({ state: "resolved", selectedOptionId: "tue" });
+    expect(elementsOf()).toEqual([]);
+    expect(blocksOf()).toContain("选了「周二」");
+  });
+
+  it("rewrites the pushed card when the user answers in the App instead", async () => {
+    const decision = ask({ origin: "lead" });
+    await pusher.sync(CONVERSATION, { userAway: true });
+    expect(elementsOf()).toHaveLength(2);
+    coordinator().resolveDecision({ requestId: decision, decision: "select", optionId: "thu", actor: { kind: "user", resolvedBy: "user via page" } });
+    await pusher.sync(CONVERSATION, { userAway: false });
+    expect(elementsOf()).toEqual([]);
+    expect(blocksOf()).toContain("选了「周四」");
+  });
+
+  it("does not push a card the user answered while still in the App", async () => {
+    const decision = ask({ origin: "lead" });
+    await pusher.sync(CONVERSATION, { userAway: false });
+    coordinator().resolveDecision({ requestId: decision, decision: "select", optionId: "tue", actor: { kind: "user", resolvedBy: "user via page" } });
+    later(30_000);
+    await pusher.sync(CONVERSATION, { userAway: true });
+    expect(messages()).toHaveLength(0);
+  });
+
+  it("leaves a card drawn in the DM turn to that turn, and skips Lead's cards without the user's own DM", async () => {
+    const drawn = ask({ origin: "lead" });
+    // 私信那一轮自己会在回复以后发（pushTurnChoices）：这一拍不抢先发。
+    await pusher.sync(CONVERSATION, { userAway: true, holding: new Set([drawn]) });
+    expect(messages()).toHaveLength(0);
+    // 没有用户自己的私信：不推，也不记「没推」的事件（那是执行者决定请求的规则）。
+    await pusher.sync(null, { userAway: true });
+    expect(skipped()).toEqual([]);
+    // Lead 判断的不推。
+    ask({ origin: "lead", audience: "lead" });
+    await pusher.sync(CONVERSATION, { userAway: true, holding: new Set([drawn]) });
+    expect(messages()).toHaveLength(0);
+  });
+});
+
 describe("(c) results of what the user asked in the DM", () => {
   it("relays Lead's words after a sub-agent task dispatched in the DM turn hands back, but not NO_REPLY", () => {
     const floor = latestItemId(db);

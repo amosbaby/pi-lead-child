@@ -4,6 +4,8 @@
 //   (b) 执行者提的、要用户回答的决定请求（受众是 user）：系统主动推到用户自己的私信（syncOwnerDecisions，daemon 每一拍调）。
 //       默认规则（用户以后可以改）：每条只推一次；同一张工单 10 分钟内的几条合成一条消息（改写那条，不另发）；只要 Lead 判断的不推；
 //       没有用户自己的私信时不推，每条记一条事件。只推提出不到 60 分钟的：功能上线时以前的决定请求不会一起涌进私信。
+//   (d) Lead 在 App 那一轮画的卡（工单 #101）：建出来时用户在看 App，不推；用户没回答就离开了 App、同步到 Slack 私信开着时，
+//       下一拍按 (b) 的规则补推一次（sync 的 userAway）。私信那一轮画的卡留给那一轮自己发（holding）。
 //   被回答、撤销或过期以后（不管在 App 里还是在 Slack 里），系统把那条消息改成结果（syncOwnerDecisions 比较消息上显示的状态）。
 // 用户本人在自己的私信里选了一个选项（resolveOwnerDecision）：和 App 里选是同一个操作（操作层的 decision.resolve，
 // performUserUiAction），凭证是那个通道的私信凭证（store 的 channelOwnerBinding，权限和 Companion 一样），来源记成 channel。
@@ -148,8 +150,12 @@ export interface OwnerDecisionPusher {
   pushTurnChoices(input: {
     conversation: string; turnId: string; choices: Array<{ decisionId: number; recommended?: string | null; reason?: string | null }>;
   }): Promise<void>;
-  /** (b) 和改写：推新的执行者决定请求，把状态变了的消息改成现在的样子。ownerConversation 是用户自己的私信，没有时是 null。 */
-  sync(ownerConversation: string | null): Promise<void>;
+  /**
+   * (b) 和改写：推新的执行者决定请求，把状态变了的消息改成现在的样子。ownerConversation 是用户自己的私信，没有时是 null。
+   * (d) userAway：同步到 Slack 私信开着、此刻没人在看 App。这时 Lead 建的、等用户回答的决定请求也推（holding 里的除外：
+   * 私信那一轮画的卡，那一轮回复以后自己发）。
+   */
+  sync(ownerConversation: string | null, options?: { userAway?: boolean; holding?: ReadonlySet<number> }): Promise<void>;
 }
 
 export function createOwnerDecisionPusher(deps: OwnerDecisionDeps): OwnerDecisionPusher {
@@ -199,12 +205,14 @@ export function createOwnerDecisionPusher(deps: OwnerDecisionDeps): OwnerDecisio
       }
     },
 
-    async sync(ownerConversation) {
+    async sync(ownerConversation, options = {}) {
       if (syncing) return;
       syncing = true;
       try {
         const at = now();
-        for (const decision of unpushedUserDecisions(deps.db, { since: new Date(at.getTime() - OWNER_DECISION_RECENT_MS) })) {
+        const lead = options.userAway === true && ownerConversation !== null;
+        for (const decision of unpushedUserDecisions(deps.db, { since: new Date(at.getTime() - OWNER_DECISION_RECENT_MS), lead })) {
+          if (decision.origin === "lead" && options.holding?.has(decision.id)) continue;
           if (!ownerConversation) {
             recordSkipped(decision);
             continue;

@@ -8,7 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { FakeSlack } from "@pi-lead-child/engine/testing";
-import { createPairing, getOwnerDmSync, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
+import { createItem, createPairing, getDecisionRequest, getOwnerDmSync, openDb, redeemPairing, type Db } from "@pi-lead-child/store";
+import { createCoordinator } from "@pi-lead-child/engine";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead } from "./fake-pi-session.js";
 
@@ -104,6 +105,75 @@ describe("syncing Lead's messages to the user's Slack DM while the user is away 
     await vi.waitFor(() => expect(events.some((event) => event.type === "command.result" && event.id === "presence")).toBe(true));
     await ask("问题C");
     await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(slack.sent("D0SELF")).toHaveLength(2);
+  }, 40_000);
+  // 工单 #101 的时间线（人、时间、文字都是编的）：Lead 在 App 那一轮里画了 ChoiceGroup，用户那时在看 App；他没回答就离开了 App。
+  // 同步到 Slack 私信开着：那张卡补推到他的私信一次，带按钮。在 App 里答了以后，私信里的那条改成结果、按钮收起。
+  // 另一张卡他一直在 App 里看着并且答了：不推。
+  it("pushes Lead's unanswered card to the DM once after the user leaves the App, and folds it after an answer", async () => {
+    const slack = new FakeSlack();
+    const lead = fakePiLead(async () => ({ say: "你好。" }));
+    daemon = await startDaemon({
+      dataDir: dir, dbPath, log: () => {}, notifyDesktop: () => {}, triageShadow: false,
+      sessionFactory: lead.factory as never,
+      channels: {
+        sources: { slack: { api: slack.api } },
+        credentials: { credential: async (provider) => (provider === "slack" ? slack.credential : null) },
+      },
+    });
+    const base = `http://127.0.0.1:${daemon.pairedPort}`;
+    const { accessToken } = redeemPairing(db, createPairing(db, { name: "手机", kind: "companion", scopes: ["chat", "tickets:view", "tickets:create"] }).code);
+    const headers = { authorization: `Bearer ${accessToken}`, "content-type": "application/json" };
+    await daemon.channels!.receive("slack", slack.selfReply("D0SELF", "你好"));
+    await vi.waitFor(() => expect(slack.sent("D0SELF")).toHaveLength(1), { timeout: 10_000 });
+    const enabled = await fetch(`${base}/v1/actions/owner_dm_sync/user/enable`, { method: "POST", headers, body: JSON.stringify({ input: {} }) });
+    expect(enabled.status).toBe(200);
+
+    // 用户在看 App。
+    const socket = new WebSocket(`ws://127.0.0.1:${daemon.pairedPort}/v1/paired/events?token=${accessToken}&protocol=2`);
+    sockets.push(socket);
+    const events: any[] = [];
+    socket.on("message", (raw) => events.push(JSON.parse(String(raw))));
+    await vi.waitFor(() => expect(events.some((event) => event.type === "hello.v2")).toBe(true));
+    const setAttended = async (attended: boolean, id: string) => {
+      socket.send(JSON.stringify({ type: "presence.set", id, protocolVersion: 2, attended }));
+      await vi.waitFor(() => expect(events.some((event) => event.type === "command.result" && event.id === id)).toBe(true));
+    };
+    await setAttended(true, "here");
+
+    // Lead 在 App 那一轮里画的卡（render_ui 的 ChoiceGroup 建的决定请求：origin lead、受众 user）。
+    const coordinator = createCoordinator({ db });
+    const ticket = createItem(db, { title: "发布清单", brief: "b", createdBy: "lead" });
+    const card = (prompt: string) => coordinator.requestDecision({
+      itemId: ticket, runId: null, origin: "lead", kind: "decision", audience: "user", prompt,
+      options: [{ id: "tue", label: "周二" }, { id: "thu", label: "周四" }], checkpoint: { title: "要你决定", summary: prompt },
+    }).requestId;
+    const decision = card("发布窗口选哪天？");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(slack.sent("D0SELF")).toHaveLength(1);
+
+    // 没回答就离开了 App：补推一次，带两个选项按钮。
+    await setAttended(false, "away");
+    await vi.waitFor(() => expect(slack.sent("D0SELF")).toHaveLength(2), { timeout: 10_000 });
+    const pushed = slack.sent("D0SELF")[1]!;
+    expect(JSON.stringify(pushed.blocks)).toContain("发布窗口选哪天？");
+    expect(JSON.stringify(pushed.blocks)).toContain(`decision:${decision}#1`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(slack.sent("D0SELF")).toHaveLength(2);
+
+    // 他回到 App 里选了周四：私信里那条改成结果，按钮收起。
+    await setAttended(true, "back");
+    coordinator.resolveDecision({ requestId: decision, decision: "select", optionId: "thu", actor: { kind: "user", resolvedBy: "user via page" } });
+    await vi.waitFor(() => expect(JSON.stringify(slack.sent("D0SELF")[1]!.blocks)).toContain("周四"), { timeout: 10_000 });
+    expect(JSON.stringify(slack.sent("D0SELF")[1]!.blocks)).not.toContain(`decision:${decision}#1`);
+
+    // 一直在看 App 并且答了的卡：离开以后也不推。
+    const answered = card("回滚脚本谁来写？");
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    coordinator.resolveDecision({ requestId: answered, decision: "select", optionId: "tue", actor: { kind: "user", resolvedBy: "user via page" } });
+    expect(getDecisionRequest(db, answered)!.state).toBe("resolved");
+    await setAttended(false, "away-again");
+    await new Promise((resolve) => setTimeout(resolve, 300));
     expect(slack.sent("D0SELF")).toHaveLength(2);
   }, 40_000);
 });
