@@ -355,6 +355,26 @@ describe("(d) Lead's own card while the user looks at the App, then leaves (#101
     expect(blocksOf()).toContain('Chose \\"周四\\"');
   });
 
+  // 宿主机上 daemon 测试那一段（#101 第二次返工）：第一张卡推过、答了；第二张卡他在 App 里看着答了；之后他离开、回来、再离开。
+  // 私信里的决定卡还是只有那一条，只改过 1 次。
+  it("pushes nothing more after the cards are answered, however often the user leaves and comes back", async () => {
+    const first = ask({ origin: "lead" });
+    await pusher.sync(CONVERSATION, { userAway: true });
+    coordinator().resolveDecision({ requestId: first, decision: "select", optionId: "thu", actor: { kind: "user", resolvedBy: "user via page" } });
+    await pusher.sync(CONVERSATION, { userAway: false });
+    const second = ask({ origin: "lead", prompt: "回滚脚本谁来写？" });
+    await pusher.sync(CONVERSATION, { userAway: false });
+    coordinator().resolveDecision({ requestId: second, decision: "select", optionId: "tue", actor: { kind: "user", resolvedBy: "user via page" } });
+    for (const userAway of [true, false, true, true]) {
+      later(1_000);
+      await pusher.sync(CONVERSATION, { userAway });
+    }
+    expect(messages()).toHaveLength(1);
+    expect(messages()[0]!.edits).toBe(1);
+    expect(blocksOf()).not.toContain("回滚脚本谁来写？");
+    expect(db.prepare("SELECT decision_id FROM channel_decision_pushes").all()).toEqual([{ decision_id: first }]);
+  });
+
   it("does not push a card the user answered while still in the App", async () => {
     const decision = ask({ origin: "lead" });
     await pusher.sync(CONVERSATION, { userAway: false });

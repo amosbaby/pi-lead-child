@@ -13,6 +13,17 @@ import { createCoordinator } from "@pi-lead-child/engine";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead } from "./fake-pi-session.js";
 
+// 这个文件不用本机 socket（plc.sock）：改成听 127.0.0.1 的随机端口，沙箱里不让建 unix socket（listen EPERM），
+// 这样执行者和核查员在沙箱里也能跑它（#101 返工）。别的都是真的。
+vi.mock("@pi-lead-child/runtime", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@pi-lead-child/runtime")>();
+  return {
+    ...actual,
+    listenOwnerOnly: (server: Parameters<typeof actual.listenOnce>[0], _path: string, onLateError?: (error: Error) => void) =>
+      actual.listenOnce(server, { port: 0, host: "127.0.0.1" }, onLateError ?? (() => {})),
+  };
+});
+
 let dir: string;
 let dbPath: string;
 let db: Db;
@@ -110,9 +121,17 @@ describe("syncing Lead's messages to the user's Slack DM while the user is away 
   // 工单 #101 的时间线（人、时间、文字都是编的）：Lead 在 App 那一轮里画了 ChoiceGroup，用户那时在看 App；他没回答就离开了 App。
   // 同步到 Slack 私信开着：那张卡补推到他的私信一次，带按钮。在 App 里答了以后，私信里的那条改成结果、按钮收起。
   // 另一张卡他一直在 App 里看着并且答了：不推。
+  // 用户答了以后系统叫醒 Lead 去处理这个回答。这里 Lead 回 NO_REPLY（不用再告诉用户什么）：Lead 在用户不在时写给他的话，
+  // 按 #88 同步到私信，那是另一件事（上一条测试）。以前这里 Lead 每轮都回「你好。」，第二张卡答完后叫醒的那一轮
+  // 刚好在用户离开以后结束，回复就被同步过去，看起来像多推了一条（#101 第二次返工）。
   it("pushes Lead's unanswered card to the DM once after the user leaves the App, and folds it after an answer", async () => {
     const slack = new FakeSlack();
-    const lead = fakePiLead(async () => ({ say: "你好。" }));
+    let wakes = 0;
+    const lead = fakePiLead(async (call) => {
+      if (!call.inputs.join("\n").includes('kind="blocker"')) return { say: "你好。" };
+      wakes += 1;
+      return { say: "NO_REPLY" };
+    });
     daemon = await startDaemon({
       dataDir: dir, dbPath, log: () => {}, notifyDesktop: () => {}, triageShadow: false,
       sessionFactory: lead.factory as never,
@@ -148,6 +167,8 @@ describe("syncing Lead's messages to the user's Slack DM while the user is away 
       itemId: ticket, runId: null, origin: "lead", kind: "decision", audience: "user", prompt,
       options: [{ id: "tue", label: "周二" }, { id: "thu", label: "周四" }], checkpoint: { title: "要你决定", summary: prompt },
     }).requestId;
+    // 推到私信的决定卡（幂等键以 owner-choice: 开头），和别的消息（私信里的回复、#88 同步的话）分开数。
+    const cards = () => slack.sent("D0SELF").filter((message) => String(message.metadata?.event_payload.idempotency_key ?? "").startsWith("owner-choice:"));
     const decision = card("发布窗口选哪天？");
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(slack.sent("D0SELF")).toHaveLength(1);
@@ -177,7 +198,20 @@ describe("syncing Lead's messages to the user's Slack DM while the user is away 
     coordinator.resolveDecision({ requestId: answered, decision: "select", optionId: "tue", actor: { kind: "user", resolvedBy: "user via page" } });
     expect(getDecisionRequest(db, answered)!.state).toBe("resolved");
     await setAttended(false, "away-again");
+    // 等系统为两次回答各叫醒 Lead 一次，再多等几拍让那两轮结束。
+    await vi.waitFor(() => expect(wakes).toBe(2), { timeout: 10_000 });
     await new Promise((resolve) => setTimeout(resolve, 300));
+    // 决定卡还是只有那一条，改过 1 次；答过的卡不推，第一张也不再推。
+    expect(cards()).toHaveLength(1);
+    expect(cards()[0]!.edits).toBe(1);
+    expect(JSON.stringify(cards()[0]!.blocks)).not.toContain("回滚脚本谁来写？");
+    expect(slack.sent("D0SELF")).toHaveLength(2);
+
+    // 再回来、再离开：也不再推。
+    await setAttended(true, "back-again");
+    await setAttended(false, "away-third");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(cards()).toHaveLength(1);
     expect(slack.sent("D0SELF")).toHaveLength(2);
   }, 40_000);
 });
