@@ -760,6 +760,45 @@ describe("ClaudeRuntime", () => {
   });
 });
 
+// 2026-11-07 daemon 的环境里 CLAUDE_CODE_AUTO_COMPACT_WINDOW=100000，child 继承了它：Claude Code 在约 67000 处压缩，
+// child 的会话光系统提示词和工具就约 8 万，每次调用都压缩，十个 Run 以「Autocompact is thrashing」失败。
+// 低于下限的值换成下限；没设时不加，用 Claude Code 自己的默认。
+describe("ClaudeRuntime and the auto-compact window", () => {
+  const capture = { env: { FAKE_CAPTURE_ENV: "CLAUDE_CODE_AUTO_COMPACT_WINDOW" } };
+
+  it("raises a window below the floor that it inherits", async () => {
+    const { events } = await runFake("inspect", capture, { env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "100000" } });
+    expect(JSON.parse(completedText(events)).values).toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000" });
+  });
+
+  it("raises a suffixed window below the floor", async () => {
+    const { events } = await runFake("inspect", capture, { env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "150k" } });
+    expect(JSON.parse(completedText(events)).values).toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000" });
+  });
+
+  it("keeps a window at or above the floor", async () => {
+    const { events } = await runFake("inspect", capture, { env: { CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400k" } });
+    expect(JSON.parse(completedText(events)).values).toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400k" });
+  });
+
+  it("does not add a window when none is set", async () => {
+    const { events } = await runFake("inspect", capture);
+    expect(JSON.parse(completedText(events)).values)
+      .toEqual({ CLAUDE_CODE_AUTO_COMPACT_WINDOW: process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW ?? null });
+  });
+});
+
+describe("claudeAutoCompactWindowTokens", () => {
+  it("reads plain and suffixed values the way Claude Code writes them", async () => {
+    const { claudeAutoCompactWindowTokens } = await import("../src/claude.js");
+    expect(claudeAutoCompactWindowTokens("100000")).toBe(100_000);
+    expect(claudeAutoCompactWindowTokens(" 200k ")).toBe(200_000);
+    expect(claudeAutoCompactWindowTokens("1M")).toBe(1_000_000);
+    expect(claudeAutoCompactWindowTokens("lots")).toBeNull();
+    expect(claudeAutoCompactWindowTokens(undefined)).toBeNull();
+  });
+});
+
 // auto 模式不能用的账号上，PLC_CLAUDE_PERMISSION_MODE 退回 acceptEdits。写错的值不认，仍然用 auto。
 // 工单 #113：机器很忙时 plc 的 MCP 服务器 30 秒内握不上手（Claude Code 默认的 MCP_TIMEOUT）。
 // 启动带 plc 时把时限放到 90 秒；init 报 plc failed 时，认出是不是启动超时，内核据此重试一次。

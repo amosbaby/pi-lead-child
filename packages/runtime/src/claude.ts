@@ -54,6 +54,30 @@ export function claudeMcpTimeoutEnv(env: Record<string, string | undefined>): Re
   return env.MCP_TIMEOUT?.trim() ? {} : { MCP_TIMEOUT: String(DEFAULT_MCP_TIMEOUT_MS) };
 }
 
+// Claude Code 自动压缩线（CLAUDE_CODE_AUTO_COMPACT_WINDOW）的下限，token。官方文档（https://code.claude.com/docs/en/env-vars）：
+// 「Set the auto-compact window, how full the context gets before compaction, from 100000 to 1000000 tokens」。
+// Claude Code 在窗口减去约 3.3 万处压缩（2.1.312：100000 → 67000）。2026-11-07 daemon 的环境里设成 100000，child 继承了它，
+// child 的会话光系统提示词和工具就约 8 万：每次调用都压缩，三轮内压缩三次，Claude Code 判定「Autocompact is thrashing」，Run 失败。
+// 和 Lead 的下限（lead 的 LEAD_AUTO_COMPACT_WINDOW）相同。
+export const CLAUDE_AUTO_COMPACT_WINDOW_FLOOR = 200_000;
+
+/** CLAUDE_CODE_AUTO_COMPACT_WINDOW 的 token 数。值的写法照 Claude Code：数字，可以带 k 或 M。认不出时 null。 */
+export function claudeAutoCompactWindowTokens(value: string | undefined): number | null {
+  const match = /^\s*(\d+(?:\.\d+)?)\s*([kKmM]?)\s*$/.exec(value ?? "");
+  if (!match) return null;
+  const unit = match[2]!.toLowerCase();
+  return Number(match[1]) * (unit === "m" ? 1_000_000 : unit === "k" ? 1_000 : 1);
+}
+
+// child 继承到的压缩线低于下限时，换成下限。没设或认不出时不动：用 Claude Code 自己的默认或它自己的处理。
+// 用户在 Claude Code 的 settings.json 的 env 里设的值由 CLI 自己读，这里看不到，也不覆盖它。
+export function claudeAutoCompactWindowEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const tokens = claudeAutoCompactWindowTokens(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW);
+  return tokens !== null && tokens < CLAUDE_AUTO_COMPACT_WINDOW_FLOOR
+    ? { CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(CLAUDE_AUTO_COMPACT_WINDOW_FLOOR) }
+    : {};
+}
+
 // child 实际收到的 MCP 启动时限，毫秒。认不出时按默认值。
 export function claudeMcpTimeoutMs(env: Record<string, string | undefined>): number {
   const value = Number(env.MCP_TIMEOUT?.trim());
@@ -502,8 +526,10 @@ export class ClaudeRuntime implements AgentRuntime {
     // 包管理器的缓存指到临时目录（沙箱里写不了 home 下面的缓存）。Run 自己给的同名变量优先。
     // 根证书（core 的 sandboxTrustEnv）：Claude Code 沙箱里的 curl、Python 也要能验证证书。用户自己设了的不改。
     // MCP_TIMEOUT（工单 #113）：只在带 plc 工具通道时补，用户自己设了的不改。它对用户自己的 MCP 服务器也生效。
+    // 压缩线（claudeAutoCompactWindowEnv）：不管来自哪一层，低于下限时都换成下限，所以写在 Run 自己给的变量后面。
     const env = childEnvironment(this.profile.environment, this.env, {
-      ...sandboxCacheEnv(), ...sandboxTrustEnv(userEnv), ...(mcpConfig ? claudeMcpTimeoutEnv(userEnv) : {}), ...request.env,
+      ...sandboxCacheEnv(), ...sandboxTrustEnv(userEnv), ...(mcpConfig ? claudeMcpTimeoutEnv(userEnv) : {}),
+      ...request.env, ...claudeAutoCompactWindowEnv(userEnv),
     });
     const launchedAt = Date.now();
 
