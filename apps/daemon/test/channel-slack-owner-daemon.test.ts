@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { isLiveUserTurn, runTicketAction } from "@pi-lead-child/engine";
+import { createLeadToolset } from "@pi-lead-child/lead";
 import { FakeSlack } from "@pi-lead-child/engine/testing";
 import { authorityTurnId } from "@pi-lead-child/lead";
 import { createItem, DEFAULT_SCOPES, getItem, openDb, revokeBinding, writeBusyPlacement, type Db } from "@pi-lead-child/store";
@@ -148,4 +149,66 @@ describe("the user's own Slack DM to themself in the daemon", () => {
     expect(getItem(db, itemId)!.token_budget).toBe(30_000_000);
     await vi.waitFor(() => expect(turnsFromSlack().map((turn) => turn.state)).toEqual(["completed", "completed"]), { timeout: 10_000 });
   }, 30_000);
+
+  // 工单 #145：浏览器会话方式发不了确认按钮（没有应用收点击），私信里只剩确认卡的回复，用户找不到按钮。
+  // 现在回复末尾补一句请用户去 App 里点，并记一条日志；应用方式照旧发按钮，回复里不补这句；Lead 的提示按方式分支。
+  describe.each([
+    { connection: "session" as const, buttons: false },
+    { connection: "app" as const, buttons: true },
+  ])("a confirmation card in the DM over the $connection connection", ({ connection, buttons }) => {
+    it(buttons ? "keeps the buttons and adds no note" : "ends the reply with the note to confirm in the app, and logs it", async () => {
+      const slack = new FakeSlack();
+      const logs: string[] = [];
+      const results: Record<string, any> = {};
+      let leadDeps: any = null;
+      const lead = fakePiLead(async (call) => {
+        if (!results.card && call.inputs.some((input) => input.includes("改一下规则"))) {
+          try {
+            const live = (name: string) => createLeadToolset(leadDeps).find((candidate: any) => candidate.name === name) as any;
+            await live("read_channel_conversation").execute("call", { source: "slack", conversation: "slack:D0SELF:main" }).catch(() => undefined);
+            results.refused = JSON.parse((await live("perform_action").execute("call", {
+              target_type: "channel_policy", target_id: "slack", action: "tighten", input: { autoReply: false }, reason: "测试",
+            })).content[0].text);
+            results.card = await live("render_ui").execute("call", {
+              root: "act", fallback_text: "要关掉 Slack 的自动代你处理，等你确认。",
+              nodes: [{ id: "act", type: "UserAction", props: { action: results.refused.user_action } }],
+            });
+          } catch (error) {
+            results.error = String(error);
+          }
+        }
+        return { say: "要改规则，见确认卡。" };
+      });
+      daemon = await startDaemon({
+        dataDir: dir, dbPath, log: (line) => logs.push(line), notifyDesktop: () => {}, triageShadow: false,
+        sessionFactory: (async (args: any) => { leadDeps = args; return lead.factory(args); }) as never,
+        channels: {
+          sources: { slack: { api: slack.api, connection, sessionWrites: () => true } },
+          credentials: { credential: async (provider) => (provider === "slack" ? slack.credential : null) },
+        },
+      });
+      await daemon.channels!.receive("slack", slack.selfReply("D0SELF", "改一下规则"));
+      await vi.waitFor(() => expect(slack.sent("D0SELF").length).toBeGreaterThan(0), { timeout: 10_000 });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      expect(results.error).toBeUndefined();
+      expect(results.refused?.user_action).toMatchObject({ kind: "confirm_rule_change" });
+      const reply = barOf(slack.sent("D0SELF")[0]!)?.fallback ?? "";
+      const note = "这个确认需要去 App 里点「确认这一次」";
+      // Lead 的提示按连接方式分支：会话方式下写明确认卡也要去 App 里点。
+      const prompt = lead.calls[0]!.inputs.join("\n");
+      if (buttons) {
+        expect(reply).not.toContain(note);
+        expect(slack.sent("D0SELF").length).toBeGreaterThan(1);
+        expect(prompt).toContain("带「确认这一次」「不改」");
+        expect(logs.join("\n")).not.toContain("cannot post the confirmation buttons");
+      } else {
+        expect(reply.trimEnd().endsWith(note)).toBe(true);
+        expect(reply).toContain("要改规则，见确认卡。");
+        expect(slack.sent("D0SELF")).toHaveLength(1);
+        expect(prompt).toContain("也只能在 App 里点「确认这一次」");
+        expect(logs.join("\n")).toContain("cannot post the confirmation buttons");
+      }
+    }, 30_000);
+  });
 });

@@ -156,7 +156,7 @@ import {
 } from "@pi-lead-child/store";
 import { assistantMessageText, projectToolEvent } from "@pi-lead-child/gateway";
 import {
-  isOwnerConfirmationAction, ownerConfirmationContent, resolveOwnerConfirmation, type OwnerConfirmationDeps,
+  isOwnerConfirmationAction, ownerConfirmationContent, resolveOwnerConfirmation, withInAppConfirmNote, type OwnerConfirmationDeps,
 } from "@pi-lead-child/gateway";
 import {
   choiceGroupsOfSurface, createOwnerDecisionPusher, dispatchedTicketOf, resolveOwnerDecision, systemReplyForOwner, turnTextForOwnerDm, type OwnerDecisionPusher,
@@ -6205,7 +6205,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             + `ChoiceGroup 带每个选项（选项多或者标签长时是下拉框），用户点了和在 App 里选一样，之后叫醒你。`
             + `回复里说一句「在下面那条消息上点」就够，不用重复卡上的内容。要用户自己写回答的，${label} 里会请用户去 App 里答。`
             + "别的卡片只在 App 里看得到：要用户在那种卡上点的，说清楚去 App 里点。"
-          : "render_ui 的卡片只在 App 里看得到：要用户在卡上点的，说清楚去 App 里点。")
+          : "render_ui 的卡片只在 App 里看得到：要用户在卡上点的，说清楚去 App 里点。"
+            + `${label} 现在发不了按钮，改规则的确认卡（confirm_rule_change）和写入确认（confirm_write）也只能在 App 里点「确认这一次」，系统会在回复末尾补这句话，你不用再写一遍。`)
         + `这一轮里你建的工单，之后系统叫醒你、你为它写给用户的话，系统也会同步发到这条私信（回 NO_REPLY 的不发）。`,
     });
     channelOwnerReplies.set(accepted.turnId, [...(channelOwnerReplies.get(accepted.turnId) ?? []), message.conversation]);
@@ -6224,6 +6225,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const hub = channelHub;
     if (!hub) return;
     const confirmations = turnUserActions.list().filter(isOwnerConfirmationAction);
+    const pendingConfirmations = confirmations.filter((action) => ownerConfirmationContent(ownerConfirmationDeps, action.target)?.pending);
     const choices = channelOwnerChoices.get(turnId) ?? [];
     channelOwnerChoices.delete(turnId);
     const floor = channelOwnerItemFloor.get(turnId);
@@ -6246,8 +6248,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           log(`[channels] could not record the dispatched ticket #${itemId} of turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
         }
       }
-      const reply = text.trim()
-        ? hub.replyToOwner(conversation, text, `${turnId}:${conversation}`).catch((error: unknown) => {
+      // 来源发不了按钮（Slack 的浏览器会话方式）：确认卡在私信里没有按钮，回复末尾补一句请用户去 App 里点，并记一条日志。
+      const canPost = hub.registry.get(conversation.split(":")[0] ?? "")?.capabilities.confirm === true;
+      const needsApp = pendingConfirmations.length > 0 && !canPost;
+      if (needsApp) log(`[channels] ${conversation}: cannot post the confirmation buttons of turn ${turnId} (no button support); told the user to confirm in the app`);
+      const replyText = needsApp ? withInAppConfirmNote(text) : text;
+      const reply = replyText.trim()
+        ? hub.replyToOwner(conversation, replyText, `${turnId}:${conversation}`).catch((error: unknown) => {
           log(`[channels] could not send the reply of turn ${turnId} to ${conversation}: ${error instanceof Error ? error.message : String(error)}`);
         })
         : Promise.resolve();

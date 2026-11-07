@@ -31,6 +31,14 @@ export interface OwnerConfirmationDeps {
 
 const CONNECTION_CONFIRMATION_ID = /^cfm_[A-Za-z0-9_-]{8,40}$/;
 
+/** 来源发不了按钮（Slack 浏览器会话方式）时，补在回复末尾的话：确认卡在私信里没有按钮，用户得去 App 里点。 */
+export const OWNER_CONFIRM_IN_APP_NOTE = "这个确认需要去 App 里点「确认这一次」";
+
+/** 回复末尾补上 OWNER_CONFIRM_IN_APP_NOTE；回复是空的时，这句话就是回复。 */
+export function withInAppConfirmNote(text: string): string {
+  return [text.trim(), OWNER_CONFIRM_IN_APP_NOTE].filter(Boolean).join("\n\n");
+}
+
 /** 这一种「需要用户做什么」在用户自己的私信里带按钮：改规则的确认卡和连接的写入确认。 */
 export function isOwnerConfirmationAction(action: UserActionRequest): boolean {
   return action.kind === "confirm_rule_change" || action.kind === "confirm_write";

@@ -22,7 +22,7 @@ import {
 } from "@pi-lead-child/engine";
 import { FakeSlack } from "@pi-lead-child/engine/testing";
 import {
-  ownerConfirmationContent, resolveOwnerConfirmation, type OwnerConfirmationDeps,
+  ownerConfirmationContent, resolveOwnerConfirmation, withInAppConfirmNote, OWNER_CONFIRM_IN_APP_NOTE, type OwnerConfirmationDeps,
 } from "../src/owner-confirmations.js";
 
 const SELF_DM = "D0SELF";
@@ -304,5 +304,14 @@ describe("a connection write confirmed in the user's own Slack DM", () => {
     await hub.receiveFromTransport("slack", slack.click(message(), SLACK_CONFIRM_ACTION));
     expect(connections.calls).toEqual([]);
     expect(blocksText()).toContain("已过期");
+  });
+});
+
+// 工单 #145：来源发不了按钮时，回复末尾补一句请用户去 App 里点。
+describe("the note for a confirmation that has no buttons in the DM", () => {
+  it("ends the reply with the note, and is the whole reply when the reply is empty", () => {
+    expect(OWNER_CONFIRM_IN_APP_NOTE).toBe("这个确认需要去 App 里点「确认这一次」");
+    expect(withInAppConfirmNote("要改规则，见确认卡。\n")).toBe(`要改规则，见确认卡。\n\n${OWNER_CONFIRM_IN_APP_NOTE}`);
+    expect(withInAppConfirmNote("  ")).toBe(OWNER_CONFIRM_IN_APP_NOTE);
   });
 });
