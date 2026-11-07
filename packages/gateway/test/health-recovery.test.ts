@@ -303,6 +303,22 @@ describe("recovery of an unavailable profile", () => {
     db.close();
   });
 
+  // 2026-11-07：用户 11-04 停用了 Codex（本机没装），它的故障 #1 没关，恢复循环照样每隔一阵探一次，一天失败 24 次。
+  // 停用的 runtime 不派发，探它没有用。用户手动 plc recheck 时照常探。
+  it("does not probe a disabled runtime on its own, but still on plc recheck", async () => {
+    const { db } = await codexCreditOutage();
+    const { adapter, calls } = probingCodex([LOGGED_OUT]);
+    const recovery = createHealthRecovery(db, {
+      runtime: () => adapter, now: () => new Date(Date.now() + 2 * HOUR), isDisabled: (id) => id === "codex",
+    });
+
+    await recovery.tick();
+    expect(calls).toHaveLength(0);
+    await recovery.recheck({ runtime: "codex" });
+    expect(calls).toHaveLength(1);
+    db.close();
+  });
+
   it("releases nothing while the probe fails, and waits longer before each new probe", async () => {
     const { db, tickWith, claims, unexpectedClaims, secondRequest } = await codexCreditOutage();
     const { adapter, calls } = probingCodex([LOGGED_OUT]);

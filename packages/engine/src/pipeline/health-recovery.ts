@@ -9,7 +9,7 @@ import { clearInterval, setInterval } from "node:timers";
 import type { Db } from "@pi-lead-child/store";
 import type { RuntimeId } from "@pi-lead-child/core";
 import type { AgentRuntime, RuntimeProbeResult } from "@pi-lead-child/runtime";
-import { isRuntimeId, runtimeIds, runtimeProfileOf } from "@pi-lead-child/runtime";
+import { isRuntimeDisabled, isRuntimeId, runtimeIds, runtimeProfileOf } from "@pi-lead-child/runtime";
 import { modelOwnershipProblem, runtimeProfileKey } from "@pi-lead-child/runtime";
 import { recoversOnlyOnRecheck, runtimeDisplayName, typedFailure, usageResetUnknown } from "@pi-lead-child/runtime";
 import {
@@ -62,12 +62,15 @@ export function createHealthRecovery(
   options: {
     // 这个 daemon 里执行这个 runtime 的 adapter。探针必须检查执行时用的同一个 profile。
     runtime: (id: RuntimeId) => AgentRuntime | null;
+    // 用户停用的 runtime（设置 → 执行器）。它不派发，自动探针跳过它的故障；plc recheck 照常探。缺省读 daemon 的环境。
+    isDisabled?: (id: RuntimeId) => boolean;
     now?: () => Date;
     log?: (line: string) => void;
   },
 ): HealthRecovery {
   const now = options.now ?? (() => new Date());
   const log = options.log ?? (() => {});
+  const isDisabled = options.isDisabled ?? ((id: RuntimeId) => isRuntimeDisabled(id));
   const inFlight = new Map<number, Promise<ProbeOutcome>>();
   const abort = new AbortController();
   let stopped = false;
@@ -143,7 +146,8 @@ export function createHealthRecovery(
       // 旧数据（2026-10-20 以前）：探针已经通过、在等金丝雀的故障，直接关闭。幂等。
       const legacy = closeLegacyCanaryIncidents(db, now());
       const due = dueProbeIncidents(db, now())
-        .filter((incident) => !inFlight.has(incident.id) && !waitsForRecheck(incident));
+        // 停用的 runtime 不派发，探它没有用（2026-11-07：停用的 Codex 没装，故障 #1 一天探失败 24 次）。
+        .filter((incident) => !inFlight.has(incident.id) && !waitsForRecheck(incident) && !isDisabled(incident.runtime));
       const outcomes = await Promise.all(due.map(async (incident) => ({
         incident, outcome: await probe(incident, false),
       })));
