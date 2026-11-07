@@ -259,6 +259,63 @@ describe("expiredSessionContext", () => {
   });
 });
 
+// 2026-11-07（Run 269–283）：压缩窗口太小时 Claude Code 报「Autocompact is thrashing」退出。会话已经塞满，
+// 续接它只会再失败（Run 270、274、276）。现在同一个 Run 里开一个新会话、带上工单的上下文接着做，只开一次；
+// 和会话过期不同，第一个进程已经干过活也开。
+describe("a Claude session whose autocompact is thrashing", () => {
+  const THRASHING = "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, "
+    + "3 times in a row. A file being read or a tool output is likely too large for the context window.";
+
+  it("carries on in a fresh session of the same run with the ticket's context", async () => {
+    const itemId = createItem(db, { title: "ticket 152", brief: "b", createdBy: "user", workdir: join(dir, "work") });
+    const runtime = new ScriptedClaude([
+      [
+        { type: "run.started", runtime: "claude", model: null },
+        { type: "session.updated", externalSessionId: "full-session" },
+        { type: "message.completed", messageId: "m1", role: "assistant", text: "读了一半" },
+        { type: "run.failed", exitCode: 1, errorCode: "claude_result_error", error: THRASHING },
+      ],
+      [
+        { type: "run.started", runtime: "claude", model: null },
+        { type: "session.updated", externalSessionId: "fresh-session" },
+        { type: "message.completed", messageId: "m2", role: "assistant", text: "做完了" },
+        { type: "run.completed", exitCode: 0 },
+      ],
+    ]);
+    const causes: Array<string | undefined> = [];
+    const { runId } = await runItem(db, itemId, conversationOpts(runtime, {
+      resumeSessionId: "full-session",
+      freshSessionPrompt: (cause?: string) => { causes.push(cause); return `FRESH(${cause})`; },
+    }));
+
+    expect(runtime.requests.map((request) => request.resumeSessionId ?? null)).toEqual(["full-session", null]);
+    expect(runtime.requests[1]!.prompt).toContain("FRESH(context_full)");
+    expect(causes).toEqual(["context_full"]);
+    expect(getRun(db, runId)).toMatchObject({ state: "finished", failure_code: null, external_session_id: "fresh-session" });
+    expect(decisions(runId, "runtime_context_thrashed")).toEqual([
+      expect.objectContaining({ fullSessionId: "full-session", runtime: "claude" }),
+    ]);
+  });
+
+  it("fails the run when the fresh session thrashes too, and says it already started one", async () => {
+    const itemId = createItem(db, { title: "ticket 152", brief: "b", createdBy: "user", workdir: join(dir, "work") });
+    const thrash = (session: string) => [
+      { type: "run.started", runtime: "claude", model: null },
+      { type: "session.updated", externalSessionId: session },
+      { type: "run.failed", exitCode: 1, errorCode: "claude_result_error", error: THRASHING },
+    ] as RecordedEvent[];
+    const runtime = new ScriptedClaude([thrash("full-session"), thrash("fresh-session")]);
+    const { runId } = await runItem(db, itemId, conversationOpts(runtime, {
+      resumeSessionId: "full-session", freshSessionPrompt: () => "FRESH",
+    }));
+
+    expect(runtime.requests).toHaveLength(2);
+    const run = getRun(db, runId)!;
+    expect(run).toMatchObject({ state: "failed", failure_code: "context_thrashing" });
+    expect(run.error_message).toContain("新会话");
+  });
+});
+
 // 每次启动按顺序回放一份录制，并记下启动请求。
 class ScriptedClaude implements AgentRuntime {
   readonly id = "claude" as const;

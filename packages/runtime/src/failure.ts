@@ -157,6 +157,10 @@ export function failureNextStep(runtime: RuntimeId, failure: TypedFailure, trans
   if (failure.needs === "code_fix") return `宿主代码出错，需要修复宿主代码。修复后，再处理这张工单。${free}`;
   const repair = healthRepair(agent, failure);
   if (repair) return `${repair}${healthHold(runtime, failure)}${free}`;
+  if (failure.code === "context_thrashing") {
+    return `${agent} 的会话塞满了，自动压缩一再失败，系统在这个 Run 里开过一个新会话也没成。`
+      + `重试时不续接塞满的会话，开新会话并附上工单的上下文；读大文件或大段输出时要分段读。${free}`;
+  }
   if (failure.code === "session_not_found") {
     return `${agent} 原来的会话已经不存在（CLI 按保留期删除了它的记录），这个 Run 无法接着它做。`
       + `下一次续接时，系统会开一个新会话，并附上工单的上下文。${free}`;

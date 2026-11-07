@@ -9,6 +9,7 @@ import {
 import { assertRunAllowed, executorRetryBudget } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
 import { createIngestor } from "../pipeline/ingest.js";
+import type { SessionLossCause } from "../pipeline/expired-session.js";
 import { ticketAttachmentsPromptSection } from "../agent-tools/ticket-attachments.js";
 import { ensurePullRequestReviewGrant } from "./pr-review-grant.js";
 import { decideRunSandbox } from "../ticket-actions/unsandboxed.js";
@@ -98,8 +99,8 @@ export interface RunOpts {
   // resume 或 fork 的会话已经不存在时（CLI 按保留期删了它的记录，工单 #66 的 Run #71），
   // 内核在同一个 Run 里开一个新会话，用这个函数给的提示启动它。只开一次。
   // 新会话不记得原来的对话，所以提示要带上工单的上下文（expiredSessionContext）。
-  // 不给时不开新会话，这个 Run 按会话不存在失败。
-  freshSessionPrompt?: () => string;
+  // 不给时不开新会话，这个 Run 按会话不存在失败。会话塞满、自动压缩抖动（context_thrashing）时也用它开新会话，cause 是 context_full。
+  freshSessionPrompt?: (cause?: SessionLossCause) => string;
   purpose?: RunPurpose;
   runId?: number;
   piBin?: string;
@@ -1018,7 +1019,7 @@ async function runItemLifecycle(
   let settledState: Run["state"] | null = null;
   let storedCursor: OutputCursor | undefined = adopt ? parseOutputCursor(run.output_cursor) : undefined;
   // 开了新会话以后，记下过期的会话。新会话也失败时，错误文本先说明这件事。
-  let freshSession: { expiredSessionId: string } | null = null;
+  let freshSession: { expiredSessionId: string; cause: SessionLossCause } | null = null;
   // 第一个进程已经说过话或者调用过工具。这时它的会话显然存在，失败不是会话过期，不开新会话。
   let progressed = false;
   const failurePrefix = (): string | null =>
@@ -1033,25 +1034,38 @@ async function runItemLifecycle(
     failed: Extract<RuntimeEvent, { type: "run.failed" }>,
   ): Promise<"started" | "declined" | "detached"> => {
     const freshPrompt = opts.freshSessionPrompt;
-    const expiredSessionId = opts.resumeSessionId;
-    if (adopt || !freshPrompt || !expiredSessionId || freshSession !== null || progressed) return "declined";
-    if (failed.failure.code !== "session_not_found") return "declined";
+    if (adopt || !freshPrompt || freshSession !== null) return "declined";
+    // 会话塞满、自动压缩抖动（2026-11-07 Run 269–283）：续接它只会再失败。第一个进程干过活也开新会话，工作区里的改动留着。
+    const thrashed = failed.failure.code === "context_thrashing";
+    const expiredSessionId = thrashed ? getRun(db, runId)?.external_session_id ?? opts.resumeSessionId : opts.resumeSessionId;
+    if (!expiredSessionId) return "declined";
+    if (!thrashed && (progressed || failed.failure.code !== "session_not_found")) return "declined";
+    const cause: SessionLossCause = thrashed ? "context_full" : "expired";
     // 旧进程这时已经失败。确保它退出，垫片写完退出记录，再开新进程。
-    await handle.interrupt("runtime session expired");
+    await handle.interrupt(thrashed ? "runtime session context full" : "runtime session expired");
     await processDone;
     if (isDetached) return "detached";
     // 用户在这期间暂停或停止了 Run：不再开新会话，失败按用户的动作收尾。
     const state = getRun(db, runId)?.state;
     if (state !== "starting" && state !== "running") return "declined";
     // 先拼好提示再记账：拼提示出错是宿主的缺陷，交给 runItem 的兜底边界，不留下"开了新会话"的记录。
-    const prompt = freshPrompt();
+    const prompt = thrashed ? freshPrompt(cause) : freshPrompt();
     const agent = runtimeDisplayName(runtime.id);
     db.transaction(() => {
       // 这个 Run 不再声称拥有那个会话。新会话报告自己的 id 以后，下一次续接就用它。
       updateRun(db, runId, { sessionId: null, externalSessionId: null });
       addActivity(db, {
         itemId, runId, actor: "system", kind: "decision",
-        payload: {
+        payload: thrashed
+          ? {
+            decision: "runtime_context_thrashed",
+            fullSessionId: expiredSessionId,
+            runtime: runtime.id,
+            errorCode: failed.errorCode,
+            reason: `${agent} 的会话 ${expiredSessionId} 塞满了，自动压缩一再失败（Autocompact is thrashing）。`
+              + "这个 Run 开了一个新会话，并附上了工单的上下文。",
+          }
+          : {
           decision: "runtime_session_expired",
           expiredSessionId,
           runtime: runtime.id,
@@ -1061,7 +1075,7 @@ async function runItemLifecycle(
         },
       });
     }).immediate();
-    freshSession = { expiredSessionId };
+    freshSession = { expiredSessionId, cause };
     // 失败事件没有落库，新进程的事件接在已经落库的事件后面。
     seqBase = processedSeq;
     try {
@@ -1496,9 +1510,11 @@ function shiftEvent(event: RuntimeEvent, seqBase: number, prefix: string | null)
 }
 
 // 新会话也失败时，错误文本先说明原来的会话不存在、系统开了新会话，再给新会话自己的失败原因。
-function freshSessionFailure(runtime: RuntimeId, fresh: { expiredSessionId: string }): string {
-  return `${runtimeDisplayName(runtime)} 原来的会话 ${fresh.expiredSessionId} 已经不存在。`
-    + "系统开了一个新会话，新会话也失败了：";
+function freshSessionFailure(runtime: RuntimeId, fresh: { expiredSessionId: string; cause: SessionLossCause }): string {
+  const lost = fresh.cause === "context_full"
+    ? `的会话 ${fresh.expiredSessionId} 塞满了，自动压缩一再失败。`
+    : `原来的会话 ${fresh.expiredSessionId} 已经不存在。`;
+  return `${runtimeDisplayName(runtime)} ${lost}系统开了一个新会话，新会话也失败了：`;
 }
 
 // runtime.start 抛错时的 handle：只有一个失败事件。分类和第一次启动抛错相同（spawn_error）。

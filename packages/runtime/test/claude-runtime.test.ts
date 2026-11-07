@@ -266,6 +266,20 @@ describe("classifyClaudeFailure on Claude Code's own model errors", () => {
   });
 });
 
+// 2026-11-07：压缩窗口太小时 Claude Code 报「Autocompact is thrashing」退出（Run 269–283）。以前归为 unknown，
+// Lead 在同一个塞满的会话上续接重试，又失败。现在单独归类：这次尝试的失败，续接同一个会话没有用。
+describe("Claude Code's autocompact thrashing", () => {
+  it("types the failure as context_thrashing", async () => {
+    const { classifyClaudeFailure } = await import("../src/claude.js");
+    const message = "Autocompact is thrashing: the context refilled to the limit within 3 turns of the previous compact, "
+      + "3 times in a row. A file being read or a tool output is likely too large for the context window. "
+      + "Try reading in smaller chunks, or use /clear to start fresh.";
+    expect(classifyClaudeFailure({ errorCode: "claude_result_error", message })).toMatchObject({
+      code: "context_thrashing", scope: "attempt", retry: "never", needs: "none",
+    });
+  });
+});
+
 // 工单 #66 的 Run #71：Claude Code 按保留期删了旧会话的记录，--resume 立即失败。
 // 旧代码把它归为 unknown，lead 收到一条「Run crashed」。
 describe("a resumed Claude session that no longer exists", () => {

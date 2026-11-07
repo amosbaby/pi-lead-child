@@ -61,6 +61,9 @@ export const FAILURE_CLASSES = {
   // 这次尝试失败了，任务没有问题。再 resume 同一个会话没有用，所以 retry 是 never。
   // 内核在同一个 Run 里开一个新会话接着做（manager.ts），调用方给不出新会话的提示时才记下这次失败。
   session_not_found: { scope: "attempt", retry: "never", needs: "none", category: "session_expired" },
+  // Claude Code 的自动压缩抖动（「Autocompact is thrashing」，2026-11-07 Run 269–283）：会话塞满了，压缩完几轮又满。
+  // 任务没有问题，续接同一个会话只会再失败，所以 retry 是 never。内核在同一个 Run 里开新会话接着做（manager.ts）。
+  context_thrashing: { scope: "attempt", retry: "never", needs: "none", category: "session_expired" },
   host_registration_failed: { scope: "host", retry: "never", needs: "code_fix", category: "host_defect" },
   host_exception: { scope: "host", retry: "never", needs: "code_fix", category: "host_defect" },
   // 宿主准备工作区时碰到用户自己能修的问题，例如本地仓库没有 PR 所在的远端（工单 #212）。没到 runtime，不算 runtime 的故障，

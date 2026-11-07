@@ -1171,6 +1171,9 @@ export function spawnClaimedItem(deps: LeadDeps, claim: DispatchClaim): string {
   // 来源 Run 是另一个 runtime 的（例如它的 runtime 被用户停用，这次重新选了一个）：那是另一个 CLI 的会话，
   // 续接不了。开新会话，带上工单的上下文（freshSessionPrompt）。修复回合不会走到这里：它总在来源 Run 的 runtime 上。
   const crossRuntime = Boolean(resumeSource) && !deps.childPi && resumeSource!.runtime !== claim.runtime;
+  // 来源 Run 的会话塞满了、自动压缩一再失败（context_thrashing，2026-11-07 Run 270、274、276 续接它又失败）：
+  // 不续接，开新会话带上工单的上下文。修复回合除外：它要续接来源 Run 才知道补交什么。
+  const fullSource = resumeSource?.failure_code === "context_thrashing" && claim.purpose !== "outcome_repair";
   const capabilities = item.project_id
     ? createLearningService(deps.db, { dataDir: deps.dataDir }).renderActiveCapabilities(item.project_id)
     : "";
@@ -1194,7 +1197,8 @@ export function spawnClaimedItem(deps: LeadDeps, claim: DispatchClaim): string {
     dbPath: deps.dbPath,
     dataDir: deps.dataDir,
     sessionDir: sessionDir(item.id),
-    prompt: crossRuntime && freshSessionPrompt ? freshSessionPrompt("runtime_changed") : prompt,
+    prompt: crossRuntime && freshSessionPrompt ? freshSessionPrompt("runtime_changed")
+      : fullSource && freshSessionPrompt ? freshSessionPrompt("context_full") : prompt,
     role: claim.role,
     purpose: claim.purpose,
     runId: claim.runId,
@@ -1202,12 +1206,12 @@ export function spawnClaimedItem(deps: LeadDeps, claim: DispatchClaim): string {
     runtimeId: claim.runtime,
     model: resolveRuntimeModel(claim.runtime, claim.model),
     ...(claim.effort ? { effort: claim.effort } : {}),
-    ...(!crossRuntime && resumeSource?.external_session_id
+    ...(!crossRuntime && !fullSource && resumeSource?.external_session_id
       ? {
           resumeSessionId: resumeSource.external_session_id,
-          ...(freshSessionPrompt ? { freshSessionPrompt: () => freshSessionPrompt() } : {}),
+          ...(freshSessionPrompt ? { freshSessionPrompt: (cause?: SessionLossCause) => freshSessionPrompt(cause) } : {}),
         }
-      : {}),
+      : freshSessionPrompt ? { freshSessionPrompt: (cause?: SessionLossCause) => freshSessionPrompt(cause) } : {}),
     env: deps.env,
     ...toolChannel(claim.runtime),
     ...(deps.childPi ? { piBin: deps.childPi.piBin, piArgs: deps.childPi.piArgs, reviewerRuntime: LOCAL_RUNTIME_ID } : {}),

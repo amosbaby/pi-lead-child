@@ -340,6 +340,7 @@ export function classifyClaudeFailure(evidence: FailureEvidence): TypedFailure {
     return typedFailure("tool_channel_unavailable", evidence);
   }
   if (SESSION_NOT_FOUND.test(evidence.message ?? "")) return typedFailure("session_not_found", evidence);
+  if (AUTOCOMPACT_THRASHING.test(evidence.message ?? "")) return typedFailure("context_thrashing", evidence);
   if (MODEL_NOT_AVAILABLE.test(evidence.message ?? "")) return typedFailure("model_unsupported", evidence);
   return typedFailure(matchProviderFailure(evidence.message) ?? residualFailureCode(evidence), evidence);
 }
@@ -348,6 +349,9 @@ export function classifyClaudeFailure(evidence: FailureEvidence): TypedFailure {
 // 文本取自 Claude Code 2.1.258 二进制里的字符串，和 Run #71 的输出一致。--fork-session 也报这一句。
 // 这时 CLI 没有初始化会话：result 的 subtype 是 error_during_execution，errors 里就是这一句。
 const SESSION_NOT_FOUND = /No conversation found with session ID/i;
+
+// 自动压缩抖动：压缩完三轮内又满，连续三次（Claude Code 2.1.312 的报错原文，2026-11-07 Run 269–283）。
+const AUTOCOMPACT_THRASHING = /Autocompact is thrashing/i;
 
 // Claude Code 自己写的模型错误：模型不存在，或者这个账号、这个部署用不了它。
 // 文本取自 Claude Code 2.1.258 二进制里的字符串（工单 13）。通用的 provider 诊断认不出这两句。

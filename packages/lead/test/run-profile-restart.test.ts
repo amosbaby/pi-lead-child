@@ -135,3 +135,23 @@ describe("changing the executor's runtime while it runs", () => {
     expect(prompt).toContain("执行 agent 从 Claude Code 换成了 Codex");
   }, 30_000);
 });
+
+// 2026-11-07（Run 270、274、276）：来源 Run 的会话塞满了、自动压缩一再失败，续接它又失败。
+// 续接这样的来源 Run 时不带 --resume，开新会话，提示里写明会话塞满了，并带上工单的上下文。
+describe("resuming a run whose session filled up", () => {
+  it("starts a new session that is told the old one was full", async () => {
+    const { itemId, runId } = runningRun("claude", "claude-session-full", { model: "opus", effort: "high" });
+    await runTicketAction(db, {
+      itemId, action: "set_run_profile", input: { role: "executor", model: "sonnet", effort: "low" }, caller: { kind: "user" }, reason: "r",
+    });
+    db.prepare("UPDATE runs SET failure_code='context_thrashing' WHERE id=?").run(runId);
+
+    const capture = join(dir, "claude-capture.json");
+    const claim = await claimAndSpawn(itemId, CASES[0]!.adapter(capture));
+    expect(getRun(db, claim.runId)).toMatchObject({ resumed_from_run_id: runId });
+    const argv = CASES[0]!.argv(capture);
+    expect(argv).not.toContain("--resume");
+    const prompt = argv.at(-1)!;
+    expect(prompt).toContain("## 原来的会话塞满了");
+  }, 30_000);
+});

@@ -15,13 +15,20 @@ const MAX_ITEMS = 8;
 
 // 为什么开新会话：expired 是原来的会话被 CLI 删掉了；runtime_changed 是换了执行 agent（工单 08 的 change_executor_runtime，
 // 或者原来的 runtime 被停用、派发时改选了一个），原来的会话属于另一个 CLI，接不上。
-export type SessionLossCause = "expired" | "runtime_changed";
+// context_full 是原来的会话塞满了，Claude Code 的自动压缩一再失败（context_thrashing），续接它只会再失败。
+export type SessionLossCause = "expired" | "runtime_changed" | "context_full";
 
 const SESSION_LOSS_HEADER: Record<SessionLossCause, string[]> = {
   expired: [
     "## 原来的会话已经不存在",
     "你在这张工单上原来的 runtime 会话已经不存在：CLI 按保留期删除了它的记录。"
       + "这是一个新会话，你不记得之前的对话。下面是工单到现在的事实。",
+  ],
+  context_full: [
+    "## 原来的会话塞满了",
+    "你在这张工单上原来的会话上下文塞满了，自动压缩一再失败，接不下去："
+      + "这是一个新会话，你不记得之前的对话。下面是工单到现在的事实。"
+      + "读大文件或大段输出时分段读，只留需要的部分。",
   ],
   runtime_changed: [
     "## 换了执行 agent",
