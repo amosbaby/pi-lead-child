@@ -146,6 +146,21 @@ describe("when the system opens a draft PR on its own", () => {
   });
 });
 
+// 2026-11-08：用户要先关掉自动开 PR（本机仓库的 origin 是没有推送权限的上游，#131、#139 都推送失败；改成自己的 fork
+// 又会把只在本地的提交推上去）。config.json 的 env 里设 PLC_AUTO_PR=off，系统就不再自动开、也不更新 PR。
+describe("turning automatic draft PRs off for this machine", () => {
+  it("opens nothing and pushes nothing while PLC_AUTO_PR is off", async () => {
+    const { itemId, worktree, branch } = codingTicket();
+    const gh = fakeGh();
+    expect(await syncAutoPullRequests(db, { runner: gh, env: { PLC_AUTO_PR: "off" } }))
+      .toEqual({ opened: [], updated: [], failed: [] });
+    expect(gh.calls).toEqual([]);
+    expect(() => git(remote, "rev-parse", "--verify", branch)).toThrow();
+    expect(await syncAutoPullRequests(db, { runner: gh, env: {} })).toMatchObject({ opened: [itemId] });
+    expect(git(remote, "rev-parse", branch)).toBe(git(worktree, "rev-parse", "HEAD"));
+  });
+});
+
 describe("the draft PR follows the ticket from delivery through rework", () => {
   it("opens the PR once, then pushes the rework to the same PR and refreshes its description", async () => {
     const { itemId, worktree, branch } = codingTicket();

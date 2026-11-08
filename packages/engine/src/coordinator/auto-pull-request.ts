@@ -138,11 +138,22 @@ function tellLead(db: Db, itemId: number, summary: string, payload: Record<strin
 
 export interface AutoPullRequestSweep { opened: number[]; updated: number[]; failed: number[] }
 
+/**
+ * 这台机器上关掉自动开 PR：config.json 的 env 里设 PLC_AUTO_PR=off（2026-11-08，本机仓库的 origin 是没有推送权限的上游）。
+ * 只管系统自动开和更新；用户自己点「开 PR」、在对话里要开（open_pr）照常。
+ */
+export const AUTO_PULL_REQUEST_ENV = "PLC_AUTO_PR";
+
+export function autoPullRequestsOff(env: Record<string, string | undefined> = process.env): boolean {
+  return /^(off|false|0|no)$/i.test((env[AUTO_PULL_REQUEST_ENV] ?? "").trim());
+}
+
 /** 看一遍交付了、有隔离分支的工单，该开 PR 的开，该更新的更新。daemon 的轮询定时调用。 */
 export async function syncAutoPullRequests(
-  db: Db, options: { runner?: PullRequestRunner } = {},
+  db: Db, options: { runner?: PullRequestRunner; env?: Record<string, string | undefined> } = {},
 ): Promise<AutoPullRequestSweep> {
   const result: AutoPullRequestSweep = { opened: [], updated: [], failed: [] };
+  if (autoPullRequestsOff(options.env)) return result;
   const candidates = db.prepare(
     `SELECT DISTINCT i.id FROM items i JOIN workspaces w ON w.owner_item_id = i.id
      WHERE i.kind='task' AND i.stage IN ('review','done')
