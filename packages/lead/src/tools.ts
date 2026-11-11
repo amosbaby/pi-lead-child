@@ -29,7 +29,8 @@ import {
 } from "@pi-lead-child/store";
 import { getWatch, listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice } from "@pi-lead-child/store";
 import {
-  checkRepositoryAccess, describeWatchSchedule, findRepositoryCheckout, HOST_COMMAND_LIMITS, hostCommandInputOf, isLiveUserTurn,
+  checkRepositoryAccess, describeWatchSchedule, escalateInterventionToUser, findRepositoryCheckout, HOST_COMMAND_LIMITS,
+  hostCommandInputOf, isLiveUserTurn,
   parseRepositorySpec, recordTicketRepository, recordTicketRepositoryClone, runRecordedHostCommand, startRepositoryClone, workspaceRepository,
   type RepositoryCheckout,
 } from "@pi-lead-child/engine";
@@ -4403,6 +4404,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         // 表单（Form，工单 #285）：对象要在，操作要登记过。user_direct 的操作可以做成表单：只有用户点提交才执行（用户的凭证），
         // 字段都显示给用户，没有隐藏参数，敏感字段 Lead 填不了。这里记下操作的名字和用户自己去哪里做，建表单记录时用。
         const formTargets = new Map<string, { label: string; where: string | null }>();
+        // 这张卡摆给用户的 child 请求（Intervention 节点，请用户回答、批准的 UserAction）。卡片合格、显示以后，
+        // 先交给 Lead 的那些从这时起算等用户（engine 的 escalateInterventionToUser，用户 2026-11-11）。
+        const shownToUser: Array<{ type: "approval" | "decision_request"; id: number }> = [];
         for (const node of checked.surface.nodes) {
           if (node.type === "Form") {
             const props = node.props as { target: { type: string; id: string | number }; action: string };
@@ -4447,6 +4451,16 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             const checkpoint = latestCheckpointIdForAction(db, kind === "approval" ? "approval" : "decision_request", id);
             delete node.props.checkpoint;
             Object.assign(node.props, { ticket, ...(checkpoint === null ? {} : { checkpoint }) });
+            shownToUser.push({ type: kind === "approval" ? "approval" : "decision_request", id });
+            continue;
+          }
+          // 请用户回答一个决定、批一个审批的 UserAction：也是把这个请求摆给用户。
+          if (node.type === "UserAction") {
+            const action = (node.props as { action?: { kind?: string; target?: string } }).action;
+            const target = /^(decision|approval):(\d+)$/.exec(action?.target ?? "");
+            if (target && (action?.kind === "choose" || action?.kind === "approve")) {
+              shownToUser.push({ type: target[1] === "approval" ? "approval" : "decision_request", id: Number(target[2]) });
+            }
             continue;
           }
           if (node.type !== "Action") continue;
@@ -4533,6 +4547,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           node.props.decision = request.requestId;
           decisions.push(request.requestId);
         }
+        for (const shown of shownToUser) {
+          escalateInterventionToUser(db, { ...shown, reason: "Lead 用卡片把它摆给了用户" });
+        }
         // 线上几乎都是先画卡、后写正文（2026-10-24：画了卡的 25 轮里 24 轮），Lead 写正文前最后读到的就是这段结果。
         // 卡片按出现的位置显示（App 的 buildAssistantTurn）：先画的卡在后写的字上面。
         // 那天用户反馈：卡片里写了结论，正文又用 Markdown 小标题把同样的话写了一遍。所以在这里提醒正文和卡片的分工。
@@ -4607,6 +4624,10 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           }
           return created;
         })();
+        // 转达了一个先交给你的审批：从这时起它算等用户（engine 的 escalateInterventionToUser）。
+        if (params.approval_id !== undefined) {
+          escalateInterventionToUser(db, { type: "approval", id: params.approval_id, reason: "Lead 用通知把它转达给了用户" });
+        }
         return text(`已通知用户（notification_id=${id}）`);
       },
     }),

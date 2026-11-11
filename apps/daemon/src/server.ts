@@ -100,7 +100,7 @@ import { repairMissingBlockerAlerts } from "@pi-lead-child/store";
 import { pendingApprovals, getApproval, isStandingOrderProposal, pendingApprovalLine } from "@pi-lead-child/store";
 import { blockerHasConversationRecord } from "@pi-lead-child/store";
 import { recordLeadTurnResponding, type EventRecord, type ReminderPush } from "@pi-lead-child/store";
-import { createWatchdog, UI_ACTIONS } from "@pi-lead-child/engine";
+import { createWatchdog, escalateInterventionToUser, UI_ACTIONS } from "@pi-lead-child/engine";
 import { leadCapabilityNotice, recordLeadCapabilities } from "./lead-capabilities.js";
 import { agentConnectionHost, setAgentConnectionHost, type AgentConnectionHost } from "@pi-lead-child/engine";
 import { createScheduler } from "@pi-lead-child/engine";
@@ -3770,6 +3770,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
   function pushApproval(approval: ReturnType<typeof pendingApprovals>[number]): void {
     conveyedApprovals.add(approval.id);
+    // 先交给 Lead 的审批（免沙箱开关打开时，engine 的 coordinator/interventions.ts）：系统替 Lead 推给了用户，从这时起它算等用户。
+    escalateInterventionToUser(db, { type: "approval", id: approval.id, reason: "审批快过期了，系统推给了用户" });
     const line = pendingApprovalLine(approval);
     // Lead 提议的常设指令修改（工单 10）只能在确认卡或设置页里决定：不提示回复，也不发 Slack 的批准按钮。
     if (isStandingOrderProposal(approval)) {

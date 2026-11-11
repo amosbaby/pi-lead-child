@@ -217,10 +217,22 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
     return { reason: row.summary?.trim() || row.prompt, since: iso(row.created_at) ?? row.created_at };
   }
 
+  // 先交给 Lead、还没摆给用户的决定和审批（engine 的 coordinator/interventions.ts 的 LEAD_FIRST_LABELS，用户 2026-11-11）：
+  // 这个请求的 inbox 行的 payload 里 leadFirst=1、needsUser=0。Lead 的一轮消化掉这一行以后标记还在，所以不看行的状态。
+  // 下面三处数「等你」的都不算它们；它们算进「Lead 处理中」。Lead 把它摆给用户（escalateInterventionToUser）以后 needsUser=1。
+  const heldByLeadSql = (type: "approval" | "decision_request", idColumn: string): string =>
+    `EXISTS (SELECT 1 FROM inbox held
+              WHERE held.item_id = ? AND json_valid(held.payload)
+                AND json_extract(held.payload, '$.authorityType') = '${type}'
+                AND json_extract(held.payload, '$.authorityId') = ${idColumn}
+                AND json_extract(held.payload, '$.leadFirst') = 1
+                AND json_extract(held.payload, '$.needsUser') = 0)`;
+
   function attention(item: Item) {
     const pendingApprovalCount = (db.prepare(
-      "SELECT COUNT(*) AS n FROM approvals WHERE item_id = ? AND status = 'pending'",
-    ).get(item.id) as { n: number }).n;
+      `SELECT COUNT(*) AS n FROM approvals WHERE item_id = ? AND status = 'pending'
+         AND NOT ${heldByLeadSql("approval", "approvals.id")}`,
+    ).get(item.id, item.id) as { n: number }).n;
     // 阻塞的决策请求按决策表数，不按它的 inbox 行：Lead 的一轮会把那一行消化掉（consumed），
     // ensureAuthorityInbox 也不会重建它，可决策还没人回答（发布评审 2340cac 的发现 C）。
     // 它的 inbox 行不再另算一次。
@@ -237,15 +249,24 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
              AND COALESCE(CASE WHEN json_valid(payload) THEN json_extract(payload, '$.needsUser') END, 1) <> 0`,
         ).get(item.id) as { n: number }).n
         + (db.prepare(
-          "SELECT COUNT(*) AS n FROM decision_requests WHERE item_id = ? AND state = 'pending' AND blocking = 1",
-        ).get(item.id) as { n: number }).n;
+          `SELECT COUNT(*) AS n FROM decision_requests WHERE item_id = ? AND state = 'pending' AND blocking = 1
+             AND NOT ${heldByLeadSql("decision_request", "decision_requests.id")}`,
+        ).get(item.id, item.id) as { n: number }).n;
     // Lead 正在处理：这张工单上（或者首次出现在这张工单上的 runtime 故障）有先交给 Lead、还没处理完的事。
     // 例行的事（routine，例如 Run 完成）不算：那不是异常。Lead 给自己设的跟进也不算：那只是提醒
     // （2026-10-15 #66：跟进让工单一直显示「Lead 处理中」，用户却在等着三选一）。
     // 「交给 Lead」按 Lead 实际收到的算（工单 14）：这一行的事件里有作为消息交给 Lead 的（tell、interrupt 级，
     // daemon 的 lead-input.ts 的 leadEventRoute）。级别由常设指令定（inbox.wake_lead 和到时限升级），
     // 所以常设指令改了，这里跟着变。以前这里另写了一份叫醒条件（blocker，或者 payload.wakeLead=1），不跟常设指令走。
-    const leadHandling = !terminal && (db.prepare(
+    // 还在 Lead 手里的决定和审批（见 heldByLeadSql）也算：Lead 可能已经看过它、正在找人问，那一行已经消化掉了。
+    const heldByLead = !terminal && (db.prepare(
+      `SELECT 1 FROM approvals WHERE item_id = ? AND status = 'pending' AND ${heldByLeadSql("approval", "approvals.id")}
+       UNION ALL
+       SELECT 1 FROM decision_requests WHERE item_id = ? AND state = 'pending'
+          AND ${heldByLeadSql("decision_request", "decision_requests.id")}
+       LIMIT 1`,
+    ).get(item.id, item.id, item.id, item.id) !== undefined);
+    const leadHandling = heldByLead || !terminal && (db.prepare(
       `SELECT 1 FROM inbox
        WHERE state IN ('pending','delivered') AND json_valid(payload)
          AND (item_id = ? OR json_extract(payload, '$.openedItemId') = ?)
@@ -263,8 +284,9 @@ export function createControlPlaneService(db: Db, options: ControlPlaneOptions) 
       ? 0
       : (db.prepare(
           `SELECT COUNT(*) AS n FROM decision_requests
-           WHERE item_id = ? AND state = 'pending' AND blocking = 1 AND audience IN ('user','lead_or_user')`,
-        ).get(item.id) as { n: number }).n;
+           WHERE item_id = ? AND state = 'pending' AND blocking = 1 AND audience IN ('user','lead_or_user')
+             AND NOT ${heldByLeadSql("decision_request", "decision_requests.id")}`,
+        ).get(item.id, item.id) as { n: number }).n;
     return {
       pendingApprovalCount,
       blockerCount,

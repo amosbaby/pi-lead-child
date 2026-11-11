@@ -30,7 +30,7 @@ import {
   resolveDecisionRequest,
 } from "@pi-lead-child/store";
 import type { Db } from "@pi-lead-child/store";
-import { itemUpdatedEvent, publishGatewayEvents } from "@pi-lead-child/store";
+import { getHostBypass, itemUpdatedEvent, latestCheckpointIdForAction, publishGatewayEvents } from "@pi-lead-child/store";
 import type {
   Approval,
   CheckpointFact,
@@ -294,7 +294,81 @@ function ensureAuthorityCard(
 ): void {
   const key = `intervention:${input.actionType}:${input.actionId}`;
   if (getConversationCardByKey(db, key)) return;
+  // 先交给 Lead、还没摆给用户的请求：用户没见过介入卡，有了结果、过期了也不补（记录卡照常写）。
+  if (heldByLead(db, input.itemId, input.actionType, input.actionId)) return;
   ensureInterventionCard(db, input);
+}
+
+// ── 先交给 Lead（用户 2026-11-11）──────────────────────────────────────────────────
+// 「改成 bypass permission 的情况先发给 lead agent，然后由它决策是自行处理还是自己通过 genui 发确认卡」。
+// 免沙箱开关打开时，child 发起的决定和审批只交给 Lead：inbox 行标 needsUser=false、leadFirst=true，不先画介入卡。
+// Lead 把它摆给用户时升级（escalateInterventionToUser）：那时才算等用户，才有介入卡。开关关着时和以前一样。
+// 标记放在这个请求的 inbox 行的 payload 里（Lead 的一轮消化掉这一行以后标记还在），不改库的结构。
+// 网关的 attention（gateway 的 control-plane.ts）按同一个标记算「等你」和「Lead 处理中」。
+// 只看开关开没开，不看是不是用户正在发话：child 的请求都是事件叫醒的一轮。
+const LEAD_FIRST_LABELS = { needsUser: false, leadFirst: true } as const;
+
+function leadFirstOn(db: Db, at: Date): boolean {
+  return getHostBypass(db, at).enabled;
+}
+
+function authorityRows(
+  db: Db, itemId: number, type: "approval" | "decision_request", id: number,
+): Array<{ id: number; payload: Record<string, unknown> }> {
+  const rows = db.prepare("SELECT id, payload FROM inbox WHERE item_id=? ORDER BY id").all(itemId) as Array<{ id: number; payload: string }>;
+  const matched: Array<{ id: number; payload: Record<string, unknown> }> = [];
+  for (const row of rows) {
+    try {
+      const payload = JSON.parse(row.payload) as Record<string, unknown>;
+      if (payload.authorityType === type && payload.authorityId === id) matched.push({ id: row.id, payload });
+    } catch {
+      // 不是 JSON 的旧行：不是这个请求的。
+    }
+  }
+  return matched;
+}
+
+/** 这个请求是不是还在 Lead 手里：先交给了 Lead，还没摆给用户。 */
+function heldByLead(db: Db, itemId: number, type: "approval" | "decision_request", id: number): boolean {
+  return authorityRows(db, itemId, type, id).some((row) => row.payload.leadFirst === true && row.payload.needsUser === false);
+}
+
+/**
+ * Lead 把一个先交给它的决定或审批摆给用户（发了卡、发了通知）：从这时起它算等用户，会话里有介入卡。
+ * 只升级一次。请求不是先交给 Lead 的（开关关着时提的、外部消息派的执行要的审批、已经升级过）、或者已经有结果时，
+ * 什么也不做，返回 false。
+ */
+export function escalateInterventionToUser(db: Db, input: {
+  type: "approval" | "decision_request"; id: number; reason: string; now?: Date;
+}): boolean {
+  const at = input.now ?? new Date();
+  return db.transaction((): boolean => {
+    const itemId = input.type === "approval"
+      ? (() => {
+          const approval = getApproval(db, input.id);
+          return approval && approval.status === "pending" ? approval.item_id : null;
+        })()
+      : (() => {
+          const request = getDecisionRequest(db, input.id);
+          return request && request.state === "pending" ? request.itemId : null;
+        })();
+    if (itemId === null) return false;
+    const held = authorityRows(db, itemId, input.type, input.id)
+      .filter((row) => row.payload.leadFirst === true && row.payload.needsUser === false);
+    if (!held.length) return false;
+    for (const row of held) {
+      db.prepare("UPDATE inbox SET payload=? WHERE id=?").run(
+        JSON.stringify({ ...row.payload, needsUser: true, escalatedAt: at.toISOString(), escalationReason: input.reason }), row.id,
+      );
+    }
+    const checkpointId = latestCheckpointIdForAction(db, input.type, input.id);
+    if (checkpointId !== null) {
+      ensureInterventionCard(db, { itemId, checkpointId, actionType: input.type, actionId: input.id, now: at });
+    }
+    touchItem(db, itemId, at);
+    publishGatewayEvents(db, [itemUpdatedEvent(itemId, at)]);
+    return true;
+  }).immediate();
 }
 
 // KernelInterventionRef / KernelIntervention 是线上 DTO：字段名由 protocol 冻结，
@@ -471,6 +545,8 @@ export function createInterventionDomainService(args: {
         ttlMs: input.ttlMs,
         now: at,
       });
+      // 先交给 Lead（见 LEAD_FIRST_LABELS）。外部消息派的执行要的审批只有用户能批，照旧直接找用户。
+      const leadFirst = input.requestedBy === "child" && leadFirstOn(db, at) && externalTaskOriginOf(db, input.itemId) === null;
       ensureAuthorityInbox(db, {
         itemId: input.itemId,
         type: "approval",
@@ -478,6 +554,7 @@ export function createInterventionDomainService(args: {
         severity: "blocker",
         summary: `Approval #${approvalId} required: ${input.action}`,
         now: at,
+        ...(leadFirst ? { labels: { ...LEAD_FIRST_LABELS } } : {}),
       });
       const checkpoint = insertCheckpointWithResult(db, {
         itemId: input.itemId,
@@ -491,13 +568,15 @@ export function createInterventionDomainService(args: {
         actionRef: { type: "approval", id: approvalId },
         idempotencyKey: `approval-created:${approvalId}`,
       }, { now: at });
-      ensureInterventionCard(db, {
-        itemId: input.itemId,
-        checkpointId: checkpoint.checkpoint.id,
-        actionType: "approval",
-        actionId: approvalId,
-        now: at,
-      });
+      if (!leadFirst) {
+        ensureInterventionCard(db, {
+          itemId: input.itemId,
+          checkpointId: checkpoint.checkpoint.id,
+          actionType: "approval",
+          actionId: approvalId,
+          now: at,
+        });
+      }
       addActivity(db, {
         itemId: input.itemId,
         runId: input.runId,
@@ -627,6 +706,7 @@ export function createInterventionDomainService(args: {
     db.transaction(() => {
       const at = now();
       const lead = input.origin === "lead";
+      const leadFirst = !lead && leadFirstOn(db, at);
       const request = insertDecisionRequest(db, {
         itemId: input.itemId,
         runId: input.runId,
@@ -648,7 +728,8 @@ export function createInterventionDomainService(args: {
         summary: `Decision #${request.id} required: ${request.prompt}`,
         now: at,
         // Lead 自己发起的：要用户决定，但不叫醒 Lead 自己（2026-10-15 generative UI）。
-        ...(lead ? { labels: { needsUser: true, wakeLead: false } } : {}),
+        // child 发起的、开关打开时：先交给 Lead（见 LEAD_FIRST_LABELS）。不阻塞的本来不叫醒 Lead，这时也叫醒：没有别人看它了。
+        ...(lead ? { labels: { needsUser: true, wakeLead: false } } : leadFirst ? { labels: { ...LEAD_FIRST_LABELS, wakeLead: true } } : {}),
       });
       const checkpoint = insertCheckpointWithResult(db, {
         itemId: input.itemId,
@@ -661,13 +742,15 @@ export function createInterventionDomainService(args: {
         actionRef: { type: "decision_request", id: request.id },
         idempotencyKey: `decision-created:${request.id}`,
       }, { now: at });
-      ensureInterventionCard(db, {
-        itemId: input.itemId,
-        checkpointId: checkpoint.checkpoint.id,
-        actionType: "decision_request",
-        actionId: request.id,
-        now: at,
-      });
+      if (!leadFirst) {
+        ensureInterventionCard(db, {
+          itemId: input.itemId,
+          checkpointId: checkpoint.checkpoint.id,
+          actionType: "decision_request",
+          actionId: request.id,
+          now: at,
+        });
+      }
       addActivity(db, {
         itemId: input.itemId,
         ...(input.runId === null ? {} : { runId: input.runId }),
@@ -895,7 +978,7 @@ export function createInterventionDomainService(args: {
           }
           if (checkpointId === null) throw new Error(`legacy approval ${authority.id} has no checkpoint`);
           const cardId = typeof gap.cardId === "number" ? gap.cardId : gap.cardId?.id ?? null;
-          if (cardId === null) {
+          if (cardId === null && !heldByLead(db, authority.item_id, "approval", authority.id)) {
             ensureInterventionCard(db, {
               itemId: authority.item_id,
               checkpointId,
@@ -955,7 +1038,7 @@ export function createInterventionDomainService(args: {
           }
           if (checkpointId === null) throw new Error(`legacy decision ${authority.id} has no checkpoint`);
           const cardId = typeof gap.cardId === "number" ? gap.cardId : gap.cardId?.id ?? null;
-          if (cardId === null) {
+          if (cardId === null && !heldByLead(db, authority.itemId, "decision_request", authority.id)) {
             ensureInterventionCard(db, {
               itemId: authority.itemId,
               checkpointId,

@@ -9,9 +9,10 @@ import { join } from "node:path";
 import WebSocket from "ws";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  addInbox, addLeadFollowUp, addNotification, createApproval, createItem, createPairing, listInbox, openDb, redeemPairing,
+  addInbox, addLeadFollowUp, addNotification, createApproval, createItem, createPairing, createRun, listInbox, openDb, redeemPairing,
   transition, type Db,
 } from "@pi-lead-child/store";
+import { createCoordinator, enableHostBypass } from "@pi-lead-child/engine";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { startDaemon } from "../src/server.js";
 
@@ -174,6 +175,27 @@ describe("an approval", () => {
     await vi.waitFor(() => expect(desktop.filter((text) => text.includes("删除临时资源"))).toHaveLength(1), { timeout: 5_000 });
     await settle();
     expect(desktop.filter((text) => text.includes("删除临时资源"))).toHaveLength(1);
+  });
+
+  // 免沙箱开关打开时 child 的审批先交给 Lead（用户 2026-11-11）：不算等用户。没人处理、快过期时系统照旧推给用户；
+  // 推了以后它算等用户，和 Lead 自己摆给用户一样。
+  it("counts as waiting for the user once the system pushes a lead-first approval", async () => {
+    vi.stubEnv("PLC_APPROVAL_DEADLINE_MARGIN_MS", String(10 * 60_000));
+    const { desktop } = await start(stubLead("healthy", { quiet: true }));
+    enableHostBypass(db, { bindingId: null, resolvedBy: "user via page", reason: "test", now: new Date() });
+    const itemId = blockedTicket();
+    const runId = createRun(db, { itemId, runtime: "claude" });
+    const approval = createCoordinator({ db }).requestApproval({
+      itemId, runId, requestedBy: "child", tool: "delete", action: "删除临时资源", ttlMs: 10 * 60_000 + 1_500,
+      checkpoint: { title: "删除临时资源", summary: "清理部署留下的临时资源", nextStep: "批准以后删除" },
+    });
+    if (approval.status !== "pending") throw new Error("expected a pending approval");
+    const payload = () => listInbox(db, {}).map((row) => JSON.parse(row.payload) as Record<string, unknown>)
+      .find((entry) => entry.authorityType === "approval" && entry.authorityId === approval.approvalId)!;
+    expect(payload()).toMatchObject({ leadFirst: true, needsUser: false });
+
+    await vi.waitFor(() => expect(desktop.filter((text) => text.includes("删除临时资源"))).toHaveLength(1), { timeout: 8_000 });
+    await vi.waitFor(() => expect(payload()).toMatchObject({ leadFirst: true, needsUser: true }));
   });
 
   it("is not pushed again when Lead already passed it on", async () => {
