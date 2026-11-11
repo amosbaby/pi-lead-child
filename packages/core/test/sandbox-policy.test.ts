@@ -1,8 +1,40 @@
 import { describe, expect, it } from "vitest";
 import {
-  claudeSandboxSettings, parseSecretHosts, SANDBOX_DEFAULT_DOMAINS, SANDBOX_EXTRA_DOMAINS_ENV, SANDBOX_SECRET_HOSTS_ENV,
+  claudeSandboxSettings, deniedHomeWritesIn, parseSecretHosts, SANDBOX_DENY_WRITE_HOME, sandboxDenyWriteHomeLabels, SANDBOX_DEFAULT_DOMAINS, SANDBOX_EXTRA_DOMAINS_ENV, SANDBOX_SECRET_HOSTS_ENV,
   sandboxAllowedDomains, sandboxCacheEnv, sandboxEnv, sandboxPolicy, sandboxWriteBlocker, sandboxRuntimeConfig, sandboxSecrets, sandboxToolNote,
 } from "../src/sandbox-policy.js";
+
+// Lead 要写这些路径时直接走 run_on_host（lead 的 hands.ts）：判断和清单都从 SANDBOX_DENY_WRITE_HOME 来。
+describe("deniedHomeWritesIn", () => {
+  const home = "/Users/alice";
+
+  it("labels every entry of SANDBOX_DENY_WRITE_HOME once, in order", () => {
+    const labels = sandboxDenyWriteHomeLabels();
+    expect(labels).toHaveLength(SANDBOX_DENY_WRITE_HOME.length);
+    expect(labels).toContain("~/.pi");
+    expect(labels).toContain("~/Library/LaunchAgents");
+    expect(labels).toContain("任何仓库的 .git/hooks");
+  });
+
+  it("finds the entries a path, a command or its output names, with ~, $HOME and ${HOME} expanded", () => {
+    expect(deniedHomeWritesIn(`${home}/.pi/agent/extensions/demo`, home)).toEqual(["~/.pi"]);
+    expect(deniedHomeWritesIn("mv ~/.pi/agent/x ~/.claude/y", home)).toEqual(["~/.claude", "~/.pi"]);
+    expect(deniedHomeWritesIn('echo x >> "$HOME/.zshrc"', home)).toEqual(["~/.zshrc"]);
+    expect(deniedHomeWritesIn("cp a ${HOME}/Library/LaunchAgents/com.example.plist", home)).toEqual(["~/Library/LaunchAgents"]);
+    expect(deniedHomeWritesIn(`${home}/Workspace/app/.git/hooks/pre-commit`, home)).toEqual(["任何仓库的 .git/hooks"]);
+    expect(deniedHomeWritesIn(`${home}/Library/Caches/com.example.app.ShipIt/update.zip`, home)).toEqual(["~/Library/Caches/*.ShipIt"]);
+    expect(deniedHomeWritesIn(`'${home}/Library/Application Support/Code/User/settings.json'`, home))
+      .toEqual(["~/Library/Application Support/Code/User"]);
+  });
+
+  it("does not match a longer name, another home, or a path outside home", () => {
+    expect(deniedHomeWritesIn(`${home}/.pip/x`, home)).toEqual([]);
+    expect(deniedHomeWritesIn(`${home}/.claude.json`, home)).toEqual([]);
+    expect(deniedHomeWritesIn("/Users/bob/.pi/x", home)).toEqual([]);
+    expect(deniedHomeWritesIn("/repo/.pi/x", home)).toEqual([]);
+    expect(deniedHomeWritesIn("$HOMEDIR/.pi/x", home)).toEqual([]);
+  });
+});
 
 describe("sandboxPolicy", () => {
   const home = "/Users/someone";

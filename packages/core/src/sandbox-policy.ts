@@ -75,6 +75,42 @@ export const SANDBOX_DENY_WRITE_HOME: readonly string[] = [
   "Library/Caches/*.ShipIt", ".cache/pre-commit",
 ];
 
+/** SANDBOX_DENY_WRITE_HOME 写成给模型看的样子：~/.pi，**\/.git/hooks 写成「任何仓库的 .git/hooks」。 */
+export function sandboxDenyWriteHomeLabels(): string[] {
+  return SANDBOX_DENY_WRITE_HOME.map(denyWriteHomeLabel);
+}
+
+function denyWriteHomeLabel(entry: string): string {
+  return entry.startsWith("**/") ? `任何仓库的 ${entry.slice(3)}` : `~/${entry}`;
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// 条目后面不能再接文件名的字符：~/.pi 不算 ~/.pip，~/.claude 不算 ~/.claude.json。
+const ENTRY_END = "(?![\\w.-])";
+
+function denyWriteHomePattern(entry: string, home: string): RegExp {
+  const pieces = (entry.startsWith("**/") ? entry.slice(3) : entry).split("*").map(escapeRegExp);
+  const body = pieces.join("[^/\\s'\"]*");
+  const prefix = entry.startsWith("**/") ? `${escapeRegExp(home)}(?:/[^/\\n'"]+)*?/` : `${escapeRegExp(home)}/`;
+  return new RegExp(`${prefix}${body}${ENTRY_END}`);
+}
+
+/**
+ * text 里提到的 SANDBOX_DENY_WRITE_HOME 条目（按清单的顺序，写法同 sandboxDenyWriteHomeLabels）。text 是一条路径、
+ * 一条命令或它的输出；~/、$HOME、${HOME} 按 home 展开。Lead 用它判断被拒绝的写入是不是这些路径：你和子 agent 的沙箱
+ * 都写不了它们，要在沙箱外写。
+ */
+export function deniedHomeWritesIn(text: string, home: string = homedir()): string[] {
+  const root = resolve(home);
+  const expanded = text
+    .replace(/\$\{HOME\}|\$HOME(?![A-Za-z0-9_])/g, root)
+    .replace(/(^|[\s'"=:(])~(?=\/)/g, `$1${root}`);
+  return SANDBOX_DENY_WRITE_HOME.filter((entry) => denyWriteHomePattern(entry, root).test(expanded)).map(denyWriteHomeLabel);
+}
+
 // 数据目录里命令能写的：Lead 的临时目录和轻子 agent 的目录。别的（账本、配置、密钥、会话、备份）都不能写。
 const DATA_DIR_WRITABLE: readonly string[] = ["lead-scratch", "light-tasks"];
 export const DATA_DIR_ALWAYS_DENY_WRITE: readonly string[] = [

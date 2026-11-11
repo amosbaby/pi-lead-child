@@ -36,7 +36,9 @@ import {
   parseRepositorySpec, recordTicketRepository, recordTicketRepositoryClone, runRecordedHostCommand, startRepositoryClone, workspaceRepository,
   type RepositoryCheckout,
 } from "@pi-lead-child/engine";
-import { EXTERNAL_TURN_WATCH_REFUSAL, handsBlockedInTurn, HOST_RUN_MARK, hostCommandRoute, leadScratchDir } from "./hands.js";
+import {
+  EXTERNAL_TURN_WATCH_REFUSAL, handsBlockedInTurn, HOST_RUN_MARK, hostCommandRoute, hostOnlyWriteNote, leadScratchDir,
+} from "./hands.js";
 import { addNotification, getNotification, listNotifications, markNotificationDelivered, type NotificationState } from "@pi-lead-child/store";
 import { pendingApprovals } from "@pi-lead-child/store";
 import { getApproval, getChannelCard, getDecisionRequest, latestCheckpointIdForAction } from "@pi-lead-child/store";
@@ -3155,6 +3157,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       label: "Run On Host",
       description: "兜底：在用户的 Mac 上、沙箱外跑一条命令，用户在确认卡上点了「确认这一次」以后才跑。用在你和子 agent 的沙箱都做不了、"
         + "又没有专门工具的事：杀进程、改 ~/Library/LaunchAgents、brew 升级、要钥匙串里的凭证的命令（gh、私有仓库、私有 npm 包）这类。"
+        + hostOnlyWriteNote()
         + "能用沙箱、连接工具或专门的工具（list_processes、派子 agent）做的，不要用它。命令用用户的登录 shell（zsh -l）跑，"
         + `和他的终端一样；不超过 ${HOST_COMMAND_LIMITS.command} 个字符（卡上要能看全），长的先写成你临时目录里的脚本，命令写 bash <脚本>。`
         + "cwd 是绝对路径（缺省是 home）。reason 写清为什么要跑、为什么沙箱里做不了，会显示在卡上。"

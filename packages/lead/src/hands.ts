@@ -15,12 +15,15 @@
 // （hostCommandRoute）。开关开着但这一次退回沙箱时，结果开头写原因；开关关着时什么都不加，和以前一样。
 import { mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { createBashToolDefinition, type BashOperations, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { sandboxPolicy, sandboxPolicyAsync, sandboxToolNote, sandboxWriteBlocker, type SandboxPolicy } from "@pi-lead-child/core";
 import {
-  copyScreenedScripts, hostBashOperations, newHostCommandId, sandboxedBashOperations, screenHostCommand, screenReason,
+  deniedHomeWritesIn, sandboxDenyWriteHomeLabels, sandboxPolicy, sandboxPolicyAsync, sandboxToolNote, sandboxWriteBlocker,
+  type SandboxPolicy,
+} from "@pi-lead-child/core";
+import {
+  copyScreenedScripts, HOST_COMMAND_LIMITS, hostBashOperations, newHostCommandId, sandboxedBashOperations, screenHostCommand, screenReason,
   type HostCommandRecord,
 } from "@pi-lead-child/engine";
 import type { HostCommandVia } from "@pi-lead-child/protocol";
@@ -90,13 +93,86 @@ export function handsBlockedInTurn(origin: LeadTurnOrigin, liveUser: boolean): b
   return sources.length === 0;
 }
 
-/** edit、write 的路径为什么不能写。可以写时返回 null。边界和 bash 的沙箱是同一份（core 的 sandboxWriteBlocker）。 */
-export function leadWriteRefusal(path: string, options: { cwd: string; home: string; policy: SandboxPolicy }): string | null {
+// 沙箱挡住的 home 路径（core 的 SANDBOX_DENY_WRITE_HOME）：Lead、执行者、核查员、轻子 agent 的沙箱是同一套边界，
+// 谁都写不了。2026-11-11 一位用户的 Lead 要卸掉 ~/.pi 下的一个 pi 扩展，先建单派了子 agent，子 agent 一样被挡，
+// 白绕一圈才让用户自己在终端里跑 mv。所以这些路径一开始就走 run_on_host：run_on_host 的说明、系统提示词、
+// edit/write/bash 被拒绝时的结果都指向它。
+
+/** run_on_host 的说明用：沙箱挡住、子 agent 也写不了的 home 路径，要改时直接用 run_on_host。清单从 core 生成。 */
+export function hostOnlyWriteNote(): string {
+  return `home 下这些路径沙箱不让写：${sandboxDenyWriteHomeLabels().join("、")}。`
+    + "子 agent（执行者、核查员、轻子 agent）的沙箱和你是同一套边界，也写不了它们。"
+    + "要改这些路径（例如卸掉一个 pi 扩展、改 shell 的配置），一开始就用 run_on_host，不要建单、不要派子 agent 去试。";
+}
+
+// shell 里能直接用的写法：不用引号的字符原样写，别的加单引号。
+function shellQuote(text: string): string {
+  return /^[\w./@%+=:,-]+$/.test(text) ? text : `'${text.replace(/'/g, "'\\''")}'`;
+}
+
+/** 命令里的一条路径：home 下的写成 ~/...（~ 不进引号，shell 才会展开它），别的照绝对路径写。 */
+export function shellPath(path: string, home: string): string {
+  const rel = relative(resolve(home), resolve(path));
+  if (rel === "") return "~";
+  if (!rel.startsWith("..") && !isAbsolute(rel)) return `~/${shellQuote(rel)}`;
+  return shellQuote(path);
+}
+
+const SAME_BOUNDARY = "你和子 agent（执行者、核查员）的沙箱是同一套边界，都写不了这里，不要建单或派子 agent 去试。";
+const HOST_RUN_NOTE = "用户在设置里开了免沙箱、又是用户本人发话的一轮时，run_on_host 直接在沙箱外跑；否则发一张确认卡，用户点了才跑。";
+
+/** edit、write 写 SANDBOX_DENY_WRITE_HOME 里的路径被拒绝时，接在拒绝后面的改法：先写临时副本，再用 run_on_host 复制过去。 */
+export function hostOnlyWriteRefusalHint(input: {
+  tool: string; target: string; scratch: string; home: string; entries: readonly string[];
+}): string {
+  const copy = join(input.scratch, "host-writes", basename(input.target));
+  const from = shellPath(copy, input.home);
+  const to = shellPath(input.target, input.home);
+  const steps = input.tool === "edit"
+    ? [
+      `用 bash 跑 mkdir -p ${shellPath(dirname(copy), input.home)} && cp ${to} ${from}（沙箱里能读）`,
+      `用 edit 改 ${from}`,
+      `用 run_on_host 跑 cp ${from} ${to}，reason 写清改了什么`,
+    ]
+    : [
+      `用 write 把内容写到 ${from}`,
+      `用 run_on_host 跑 mkdir -p ${shellPath(dirname(input.target), input.home)} && cp ${from} ${to}，reason 写清写了什么`,
+    ];
+  return `${input.entries.join("、")} 只能在沙箱外写。${SAME_BOUNDARY}改法：`
+    + steps.map((step, index) => `${index + 1}. ${step}`).join("；") + `。${HOST_RUN_NOTE}`;
+}
+
+/**
+ * bash 在沙箱里写 SANDBOX_DENY_WRITE_HOME 里的路径被拒绝时（输出里有 Operation not permitted，命令或输出提到这些路径），
+ * 接在结果后面的话：改用 run_on_host 跑同一条命令。不是这种情况时为 null。
+ */
+export function bashHostOnlyWriteHint(input: { command: string; cwd: string; output: string; home: string }): string | null {
+  if (!/operation not permitted/i.test(input.output)) return null;
+  const entries = deniedHomeWritesIn(`${input.command}\n${input.output}`, input.home);
+  if (!entries.length) return null;
+  const how = input.command.length > HOST_COMMAND_LIMITS.command
+    ? `命令超过 ${HOST_COMMAND_LIMITS.command} 个字符：先写成你临时目录里的脚本，再用 run_on_host 跑 bash <脚本>，cwd 填 ${shellPath(input.cwd, input.home)}。`
+    : `改用 run_on_host 跑同一条命令，cwd 填 ${shellPath(input.cwd, input.home)}：\n${input.command}\n`;
+  return `（沙箱挡住了写 ${entries.join("、")}。${SAME_BOUNDARY}${how}reason 写清要做什么。${HOST_RUN_NOTE}）`;
+}
+
+/**
+ * edit、write 的路径为什么不能写。可以写时返回 null。边界和 bash 的沙箱是同一份（core 的 sandboxWriteBlocker）。
+ * SANDBOX_DENY_WRITE_HOME 里的路径不算底线：拒绝后面接上用 run_on_host 的改法（hostOnlyWriteRefusalHint）。
+ */
+export function leadWriteRefusal(
+  path: string, options: { cwd: string; home: string; policy: SandboxPolicy; tool?: string; scratch?: string },
+): string | null {
   const credential = credentialPathReason(path, { cwd: options.cwd, home: options.home });
   if (credential) return `不能写凭证：${credential}（底线）。`;
   const absolute = resolveLikePi(path, { cwd: options.cwd, home: options.home });
   const blocker = sandboxWriteBlocker(options.policy, absolute);
-  return blocker ? `${blocker}（底线）。` : null;
+  if (!blocker) return null;
+  const entries = deniedHomeWritesIn(absolute, options.home);
+  if (!entries.length) return `${blocker}（底线）。`;
+  return `${blocker}。${hostOnlyWriteRefusalHint({
+    tool: options.tool ?? "write", target: absolute, scratch: options.scratch ?? leadScratchDir(options.cwd), home: options.home, entries,
+  })}`;
 }
 
 /** 在沙箱外跑的命令，工具结果开头写这一句（设计文档 5.3）。会话里的工具行据此加标记。 */
@@ -191,6 +267,18 @@ function withLeadingNote<T extends { content: Array<{ type: string; text?: strin
   return { ...result, content };
 }
 
+/** 工具结果的最后一段文字后面加一句。 */
+function withTrailingNote<T extends { content: Array<{ type: string; text?: string }> }>(result: T, note: string): T {
+  const index = result.content.map((part) => part.type).lastIndexOf("text");
+  if (index < 0) return { ...result, content: [...result.content, { type: "text", text: note }] };
+  const content = result.content.map((part, at) => (at === index ? { ...part, text: `${part.text ?? ""}\n${note}` } : part));
+  return { ...result, content };
+}
+
+function resultText(result: { content: Array<{ type: string; text?: string }> }): string {
+  return result.content.map((part) => part.text ?? "").join("\n");
+}
+
 /** pi 扩展：沙箱里的 bash（替换 pi 内置的），以及三个动手工具的检查。 */
 export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory {
   const scratch = leadScratchDir(options.dataDir);
@@ -220,6 +308,11 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
       // 每次调用按这一次的命令和目录选沙箱或主机（hostCommandRoute）。pi 的 bash 工具照旧管输出、截断和错误写法。
       async execute(toolCallId, params, signal, onUpdate, ctx) {
         let note: string | null = null;
+        // 在沙箱里跑时的目录：被沙箱挡住写 SANDBOX_DENY_WRITE_HOME 的路径时，结果后面接上 run_on_host 的写法。
+        let sandboxCwd: string | null = null;
+        const hostHint = (output: string) => sandboxCwd === null ? null : bashHostOnlyWriteHint({
+          command: String((params as { command?: unknown }).command ?? ""), cwd: sandboxCwd, output, home,
+        });
         const routed: BashOperations = {
           exec: (command, cwd, run) => {
             const route = hostCommandRoute(options.db, options, {
@@ -228,9 +321,11 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
             });
             if (route.route === "sandbox") {
               note = route.why ? sandboxFallbackNote(route.why) : null;
+              sandboxCwd = cwd;
               return sandboxed.exec(command, cwd, run);
             }
             note = HOST_RUN_MARK;
+            sandboxCwd = null;
             options.log?.(`[lead] bash runs outside the sandbox (${route.record.id})`);
             return hostBashOperations(options.db, { record: route.record, dataDir: options.dataDir }).exec(route.run, cwd, run);
           },
@@ -251,16 +346,22 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
               }
             },
           });
-          if (result.isError) throw new Error(`${note ? `${note}\n` : ""}${result.content.map((part) => part.text ?? "").join("\n")}`);
-          return (note ? withLeadingNote(result, note) : result) as Awaited<ReturnType<typeof longCall.execute>>;
+          const hint = hostHint(resultText(result));
+          if (result.isError) throw new Error(`${note ? `${note}\n` : ""}${resultText(result)}${hint ? `\n${hint}` : ""}`);
+          const hinted = hint ? withTrailingNote(result, hint) : result;
+          return (note ? withLeadingNote(hinted, note) : hinted) as Awaited<ReturnType<typeof longCall.execute>>;
         }
         const call = createBashToolDefinition(scratch, { operations: withDefaultTimeout(routed, timeoutSeconds) });
         try {
           const result = await call.execute(toolCallId, params, signal, onUpdate, ctx);
-          return note ? withLeadingNote(result, note) : result;
+          const hint = hostHint(resultText(result));
+          const hinted = hint ? withTrailingNote(result, hint) : result;
+          return note ? withLeadingNote(hinted, note) : hinted;
         } catch (error) {
-          if (!note || !(error instanceof Error)) throw error;
-          throw new Error(`${note}\n${error.message}`);
+          if (!(error instanceof Error)) throw error;
+          const hint = hostHint(error.message);
+          if (!note && !hint) throw error;
+          throw new Error(`${note ? `${note}\n` : ""}${error.message}${hint ? `\n${hint}` : ""}`);
         }
       },
       // 工具说明每一轮都发给模型服务商：用户目录写成 ~（home-paths.ts，用户 2026-10-30）。
@@ -269,7 +370,7 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
         + (options.backgroundJobs ? "只读或可以重跑的命令（搜索、跑测试、构建、查外部系统）标 read_only=true：跑过 20 秒还没完就转后台，结束时系统把输出交给你，这期间用户的消息能送到你这里。改东西的命令不要标。" : "")
         + "在仓库里找文件、搜代码用 find、grep 工具，读已知的文件用 read：它们按 .gitignore 跳过 node_modules 这类目录。"
         + "bash 里的 grep -r、find 不会跳过它们，在大仓库里会跑很久。"
-        + sandboxToolNote(leadSandboxPolicy(options.db, options.dataDir), "整个 home（挡住会在沙箱外执行的地方）、plc 的隔离 worktree")
+        + sandboxToolNote(leadSandboxPolicy(options.db, options.dataDir), "整个 home（挡住会在沙箱外执行的地方，清单和改法见 run_on_host 的说明）、plc 的隔离 worktree")
         + "\n发评审、发消息这类写外部账号的事用连接工具：那里有你的账号和护栏。", home),
     });
     pi.on("tool_call", async (event) => {
@@ -285,7 +386,9 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
       const input = event.input as Record<string, unknown>;
       const path = typeof input.path === "string" ? input.path : "";
       if (!path.trim()) return undefined;
-      const reason = leadWriteRefusal(path, { cwd: options.dataDir, home, policy: await leadSandboxPolicyAsync(options.db, options.dataDir) });
+      const reason = leadWriteRefusal(path, {
+        cwd: options.dataDir, home, policy: await leadSandboxPolicyAsync(options.db, options.dataDir), tool: event.toolName, scratch,
+      });
       if (!reason) return undefined;
       options.log?.(`[lead] ${event.toolName} refused outside the writable roots`);
       return { block: true, reason };
