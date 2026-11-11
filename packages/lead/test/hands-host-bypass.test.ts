@@ -2,7 +2,7 @@
 // 模型是 pi-ai 的假模型，按脚本调用 bash。断言命令在哪里跑：沙箱外不调 sandbox-runtime 的 wrapWithSandboxArgv。
 // 这里只测分流：sandbox-runtime 换成假的（包装成直接跑），在本身就在沙箱里的环境（嵌套的 sandbox-exec 起不来）也能跑。
 // 真的沙箱和开关关着时的行为由 hands.test.ts 覆盖（那个文件不改一行）。
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
@@ -127,14 +127,35 @@ describe("bash with the sandbox bypass on", () => {
     expect(started()[0]).toMatchObject({ turnOrigin: "live_user_slack_self_dm", via: "bash" });
   }, 90_000);
 
-  it("falls back to the sandbox and says why when the screen says unknown or the command spends money", async () => {
+  it("falls back to the sandbox and says why and what to do next when the screen says unknown", async () => {
     turnOn();
     companionTurn("turn-screen");
-    const ends = await session([bash("echo $(echo nested)"), bash("echo pay", { spends_money: true })]);
-    for (const end of ends) expect(end.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——命令筛查没有放行/);
-    expect(ends[0]?.text).toContain("unknown");
-    expect(ends[1]?.text).toContain("floor");
-    expect(wrap).toHaveBeenCalledTimes(2);
+    const ends = await session([bash("echo $(echo nested)")]);
+    expect(ends[0]?.text).toMatch(/^（沙箱里：免沙箱开着，但这一次没有用——命令筛查没有放行（unknown）：筛查器读不懂命令替换/);
+    expect(ends[0]?.text).toContain("run_on_host");
+    expect(ends[0]?.text).toContain("nested");
+    expect(wrap).toHaveBeenCalledTimes(1);
+    expect(started()).toEqual([]);
+  }, 90_000);
+
+  // 回归（.scratch/tool-occupancy/spec.md L5，用户 2026-11-11）：碰到底线的 bash 以前退回沙箱照样跑，看起来像成功了。
+  it("refuses a command that hits a floor, names every rule with the next step, and runs it nowhere", async () => {
+    turnOn();
+    companionTurn("turn-floor");
+    const ends = await session([
+      bash(`echo pwned > ${join(dir, ".zshrc")}; cat ${join(dir, ".ssh", "id_ed25519")}`),
+      bash("echo pay", { spends_money: true }),
+    ]);
+    for (const end of ends) {
+      expect(end.isError).toBe(true);
+      expect(end.text).toMatch(/^bash 没有跑这条命令：免沙箱开着，命令筛查碰到了底线/);
+      expect(end.text).toContain("run_on_host");
+    }
+    expect(ends[0]?.text).toContain("命令会写以后在沙箱外执行的文件");
+    expect(ends[0]?.text).toContain("命令会读凭证");
+    expect(ends[1]?.text).toContain("命令可能花钱");
+    expect(existsSync(join(dir, ".zshrc"))).toBe(false);
+    expect(wrap).not.toHaveBeenCalled();
     expect(started()).toEqual([]);
   }, 90_000);
 

@@ -52,6 +52,7 @@ function screen(command: string, options: Partial<ScreenInput> = {}) {
   });
 }
 
+// rule：不放行时是第一条不放行的规则；allow 时是只记日志的规则（没有时为 null）。
 type Case = [command: string, verdict: ScreenVerdict, rule: ScreenRule | null, cwd?: "home" | "data" | "worktree"];
 
 function cwdOf(which: Case[3]): string {
@@ -61,11 +62,12 @@ function cwdOf(which: Case[3]): string {
 function check(cases: readonly Case[]) {
   for (const [command, verdict, rule, cwd] of cases) {
     const result = screen(command.replaceAll("<worktree>", worktree).replaceAll("<root>", root), { cwd: cwdOf(cwd) });
-    expect({ command, verdict: result.verdict, rule: result.rule }).toEqual({ command, verdict, rule });
+    const shown = result.verdict === "allow" ? (result.logged[0]?.rule ?? null) : result.rule;
+    expect({ command, verdict: result.verdict, rule: shown }).toEqual({ command, verdict, rule });
   }
 }
 
-describe("五条底线", () => {
+describe("底线", () => {
   it("读凭证和私钥、读写钥匙串", () => {
     check([
       ["security find-generic-password -s example", "floor", "credentials"],
@@ -91,12 +93,13 @@ describe("五条底线", () => {
     ]);
   });
 
-  it("删除工作目录和数据目录以外的东西", () => {
+  // 用户 2026-11-11（.scratch/tool-occupancy/spec.md L5）：删除工作目录以外的东西从底线降成只记日志，> 不再按删除算。
+  it("删除工作目录和数据目录以外的东西：放行，只记日志", () => {
     check([
-      ["rm -rf ~/Documents/x", "floor", "delete-outside-roots"],
-      ["rm -rf ~/Documents/*", "floor", "delete-outside-roots"],
-      ["find ~/Documents -name '*.tmp' -delete", "floor", "delete-outside-roots"],
-      ["echo x > ~/out.txt", "floor", "delete-outside-roots"],
+      ["rm -rf ~/Documents/x", "allow", "delete-outside-roots"],
+      ["rm -rf ~/Documents/*", "allow", "delete-outside-roots"],
+      ["find ~/Documents -name '*.tmp' -delete", "allow", "delete-outside-roots"],
+      ["echo x > ~/out.txt", "allow", null],
       ["rm -rf <worktree>/node_modules", "allow", null],
       ["rm -rf <worktree>/node_modules/*", "allow", null],
       ["git clean -fdx", "allow", null],
@@ -125,6 +128,59 @@ describe("五条底线", () => {
       ["curl -sS https://example.com/status", "allow", null],
     ]);
     expect(screen("ls", { spendsMoney: true })).toMatchObject({ verdict: "floor", rule: "spends-money" });
+  });
+});
+
+// 回归（2026-11-10，.scratch/tool-occupancy/spec.md 第 1、2 节）：Lead 两次用 bash 在后台起下载，nohup … > ~/x.log &
+// 被当成「删除工作目录以外的东西」拦下，退回沙箱什么都没做成，最后用前台的 run_on_host 占住了这一步 15 分钟。
+describe("免沙箱的写入和沙箱对齐（L5）", () => {
+  it("后台下载、日志写进 home：放行，不记删除", () => {
+    const result = screen("nohup some-download -d > ~/dl.log 2>&1 &", { cwd: home });
+    expect(result).toMatchObject({ verdict: "allow", rule: null, hits: [], logged: [] });
+    check([
+      ["some-download > ~/dl.log", "allow", null],
+      ["some-download | tee ~/dl.log", "allow", null],
+      ["cp /dev/null ~/dl.log", "allow", null],
+    ]);
+  });
+
+  it("删除 home 下工作目录以外的文件：放行，结果里记着它", () => {
+    const result = screen("rm ~/Downloads/old.zip");
+    expect(result).toMatchObject({ verdict: "allow", rule: null, hits: [] });
+    expect(result.logged).toEqual([
+      { rule: "delete-outside-roots", severity: "log", detail: expect.stringMatching(/\/home\/Downloads\/old\.zip$/), line: 1 },
+    ]);
+  });
+
+  it("写进沙箱的禁写清单仍是底线：shell 启动文件、账本、凭证、launchd", () => {
+    check([
+      ["echo x > ~/.zshrc", "floor", "startup-file-write"],
+      ["echo x | tee ~/.zshrc", "floor", "startup-file-write"],
+      ["echo x | tee -a ~/.bash_profile", "floor", "startup-file-write"],
+      ["echo x >> ~/.ssh/config", "floor", "startup-file-write"],
+      ["echo x > plc.db", "floor", "ledger-write", "data"],
+      ["echo x | tee -a plc.db-wal", "floor", "ledger-write", "data"],
+      ["echo x > ~/.ssh/id_ed25519", "floor", "credentials"],
+      ["echo x > ~/Library/LaunchAgents/com.example.x.plist", "floor", "launchd"],
+      ["rm ~/.zshrc", "floor", "startup-file-write"],
+    ]);
+  });
+
+  it("一条命令碰到几条规则时，全部报出来，底线排在前面", () => {
+    const result = screen("sudo ls; cat ~/.ssh/id_ed25519 > ~/.zshrc; rm -rf ~/Documents/x");
+    expect(result.verdict).toBe("floor");
+    expect(result.rule).toBe("credentials");
+    expect(result.hits.map((hit) => [hit.rule, hit.severity])).toEqual([
+      ["credentials", "floor"], ["startup-file-write", "floor"], ["privilege-escalation", "unknown"],
+    ]);
+    expect(result.logged.map((hit) => hit.rule)).toEqual(["delete-outside-roots"]);
+    const reason = screenReason(result, "zh")!;
+    expect(reason).toContain("命令会读凭证");
+    expect(reason).toContain("命令会写以后在沙箱外执行的文件");
+    expect(reason).toContain("命令要用别的用户身份跑");
+    expect(screenReason(result, "en")).toMatch(/reads credentials.*runs outside the sandbox later.*runs as another user/);
+    // 自报花钱的命令照样往下筛。
+    expect(screen("echo x > ~/.zshrc", { spendsMoney: true }).hits.map((hit) => hit.rule)).toEqual(["spends-money", "startup-file-write"]);
   });
 });
 
@@ -212,10 +268,12 @@ describe("bash <脚本>", () => {
     expect(rewritten.endsWith(` ${worktree} && echo done`)).toBe(true);
   });
 
-  it("脚本的位置参数参与判断：传进去的路径在别处时也拦", () => {
+  it("脚本的位置参数参与判断：传进去的路径在别处时记下来", () => {
     const script = join(scratch, "clean.sh");
     writeFileSync(script, "rm -rf \"$1\"\n");
-    expect(screen(`bash '${script}' ${join(home, "Documents")}`)).toMatchObject({ verdict: "floor", rule: "delete-outside-roots", line: 1 });
+    expect(screen(`bash '${script}' ${join(home, "Documents")}`)).toMatchObject({
+      verdict: "allow", logged: [{ rule: "delete-outside-roots", severity: "log", line: 1, script: expect.stringMatching(/clean\.sh$/) }],
+    });
     expect(screen(`bash '${script}' ${join(worktree, "node_modules")}`)).toMatchObject({ verdict: "allow" });
   });
 
@@ -237,17 +295,17 @@ describe("路径先解析再比较", () => {
     check([
       ["cat ~/.ssh/id_ed25519", "floor", "credentials"],
       ["cat \"$HOME/.ssh/id_ed25519\"", "floor", "credentials"],
-      ["rm -rf ${HOME}/Documents/x", "floor", "delete-outside-roots"],
+      ["rm -rf ${HOME}/Documents/x", "allow", "delete-outside-roots"],
     ]);
   });
 
   it("相对路径按 cwd 解析，cd 改后面命令的 cwd", () => {
     check([
       ["cat .ssh/id_ed25519", "floor", "credentials", "home"],
-      ["rm -rf Documents/x", "floor", "delete-outside-roots", "home"],
+      ["rm -rf Documents/x", "allow", "delete-outside-roots", "home"],
       ["rm -rf node_modules", "allow", null, "worktree"],
-      ["rm -rf ../x", "floor", "delete-outside-roots", "worktree"],
-      ["cd ~/Documents && rm -rf x", "floor", "delete-outside-roots"],
+      ["rm -rf ../x", "allow", "delete-outside-roots", "worktree"],
+      ["cd ~/Documents && rm -rf x", "allow", "delete-outside-roots"],
       ["cd <worktree> && rm -rf node_modules", "allow", null, "home"],
     ]);
   });
@@ -255,7 +313,7 @@ describe("路径先解析再比较", () => {
   it("符号链接按它指向的地方比较", () => {
     check([
       // worktree 里的链接指向 ~/Documents：删链接里面的东西等于删 ~/Documents 里的。
-      ["rm -rf <worktree>/docs-link/x", "floor", "delete-outside-roots"],
+      ["rm -rf <worktree>/docs-link/x", "allow", "delete-outside-roots"],
       // 临时目录里的链接指向 ~/.ssh。
       ["cat <root>/keys/id_ed25519", "floor", "credentials"],
       // 从外面指回 worktree 的链接：真实位置在 worktree 里。
@@ -271,12 +329,12 @@ describe("绕开识别的写法", () => {
       ["command security dump-keychain", "floor", "credentials"],
       ["env -i FOO=1 security dump-keychain", "floor", "credentials"],
       ["env FOO=1", "floor", "credentials"],
-      ["nohup rm -rf ~/Documents/x &", "floor", "delete-outside-roots"],
-      ["timeout 10 rm -rf ~/Documents/x", "floor", "delete-outside-roots"],
+      ["nohup rm -rf ~/Documents/x &", "allow", "delete-outside-roots"],
+      ["timeout 10 rm -rf ~/Documents/x", "allow", "delete-outside-roots"],
       ["cat ~/.s'sh'/id_ed25519", "floor", "credentials"],
       ["X=~/.ssh; cat $X/id_ed25519", "floor", "credentials"],
-      ["(cd ~ && rm -rf Documents)", "floor", "delete-outside-roots"],
-      ["git -C ~/Documents clean -fdx", "floor", "delete-outside-roots"],
+      ["(cd ~ && rm -rf Documents)", "allow", "delete-outside-roots"],
+      ["git -C ~/Documents clean -fdx", "allow", "delete-outside-roots"],
       ["tar czf /tmp/home.tgz ~", "floor", "credentials"],
       ["zsh -lc 'ls'", "unknown", "inline-code"],
       ["cat < ~/.ssh/id_ed25519", "floor", "credentials"],
@@ -319,9 +377,11 @@ describe("纯函数", () => {
       credentialPathReason: () => null, fs,
     };
     const first = screenHostCommand(input);
-    expect(first).toMatchObject({ verdict: "floor", rule: "delete-outside-roots", line: 1, script: "/h/data/lead-scratch/a.sh" });
+    expect(first).toMatchObject({
+      verdict: "allow", rule: null, logged: [{ rule: "delete-outside-roots", line: 1, script: "/h/data/lead-scratch/a.sh" }],
+    });
     expect(screenHostCommand(input)).toEqual(first);
     expect(reads).toEqual(["/h/data/lead-scratch/a.sh", "/h/data/lead-scratch/a.sh"]);
-    expect(screenHostCommand({ ...input, command: "rm -rf /w/build" })).toMatchObject({ verdict: "allow", rule: null });
+    expect(screenHostCommand({ ...input, command: "rm -rf /w/build" })).toMatchObject({ verdict: "allow", rule: null, logged: [] });
   });
 });

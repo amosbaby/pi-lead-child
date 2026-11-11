@@ -13,6 +13,8 @@
 // 免沙箱（docs/ticket-246-user-turn-bypass.md，实施单 C）：开关开着、用户本人正在发话、这一轮没读过外部内容、命令过了
 // 筛查器时，这一次 bash 在沙箱外跑（engine 的 hostBashOperations），结果开头写「（沙箱外）」。每次调用重新判断
 // （hostCommandRoute）。开关开着但这一次退回沙箱时，结果开头写原因；开关关着时什么都不加，和以前一样。
+// 筛查器说 floor 的 bash 直接拒绝，不退回沙箱（.scratch/tool-occupancy/spec.md L5，用户 2026-11-11）：退回沙箱的命令常常
+// 什么都没做成，看起来却像成功了。拒绝写明碰到的每条规则和下一步（run_on_host 发确认卡）。
 import { mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -23,8 +25,8 @@ import {
   type SandboxPolicy,
 } from "@pi-lead-child/core";
 import {
-  copyScreenedScripts, HOST_COMMAND_LIMITS, hostBashOperations, newHostCommandId, sandboxedBashOperations, screenHostCommand, screenReason,
-  type HostCommandRecord,
+  copyScreenedScripts, HOST_COMMAND_LIMITS, hostBashOperations, newHostCommandId, sandboxedBashOperations, screenHitReason,
+  screenHostCommand, screenReason, type HostCommandRecord, type ScreenResult,
 } from "@pi-lead-child/engine";
 import type { HostCommandVia } from "@pi-lead-child/protocol";
 import type { Db } from "@pi-lead-child/store";
@@ -181,11 +183,28 @@ export function sandboxFallbackNote(why: string): string {
   return `（沙箱里：免沙箱开着，但这一次没有用——${why}）`;
 }
 
+/** 筛查器读不懂的 bash 退回沙箱时，接在原因后面的下一步。 */
+const SCREEN_UNKNOWN_NEXT_STEP = "要在沙箱外跑，改成筛查器读得懂的写法（例如写成 lead-scratch 里的脚本，再用 bash <脚本>），"
+  + "或者用 run_on_host 发确认卡";
+
+/**
+ * 筛查器说 floor 的 bash：不跑，也不退回沙箱。每条命中一行，写明下一步。只给模型看。
+ */
+export function bashFloorRefusal(screen: ScreenResult): string {
+  const lines = screen.hits.map((hit) => `- ${screenHitReason(hit, "zh")}下一步：${hit.severity === "floor"
+    ? "真要在 Mac 上跑，用 run_on_host，系统会给用户发确认卡，用户确认后才跑；用不着碰这个位置的，改写命令再用 bash。"
+    : `${SCREEN_UNKNOWN_NEXT_STEP}。`}`);
+  return "bash 没有跑这条命令：免沙箱开着，命令筛查碰到了底线。它也没有退回沙箱跑：退回沙箱的命令常常什么都没做成，"
+    + `看起来却像成功了。碰到的规则：\n${lines.join("\n")}`;
+}
+
 export type HostCommandRoute =
   // 在沙箱外跑。run 是真正跑的命令（脚本换成筛查过的副本），record 写进 host_command.started。
-  | { route: "host"; run: string; record: Omit<HostCommandRecord, "cwd" | "timeoutSeconds"> }
+  // 只记日志的命中（例如删除工作目录以外的东西）记在 record.screen.rule，logged 是全部这类命中。
+  | { route: "host"; run: string; record: Omit<HostCommandRecord, "cwd" | "timeoutSeconds">; logged: ScreenResult["logged"] }
   // 照旧：bash 在沙箱里跑，run_on_host 发确认卡。why 是开关开着时这一次没有免沙箱的原因；开关关着时为 null。
-  | { route: "sandbox"; why: string | null };
+  // screen 是筛查器没有放行时的结果：floor 时 bash 直接拒绝（bashFloorRefusal），run_on_host 照旧发确认卡。
+  | { route: "sandbox"; why: string | null; screen?: ScreenResult };
 
 type HostCommandRouteInput = {
   command: string; cwd: string; via: HostCommandVia; spendsMoney: boolean; dataDir: string; home?: string; now?: Date;
@@ -214,15 +233,16 @@ function routeOf(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): Ho
   });
   if (screen.verdict !== "allow") {
     const reason = screenReason(screen, "zh") ?? screen.rule ?? screen.verdict;
-    return { route: "sandbox", why: `命令筛查没有放行（${screen.verdict}）：${reason}` };
+    return { route: "sandbox", why: `命令筛查没有放行（${screen.verdict}）：${reason}`, screen };
   }
   return {
     route: "host",
     run: screen.scripts.length ? copyScreenedScripts(input.command, screen.scripts, tmpdir()) : input.command,
     record: {
       id: newHostCommandId(), turnId: decision.turnId, turnOrigin: decision.turnOrigin, via: input.via, confirmationId: null,
-      command: input.command, screen: { verdict: screen.verdict, rule: screen.rule }, spendsMoney: input.spendsMoney,
+      command: input.command, screen: { verdict: screen.verdict, rule: screen.logged[0]?.rule ?? null }, spendsMoney: input.spendsMoney,
     },
+    logged: screen.logged,
   };
 }
 
@@ -305,21 +325,37 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
         const hostHint = (output: string) => sandboxCwd === null ? null : bashHostOnlyWriteHint({
           command: String((params as { command?: unknown }).command ?? ""), cwd: sandboxCwd, output, home,
         });
+        const spendsMoney = (params as { spends_money?: unknown }).spends_money === true;
+        const routeOfCall = (command: string, cwd: string) => hostCommandRoute(options.db, options, {
+          command, cwd, via: "bash", spendsMoney, dataDir: options.dataDir, home,
+        });
+        // 先按这一次的命令判断一次：碰到底线的直接拒绝，不跑，也不退回沙箱（L5）。
+        // pi 的 bash 用会话的 cwd，没有时用 scratch（createBashToolDefinition）；这里按同一个目录判断，exec 时直接用这一次的结果。
+        const command = String((params as { command?: unknown }).command ?? "");
+        const cwd = (ctx as { cwd?: string } | undefined)?.cwd || scratch;
+        let first: HostCommandRoute | null = routeOfCall(command, cwd);
+        if (first.route === "sandbox" && first.screen?.verdict === "floor") {
+          options.log?.(`[lead] bash refused by the host screen: ${first.screen.hits.map((hit) => hit.rule).join(", ")}`);
+          throw new Error(bashFloorRefusal(first.screen));
+        }
         const routed: BashOperations = {
-          exec: (command, cwd, run) => {
-            const route = hostCommandRoute(options.db, options, {
-              command, cwd, via: "bash", spendsMoney: (params as { spends_money?: unknown }).spends_money === true,
-              dataDir: options.dataDir, home,
-            });
+          exec: (runCommand, runCwd, run) => {
+            const route = first && runCommand === command && runCwd === cwd ? first : routeOfCall(runCommand, runCwd);
+            first = null;
             if (route.route === "sandbox") {
-              note = route.why ? sandboxFallbackNote(route.why) : null;
-              sandboxCwd = cwd;
-              return sandboxed.exec(command, cwd, run);
+              // pi 改过命令或目录、又碰到底线时，同样不退回沙箱。
+              if (route.screen?.verdict === "floor") return Promise.reject(new Error(bashFloorRefusal(route.screen)));
+              note = route.why
+                ? sandboxFallbackNote(route.screen?.verdict === "unknown" ? `${route.why}${SCREEN_UNKNOWN_NEXT_STEP}` : route.why)
+                : null;
+              sandboxCwd = runCwd;
+              return sandboxed.exec(runCommand, runCwd, run);
             }
             note = HOST_RUN_MARK;
             sandboxCwd = null;
-            options.log?.(`[lead] bash runs outside the sandbox (${route.record.id})`);
-            return hostBashOperations(options.db, { record: route.record, dataDir: options.dataDir }).exec(route.run, cwd, run);
+            const logged = route.logged.map((hit) => `${hit.rule} ${hit.detail}`).join("; ");
+            options.log?.(`[lead] bash runs outside the sandbox (${route.record.id})${logged ? `; screen logged: ${logged}` : ""}`);
+            return hostBashOperations(options.db, { record: route.record, dataDir: options.dataDir }).exec(route.run, runCwd, run);
           },
         };
         // 跑过软时限、用户插话、调度器为了空出 Lead 而中止时，中止兜底把这次调用转到后台（tool-abort-guard.ts）。

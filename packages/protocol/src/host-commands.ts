@@ -28,7 +28,8 @@ export const HostCommandTurnOriginSchema = Type.Union([
 export const HostCommandViaSchema = Type.Union([Type.Literal("bash"), Type.Literal("run_on_host")]);
 export type HostCommandVia = Static<typeof HostCommandViaSchema>;
 
-// 筛查器的结果（engine 的 host-commands/screen.ts）。在沙箱外跑的命令都是 allow；rule 留给以后放行带规则的结果。
+// 筛查器的结果（engine 的 host-commands/screen.ts）。在沙箱外跑的命令都是 allow；rule 是只记日志的规则（例如
+// delete-outside-roots），没有时为 null。
 // 确认卡上的命令不过筛查器（用户看过命令本身），为 null。
 export const HostCommandScreenSchema = Type.Object({
   verdict: Type.String({ minLength: 1 }),

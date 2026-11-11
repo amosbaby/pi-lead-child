@@ -1,6 +1,9 @@
 // 命令筛查器（docs/ticket-246-user-turn-bypass.md 第 4 节）。免沙箱开关打开时，bash 和 run_on_host 要在沙箱外跑的命令
-// 先过这里。结果三种：allow 直接在沙箱外跑；floor 碰到底线；unknown 筛查器读不懂。floor 和 unknown 都退回今天的做法
-// （bash 回沙箱，run_on_host 发确认卡），所以这里宁可多拦：拦错的代价是多一张卡，放错的代价改不回来。
+// 先过这里。结果三种：allow 直接在沙箱外跑；floor 碰到底线；unknown 筛查器读不懂。run_on_host 碰到 floor 或 unknown 都
+// 发确认卡；bash 碰到 unknown 回沙箱，碰到 floor 直接拒绝，不退回沙箱（.scratch/tool-occupancy/spec.md L5，用户
+// 2026-11-11：退回沙箱的命令常常什么都没做成，看起来却像成功了）。
+// 规则还有第三种严重程度 log：命令照样在沙箱外跑，命中只记下来（删除工作目录以外的东西）。
+// 一次报出全部命中的规则，不只第一条（ScreenResult.hits）。
 //
 // 怎么读一条命令（4.1）：
 //   1. 按 shell 的词法拆：;、&&、||、|、&、换行和括号分开简单命令，每个简单命令取程序名和参数，去掉引号。
@@ -10,7 +13,8 @@
 //      写成副本再跑副本，筛查和执行是同一份内容。脚本在别处的 unknown。
 //   4. 路径先展开 ~、按 cwd 解析相对路径（cd 会改后面命令的 cwd），再解析符号链接，然后比较。macOS 的文件系统不分
 //      大小写，比较按小写。
-//   5. 重定向 >、>>、tee 的目标按写入处理；> 和不带 -a 的 tee 会清空文件，也按删除处理。
+//   5. 重定向 >、>>、tee 的目标按写入处理，只对照沙箱同一份禁写清单（账本、凭证、shell 启动文件、launchd）。
+//      > 不再按删除算（用户 2026-11-11）：nohup x > ~/dl.log & 这类写日志的写法以前被当成删除拦下。
 //
 // 纯函数：输入命令、cwd、允许的根、数据目录，输出结果和规则名。不读数据库，不跑命令。碰文件系统的只有两件事，都经
 // ScreenFs：解析符号链接、读 lead-scratch 下的脚本。认凭证路径的 credentialPathReason 在 lead 包里（lead 依赖 engine），
@@ -28,14 +32,18 @@ import { HOST_COMMAND_LIMITS } from "../ui-actions/host-commands.js";
 import { screenMessages } from "./screen.messages.js";
 
 export type ScreenVerdict = "allow" | "floor" | "unknown";
+/** 一条规则命中时的严重程度。floor、unknown 不让命令在沙箱外直接跑；log 照样跑，只把命中记下来。 */
+export type ScreenSeverity = Exclude<ScreenVerdict, "allow"> | "log";
 
 export const SCREEN_RULES = {
-  // 五条底线（4.2）
+  // 底线（4.2）
   credentials: "floor",
   "ledger-write": "floor",
-  "delete-outside-roots": "floor",
   launchd: "floor",
   "spends-money": "floor",
+  // 只记日志（用户 2026-11-11）：bash 被拦以后退回沙箱，沙箱照样能删家目录下的东西，这条拦不住什么，只让命令换了地方跑。
+  // 删的是底线保护的位置时（账本、凭证、启动文件、launchd），按那几条底线拦。
+  "delete-outside-roots": "log",
   // 四条保守规则（4.2，用户 11-05 13:45 定）
   "privilege-escalation": "unknown",
   "startup-file-write": "floor",
@@ -54,7 +62,7 @@ export const SCREEN_RULES = {
   "script-outside-scratch": "unknown",
   "script-not-screened": "unknown",
   unterminated: "unknown",
-} as const satisfies Record<string, Exclude<ScreenVerdict, "allow">>;
+} as const satisfies Record<string, ScreenSeverity>;
 
 export type ScreenRule = keyof typeof SCREEN_RULES;
 
@@ -65,16 +73,31 @@ export interface ScreenedScript {
   span: readonly [number, number];
 }
 
-export interface ScreenResult {
-  verdict: ScreenVerdict;
-  /** 命中的规则。allow 时为 null。 */
-  rule: ScreenRule | null;
+/** 命中的一条规则。 */
+export interface ScreenHit {
+  rule: ScreenRule;
+  severity: ScreenSeverity;
   /** 命中的那一段：程序名、路径或写法。 */
-  detail?: string;
+  detail: string;
   /** 命中的行号，从 1 数。在脚本里命中时是脚本的行号。 */
-  line?: number;
+  line: number;
   /** 在脚本里命中时，脚本的真实路径。 */
   script?: string;
+}
+
+export interface ScreenResult {
+  /** 有 floor 命中时是 floor，否则有 unknown 命中时是 unknown，否则 allow（log 命中不改变结果）。 */
+  verdict: ScreenVerdict;
+  /** 第一条不放行的规则（floor 排在 unknown 前面）。allow 时为 null。 */
+  rule: ScreenRule | null;
+  /** 第一条不放行的规则命中的那一段。 */
+  detail?: string;
+  line?: number;
+  script?: string;
+  /** 全部不放行的命中：floor 在前，unknown 在后，各自按命令里的顺序。allow 时为空。 */
+  hits: ScreenHit[];
+  /** 只记日志的命中（log）。命令照样跑。 */
+  logged: ScreenHit[];
   scripts: ScreenedScript[];
 }
 
@@ -149,24 +172,42 @@ export function screenHostCommand(input: ScreenInput): ScreenResult {
     launch: [join(home, "Library", "LaunchAgents"), ...SYSTEM_LAUNCH_DIRS],
     startup: SANDBOX_DENY_WRITE_HOME.map((path) => join(home, path)),
   };
-  const result: ScreenResult = { verdict: "allow", rule: null, scripts: [] };
-  const hit = input.command.length > HOST_COMMAND_LIMITS.command
-    ? { rule: "too-long" as const, detail: `${input.command.length}`, line: 1 }
-    : input.spendsMoney
-      ? { rule: "spends-money" as const, detail: "spends_money", line: 1 }
-      : screenSource(input.command, { cwd, vars: initialVars(home, cwd), depth: 0, scripts: result.scripts }, env);
-  if (!hit) return result;
+  const scripts: ScreenedScript[] = [];
+  // 太长的命令不往下读（确认卡上要能看全）；花钱是 Lead 自报的，命令照样往下筛，一起报出来。
+  const found: Hit[] = input.command.length > HOST_COMMAND_LIMITS.command
+    ? [{ rule: "too-long", detail: `${input.command.length}`, line: 1 }]
+    : [
+      ...(input.spendsMoney ? [{ rule: "spends-money" as const, detail: "spends_money", line: 1 }] : []),
+      ...screenSource(input.command, { cwd, vars: initialVars(home, cwd), depth: 0, scripts }, env),
+    ];
+  const seen = new Set<string>();
+  const all: ScreenHit[] = [];
+  for (const hit of found) {
+    const key = `${hit.rule}\0${hit.detail}\0${hit.line}\0${hit.script ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    all.push({ ...hit, severity: SCREEN_RULES[hit.rule] });
+  }
+  const hits = [...all.filter((hit) => hit.severity === "floor"), ...all.filter((hit) => hit.severity === "unknown")];
+  const logged = all.filter((hit) => hit.severity === "log");
+  const first = hits[0];
+  if (!first) return { verdict: "allow", rule: null, hits: [], logged, scripts };
   return {
-    verdict: SCREEN_RULES[hit.rule], rule: hit.rule, detail: hit.detail, line: hit.line,
-    ...(hit.script ? { script: hit.script } : {}), scripts: [],
+    verdict: first.severity === "floor" ? "floor" : "unknown", rule: first.rule, detail: first.detail, line: first.line,
+    ...(first.script ? { script: first.script } : {}), hits, logged, scripts: [],
   };
 }
 
-/** 不放行的原因，一句话，给 Fairy 和工具行看。allow 时为 null。 */
+/** 不放行的原因，每条命中一句，用空格连起来，给 Fairy 和工具行看。allow 时为 null。 */
 export function screenReason(result: ScreenResult, locale: Locale): string | null {
-  if (!result.rule) return null;
+  if (result.hits.length === 0) return null;
+  return result.hits.map((hit) => screenHitReason(hit, locale)).join(locale === "zh" ? "" : " ");
+}
+
+/** 一条命中的原因，一句话。 */
+export function screenHitReason(hit: ScreenHit, locale: Locale): string {
   const m = screenMessages(locale);
-  const detail = result.detail ?? "";
+  const detail = hit.detail;
   const reasons: Record<ScreenRule, () => string> = {
     credentials: () => m.credentials(detail),
     "ledger-write": () => m.ledgerWrite(detail),
@@ -190,8 +231,8 @@ export function screenReason(result: ScreenResult, locale: Locale): string | nul
     "script-not-screened": () => m.scriptNotScreened(detail),
     unterminated: () => m.unterminated(detail),
   };
-  const reason = reasons[result.rule]();
-  return result.script && result.line ? m.atScriptLine(reason, result.script, result.line) : reason;
+  const reason = reasons[hit.rule]();
+  return hit.script ? m.atScriptLine(reason, hit.script, hit.line) : reason;
 }
 
 /**
@@ -538,17 +579,16 @@ interface ScreenContext {
   scripts: ScreenedScript[];
 }
 
-function screenSource(source: string, context: ScreenContext, env: ScreenEnv): Hit | null {
+// 一段命令（或者脚本的内容）里命中的全部规则。词法读不懂时只有那一条：后面的命令拆不出来。
+function screenSource(source: string, context: ScreenContext, env: ScreenEnv): Hit[] {
+  const hits: Hit[] = [];
   try {
-    for (const command of commandsOf(lex(source))) {
-      const hit = screenCommand(command, context, env);
-      if (hit) return hit;
-    }
-    return null;
+    for (const command of commandsOf(lex(source))) hits.push(...screenCommand(command, context, env));
   } catch (error) {
-    if (error instanceof Unreadable) return error.hit;
-    throw error;
+    if (!(error instanceof Unreadable)) throw error;
+    hits.push({ ...error.hit, ...(context.script ? { script: context.script } : {}) });
   }
+  return hits;
 }
 
 /** 一个路径参数：展开、解析以后的几种位置。任何一种落在受保护的位置都算。 */
@@ -564,8 +604,17 @@ interface PathRef {
   glob: { dir: string; pattern: string } | null;
 }
 
-function screenCommand(command: SimpleCommand, context: ScreenContext, env: ScreenEnv): Hit | null {
-  const at = (rule: ScreenRule, detail: string): Hit => ({ rule, detail, line: command.line, ...(context.script ? { script: context.script } : {}) });
+// 一条简单命令命中的全部规则。读不懂的写法（unknown）以后不再读这条命令的参数，只看它的重定向；底线命中以后接着往下看，
+// 一次报全。
+function screenCommand(command: SimpleCommand, context: ScreenContext, env: ScreenEnv): Hit[] {
+  const hits: Hit[] = [];
+  const at = (rule: ScreenRule, detail: string): void => {
+    hits.push({ rule, detail, line: command.line, ...(context.script ? { script: context.script } : {}) });
+  };
+  const stop = (scope: { cwd: string } | null = null): Hit[] => {
+    screenRedirects(command, scope, context, env, at);
+    return hits;
+  };
   const words = command.words.map((token) => wordOf(token, context.vars, env.home));
 
   // 开头的赋值。整条都是赋值时记下来，后面的命令能用；只是前缀时只对这一条有效，不记。
@@ -573,69 +622,67 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
   while (index < words.length && words[index]!.assignment) index += 1;
   if (index === words.length) {
     for (const word of words) context.vars.set(word.assignment!.name, word.dynamic ? null : word.assignment!.value);
-    return screenRedirects(command, null, context, env, at);
+    return stop();
   }
   for (; index < words.length; index += 1) {
     const word = words[index]!;
     if (word.token.segments.some((segment) => segment.kind !== "text" || segment.quoted)) break;
-    if (UNREADABLE_KEYWORDS.has(word.text)) return at("shell-construct", word.text);
+    if (UNREADABLE_KEYWORDS.has(word.text)) {
+      at("shell-construct", word.text);
+      return stop();
+    }
     if (!LEADING_KEYWORDS.has(word.text)) break;
   }
   let rest = words.slice(index);
-  if (rest.length === 0) return screenRedirects(command, null, context, env, at);
+  if (rest.length === 0) return stop();
 
   // 去掉 env、nohup、timeout 这类外壳。
   for (let guard = 0; guard < 8 && rest.length > 0; guard += 1) {
     const head = rest[0]!;
-    if (head.dynamic) return at("dynamic-word", head.dynamic);
+    if (head.dynamic) {
+      at("dynamic-word", head.dynamic);
+      return stop();
+    }
     const name = basename(head.text);
     if (!WRAPPERS.has(name)) break;
     const unwrapped = unwrap(name, rest.slice(1));
-    if (unwrapped === "dump") return at("credentials", name);
-    if (unwrapped === "dynamic") return at("inline-code", `${name} -S`);
-    if (unwrapped === "lookup") return screenRedirects(command, null, context, env, at);
+    if (unwrapped === "dump") at("credentials", name);
+    if (unwrapped === "dynamic") at("inline-code", `${name} -S`);
+    if (typeof unwrapped === "string") return stop();
     rest = unwrapped;
   }
-  if (rest.length === 0) return screenRedirects(command, null, context, env, at);
+  if (rest.length === 0) return stop();
 
   const program = rest[0]!;
-  if (program.dynamic) return at("dynamic-word", program.dynamic);
-  if (program.glob) return at("dynamic-word", program.text);
+  if (program.dynamic) at("dynamic-word", program.dynamic);
+  else if (program.glob) at("dynamic-word", program.text);
+  if (program.dynamic || program.glob) return stop();
   const name = basename(program.text);
   const args = rest.slice(1);
   const dynamicArg = args.find((arg) => arg.dynamic);
-  if (dynamicArg) return at("dynamic-word", dynamicArg.dynamic!);
+  if (dynamicArg) {
+    at("dynamic-word", dynamicArg.dynamic!);
+    return stop();
+  }
   const argTexts = args.map((arg) => arg.text);
 
-  // 读不懂的写法和保守规则：看程序名就够。
-  if (PRIVILEGE_PROGRAMS.has(name)) return at("privilege-escalation", name);
-  if (EVAL_PROGRAMS.has(name)) return at("eval", name);
-  if (XARGS_PROGRAMS.has(name)) return at("xargs", name);
-  if (name === "osascript") return at("inline-code", name);
-  if (name === "plc") return at("plc-cli", [name, ...argTexts].join(" ").slice(0, 80));
-  if (name === "pushd" || name === "popd") return at("dynamic-word", name);
-  const inline = interpreterInlineFlag(name, argTexts);
-  if (inline === "stdin") return at("stdin-shell", name);
-  if (inline) return at("inline-code", `${name} ${inline}`);
-  if (name === "find") {
-    const exec = argTexts.find((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg));
-    if (exec) return at("find-exec", exec);
-  }
-  if (name === "sqlite3") {
-    const code = argTexts.find((arg) => /^\s*\.[a-z]/i.test(arg) || /\b(load_extension|writefile|readfile|edit)\s*\(/i.test(arg) || arg === "-cmd" || arg === "-init");
-    if (code) return at("inline-code", `sqlite3 ${code.slice(0, 40)}`);
+  // 读不懂的写法和保守规则：看程序名就够，参数不再往下读。
+  const unreadable = programUnreadable(name, argTexts);
+  if (unreadable) {
+    at(unreadable.rule, unreadable.detail);
+    return stop();
   }
 
-  // 五条底线里只看程序名的部分。
-  if (CREDENTIAL_PROGRAMS.has(name)) return at("credentials", name);
-  if (ENV_DUMP_PROGRAMS.has(name) && envDump(name, argTexts)) return at("credentials", name);
-  if (LAUNCHD_PROGRAMS.has(name)) return at("launchd", name);
+  // 底线里只看程序名的部分。
+  if (CREDENTIAL_PROGRAMS.has(name)) at("credentials", name);
+  if (ENV_DUMP_PROGRAMS.has(name) && envDump(name, argTexts)) at("credentials", name);
+  if (LAUNCHD_PROGRAMS.has(name)) at("launchd", name);
   const spending = SPENDING_COMMANDS.find((entry) => entry.programs.includes(name));
   const spendingWord = spending?.spends(argTexts.filter((arg) => !arg.startsWith("-")));
-  if (spendingWord) return at("spends-money", `${name} ${spendingWord}`);
+  if (spendingWord) at("spends-money", `${name} ${spendingWord}`);
   if (HTTP_CLIENTS.has(name)) {
     const paid = argTexts.find((arg) => paidHost(arg));
-    if (paid) return at("spends-money", `${name} ${paidHost(paid)}`);
+    if (paid) at("spends-money", `${name} ${paidHost(paid)}`);
   }
 
   // git：-C 换目录；git config --global 写 ~/.gitconfig；git clean 是删除。
@@ -655,63 +702,79 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
     gitArgs = args.slice(position + 1);
     if (gitSubcommand === "config" && gitArgs.some((arg) => arg.text === "--global" || arg.text === "--system")
       && !gitArgs.some((arg) => /^(--get|--get-all|--get-regexp|--list|-l|--show-origin)$/.test(arg.text))) {
-      return at("startup-file-write", "~/.gitconfig");
+      at("startup-file-write", "~/.gitconfig");
     }
   }
 
   // 脚本：bash <脚本>。
   if (SHELLS.has(name)) {
-    const hit = screenShellCall(name, args, { ...context, cwd }, env, at);
-    if (hit) return hit;
+    hits.push(...screenShellCall(name, args, { ...context, cwd }, env, at));
   } else if (program.text.includes("/")) {
     // 直接执行 lead-scratch 里的文件：内容可能是任何解释器的脚本，筛查器不读。
     const location = pathRef(program.text, cwd, env);
-    if (within(location.real, env.scratch) || within(location.link, env.scratch)) return at("script-not-screened", program.text);
+    if (within(location.real, env.scratch) || within(location.link, env.scratch)) at("script-not-screened", program.text);
   }
 
-  // 每个路径参数。
+  // 每个路径参数。tee 的目标也在这里：写入只对照底线保护的位置，和重定向一样。
   const sqliteReadonly = name === "sqlite3" && argTexts.includes("-readonly");
   const paths = pathArguments(name === "git" ? gitArgs : args).map((arg) => pathRef(arg.text, cwd, env, arg.glob));
   for (const path of paths) {
     const credential = credentialHit(path, env, cwd);
-    if (credential) return at("credentials", credential);
+    if (credential) at("credentials", credential);
     if (RECURSIVE_COPIERS.has(name)) {
       const parent = [...env.protectedRead, join(env.home, ".ssh")].find((target) => !target.includes("*") && isAncestor(path.real, target));
-      if (parent) return at("credentials", parent);
+      if (parent) at("credentials", parent);
     }
     const ledger = protectedHit(path, env.ledger);
-    if (ledger && !(sqliteReadonly && /plc\.db(-wal|-shm)?$/i.test(ledger))) return at("ledger-write", ledger);
+    if (ledger && !(sqliteReadonly && /plc\.db(-wal|-shm)?$/i.test(ledger))) at("ledger-write", ledger);
     const launch = protectedHit(path, env.launch);
-    if (launch) return at("launchd", launch);
+    if (launch) at("launchd", launch);
     if (!READ_ONLY_PROGRAMS.has(name)) {
       const startup = protectedHit(path, env.startup);
-      if (startup) return at("startup-file-write", startup);
+      if (startup) at("startup-file-write", startup);
     }
   }
 
-  // 删除。
-  const deleted = deletedPaths(name, args, gitSubcommand, gitArgs, cwd);
-  for (const arg of deleted) {
+  // 删除：工作目录以外的只记日志（delete-outside-roots 是 log）。
+  for (const arg of deletedPaths(name, args, gitSubcommand, gitArgs, cwd)) {
     const outside = outsideRoots(pathRef(arg.text, cwd, env, arg.glob), env);
-    if (outside) return at("delete-outside-roots", outside);
-  }
-  if (name === "tee") {
-    const append = argTexts.some((arg) => arg === "-a" || arg === "--append");
-    for (const arg of pathArguments(args)) {
-      const hit = writeTargetHit(pathRef(arg.text, cwd, env, arg.glob), append ? ">>" : ">", env);
-      if (hit) return at(hit.rule, hit.detail);
-    }
+    if (outside) at("delete-outside-roots", outside);
   }
 
   // cd 改后面命令的 cwd。
   if (name === "cd") {
     const target = pathArguments(args)[0]?.text;
-    if (target === "-") return at("dynamic-word", "cd -");
+    if (target === "-") {
+      at("dynamic-word", "cd -");
+      return stop({ cwd });
+    }
     context.cwd = target === undefined ? env.home : env.fs.realPath(resolve(cwd, target));
     context.vars.set("PWD", context.cwd);
   }
 
-  return screenRedirects(command, { cwd }, context, env, at);
+  return stop({ cwd });
+}
+
+// 只看程序名和参数就知道读不懂的写法，以及两条保守规则（plc、用别的用户身份跑）。
+function programUnreadable(name: string, argTexts: readonly string[]): { rule: ScreenRule; detail: string } | null {
+  if (PRIVILEGE_PROGRAMS.has(name)) return { rule: "privilege-escalation", detail: name };
+  if (EVAL_PROGRAMS.has(name)) return { rule: "eval", detail: name };
+  if (XARGS_PROGRAMS.has(name)) return { rule: "xargs", detail: name };
+  if (name === "osascript") return { rule: "inline-code", detail: name };
+  if (name === "plc") return { rule: "plc-cli", detail: [name, ...argTexts].join(" ").slice(0, 80) };
+  if (name === "pushd" || name === "popd") return { rule: "dynamic-word", detail: name };
+  const inline = interpreterInlineFlag(name, argTexts);
+  if (inline === "stdin") return { rule: "stdin-shell", detail: name };
+  if (inline) return { rule: "inline-code", detail: `${name} ${inline}` };
+  if (name === "find") {
+    const exec = argTexts.find((arg) => ["-exec", "-execdir", "-ok", "-okdir"].includes(arg));
+    if (exec) return { rule: "find-exec", detail: exec };
+  }
+  if (name === "sqlite3") {
+    const code = argTexts.find((arg) => /^\s*\.[a-z]/i.test(arg) || /\b(load_extension|writefile|readfile|edit)\s*\(/i.test(arg) || arg === "-cmd" || arg === "-init");
+    if (code) return { rule: "inline-code", detail: `sqlite3 ${code.slice(0, 40)}` };
+  }
+  return null;
 }
 
 // 外壳后面真正的命令。env 不带命令时整份打印变量；command -v 只是查找。
@@ -763,10 +826,15 @@ function paidHost(arg: string): string | undefined {
   }) ? host : undefined;
 }
 
-// bash、sh、zsh 的调用：-c 是直接写代码；没有脚本时从标准输入读；脚本在 lead-scratch 下的逐行筛查。
+// bash、sh、zsh 的调用：-c 是直接写代码；没有脚本时从标准输入读；脚本在 lead-scratch 下的逐行筛查。返回脚本里命中的
+// 规则；调用本身的问题经 at 报。脚本里没有不放行的命中时，记进 context.scripts（只记日志的命中不妨碍执行）。
 function screenShellCall(
-  name: string, args: readonly Word[], context: ScreenContext, env: ScreenEnv, at: (rule: ScreenRule, detail: string) => Hit,
-): Hit | null {
+  name: string, args: readonly Word[], context: ScreenContext, env: ScreenEnv, at: (rule: ScreenRule, detail: string) => void,
+): Hit[] {
+  const fail = (rule: ScreenRule, detail: string): Hit[] => {
+    at(rule, detail);
+    return [];
+  };
   let position = 0;
   while (position < args.length) {
     const text = args[position]!.text;
@@ -775,21 +843,21 @@ function screenShellCall(
     if (text === "--norc" || text === "--noprofile" || text === "--login") { position += 1; continue; }
     if (/^[-+][euxvnl]+$/.test(text)) { position += 1; continue; }
     if (text.startsWith("-") || text.startsWith("+")) {
-      if (/c/.test(text)) return at("inline-code", `${name} ${text}`);
-      if (/[si]/.test(text) || text === "-") return at("stdin-shell", `${name} ${text}`);
-      return at("inline-code", `${name} ${text}`);
+      if (/c/.test(text)) return fail("inline-code", `${name} ${text}`);
+      if (/[si]/.test(text) || text === "-") return fail("stdin-shell", `${name} ${text}`);
+      return fail("inline-code", `${name} ${text}`);
     }
     break;
   }
   const scriptWord = args[position];
-  if (!scriptWord) return at("stdin-shell", name);
+  if (!scriptWord) return fail("stdin-shell", name);
   const location = pathRef(scriptWord.text, context.cwd, env);
   if (!within(location.real, env.scratch) || !within(location.link, env.scratch)) {
-    return at("script-outside-scratch", scriptWord.text);
+    return fail("script-outside-scratch", scriptWord.text);
   }
-  if (context.depth > 0) return at("script-not-screened", `${scriptWord.text}：脚本里再跑脚本`);
+  if (context.depth > 0) return fail("script-not-screened", `${scriptWord.text}：脚本里再跑脚本`);
   const content = env.fs.readFile(location.real);
-  if (content === null) return at("script-not-screened", scriptWord.text);
+  if (content === null) return fail("script-not-screened", scriptWord.text);
   // 脚本的位置参数：$0 是脚本，$1… 是后面的参数。
   const scriptArgs = args.slice(position + 1).map((arg) => arg.text);
   const vars: Vars = initialVars(env.home, context.cwd);
@@ -798,10 +866,11 @@ function screenShellCall(
   vars.set("#", String(scriptArgs.length));
   vars.set("@", scriptArgs.join(" "));
   vars.set("*", scriptArgs.join(" "));
-  const hit = screenSource(content, { cwd: context.cwd, vars, depth: context.depth + 1, script: location.real, scripts: [] }, env);
-  if (hit) return hit;
-  context.scripts.push({ path: location.real, content, span: [scriptWord.token.start, scriptWord.token.end] });
-  return null;
+  const hits = screenSource(content, { cwd: context.cwd, vars, depth: context.depth + 1, script: location.real, scripts: [] }, env);
+  if (hits.every((hit) => SCREEN_RULES[hit.rule] === "log")) {
+    context.scripts.push({ path: location.real, content, span: [scriptWord.token.start, scriptWord.token.end] });
+  }
+  return hits;
 }
 
 // 参数里哪些可能是路径：选项本身不算，--file=<路径> 取 = 后面；-- 以后都算；URL 不算。宁可多算：多算的只会多比较一次。
@@ -901,8 +970,9 @@ function deletedPaths(
 
 const DEVICE_FILES = /^\/dev\/(null|stdout|stderr|tty|fd\/[0-9]+)$/;
 
-// 写的目标：账本、凭证、launchd、沙箱外会执行的位置；> 会清空文件，目标在允许的根以外时也算删除。
-function writeTargetHit(path: PathRef, op: string, env: ScreenEnv): { rule: ScreenRule; detail: string } | null {
+// 写的目标（重定向）：只对照沙箱同一份禁写清单，即账本、凭证、launchd、沙箱外会执行的位置。> 清空文件不再按删除算
+// （用户 2026-11-11）：沙箱本身就能写家目录下别的地方，按删除拦只让命令换了地方跑。
+function writeTargetHit(path: PathRef, env: ScreenEnv): { rule: ScreenRule; detail: string } | null {
   if (!path.glob && DEVICE_FILES.test(path.absolute)) return null;
   const ledger = protectedHit(path, env.ledger);
   if (ledger) return { rule: "ledger-write", detail: ledger };
@@ -912,34 +982,32 @@ function writeTargetHit(path: PathRef, op: string, env: ScreenEnv): { rule: Scre
   if (launch) return { rule: "launchd", detail: launch };
   const startup = protectedHit(path, env.startup);
   if (startup) return { rule: "startup-file-write", detail: startup };
-  if (op === ">") {
-    const outside = outsideRoots(path, env);
-    if (outside) return { rule: "delete-outside-roots", detail: `> ${outside}` };
-  }
   return null;
 }
 
 function screenRedirects(
   command: SimpleCommand, scope: { cwd: string } | null, context: ScreenContext, env: ScreenEnv,
-  at: (rule: ScreenRule, detail: string) => Hit,
-): Hit | null {
+  at: (rule: ScreenRule, detail: string) => void,
+): void {
   const cwd = scope?.cwd ?? context.cwd;
   for (const redirect of command.redirects) {
     if (!redirect.target || redirect.op === "<<<") continue;
     const word = wordOf(redirect.target, context.vars, env.home);
-    if (word.dynamic) return at("dynamic-word", word.dynamic);
+    if (word.dynamic) {
+      at("dynamic-word", word.dynamic);
+      continue;
+    }
     const path = pathRef(word.text, cwd, env, word.glob);
     if (redirect.op === "<" || redirect.op === "<&") {
       const credential = credentialHit(path, env, cwd);
-      if (credential) return at("credentials", credential);
+      if (credential) at("credentials", credential);
       const launch = protectedHit(path, env.launch);
-      if (launch) return at("launchd", launch);
+      if (launch) at("launchd", launch);
       continue;
     }
-    const hit = writeTargetHit(path, redirect.op === ">&" ? ">" : redirect.op, env);
-    if (hit) return at(hit.rule, hit.detail);
+    const hit = writeTargetHit(path, env);
+    if (hit) at(hit.rule, hit.detail);
   }
-  return null;
 }
 
 // ——— 路径比较 ———

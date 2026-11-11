@@ -5,7 +5,7 @@ export const screenMessages = defineMessages({
   en: {
     credentials: (detail: string) => `The command reads credentials, private keys or the keychain (${detail}).`,
     ledgerWrite: (detail: string) => `The command can write the plc database or its configuration (${detail}). Only sqlite3 -readonly can open plc.db.`,
-    deleteOutsideRoots: (detail: string) => `The command deletes or empties a path outside the working directories (${detail}).`,
+    deleteOutsideRoots: (detail: string) => `The command deletes a path outside the working directories (${detail}). It still runs; the screener only records it.`,
     launchd: (detail: string) => `The command touches launchd or a LaunchAgents directory (${detail}).`,
     spendsMoney: (detail: string) => `The command can spend money (${detail}).`,
     privilegeEscalation: (detail: string) => `The command runs as another user (${detail}).`,
@@ -29,7 +29,7 @@ export const screenMessages = defineMessages({
   zh: {
     credentials: (detail) => `命令会读凭证、私钥或钥匙串（${detail}）。`,
     ledgerWrite: (detail) => `命令可能写 plc 的账本或配置（${detail}）。plc.db 只能用 sqlite3 -readonly 打开。`,
-    deleteOutsideRoots: (detail) => `命令会删除或清空工作目录以外的路径（${detail}）。`,
+    deleteOutsideRoots: (detail) => `命令会删除工作目录以外的路径（${detail}）。命令照样跑，筛查器只记下来。`,
     launchd: (detail) => `命令会碰 launchd 或 LaunchAgents 目录（${detail}）。`,
     spendsMoney: (detail) => `命令可能花钱（${detail}）。`,
     privilegeEscalation: (detail) => `命令要用别的用户身份跑（${detail}）。`,

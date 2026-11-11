@@ -5,12 +5,14 @@
 // 免沙箱的执行路径（实施单 C）：用户在网页上发话、Fairy 读 Slack、用户再发话，三步里 run_on_host 和 bash 的去处；
 // Slack 消息叫醒的一轮照旧发卡。
 // daemon、网关、store、操作层是真的；Lead 的会话是替身（第三组用 fake-pi-session，Lead 的工具是真的）。
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { SandboxManager } from "@anthropic-ai/sandbox-runtime";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { withCallObserver } from "@pi-lead-child/engine";
+import { resetSandboxForTests, withCallObserver } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
-import { createLeadTools, guardToolAbort, hostCommandRoute, leadToolGuardOptions } from "@pi-lead-child/lead";
+import { createLeadTools, guardToolAbort, hostCommandRoute, leadHandsExtension, leadToolGuardOptions } from "@pi-lead-child/lead";
 import {
   HOST_BYPASS_ENABLED_KIND, HOST_BYPASS_EXPIRED_KIND, HOST_COMMAND_FINISHED_KIND, HOST_COMMAND_STARTED_KIND,
 } from "@pi-lead-child/protocol";
@@ -38,6 +40,7 @@ afterEach(async () => {
   daemon = null;
   db.close();
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 const stubLead = async () => ({
@@ -290,6 +293,79 @@ describe("commands outside the sandbox through the daemon", () => {
       await vi.waitFor(() => expect(jobOutput("soft-done")).toBeDefined(), { timeout: 15_000 });
     }, 45_000);
   });
+
+  // 回归（2026-11-10，.scratch/tool-occupancy/spec.md L5，用户 2026-11-11）：Lead 用 bash 在后台起下载，nohup … > ~/x.log &
+  // 被筛查器当成删除拦下，退回沙箱什么都没做成，它只好用前台的 run_on_host。现在：写日志的写法和删除工作目录以外的东西
+  // 都在沙箱外跑（删除记在 host_command.started 里）；碰到底线的 bash 直接拒绝，写明规则和下一步，不退回沙箱；
+  // run_on_host 碰到底线照旧发确认卡。Lead 的 bash 是 hands 扩展里真的那一个，用 daemon 交给会话的依赖。
+  it("runs a backgrounded download log and a delete outside the roots on the host, and refuses a floor-hit bash without the sandbox", async () => {
+    await resetSandboxForTests();
+    vi.spyOn(SandboxManager, "isSupportedPlatform").mockReturnValue(true);
+    vi.spyOn(SandboxManager, "initialize").mockResolvedValue(undefined as never);
+    vi.spyOn(SandboxManager, "reset").mockResolvedValue(undefined as never);
+    // 退回沙箱时命令照样跑（包装成直接跑）：旧代码在这里会写出 .zshrc。
+    const wrap = vi.spyOn(SandboxManager, "wrapWithSandboxArgv")
+      .mockImplementation((async (command: string) => ({ argv: ["/bin/sh", "-c", command] })) as never);
+    const home = join(dir, "home");
+    mkdirSync(home, { recursive: true });
+    writeFileSync(join(dir, "old.zip"), "x");
+    const bashOf = (deps: any) => {
+      let tool: any = null;
+      leadHandsExtension({
+        db: deps.db, dataDir: deps.dataDir, home, turnOrigin: deps.turnOrigin, currentTurnId: deps.currentTurnId,
+      })({ registerTool: (definition: any) => { tool = definition; }, on: () => {} } as never);
+      return async (command: string) => {
+        try {
+          const result = await tool.execute(`call-${command.length}`, { command }, undefined, undefined, undefined);
+          return { isError: false, text: result.content.map((part: { text?: string }) => part.text ?? "").join("") };
+        } catch (error) {
+          return { isError: true, text: (error as Error).message };
+        }
+      };
+    };
+    const seen: Record<string, any> = {};
+    const { say, call } = await bootLead(async (fake, live, deps) => {
+      if (!seen.floor && fake.inputs.some((input) => input.includes("后台下载"))) {
+        const bash = bashOf(deps);
+        seen.logRoute = bashRoute(deps, "nohup some-download -d > ~/dl.log 2>&1 &");
+        seen.log = await bash(`nohup echo download-started > ${join(dir, "dl.log")} 2>&1 &`);
+        seen.delete = await bash(`rm ${join(dir, "old.zip")}`);
+        seen.floor = await bash(`echo pwned > ${join(home, ".zshrc")}; sudo true`);
+        // run_on_host 按真实的 home 筛查：用数据目录里的账本文件做底线的例子。
+        seen.card = await run(live, `echo pwned > ${join(dir, "config.json")}`);
+      }
+      return { say: "好了。" };
+    });
+    await call("/v1/lead/host-bypass/enable", {});
+    const turn = await say("msg-host-l5", "在后台下载，日志写进 home，再清掉旧的 zip");
+    await vi.waitFor(() => expect(seen.card).toBeDefined(), { timeout: 15_000 });
+
+    expect(seen.logRoute).toBe("host");
+    expect(seen.log).toMatchObject({ isError: false });
+    expect(seen.log.text).toMatch(/^（沙箱外）/);
+    await vi.waitFor(() => expect(readFileSync(join(dir, "dl.log"), "utf8")).toContain("download-started"), { timeout: 5_000 });
+    expect(seen.delete.text).toMatch(/^（沙箱外）/);
+    expect(existsSync(join(dir, "old.zip"))).toBe(false);
+
+    expect(seen.floor.isError).toBe(true);
+    expect(seen.floor.text).toMatch(/^bash 没有跑这条命令：免沙箱开着，命令筛查碰到了底线/);
+    expect(seen.floor.text).toContain("命令会写以后在沙箱外执行的文件");
+    expect(seen.floor.text).toContain("命令要用别的用户身份跑");
+    expect(seen.floor.text).toContain("用 run_on_host");
+    expect(existsSync(join(home, ".zshrc"))).toBe(false);
+    expect(wrap).not.toHaveBeenCalled();
+
+    // run_on_host 碰到底线照旧发确认卡。
+    expect(seen.card.isError).toBe(true);
+    expect(JSON.parse(seen.card.text)).toMatchObject({ kind: "needs_authorization" });
+    expect(existsSync(join(dir, "config.json"))).toBe(false);
+
+    expect(started()).toEqual([
+      expect.objectContaining({ turnId: turn, via: "bash", command: expect.stringContaining("download-started"), screen: { verdict: "allow", rule: null } }),
+      expect.objectContaining({ turnId: turn, via: "bash", command: expect.stringContaining("old.zip"), screen: { verdict: "allow", rule: "delete-outside-roots" } }),
+    ]);
+    await resetSandboxForTests();
+  }, 45_000);
 
   it("keeps sending the card in a turn that a Slack message woke", async () => {
     const slack = new FakeSlack({ users: { U0MALLORY: { name: "Mallory" } } });
