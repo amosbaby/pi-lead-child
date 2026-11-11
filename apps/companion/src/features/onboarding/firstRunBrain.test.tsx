@@ -114,10 +114,13 @@ describe('the first-run page', { timeout: 30_000 }, () => {
 
   // 其他服务连上了但目录读不出来，用户改了 key 再点「连接」：覆盖同一个服务商，config.json 里不再多出 deepseek-2、deepseek-3……
   it('overwrites the same provider when the user retries another service at the same address', async () => {
-    const { runtime, perform } = firstRunRuntime((input, providers) => [
+    const { runtime, perform } = firstRunRuntime((raw, providers) => {
+      const input = raw as SaveInput;
+      return [
       ...providers.filter((entry) => entry.name !== input.name),
       { ...anthropic, name: input.name, baseUrl: input.baseUrl, api: 'openai-completions', keyHost: 'api.deepseek.com', models: [], problem: 'GET https://api.deepseek.com/v1/models failed: 401' },
-    ]);
+      ];
+    });
     renderWithRuntime(<RootTabs />, runtime);
     fireEvent.click(screen.getByTestId('first-run-preset-custom'));
     fireEvent.change(screen.getByTestId('first-run-base-url'), { target: { value: 'https://api.deepseek.com/v1' } });

@@ -442,7 +442,11 @@ export async function registerLeadProviders(
       const reason = `${name}: model catalog failed (${String(error)})`;
       notes.push(reason);
       unavailable.push({ provider: name, reason });
-      catalog = { models: [], note: null };
+      // 没读到目录：按 config 写的设置算，和读到普通目录（不是 CLIProxyAPI 的详细目录）一样。
+      catalog = {
+        models: [], note: null,
+        info: { detailed: false, accountPrefix: effectiveAccountPrefix(provider, false), capabilities: effectiveCapabilities(provider, false) },
+      };
     }
     if (catalog.note) notes.push(catalog.note);
     // lead.models 里这个 provider 的模型也要注册：带推理强度后缀的（as4/claude-sonnet-5(high)）不在目录里。
