@@ -1,8 +1,11 @@
 import {
-  Avatar, Box, Button, Column, Dot, EmptyState, Icon, List, ListItem, Pressable, ProgressBar, Row, Text, type ColorToken,
+  Avatar, Badge, Box, Button, Column, Dot, EmptyState, Icon, List, ListItem, Pressable, ProgressBar, Row, Text, type ColorToken,
 } from '@pi-lead-child/components';
+import type { TicketMeta } from '@pi-lead-child/protocol';
 import { Fragment, useEffect, useState } from 'react';
 
+import { idleClaimHours, ticketMetaCaptionParts } from '@/features/tickets/ticketLinks';
+import { ticketLinksMessages } from '@/features/tickets/ticketLinks.messages';
 import { useLocale, useMessages } from '@/i18n';
 
 import {
@@ -11,9 +14,10 @@ import {
   groupForTicket,
   isPausedTicket,
   projectTicketSecondaryMeta,
-  ticketRailCaption,
+  ticketRailCaptionWithFacts,
   ticketTitle,
   type Ticket,
+  type TicketHubFacts,
   type TicketFilter,
   type TicketGroupId,
   type TicketProjectScope,
@@ -41,6 +45,10 @@ type TicketListProps = {
   // 停太久的暂停工单在行上直接继续或取消（工单 #111）。不给时行上没有这两个按钮。
   onResumeTicket?: (ticket: Ticket) => Promise<unknown>;
   onCancelTicket?: (ticket: Ticket) => Promise<unknown>;
+  // 来源、处理方式、复杂度、领取人（GET /v1/tickets/meta，external-worker-hub Task 10）。旧 daemon 不给时为 null。
+  meta?: TicketHubFacts | null;
+  // 手动领的单超过 4 小时没动静时在行上释放（ticket.release）。不给时行上没有这个按钮。
+  onReleaseTicket?: (ticket: Ticket) => Promise<unknown>;
 };
 
 type PauseActions = Pick<TicketListProps, 'onResumeTicket' | 'onCancelTicket'>;
@@ -176,21 +184,64 @@ function PausedTicketActions({ ticket, onResumeTicket, onCancelTicket }: { ticke
   );
 }
 
+// 手动领的单超过 4 小时没动静（external-worker-hub P1-4：手动领的单没有租约）：卡片下面一行「释放」。照停太久的暂停工单
+// （设计规范 P7.6）的样子：按钮放在可点的卡片外面，进行中写「正在……」，失败时在下面写原因（P5.4）。释放收得回（再领一次），不再确认。
+function IdleClaimActions({ ticket, onReleaseTicket }: { ticket: Ticket; onReleaseTicket: (ticket: Ticket) => Promise<unknown> }) {
+  const m = useMessages(ticketLinksMessages);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const release = async () => {
+    if (pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await onReleaseTicket(ticket);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setPending(false);
+    }
+  };
+  return (
+    <Column testID={`ticket-idle-actions-${ticket.id}`} pr="row-x" pb="row-y" pl="row-x" gap="text-stack">
+      <Row items="center" gap="actions">
+        <Button
+          testID={`ticket-release-${ticket.id}`}
+          label={pending ? m.releasing : m.release}
+          size="xs"
+          tone="accent"
+          disabled={pending}
+          onPress={() => { void release(); }}
+        />
+      </Row>
+      {error ? <Text size="secondary" color="danger-dark">{error}</Text> : null}
+    </Column>
+  );
+}
+
 // 侧栏里的工单卡片：头像、标题、一行说明；执行中的工单多一条进度。
-function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTicket }: {
-  ticket: Ticket; selected: boolean; onSelect: () => void;
+function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTicket, facts, onReleaseTicket }: {
+  ticket: Ticket; selected: boolean; onSelect: () => void; facts?: TicketMeta; onReleaseTicket?: (ticket: Ticket) => Promise<unknown>;
 } & PauseActions) {
   const locale = useLocale();
+  const hub = useMessages(ticketLinksMessages);
   const progressPercent = clampPercent(ticket.progressPercent);
   const hasProgress = ticket.status === 'active' && progressPercent !== undefined;
   // 暂停着、又没有别的在跑的工单（工单 #111）：右边写停了多久，停太久的用「等你」的琥珀色（主题 C-11），行下多一行继续、取消。
   const paused = isPausedTicket(ticket) && ticket.turn !== 'running' ? ticket.pause! : null;
   const overdue = paused?.overdue === true;
   const showPauseActions = overdue && Boolean(onResumeTicket || onCancelTicket);
+  // 手动领的单超过 4 小时没动静：右边写「N 小时无动静」，用「等你」的琥珀色（主题 C-11），行下给释放。
+  const idle = paused ? null : idleClaimHours(facts);
+  const showIdleActions = idle !== null && Boolean(onReleaseTicket) && !showPauseActions;
   // 右边的停留时间：在当前 stage 待了多久。已结束的工单不写。
   const stayed = paused
     ? pausedForText(paused.since, locale)
-    : ticket.turn !== 'ended' && ticket.stageChangedAt ? waitedText(ticket.stageChangedAt, undefined, locale) : null;
+    : idle !== null
+      ? hub.idle(idle)
+      : ticket.turn !== 'ended' && ticket.stageChangedAt ? waitedText(ticket.stageChangedAt, undefined, locale) : null;
+  const attentionTime = overdue || idle !== null;
+  const needsCall = facts?.handling === 'needs_user';
   const due = ticket.turn !== 'ended' && ticket.nextMilestone ? milestoneChip(ticket.nextMilestone, undefined, locale) : null;
   const assigned = ticket.status === 'review'
     || (Boolean(ticket.agentLabel || ticket.runtimeName) && !ticket.needsAttention);
@@ -203,6 +254,7 @@ function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTi
         : 'text-muted';
 
   const boxShadow = selected ? '0 1px 3px rgba(16,24,40,0.08)' : '0 1px 2px rgba(16,24,40,0.04)';
+  const withActions = showPauseActions || showIdleActions;
   const card = (
     <Pressable
       testID={`ticket-row-${ticket.id}`}
@@ -218,7 +270,7 @@ function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTi
       pl="row-x"
       rounded={9}
       bg="surface"
-      boxShadow={showPauseActions ? undefined : boxShadow}
+      boxShadow={withActions ? undefined : boxShadow}
     >
       {selected ? <Box position="absolute" l={0} t={0} b={0} w={3} bg={statusAccent[ticket.status]} /> : null}
       <Row gap="side-item">
@@ -235,13 +287,25 @@ function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTi
           <Row items="center" gap="inline-item">
             <Text flex={1} minW={0} size="card-title" weight="bold" numberOfLines={1}>{ticketTitle(ticket)}</Text>
             {stayed ? (
-              <Text testID={paused ? `ticket-paused-for-${ticket.id}` : undefined} size="meta" mono weight="bold" {...(overdue ? { color: 'warning-dark' as const } : { tone: 'muted' as const })}>
+              <Text
+                testID={paused ? `ticket-paused-for-${ticket.id}` : idle !== null ? `ticket-idle-${ticket.id}` : undefined}
+                size="meta"
+                mono
+                weight="bold"
+                {...(attentionTime ? { color: 'warning-dark' as const } : { tone: 'muted' as const })}
+              >
                 {stayed}
               </Text>
             ) : null}
           </Row>
           <Row mt="text-stack" items="center" gap="inline-item">
-            <Text flex={1} minW={0} size="secondary" tone="muted" numberOfLines={1}>{ticketRailCaption(ticket, locale)}</Text>
+            <Text flex={1} minW={0} size="secondary" tone="muted" numberOfLines={1}>
+              {ticketRailCaptionWithFacts(ticket, ticketMetaCaptionParts(facts, locale), locale)}
+            </Text>
+            {needsCall ? (
+              // 要你拿主意（handling=needs_user，spec P1-4「在网页里标出」）：「等你」的琥珀色小标签，写着字（设计规范 P7.2、P7.7）。
+              <Badge testID={`ticket-handling-${ticket.id}`} label={hub.handlingNeedsUser} tone="warning" size="sm" />
+            ) : null}
             {due ? (
               <Box px="pill-x" rounded={5} bg={due.overdue ? 'danger-soft' : 'warning-soft'}>
                 {/* spacing-exempt: 徽标字号行高 */}
@@ -259,12 +323,14 @@ function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTi
       </Row>
     </Pressable>
   );
-  if (!showPauseActions) return card;
+  if (!withActions) return card;
   // 按钮放在可点的卡片外面：点按钮不会同时打开工单。外层画卡片的底、圆角和阴影；里面卡片的下间距落在同一块白底上，成了按钮上方的空。
   return (
     <Column mb="stacked-card" rounded={9} overflow="hidden" bg="surface" boxShadow={boxShadow}>
       {card}
-      <PausedTicketActions ticket={ticket} onResumeTicket={onResumeTicket} onCancelTicket={onCancelTicket} />
+      {showPauseActions
+        ? <PausedTicketActions ticket={ticket} onResumeTicket={onResumeTicket} onCancelTicket={onCancelTicket} />
+        : <IdleClaimActions ticket={ticket} onReleaseTicket={onReleaseTicket!} />}
     </Column>
   );
 }
@@ -333,6 +399,8 @@ export function TicketList({
   project = null,
   onResumeTicket,
   onCancelTicket,
+  meta = null,
+  onReleaseTicket,
 }: TicketListProps) {
   const locale = useLocale();
   const [collapsedGroups, setCollapsedGroups] = useState<Set<TicketGroupId>>(() => new Set(['background', 'completed', 'cancelled']));
@@ -368,7 +436,7 @@ export function TicketList({
     );
   }
 
-  const projection = buildTicketRailPresentation(items, { filter, query, loading, project, locale });
+  const projection = buildTicketRailPresentation(items, { filter, query, loading, project, locale, meta });
   if (projection.state !== 'populated') {
     return <EmptyStateForRail state={projection.state} onCreateTask={onCreateTask} onClearFilters={onClearFilters} onSeedTask={onSeedTask} />;
   }
@@ -404,6 +472,8 @@ export function TicketList({
                 onSelect={() => onSelect(ticket.id)}
                 onResumeTicket={onResumeTicket}
                 onCancelTicket={onCancelTicket}
+                facts={meta?.get(ticket.id)}
+                onReleaseTicket={onReleaseTicket}
               />
             )) : null}
           </Fragment>

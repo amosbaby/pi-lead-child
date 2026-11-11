@@ -69,7 +69,7 @@ describe('the paused filter and group', () => {
   it('counts every paused ticket, background ones included, and takes them out of the queue', () => {
     // 等你：#26、#28 停了两天，#104 派发挂起（执行受阻，没有在自动恢复）。在执行：#101 的核查在跑，#111 在跑。
     // 排队只剩 #110（ready、没有 Run）；Red Bull 在管：#7（后台学习工单）、#112（Lead 正在处理的阻塞）。
-    expect(counts()).toEqual({ all: 11, todo: 3, running: 2, paused: 3, queued: 1, lead: 2 });
+    expect(counts()).toEqual({ all: 11, todo: 3, running: 2, paused: 3, queued: 1, lead: 2, needs_call: 0, worker: 0 });
     const ids = (filter: TicketFilter) => buildTicketRailPresentation(items, { filter }).groups.flatMap((group) => group.items.map((t) => t.id));
     expect(ids('paused').sort()).toEqual(['26', '28', '89']);
     expect(ids('queued')).toEqual(['110']);

@@ -46,7 +46,7 @@ export function detailStage(status: TicketStatus): DetailStage {
 // ── 块的顺序、默认展开、出处 ────────────────────────────────────────────────────────────
 
 // 头部以下的每一块（第 3 节的顺序）。没有「这张工单」这一层标题：任务说明、验收标准、工单信息直接排。
-export const DETAIL_SECTIONS = ['relations', 'task', 'criteria', 'info', 'execution', 'delivery', 'history'] as const;
+export const DETAIL_SECTIONS = ['relations', 'task', 'criteria', 'info', 'links', 'execution', 'delivery', 'history'] as const;
 export type DetailSectionKind = typeof DETAIL_SECTIONS[number];
 
 export function detailSectionTitles(locale: Locale = 'en'): Record<DetailSectionKind, string> {
@@ -58,10 +58,11 @@ export function detailSectionTitles(locale: Locale = 'en'): Record<DetailSection
 // - 等你验收：验收标准、交付与验收展开，任务说明和执行折叠。
 // - 已完成：交付与验收展开，其余折叠。已取消同已完成。
 // - 草稿：还没开跑，工单本身的信息展开。
+// - 来源与会话（external-worker-hub Task 10）：没结束的工单展开，结束的折叠（标题旁写第一条来源）。
 const EXPANDED_BY_STAGE: Record<DetailStage, readonly DetailSectionKind[]> = {
-  draft: ['relations', 'task', 'criteria', 'info', 'execution', 'history'],
-  running: ['relations', 'task', 'criteria', 'info', 'execution', 'delivery', 'history'],
-  review: ['relations', 'criteria', 'info', 'delivery', 'history'],
+  draft: ['relations', 'task', 'criteria', 'info', 'links', 'execution', 'history'],
+  running: ['relations', 'task', 'criteria', 'info', 'links', 'execution', 'delivery', 'history'],
+  review: ['relations', 'criteria', 'info', 'links', 'delivery', 'history'],
   done: ['delivery'],
   cancelled: ['delivery'],
 };

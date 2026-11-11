@@ -116,4 +116,15 @@ describe('Link', () => {
     expect(safeLink('file:///etc/passwd')).toBeNull();
     expect(safeLink('not a url')).toBeNull();
   });
+
+  // 外部工人的会话链接（claude://）要能点；只在调用方说了的地方放行，别处照旧不认（external-worker-hub Task 10）。
+  it('opens only the protocols the caller names, when it names them', () => {
+    expect(safeLink('claude://resume?session=abc')).toBeNull();
+    expect(safeLink('claude://resume?session=abc', ['https:', 'claude:'])).toBe('claude://resume?session=abc');
+    expect(safeLink('http://a.test', ['https:', 'claude:'])).toBeNull();
+    renderUI(<Link href="claude://resume?session=abc" protocols={['https:', 'claude:']} testID="claude">open</Link>);
+    expect(screen.getByTestId('claude').getAttribute('role')).toBe('link');
+    renderUI(<Link href="http://a.test" protocols={['https:', 'claude:']} testID="plain">open</Link>);
+    expect(screen.getByTestId('plain').getAttribute('role')).toBeNull();
+  });
 });

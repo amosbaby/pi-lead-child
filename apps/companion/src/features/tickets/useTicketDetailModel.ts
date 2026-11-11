@@ -1,6 +1,6 @@
 import type {
   DeliverySummary, KernelIntervention, KernelInterventionRef, TicketActionId as TicketOperationId, TicketActionRunRequest,
-  TicketAttachment, TicketReviewerInfo, TicketSandboxInfo, TicketUsage,
+  TicketAttachment, TicketLinks, TicketMeta, TicketReviewerInfo, TicketSandboxInfo, TicketUsage,
 } from '@pi-lead-child/protocol';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -143,6 +143,8 @@ export function useTicketDetailModel(
     try {
       await runtime.runTicketAction(ticketId, action, request);
       setActionRequest({ ticketId, pendingActionId: null, error: null });
+      // 改处理方式、释放以后重读来源与会话：工单的 updatedAt 只到秒，连着点两下时不一定变。
+      setLinksRevision((revision) => revision + 1);
     } catch (error) {
       setActionRequest({ ticketId, pendingActionId: null, error: actionErrorText(error, locale) });
     }
@@ -394,6 +396,20 @@ export function useTicketDetailModel(
       .catch(() => {});
     return () => controller.abort();
   }, [connected, runtime, summary?.updatedAt, ticketId]);
+  // 来源与会话（external-worker-hub Task 10）：GET /v1/tickets/:id/links 和这张单的 GET /v1/tickets/meta。不进工单快照
+  // （TicketSummary 是严格校验的）。工单更新、做完一个操作以后再读。旧 daemon 没有这两个接口时为 null，详情不画这一块。
+  const [linksRevision, setLinksRevision] = useState(0);
+  const [hubFacts, setHubFacts] = useState<{ ticketId: number; links: TicketLinks; meta: TicketMeta | null } | null>(null);
+  useEffect(() => {
+    if (!connected) return undefined;
+    const controller = new AbortController();
+    void Promise.all([
+      runtime.getTicketLinks(ticketId, controller.signal),
+      runtime.getTicketsMeta([ticketId], controller.signal).then((rows) => rows[0] ?? null, () => null),
+    ]).then(([links, meta]) => { if (!controller.signal.aborted) setHubFacts({ ticketId, links, meta }); }).catch(() => {});
+    return () => controller.abort();
+  }, [connected, linksRevision, runtime, summary?.updatedAt, ticketId]);
+  const currentHubFacts = hubFacts?.ticketId === ticketId ? hubFacts : null;
   const facts = useMemo(() => detail ? {
     createdAt: detail.createdAt,
     createdBy: detail.createdBy ?? null,
@@ -511,6 +527,8 @@ export function useTicketDetailModel(
     delivery,
     deliveryNumbers,
     facts,
+    links: currentHubFacts?.links ?? null,
+    meta: currentHubFacts?.meta ?? null,
     executor,
     reviewer,
     onRunAction: connected ? (action, request) => void runOperation(action, request) : undefined,

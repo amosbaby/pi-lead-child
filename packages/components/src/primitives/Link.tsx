@@ -17,17 +17,19 @@ export type LinkProps = Omit<GetProps<typeof LinkFrame>, 'onPress' | 'role'> & {
   href: string;
   /** always：一直有下划线。hover：悬停时才有（GitHub 正文里的链接，2026-10-16）。 */
   underline?: 'always' | 'hover';
+  /** 只放行这几种协议（例如 ['https:', 'claude:']）。不给时放行 http(s)、mailto 和 tel。 */
+  protocols?: readonly string[];
 };
 
 // 文字链接。可以单独用，也可以嵌在 Text 里组成富文本。
-// 只打开 http(s)、mailto 和 tel 链接；别的协议按普通文字显示，不可点击。
-export function Link({ href, underline = 'always', ...rest }: LinkProps) {
-  const safe = safeLink(href);
+// 只打开 http(s)、mailto 和 tel 链接（或者 protocols 里的）；别的协议按普通文字显示，不可点击。
+export function Link({ href, underline = 'always', protocols, ...rest }: LinkProps) {
+  const safe = safeLink(href, protocols);
   if (!safe) return <Text {...rest} />;
   return (
     <LinkText
       role="link"
-      onPress={() => openURL(safe)}
+      onPress={() => openURL(safe, protocols)}
       {...(underline === 'hover' ? { textDecorationLine: { default: 'none', hover: 'underline' } } as const : {})}
       {...rest}
     />

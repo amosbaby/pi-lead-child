@@ -77,6 +77,8 @@ import type {
   StartConnectionResponse,
   TicketReviewerInfo,
   TicketSandboxInfo,
+  TicketLinks,
+  TicketMeta,
   TicketUsage,
   DeliverySummary,
   TicketReviewRequest,
@@ -229,7 +231,7 @@ export type CompanionTransport = Pick<
   | 'ruleChangeConfirmation' | 'resolveRuleChangeConfirmation'
   | 'timerRequest' | 'resolveTimerRequest' | 'externalTimers' | 'watchTimers' | 'cancelTimer'
   | 'getOwnerAction' | 'disownOwnerAction'
-  | 'getTicketReviewer' | 'getTicketSandbox' | 'getTicketDeliveries' | 'getTicketUsage'
+  | 'getTicketReviewer' | 'getTicketSandbox' | 'getTicketDeliveries' | 'getTicketUsage' | 'getTicketsMeta' | 'getTicketLinks'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
   | 'getChatImage' | 'getTicketAttachments' | 'getTicketAttachment'
   | 'getLeadModels' | 'switchLeadModel'
@@ -828,6 +830,21 @@ export class CompanionStateRuntime {
   async getTicketSandbox(ticketId: number, signal?: AbortSignal): Promise<TicketSandboxInfo> {
     const read = this.dependencies.client.getTicketSandbox;
     if (typeof read !== 'function') throw new Error('this connection cannot read the ticket sandbox permission');
+    return read.call(this.dependencies.client, ticketId, signal);
+  }
+
+  // 列表上的来源、处理方式、复杂度、领取人（GET /v1/tickets/meta，external-worker-hub P1-7）。不放进工单快照，理由同上。
+  // 旧 daemon 没有这个接口时报错，列表不显示这些信息。
+  async getTicketsMeta(ticketIds: readonly number[], signal?: AbortSignal): Promise<TicketMeta[]> {
+    const read = this.dependencies.client.getTicketsMeta;
+    if (typeof read !== 'function') throw new Error('this connection cannot read the ticket meta');
+    return read.call(this.dependencies.client, ticketIds, signal);
+  }
+
+  // 工单详情的来源、会话链接和判断理由（GET /v1/tickets/:id/links）。旧 daemon 没有这个接口时报错，详情不画这一块。
+  async getTicketLinks(ticketId: number, signal?: AbortSignal): Promise<TicketLinks> {
+    const read = this.dependencies.client.getTicketLinks;
+    if (typeof read !== 'function') throw new Error('this connection cannot read the ticket links');
     return read.call(this.dependencies.client, ticketId, signal);
   }
 

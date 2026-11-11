@@ -66,16 +66,18 @@ export function setViewportWidth(width: number) {
  */
 export function renderWorkbenchWithTicket(
   ticket: TicketSummary,
-  { width = 1280, turns = [], interventions = [], actions = [], delivery, deliveries }: {
+  { width = 1280, turns = [], interventions = [], actions = [], delivery, deliveries, client = {} }: {
     width?: number; turns?: ConversationTurn[]; interventions?: KernelIntervention[]; actions?: TicketAction[];
     delivery?: TicketDelivery;
     /** 每一次交付的序号（GET /v1/tickets/:id/deliveries）。不给时这个连接读不了交付列表，像旧 daemon。 */
     deliveries?: Pick<DeliverySummary, 'attemptId' | 'sequence'>[];
+    /** 连接上另外能做的事（例如 getTicketLinks、runTicketAction）。不给的就像旧 daemon 没有。 */
+    client?: Partial<CompanionRuntimeDependencies['client']>;
   } = {},
 ) {
   setViewportWidth(width);
   const runtime = createCompanionStateRuntime({
-    client: (deliveries ? { getTicketDeliveries: async () => deliveries } : {}) as CompanionRuntimeDependencies['client'],
+    client: { ...(deliveries ? { getTicketDeliveries: async () => deliveries } : {}), ...client } as CompanionRuntimeDependencies['client'],
     credentials: {} as CompanionRuntimeDependencies['credentials'],
     scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
   });

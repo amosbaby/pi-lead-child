@@ -1,5 +1,5 @@
 import { Density } from '@pi-lead-child/components';
-import { inboxNotices, type ExternalTimerDto, type TicketStatus, type WatchTimerDto } from '@pi-lead-child/protocol';
+import { inboxNotices, type ExternalTimerDto, type TicketMeta, type TicketStatus, type WatchTimerDto } from '@pi-lead-child/protocol';
 import { useRouter, type Href } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
@@ -13,7 +13,7 @@ import { useLocale } from '@/i18n';
 import { useLeadAvatarSource } from '@/components/useLeadAvatarSource';
 import { leadFairy } from '@/components/leadPresence';
 
-import { isWorkspaceControlActionId, resolveWorkspaceTickets, type Ticket } from './model';
+import { isWorkspaceControlActionId, resolveWorkspaceTickets, type Ticket, type TicketHubFacts } from './model';
 import { sortUpcoming, watchReminder, type UpcomingReminder } from './inboxModel';
 import { userOutboxNotifications } from './notificationOutbox';
 import { InboxChannelCards } from './InboxChannelCards';
@@ -135,6 +135,22 @@ export function ConnectedWorkRail({
     });
     return sortUpcoming([...own, ...asked, ...watchTimers.map(watchReminder)]);
   }, [agenda, externalTimers, ticketDetails, watchTimers]);
+  // 列表上的来源、处理方式、复杂度、领取人（GET /v1/tickets/meta，external-worker-hub Task 10）：不在 TicketSummary 里，按列表里的工单号
+  // 批量读。工单有变化（编号或 updatedAt 变了）时再读一次。读不到（旧 daemon）时为 null：列表照旧，不显示这两个筛选。
+  const [ticketMeta, setTicketMeta] = useState<TicketHubFacts | null>(null);
+  const metaKey = ticketSummaries.map((ticket) => `${ticket.id}:${ticket.updatedAt}`).join(',');
+  useEffect(() => {
+    if (!ready) return undefined;
+    const ids = ticketSummaries.map((ticket) => ticket.id);
+    const controller = new AbortController();
+    runtime.getTicketsMeta(ids, controller.signal).then(
+      (rows: TicketMeta[]) => { if (!controller.signal.aborted) setTicketMeta(new Map(rows.map((row) => [String(row.id), row]))); },
+      () => { if (!controller.signal.aborted) setTicketMeta(null); },
+    );
+    return () => controller.abort();
+    // metaKey 已经包含了 ticketSummaries 里用到的部分。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [metaKey, ready, runtime]);
   // 取消是操作层的 timer.cancel（页面和 Lead 同一个操作），取消以后重读一次列表。
   const cancelTimer = useCallback(async (ref: string) => {
     await runtime.cancelTimer(ref);
@@ -185,6 +201,9 @@ export function ConnectedWorkRail({
       // 停太久的暂停工单：继续的是暂停着的那个 Run，取消就是取消工单（都是工单操作，和 Lead 的 ticket_action 同一个函数）。
       onResumeTicket={(ticket) => runtime.runTicketAction(Number(ticket.id), 'resume_run', ticket.pause ? { input: { runId: ticket.pause.attemptId } } : {})}
       onCancelTicket={(ticket) => runtime.runTicketAction(Number(ticket.id), 'cancel')}
+      ticketMeta={ticketMeta}
+      // 手动领的单很久没动静：放掉外部工人的领取（ticket.release，和 Lead 的 ticket_action 同一个函数），工单回到待领。
+      onReleaseTicket={(ticket) => runtime.runTicketAction(Number(ticket.id), 'ticket.release')}
       notices={notices}
       upcomingReminders={upcomingReminders}
       onCancelTimer={cancelTimer}

@@ -468,7 +468,8 @@ export type RailView = 'inbox' | 'tickets' | 'projects' | 'agenda';
 export type CompactDestination = 'conversation' | 'inbox' | 'tickets' | 'projects' | 'agenda';
 // 每张没结束的工单都落在一个筛选里（工单 #111）：等你、在执行、已暂停、排队、Lead 在管（处理中和后台）。已结束的只在「全部」里。
 // workspace/model.ts 用的就是这一个，不另写一份。
-export type TicketFilter = 'all' | 'todo' | 'running' | 'paused' | 'queued' | 'lead';
+// needs_call、worker 按 GET /v1/tickets/meta 的事实筛（external-worker-hub Task 10）：要你拿主意的、外部工人领着的。
+export type TicketFilter = 'all' | 'todo' | 'running' | 'paused' | 'queued' | 'lead' | 'needs_call' | 'worker';
 export type TicketGroupId = 'needs_intervention' | 'running' | 'paused' | 'queued' | 'lead' | 'background' | 'completed' | 'cancelled';
 
 export interface ArtifactDownloadState {

@@ -10,6 +10,7 @@ import {
   type KernelTicketWorkItemV2,
   type ResolveKernelInterventionRequest,
   type TicketKind,
+  type TicketMeta,
   type TicketNeedsUserReason,
   type TicketPause,
   type TicketStatus,
@@ -23,6 +24,8 @@ import { DEFAULT_LOCALE, type Locale } from '@/i18n';
 
 import { leadNameNow } from '@/state/leadName';
 import { resolvedByLabel } from '@/features/chat/resolvedByLabel';
+import { ticketMetaSearchText } from '@/features/tickets/ticketLinks';
+import { ticketLinksMessages } from '@/features/tickets/ticketLinks.messages';
 import type { ControlPlanePhase, ResourceLoadState, TicketFilter, TicketGroupId } from '@/state/types';
 import type { ConnectionState } from '@pi-lead-child/client';
 
@@ -461,8 +464,13 @@ export function buildTicketActionPresentation(
   ];
 }
 
-export function ticketRailFilters(locale: Locale = DEFAULT_LOCALE): readonly { id: TicketFilter; label: string }[] {
+// hubFacts：读到了 GET /v1/tickets/meta 时多两个筛选（要你拿主意、工人领着）。旧 daemon 没有这个接口时不显示它们。
+export function ticketRailFilters(
+  locale: Locale = DEFAULT_LOCALE,
+  options: { hubFacts?: boolean } = {},
+): readonly { id: TicketFilter; label: string }[] {
   const m = workspaceModelMessages(locale).filters;
+  const hub = ticketLinksMessages(locale);
   return [
     { id: 'all', label: m.all },
     { id: 'todo', label: m.todo },
@@ -470,6 +478,10 @@ export function ticketRailFilters(locale: Locale = DEFAULT_LOCALE): readonly { i
     { id: 'paused', label: m.paused },
     { id: 'queued', label: m.queued },
     { id: 'lead', label: m.lead(leadNameNow()) },
+    ...(options.hubFacts ? [
+      { id: 'needs_call' as const, label: hub.filterNeedsCall },
+      { id: 'worker' as const, label: hub.filterWorker },
+    ] : []),
   ];
 }
 
@@ -702,9 +714,13 @@ function isTodoTicket(ticket: Ticket): boolean {
   return ticket.needsUser != null;
 }
 
-function ticketMatchesQuery(ticket: Ticket, query: string): boolean {
+// 工单列表上的来源、处理方式、复杂度、领取人（GET /v1/tickets/meta），按工单号。不在 TicketSummary 里（external-worker-hub Task 10）。
+export type TicketHubFacts = ReadonlyMap<string, TicketMeta>;
+
+function ticketMatchesQuery(ticket: Ticket, query: string, facts?: TicketMeta, locale: Locale = DEFAULT_LOCALE): boolean {
   if (!query) return true;
   return [
+    ticketMetaSearchText(facts, locale),
     ticket.id,
     ticket.displayTitle,
     ticket.title,
@@ -722,7 +738,9 @@ export function isPausedTicket(ticket: Ticket): boolean {
   return ticket.pause != null && ticket.turn !== 'ended';
 }
 
-function ticketMatchesFilter(ticket: Ticket, filter: TicketFilter): boolean {
+function ticketMatchesFilter(ticket: Ticket, filter: TicketFilter, facts?: TicketMeta): boolean {
+  if (filter === 'needs_call') return facts?.handling === 'needs_user';
+  if (filter === 'worker') return Boolean(facts?.claimedBy);
   if (filter === 'running') return ticket.turn === 'running';
   if (filter === 'paused') return isPausedTicket(ticket);
   if (filter === 'queued') return ticket.turn === 'queued' && !isPausedTicket(ticket);
@@ -748,13 +766,17 @@ export function groupForTicket(ticket: Ticket): TicketGroupId {
 
 export function buildTicketRailPresentation(
   allItems: Ticket[],
-  options: { filter: TicketFilter; query?: string; loading?: boolean; project?: TicketProjectScope | null; locale?: Locale },
+  options: {
+    filter: TicketFilter; query?: string; loading?: boolean; project?: TicketProjectScope | null; locale?: Locale;
+    meta?: TicketHubFacts | null;
+  },
 ): TicketRailPresentation {
   const locale = options.locale ?? DEFAULT_LOCALE;
   const query = options.query?.trim().toLocaleLowerCase() ?? '';
   // 从项目 tab 点进来时只看这个项目。筛选条上的数字也只数这个项目，和项目 tab 一样。
   const projectScope = options.project ?? null;
   const items = projectScope ? allItems.filter((ticket) => ticketInProject(ticket, projectScope)) : allItems;
+  const factsOf = (ticket: Ticket) => options.meta?.get(ticket.id);
   const filterCounts = {
     all: items.length,
     todo: items.filter(isTodoTicket).length,
@@ -762,6 +784,8 @@ export function buildTicketRailPresentation(
     paused: items.filter(isPausedTicket).length,
     queued: items.filter((ticket) => ticketMatchesFilter(ticket, 'queued')).length,
     lead: items.filter((ticket) => ticket.turn === 'lead').length,
+    needs_call: items.filter((ticket) => ticketMatchesFilter(ticket, 'needs_call', factsOf(ticket))).length,
+    worker: items.filter((ticket) => ticketMatchesFilter(ticket, 'worker', factsOf(ticket))).length,
   };
 
   if (options.loading) {
@@ -774,7 +798,8 @@ export function buildTicketRailPresentation(
     return { state: 'all_completed', groups: [], filterCounts, totalCount: items.length, todoCount: 0 };
   }
 
-  const filteredItems = items.filter((ticket) => ticketMatchesFilter(ticket, options.filter) && ticketMatchesQuery(ticket, query));
+  const filteredItems = items.filter((ticket) =>
+    ticketMatchesFilter(ticket, options.filter, factsOf(ticket)) && ticketMatchesQuery(ticket, query, factsOf(ticket), locale));
   if (filteredItems.length === 0) {
     return { state: 'no_results', groups: [], filterCounts, totalCount: items.length, todoCount: filterCounts.todo };
   }
@@ -1349,6 +1374,15 @@ export function ticketRailCaption(ticket: Ticket, locale: Locale = DEFAULT_LOCAL
   if (ticket.turn === 'lead') return `#${ticket.id} · ${ticket.background ? m.background(leadNameNow()) : ticket.statusLabel || leadHandlingLabel(locale)}`;
   const runtime = ticket.runtimeLabel === messages.runtime.running ? m.executing : ticket.runtimeLabel;
   return `#${ticket.id} · ${ticket.agentLabel ?? 'child'} ${runtime}`;
+}
+
+// 行说明里接在工单号后面的来源、复杂度、领取人（设计规范 P6.4：元信息合成一行，external-worker-hub Task 10）：
+// 「#12 · PROJ-123 · Simple · with ethan-cc · Executing」。没有这些事实时就是 ticketRailCaption。
+export function ticketRailCaptionWithFacts(ticket: Ticket, parts: readonly string[], locale: Locale = DEFAULT_LOCALE): string {
+  const caption = ticketRailCaption(ticket, locale);
+  const prefix = `#${ticket.id}`;
+  if (parts.length === 0 || !caption.startsWith(prefix)) return caption;
+  return [prefix, ...parts].join(' · ') + caption.slice(prefix.length);
 }
 
 // 「#26 · 你暂停的 · 停在「补测试」」：谁暂停的、暂停前在做什么（最近一个 checkpoint 的标题）。

@@ -25,18 +25,20 @@ export function useBreakpoint(): Breakpoint {
 const SAFE_PROTOCOLS = new Set(['https:', 'http:', 'mailto:', 'tel:']);
 
 // 只放行 http(s)、mailto 和 tel 链接。其他协议（javascript:、file: 等）返回 null。
-export function safeLink(href: string | null | undefined): string | null {
+// 调用方给了 protocols 时只放行这几种（例如外部工人的会话链接只认 https: 和 claude:）。
+export function safeLink(href: string | null | undefined, protocols?: readonly string[]): string | null {
   if (!href) return null;
   try {
-    return SAFE_PROTOCOLS.has(new URL(href).protocol) ? href : null;
+    const protocol = new URL(href).protocol;
+    return (protocols ? protocols.includes(protocol) : SAFE_PROTOCOLS.has(protocol)) ? href : null;
   } catch {
     return null;
   }
 }
 
 // 用系统浏览器或对应的应用打开链接。不安全的链接直接忽略。
-export function openURL(href: string): void {
-  const safe = safeLink(href);
+export function openURL(href: string, protocols?: readonly string[]): void {
+  const safe = safeLink(href, protocols);
   if (safe) void Linking.openURL(safe).catch(() => {});
 }
 

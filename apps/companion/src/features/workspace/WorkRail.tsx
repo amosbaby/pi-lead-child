@@ -23,6 +23,7 @@ import {
   type RailViewDirection,
   type Ticket,
   type TicketFilter,
+  type TicketHubFacts,
   type TicketProjectScope,
 } from './model';
 import { ProjectList } from './ProjectList';
@@ -60,6 +61,10 @@ type WorkRailProps = {
   // 停太久的暂停工单在工单行上直接继续、取消（工单 #111）。
   onResumeTicket?: (ticket: Ticket) => Promise<unknown>;
   onCancelTicket?: (ticket: Ticket) => Promise<unknown>;
+  // 列表上的来源、处理方式、复杂度、领取人（GET /v1/tickets/meta，external-worker-hub Task 10）。还没读到、旧 daemon 时为 null。
+  ticketMeta?: TicketHubFacts | null;
+  // 手动领的单超过 4 小时没动静时在行上释放（ticket.release）。
+  onReleaseTicket?: (ticket: Ticket) => Promise<unknown>;
   showViewTabs?: boolean;
   // 收件箱里单独露出来的通知（protocol 的 inboxNotices）。只在收件箱渲染。
   notices?: InboxNotices;
@@ -110,6 +115,8 @@ export function WorkRail({
   onSeedTask,
   onResumeTicket,
   onCancelTicket,
+  ticketMeta = null,
+  onReleaseTicket,
   showViewTabs = true,
   notices = EMPTY_NOTICES,
   onAckNotification,
@@ -143,7 +150,9 @@ export function WorkRail({
   const projectScope: TicketProjectScope | null = ticketProject
     ? { name: ticketProject, knownNames: knownProjectNames }
     : null;
-  const ticketProjection = buildTicketRailPresentation(items, { filter, query: deferredQuery, loading, project: projectScope, locale });
+  const ticketProjection = buildTicketRailPresentation(items, {
+    filter, query: deferredQuery, loading, project: projectScope, locale, meta: ticketMeta,
+  });
 
   const selectView = (nextView: RailView) => {
     const direction = resolveRailViewDirection(view, nextView);
@@ -255,10 +264,10 @@ export function WorkRail({
           </Row>
         ) : null}
         {view === 'tickets' ? (
-          // 六个筛选在窄栏里放不下：横向滑动，不换行，数字变了这一行的高度也不变（工单 #111）。
+          // 六个（读到工单的来源和领取人时八个）筛选在窄栏里放不下：横向滑动，不换行，数字变了这一行的高度也不变（工单 #111）。
           <ScrollArea horizontal flex={0} testID="ticket-filters">
             <Row items="center" gap="chips">
-              {ticketRailFilters(locale).map((item) => (
+              {ticketRailFilters(locale, { hubFacts: ticketMeta !== null }).map((item) => (
                 <Chip
                   key={item.id}
                   testID={`ticket-filter-${item.id}`}
@@ -310,6 +319,8 @@ export function WorkRail({
                 project={projectScope}
                 onResumeTicket={onResumeTicket}
                 onCancelTicket={onCancelTicket}
+                meta={ticketMeta}
+                onReleaseTicket={onReleaseTicket}
               />
             ) : null}
             {view === 'projects' ? (

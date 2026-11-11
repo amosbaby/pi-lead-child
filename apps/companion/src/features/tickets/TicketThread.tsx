@@ -6,7 +6,7 @@ import {
 import type {
   KernelArtifact, KernelOutcomeSnapshotResource, KernelTicketPow, TicketAcceptanceCriteria, TicketAction,
   TicketActionId as TicketOperationId, TicketActionRunRequest, TicketChatResume, TicketDelivery, TicketExecutionPlan,
-  TicketAttachment, TicketReplyActionId,
+  TicketAttachment, TicketLinks, TicketMeta, TicketReplyActionId,
 } from '@pi-lead-child/protocol';
 import { useState, type ReactNode } from 'react';
 
@@ -36,6 +36,7 @@ import type { TicketLogRunPresentation } from './LogTimeline';
 import { TicketAttachmentStrip, TicketAttachmentViewer, type TicketAttachmentLoader } from './TicketAttachments';
 import { ticketAttachmentsMessages } from './ticketAttachments.messages';
 import { TicketChatDock, type TicketChatAction } from './TicketChatDock';
+import { TicketLinksSection } from './TicketLinksSection';
 import type { TicketActionReceipt, TicketRunProgress } from './ticketChatStatus';
 import { isTicketBlockedForActions, ticketDecision } from './ticketDecision';
 import {
@@ -191,6 +192,10 @@ export type TicketThreadProps = {
   /** 每次交付是第几次（deliveryNumbers.ts）。文字里的交付写「第 N 次交付」，不写执行记录的编号。 */
   deliveryNumbers?: DeliveryNumbers;
   facts?: TicketDetailFacts | null;
+  /** 来源、会话链接和判断理由（GET /v1/tickets/:id/links，external-worker-hub Task 10）。旧 daemon 不给时为 null，不画这一块。 */
+  links?: TicketLinks | null;
+  /** 这张单的处理方式、复杂度、领取人（GET /v1/tickets/meta）。旧 daemon 不给时为 null。 */
+  meta?: TicketMeta | null;
   executor?: RunProfilePresentation | null;
   /** 不要求独立核查的工单没有核查员（null）。 */
   reviewer?: (RunProfilePresentation & { status: ReviewerStatus }) | null;
@@ -299,6 +304,8 @@ export function TicketThread({
   delivery = null,
   deliveryNumbers,
   facts = null,
+  links = null,
+  meta = null,
   executor = null,
   reviewer = null,
   onRunAction,
@@ -672,6 +679,29 @@ export function TicketThread({
     </Section>
   );
 
+  // ── 来源与会话（external-worker-hub Task 10）──
+  // 从哪来、怎么处理和为什么、谁领着、在哪个会话里。处理方式在这里一键切换（ticket.set_handling，user_direct），能不能点按清单。
+  const handlingAction = findAction(actions, 'ticket.set_handling');
+  const linksSection = links ? (
+    <Section
+      testID="ticket-section-links"
+      title={titles.links}
+      source={sources.system}
+      summary={collapsed('links') ? meta?.sourceLabel ?? undefined : undefined}
+      collapsed={collapsed('links')}
+      onToggle={toggle('links')}
+    >
+      <TicketLinksSection
+        links={links}
+        meta={meta}
+        handlingAction={handlingAction}
+        busy={pendingActionId !== null || !onRunAction}
+        settingHandling={handlingAction !== null && pendingActionId === handlingAction.id}
+        onSetHandling={handlingAction ? (handling) => runAction(handlingAction, { input: { handling } }) : undefined}
+      />
+    </Section>
+  ) : null;
+
   // ── 执行 ──
   const running = stage === 'running';
   const usage = {
@@ -1017,6 +1047,7 @@ export function TicketThread({
                 {taskSection}
                 {criteriaSection}
                 {infoSection}
+                {linksSection}
               </Column>
               {executionSection ? <Column pt="page-section">{executionSection}</Column> : null}
               {deliverySection ? <Column pt="page-section">{deliverySection}</Column> : null}
