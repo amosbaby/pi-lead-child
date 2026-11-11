@@ -59,10 +59,15 @@ export const AgentTaskRequestSchema = StrictObject({
 });
 export type AgentTaskRequest = Static<typeof AgentTaskRequestSchema>;
 
-/** 派单器的回答：开好的工单和 Run，算出来的清单，以及超出上限被丢掉的部分（给 Lead 看）。 */
+/**
+ * 派单器的回答：开好的工单和 Run，算出来的清单，以及超出上限被丢掉的部分（给 Lead 看）。
+ * 执行模式不是 self 时（engine 的 execution-mode.ts，ruling R12）：只建工单，不建 Run（runId 是 null，deferred 是 true），
+ * 工单留在 ready 等外部工人领走。这时没有结果回调。
+ */
 export interface AgentTaskDispatch {
   itemId: number;
-  runId: number;
+  runId: number | null;
+  deferred?: true;
   grant: RunGrant;
   dropped: string[];
 }

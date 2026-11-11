@@ -79,6 +79,11 @@ export function handlingNotice(assistant: string, verb: HandlingVerb): Disclosed
   return disclosed(`${assistantLabel(assistant)} is ${HANDLING_PHRASES[verb]}…`, null);
 }
 
+/** 执行模式不是 self 时派的子 agent 工单（ruling R12）：回一句它成了哪张工单、在等外部工人。text 来自 hub.messages.ts。 */
+export function deferredTaskNotice(assistant: string, text: string): DisclosedText {
+  return disclosed(assistantLabel(assistant), text);
+}
+
 /** 自动发出的回复。 */
 export function autoReplyDisclosure(assistant: string, owner: string, text: string): DisclosedText {
   return disclosed(`${assistantLabel(assistant)} · auto-reply for ${owner}`, text);

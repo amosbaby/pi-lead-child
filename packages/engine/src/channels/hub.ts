@@ -104,8 +104,8 @@ import {
 import { DELEGATION_GATE_LABELS } from "./delegation-gate.js";
 import { channelHubMessages } from "./hub.messages.js";
 import {
-  autoReplyDisclosure, confirmedDraftDisclosure, defaultHandlingVerb, disclosureAssistantName, disclosureOwnerName, handlingNotice,
-  isHandlingVerb, ownerReplyDisclosure,
+  autoReplyDisclosure, confirmedDraftDisclosure, defaultHandlingVerb, deferredTaskNotice, disclosureAssistantName, disclosureOwnerName,
+  handlingNotice, isHandlingVerb, ownerReplyDisclosure, type DisclosedText,
 } from "./disclosure.js";
 import {
   buildContextPack, contextParts, repackForText, type BuiltContextPack, type ContextPackDeps, type ContextPackInput, type ContextPackOptions,
@@ -405,7 +405,9 @@ export interface ChannelLeadDispatchInput {
 
 export interface ChannelLeadDispatchResult {
   itemId: number;
-  runId: number;
+  // 执行模式不是 self 时没有 Run（null），deferred 是 true：工单等外部工人领走（ruling R12）。
+  runId: number | null;
+  deferred?: true;
   // 算出来的清单（一句话一条）。
   grant: string[];
   // Lead 要的、超出上限被丢掉的部分。
@@ -1829,7 +1831,7 @@ export class ChannelHub {
   // 记 Lead 的决定（系统只记两种事实：并进了新的请求、卡已经结束）。同一个请求只记一次：返回 false 时别人已经定了。
   private recordLeadDecision(
     request: LeadRequest, decision: ChannelLeadDecision, by: "lead" | "system", reason: string,
-    extra: { itemId?: number; runId?: number; dropped?: string[]; pullRequest?: string } = {},
+    extra: { itemId?: number; runId?: number; deferred?: true; dropped?: string[]; pullRequest?: string } = {},
     // 同一条消息多派的一张工单另记一条（extraDispatchRef），不占这个请求的决定。
     sourceRef: string = leadDecidedRef(request.stage, request.forSeq, request.seq),
   ): boolean {
@@ -1903,7 +1905,10 @@ export class ChannelHub {
     const dispatched = await this.dispatchTask(adapter, request, {
       intent, summary: input.summary, scope, followUp, ...(sentenceBound ? { bound: sentenceBound } : {}),
     });
-    return { itemId: dispatched.itemId, runId: dispatched.runId, grant: describeRunGrant(dispatched.grant), dropped: dispatched.dropped };
+    return {
+      itemId: dispatched.itemId, runId: dispatched.runId, ...(dispatched.deferred ? { deferred: true as const } : {}),
+      grant: describeRunGrant(dispatched.grant), dropped: dispatched.dropped,
+    };
   }
 
   /**
@@ -1978,18 +1983,24 @@ export class ChannelHub {
         bound: input.bound ?? (request.intent === input.intent && request.bound ? request.bound : DEFAULT_INTENT_GRANT_BOUNDS[input.intent]),
         callback: { kind: CHANNEL_TASK_CALLBACK, ref: taskRef(card.id, request.forSeq) },
       });
+      // 没有 Run 时（ruling R12）不写 runId，写 deferred（事件的 payload 里 runId 只能是编号）。
       const decided = {
-        itemId: dispatched.itemId, runId: dispatched.runId, ...(pr !== "-" ? { pullRequest: pr } : {}),
+        itemId: dispatched.itemId, ...(dispatched.runId === null ? { deferred: true as const } : { runId: dispatched.runId }),
+        ...(pr !== "-" ? { pullRequest: pr } : {}),
         ...(dispatched.dropped.length ? { dropped: dispatched.dropped } : {}),
       };
       // 同时派的另一个 PR 的工单，请求已经被前一张定了：另记一条，下一次派活按它数这条消息派过哪些 PR。
       if (input.followUp || !this.recordLeadDecision(request, "dispatch", "lead", "Lead 决定派工单", decided)) {
-        this.recordLeadDecision(request, "dispatch", "lead", `Lead 为 ${pr} 再派一张工单`, decided, extraDispatchRef(request.forSeq, dispatched.runId));
+        this.recordLeadDecision(request, "dispatch", "lead", `Lead 为 ${pr} 再派一张工单`, decided, extraDispatchRef(request.forSeq, dispatched));
       }
       this.recordTaskStart(adapter, card, request, input.intent, input.scope, dispatched, text);
       // 回一句「正在处理」：结果出来以后的回复改写它（落地计划 A3）。只有 Lead 派活时才发（统一消息事件 spec D9）。
       // 自动代你处理关着（issue 07）时不发：结果也不代你发，交回 Lead。
-      if (this.handbookNow().autoReply) this.sendStatusNotice(adapter, card, request.forSeq, text, input.intent === "code_review" || input.intent === "approve" ? "review" : "lookup");
+      // 执行模式不是 self（ruling R12）：工单没有开跑，等外部工人领走。回的一句写明它成了哪张工单，不等结果。
+      if (this.handbookNow().autoReply) {
+        this.sendStatusNotice(adapter, card, request.forSeq, text, input.intent === "code_review" || input.intent === "approve" ? "review" : "lookup",
+          dispatched.deferred ? deferredTaskNotice(this.assistantFor(adapter), channelHubMessages(getLocale(db)).taskDeferred(dispatched.itemId)) : undefined);
+      }
       this.cardsChanged([card.id]);
       return dispatched;
     } finally {
@@ -2018,7 +2029,8 @@ export class ChannelHub {
       db.transaction(() => {
         const created = createChannelLookup(db, {
           cardId: card.id, source: adapter.id, objectKey: card.objectKey, forSeq: request.forSeq,
-          playbook: intent === "code_review" || intent === "approve" ? "review" : "lookup", state: "running",
+          // 执行模式不是 self 时没有 Run（ruling R12）：排着（queued），一样占着这张卡唯一的进行中记录，同一张卡不会再派一张。
+          playbook: intent === "code_review" || intent === "approve" ? "review" : "lookup", state: dispatched.deferred ? "queued" : "running",
           requester: { id: card.sender.id, name: card.sender.name, trust: card.sender.trust }, question,
           intake: {
             answered: intake?.status === "answered", askKind: typeof intake?.askKind === "string" ? intake.askKind : null,
@@ -4523,15 +4535,20 @@ export class ChannelHub {
   }
 
   // 「正在处理」的一句（代查、子 agent 工单都用）：幂等键按卡和消息，回复改写它（落地计划 A3）。返回发送的 promise。
-  private sendStatusNotice(adapter: ChannelAdapter, card: ChannelCard, forSeq: number, question: string, playbook: string): Promise<void> {
+  // fixed：发这一句，不再按问题挑动作词（执行模式不是 self 时派的工单，ruling R12）。
+  private sendStatusNotice(
+    adapter: ChannelAdapter, card: ChannelCard, forSeq: number, question: string, playbook: string, fixed?: DisclosedText,
+  ): Promise<void> {
     const key = `handling:card:${card.id}:seq:${forSeq}`;
     const sending: Promise<void> = (async () => {
       try {
-        const verb = await judgeHandlingVerb({
-          question, playbook: playbook === "review" ? "review" : "lookup", model: this.smartModelNow(),
-          timeoutMs: Math.max(this.options.intakeTimeoutMs ?? CHANNEL_INTAKE_TIMEOUT_MS, 1),
-        });
-        const notice = handlingNotice(this.assistantFor(adapter), isHandlingVerb(verb) ? verb : defaultHandlingVerb(playbook));
+        const notice = fixed ?? handlingNotice(this.assistantFor(adapter), await (async () => {
+          const verb = await judgeHandlingVerb({
+            question, playbook: playbook === "review" ? "review" : "lookup", model: this.smartModelNow(),
+            timeoutMs: Math.max(this.options.intakeTimeoutMs ?? CHANNEL_INTAKE_TIMEOUT_MS, 1),
+          });
+          return isHandlingVerb(verb) ? verb : defaultHandlingVerb(playbook);
+        })());
         // 想措辞的时候自动代你处理被关掉了（issue 07）：按现在的开关，不发。
         if (!this.handbookNow().autoReply) {
           this.log(`[channels] ${adapter.id}: auto-handling was turned off; the handling notice on card #${card.id} was not sent`);
@@ -4875,7 +4892,10 @@ const leadDecidedRef = (stage: ChannelLeadStage, forSeq: number, seq: number) =>
 const legacyReplyDecidedRef = (forSeq: number) => `channel-lead-decided:reply:${forSeq}`;
 const pullRequestKey = (pr: { owner: string; repo: string; number: number }) => `${pr.owner}/${pr.repo}#${pr.number}`.toLowerCase();
 // 同一条消息多派的一张工单（另一个 PR，或者交回以后重派以外的情况）：按 Run 记。
-const extraDispatchRef = (forSeq: number, runId: number) => `channel-lead-dispatched:${forSeq}:run:${runId}`;
+// 执行模式不是 self 时派的工单没有 Run（ruling R12）：按工单编号记。
+const extraDispatchRef = (forSeq: number, dispatched: Pick<AgentTaskDispatch, "itemId" | "runId">) => dispatched.runId === null
+  ? `channel-lead-dispatched:${forSeq}:item:${dispatched.itemId}`
+  : `channel-lead-dispatched:${forSeq}:run:${dispatched.runId}`;
 // 一条消息最多派这么多张子 agent 工单（每个 PR 一张，加上失败以后的重派）。再多就开普通工单。
 export const CHANNEL_MAX_TASKS_PER_MESSAGE = 6;
 // 派不了时 Lead 的下一步（AGENTS.md：新的拒绝要说 Lead 下一步做什么）。

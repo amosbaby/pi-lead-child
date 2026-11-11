@@ -9,7 +9,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
-import { getChannelCard, getStandingOrder, listEvents, openDb, proposeStandingOrderChange, type Db } from "@pi-lead-child/store";
+import {
+  getChannelCard, getItem, getLatestLookupForCard, getStandingOrder, listEvents, listRuns, openDb, proposeStandingOrderChange, type Db,
+} from "@pi-lead-child/store";
 import { AUTHORITY_REFUSAL_TEXT, ChannelHub, ChannelRegistry, createSlackChannelAdapter, type ChannelHubOptions } from "../src/index.js";
 import { agentTaskResult, cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel, type ScriptedSmartModel } from "../testing/index.js";
 
@@ -230,7 +232,7 @@ describe("B2: Lead decides", () => {
     await expect(channels.leadDispatch(eventOf(item.cardId), { summary: "再派一次" })).rejects.toMatchObject({ code: "invalid_action" });
 
     // 子 agent 在 PR 上发了评论，交回草稿：信心够，代你回，改写「正在处理」那一条。
-    await dispatcher.finish(dispatched.runId, {
+    await dispatcher.finish(dispatched.runId!, {
       result: agentTaskResult({ answer: "看过了，留了 1 条评论。", sources: [], replyDraft: "已在 PR 留了 1 条评论：https://github.com/acme/orders/pull/12#pullrequestreview-1" }),
       actions: [{
         connection: "github", tool: "pull_request_review_write", summary: "在 acme/orders#12 提交了 COMMENT review（1 条评论）",
@@ -252,12 +254,33 @@ describe("B2: Lead decides", () => {
     expect(channels.cardForLead(item.cardId)!.tasks).toEqual([{ itemId: dispatched.itemId, runId: dispatched.runId, by: "lead", status: "finished", reply: "auto_send" }]);
   });
 
+  // 执行模式不是 self 时派单器只建工单、不建 Run（ruling R12）：卡上记一条排着的子 agent 工单（run_id 是 null），占着这张卡，
+  // 同一张卡不能再派一张；来源里回一句它成了哪张工单。结果不回通道（Task 11）。
+  it("records a deferred dispatch as a queued task with no run, says which ticket it became, and refuses a second one", async () => {
+    const channels = hub(jev());
+    const item = await receive(channels, slack.dm("U0ETHAN", "帮忙 review 一下 acme/orders#12"));
+    dispatcher.deferNext = true;
+    const dispatched = await channels.leadDispatch(eventOf(item.cardId), { summary: "review 订单服务的重试改动" });
+    expect(dispatched).toMatchObject({ runId: null, deferred: true });
+    expect(getItem(db, dispatched.itemId)!.stage).toBe("ready");
+    expect(listRuns(db, dispatched.itemId)).toEqual([]);
+    expect(getLatestLookupForCard(db, item.cardId)).toMatchObject({ state: "queued", itemId: dispatched.itemId, runId: null });
+    expect(decisions()).toMatchObject([{ payload: { decision: "dispatch", by: "lead", itemId: dispatched.itemId, deferred: true } }]);
+    await channels.idle();
+    expect(slack.sent("D0ETHAN").map((message) => message.text)).toEqual([
+      `:robot_face: Paimon (Assistant)\nThis request is now ticket #${dispatched.itemId}, waiting for an external worker to pick it up.`,
+    ]);
+    // 同一张卡不再派一张：没有第二张工单。
+    await expect(channels.leadDispatch(eventOf(item.cardId), { summary: "再派一次" })).rejects.toMatchObject({ code: "invalid_action" });
+    expect(dispatcher.requests).toHaveLength(1);
+  });
+
   it("hands a weak result back to Lead (B4), and Lead tells the user with its own draft", async () => {
     const channels = hub(jev({ fulfills_request: 0.1 }));
     const item = await receive(channels, slack.dm("U0ETHAN", "帮忙 review 一下 acme/orders#12"));
     const event = eventOf(item.cardId);
     const dispatched = await channels.leadDispatch(event, { summary: "review 这个 PR" });
-    await dispatcher.finish(dispatched.runId, { result: agentTaskResult({ replyDraft: "看过了，有两处要改。" }) });
+    await dispatcher.finish(dispatched.runId!, { result: agentTaskResult({ replyDraft: "看过了，有两处要改。" }) });
     await channels.idle();
     expect(replies()).toEqual([]);
     expect(getChannelCard(db, item.cardId)).toMatchObject({ state: "open", draft: { text: "看过了，有两处要改。" } });
@@ -311,7 +334,7 @@ describe("dispatching again on the same message", () => {
     const channels = hub(jev());
     const item = await receive(channels, slack.dm("U0ETHAN", "帮忙 review 一下 acme/orders#12"));
     const first = await channels.leadDispatch(eventOf(item.cardId), { summary: "review 这个 PR" });
-    await dispatcher.finish(first.runId, { status: "failed", result: null, error: "子 agent 没有用 submit_result 交结果" });
+    await dispatcher.finish(first.runId!, { status: "failed", result: null, error: "子 agent 没有用 submit_result 交结果" });
     await channels.idle();
     const [back] = handedBack();
     expect(back).toBeDefined();
@@ -320,7 +343,7 @@ describe("dispatching again on the same message", () => {
     expect(dispatcher.requests.at(-1)).toMatchObject({ scope: { pullRequest: { owner: "acme", repo: "orders", number: 12 } } });
     expect(decisions().map((event) => [event.payload.stage, event.payload.decision])).toEqual([["intake", "dispatch"], ["reply", "dispatch"]]);
     // 重派的结果交回以后，Lead 照常能处理它：它不会被上一次的决定算成已经定了。
-    await dispatcher.finish(again.runId, { status: "failed", result: null, error: "又失败了" });
+    await dispatcher.finish(again.runId!, { status: "failed", result: null, error: "又失败了" });
     await channels.idle();
     expect(channels.pendingLeadRequest(item.cardId)).toMatchObject({ stage: "reply" });
   });
@@ -374,7 +397,7 @@ describe("D2: calibration from what you actually did", () => {
     const item = await receive(channels, slack.dm(from, text));
     const dispatched = await channels.leadDispatch(eventOf(item.cardId), { summary: "review 这个 PR" });
     // 子 agent 在 PR 上留了一条评论（核实过的动作），交回草稿。
-    await dispatcher.finish(dispatched.runId, {
+    await dispatcher.finish(dispatched.runId!, {
       result: agentTaskResult({ answer: "看过了，留了 1 条评论。", sources: [], replyDraft: "看过了，没问题。" }),
       actions: [{
         connection: "github", tool: "pull_request_review_write", summary: "在 acme/orders#12 提交了 COMMENT review（1 条评论）",

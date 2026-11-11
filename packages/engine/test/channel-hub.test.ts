@@ -510,7 +510,7 @@ describe("the authority table decides what the channel does", () => {
     await channels.idle();
     const event = listEvents(db, { kind: "message.received" }).find((entry) => entry.payload.cardId === cardIdOf(db, ask))!.seq;
     const task = await channels.leadDispatch(event, { summary: "review 这个 PR", pullRequest: { owner: "acme", repo: "orders", number: 12 } });
-    await dispatcher.finish(task.runId, {
+    await dispatcher.finish(task.runId!, {
       result: agentTaskResult({ answer: "看过了，留了 1 条评论。", sources: [], replyDraft: "看过了，没问题。" }),
       actions: [{
         connection: "github", tool: "pull_request_review_write", summary: "在 acme/orders#12 提交了 COMMENT review（1 条评论）",

@@ -213,7 +213,7 @@ describe("a card with a dispatched sub-agent waits for its result", () => {
     const channels = hub(jev({ fulfills_request: 0.1 }));
     const item = await dispatched(channels);
     await channels.leadDisposed(item.event, { disposition: "handled", reason: "已经派了子 agent 去查" });
-    await dispatcher.finish(item.runId, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
+    await dispatcher.finish(item.runId!, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
     await channels.idle();
     expect(getChannelCard(db, item.cardId)).toMatchObject({ state: "open" });
     expect(listEvents(db, { kind: "channel.task.finished" })).toMatchObject([{ level: "tell", payload: { handedBack: true, messageEvent: item.event } }]);
@@ -226,7 +226,7 @@ describe("a card with a dispatched sub-agent waits for its result", () => {
   it("lets the card end with Lead's handled once the result is back", async () => {
     const channels = hub(jev({ fulfills_request: 0.1 }));
     const item = await dispatched(channels);
-    await dispatcher.finish(item.runId, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
+    await dispatcher.finish(item.runId!, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
     await channels.idle();
     const done = await channels.leadDisposed(item.event, { disposition: "handled", reason: "在会话里告诉用户了，他说自己回" });
     expect(done).toMatchObject({ cardId: item.cardId, state: "handled" });
@@ -290,7 +290,7 @@ describe("Lead does nothing outward by itself when auto-handling is off", () => 
     const task = await channels.leadDispatch(event, { summary: "查 orders 今天有没有上线", intent: "progress" });
     await channels.idle();
     expect(slack.sent()).toEqual([]);
-    await dispatcher.finish(task.runId, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
+    await dispatcher.finish(task.runId!, { result: agentTaskResult({ replyDraft: "orders 今天已经上线了。" }) });
     await channels.idle();
     expect(slack.sent()).toEqual([]);
     expect(getChannelCard(db, yi.cardId)).toMatchObject({ state: "open" });

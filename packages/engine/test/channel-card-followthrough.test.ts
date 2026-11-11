@@ -82,7 +82,7 @@ describe("the status notice ends with the work", () => {
   it("is deleted when the sub-agent hands the request to you without a reply", async () => {
     const channels = hub();
     const card = await dispatchedCard(channels);
-    await dispatcher.finish(card.runId, { status: "failed", result: null, error: "工单没跑完" });
+    await dispatcher.finish(card.runId!, { status: "failed", result: null, error: "工单没跑完" });
     await channels.idle();
     expect(texts("D0ETHAN")).toEqual([]);
     expect(getChannelCard(db, card.cardId)).toMatchObject({ state: "open" });
@@ -91,7 +91,7 @@ describe("the status notice ends with the work", () => {
   it("stays while a draft waits for you, and is deleted when you dismiss the card", async () => {
     const channels = hub(jev({ fulfills_request: 0.1 }));
     const card = await dispatchedCard(channels);
-    await dispatcher.finish(card.runId, { result: agentTaskResult({ replyDraft: "上限是 5 次。" }) });
+    await dispatcher.finish(card.runId!, { result: agentTaskResult({ replyDraft: "上限是 5 次。" }) });
     await channels.idle();
     expect(getChannelCard(db, card.cardId)).toMatchObject({ state: "open", draft: { text: "上限是 5 次。" } });
     expect(texts("D0ETHAN")).toEqual([NOTICE]);
@@ -103,7 +103,7 @@ describe("the status notice ends with the work", () => {
   it("is deleted when you answer in Slack yourself", async () => {
     const channels = hub(jev({ fulfills_request: 0.1, answers_request: 0.95 }));
     const card = await dispatchedCard(channels);
-    await dispatcher.finish(card.runId, { result: agentTaskResult({ replyDraft: "上限是 5 次。" }) });
+    await dispatcher.finish(card.runId!, { result: agentTaskResult({ replyDraft: "上限是 5 次。" }) });
     await channels.idle();
     await channels.receive("slack", slack.selfReply("D0ETHAN", "5 次，配置在 retry.ts"));
     await channels.idle();
@@ -143,7 +143,7 @@ describe("Lead's message in a conversation ends the card that waits there", () =
   it("closes the card as replied for you and turns the status notice into the message", async () => {
     const channels = hub(jev({ fulfills_request: 0.1 }));
     const card = await dispatchedCard(channels);
-    await dispatcher.finish(card.runId, { result: agentTaskResult({ replyDraft: "上限是 5 次。" }) });
+    await dispatcher.finish(card.runId!, { result: agentTaskResult({ replyDraft: "上限是 5 次。" }) });
     await channels.idle();
     const sent = await channels.sendMessage("slack:@U0ETHAN", {
       text: "上限 5 次，下周改成可配置", words: "user", forUser: true, by, seenBefore: clock.getTime() + 1,

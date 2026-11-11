@@ -268,7 +268,7 @@ describe("when Lead cannot work (spec D7, scenario 14)", () => {
     await channels.idle();
     const notices = outbound().length;
     leadUp = false;
-    await dispatcher.finish(dispatched.runId, { result: agentTaskResult({ replyDraft: "看过了，有两处要改。" }) });
+    await dispatcher.finish(dispatched.runId!, { result: agentTaskResult({ replyDraft: "看过了，有两处要改。" }) });
     await channels.idle();
     await later(channels, 5);
     const back = listEvents(db, { kind: "channel.task.finished" });

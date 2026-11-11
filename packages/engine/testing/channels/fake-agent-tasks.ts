@@ -9,9 +9,11 @@ import { createItem, createRun, transition, type Db } from "@pi-lead-child/store
 import type { ChannelHub } from "../../src/index.js";
 
 export class FakeAgentTaskDispatcher implements AgentTaskDispatcher {
-  readonly requests: Array<AgentTaskRequest & { runId: number; itemId: number; grant: RunGrant; dropped: string[] }> = [];
+  readonly requests: Array<AgentTaskRequest & { runId: number | null; itemId: number; grant: RunGrant; dropped: string[] }> = [];
   hub: Pick<ChannelHub, "agentTaskFinished"> | null = null;
   failNext: string | null = null;
+  // 下一次派活像执行模式不是 self 时那样只建工单、不建 Run（apps/daemon 的 agent-tasks.ts，ruling R12）。
+  deferNext = false;
   private readonly handlers = new Map<string, (outcome: AgentTaskOutcome) => void>();
 
   constructor(private readonly db: Db, private readonly localRepos: Record<string, string> = {}) {}
@@ -24,6 +26,12 @@ export class FakeAgentTaskDispatcher implements AgentTaskDispatcher {
     }
     const resolveLocalRepo = (name: string): GrantLocalRepo | null => (this.localRepos[name] ? { name, root: this.localRepos[name]! } : null);
     const { grant, dropped } = computeRunGrant({ intent: request.intent, scope: request.scope, ...(request.bound ? { bound: request.bound } : {}), resolveLocalRepo });
+    if (this.deferNext) {
+      this.deferNext = false;
+      const itemId = createItem(this.db, { title: `子 agent：${request.request.summary.slice(0, 40)}`, brief: "测试", createdBy: "system", purpose: "lookup" });
+      this.requests.push({ ...request, itemId, runId: null, grant, dropped });
+      return { itemId, runId: null, deferred: true, grant, dropped };
+    }
     const ids = this.db.transaction(() => {
       const itemId = createItem(this.db, { title: `子 agent：${request.request.summary.slice(0, 40)}`, brief: "测试", createdBy: "system", purpose: "lookup" });
       const runId = createRun(this.db, { itemId, purpose: "lookup" });

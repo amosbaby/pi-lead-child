@@ -27,7 +27,10 @@ export interface LeadChannelCards {
     tasks?: Array<Record<string, unknown>>;
   } | null;
   // 没有接派单器时没有它，也就没有 dispatch_agent_task。
-  dispatch?(eventSeq: number, input: LeadChannelDispatchInput): Promise<{ itemId: number; runId: number; grant: string[]; dropped: string[] }>;
+  // 执行模式不是 self 时 runId 是 null、deferred 是 true：只建了工单，等外部工人领走（ruling R12）。
+  dispatch?(eventSeq: number, input: LeadChannelDispatchInput): Promise<{
+    itemId: number; runId: number | null; deferred?: true; grant: string[]; dropped: string[];
+  }>;
   // 改选交接说明里的一句（repick_situation，自动代你处理方案 B，用户 2026-10-30 定 D1）：上限按新的一句重算。
   repick?(eventSeq: number, input: { situation: string; reason: string }): {
     cardId: number; situation: { id: string; text: string }; final: string; by: string; limit: string | null; abilities: string[]; next: string;
@@ -190,7 +193,10 @@ export function createChannelCardTools(cards: LeadChannelCards | undefined, db?:
           });
           return json({
             ok: true, ...result,
-            next: "结果回到通道，信心够就代用户回复；不够会再交给你。这条消息不用再 record_disposition，也不用回复对方：卡等结果交回再结束",
+            next: result.deferred
+              ? `执行模式不是 self：只建了工单 #${result.itemId}，没有开跑，等外部工人领走；来源里回了一句它成了哪张工单。`
+                + "结果不会自动回到通道。这条消息不用再 record_disposition，也不要再派一次"
+              : "结果回到通道，信心够就代用户回复；不够会再交给你。这条消息不用再 record_disposition，也不用回复对方：卡等结果交回再结束",
           });
         } catch (error) {
           return failure(error);

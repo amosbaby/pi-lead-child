@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { Value } from "typebox/value";
 import type { Item } from "@pi-lead-child/core";
 import type { ConnectionHub } from "@pi-lead-child/connections";
-import { runItem, liveChildren } from "@pi-lead-child/engine";
+import { deferIfExternal, getExecutionMode, runItem, liveChildren } from "@pi-lead-child/engine";
 import {
   agentTaskConnections, agentTaskPrompt, AGENT_TASK_RUNTIME_PROFILE, createAgentTaskRuntime, createLookupSessionFactory,
   type AgentTaskToolLimits, type LookupSessionFactory,
@@ -265,6 +265,17 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       ...(dropped.length ? [`超出上限、没有给的：${dropped.join("；")}。`] : []),
       "对方的原话在通道卡上。结果由派单器交回发起方；这张工单跟着子 agent 结束。",
     ].join("\n");
+    // 执行模式不是 self（engine 的 execution-mode.ts，ruling R12）：只建工单，不建 Run、不起会话。工单留在 ready，
+    // 记一条 execution_deferred，等外部工人领走。没有结果回调：外部工人写回以后在来源里回复是以后的事（Task 11）。
+    if (getExecutionMode(db) !== "self") {
+      const itemId = db.transaction(() => {
+        const created = createItem(db, { title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal" });
+        deferIfExternal(db, created, "dispatch_agent_task");
+        return created;
+      }).immediate();
+      log(`[agent-task] ${request.intent} deferred: ticket #${itemId} waits for an external worker`);
+      return { itemId, runId: null, deferred: true, grant, dropped };
+    }
     const { itemId, runId } = db.transaction(() => {
       const itemId = createItem(db, { title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal" });
       const runId = createRun(db, {

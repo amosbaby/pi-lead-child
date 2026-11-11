@@ -102,7 +102,7 @@ describe("the agent task dispatcher", () => {
     const dispatched = await dispatcher.dispatch(REQUEST);
     // 代码 review 的上限里没有 APPROVE：Lead 要了也不给，告诉它丢了什么。
     expect(dispatched.dropped).toEqual(["这个意图不能发 APPROVE"]);
-    expect(getRunGrant(f.db, dispatched.runId)?.grant).toEqual(dispatched.grant);
+    expect(getRunGrant(f.db, dispatched.runId!)?.grant).toEqual(dispatched.grant);
     const item = getItem(f.db, dispatched.itemId)!;
     expect(item.title).toBe(agentTaskTitle(REQUEST));
     expect(`${item.title}\n${item.brief}`).not.toContain("approve");
@@ -125,14 +125,14 @@ describe("the agent task dispatcher", () => {
     expect(outcome.actions[2]!.url).toBe("https://github.com/Acme/x/pull/101");
     expect(outcome.reads.map((read) => read.path)).toEqual(["pull/101/get", "pull/101/get_diff", undefined]);
     // 交回以后，连接中心丢掉这个 Run 读到的内容。
-    expect(f.hub.runReads(dispatched.runId).records()).toEqual([]);
+    expect(f.hub.runReads(dispatched.runId!).records()).toEqual([]);
     expect(f.gh.submitted(PR.owner, PR.repo, PR.number)).toMatchObject([{ state: "COMMENTED" }]);
-    expect(listRunToolCalls(f.db, dispatched.runId).find((entry) => entry.decision === "refused")).toMatchObject({
+    expect(listRunToolCalls(f.db, dispatched.runId!).find((entry) => entry.decision === "refused")).toMatchObject({
       tool: "pull_request_review_write", reason: expect.stringContaining("event 是 APPROVE"),
     });
     // 工单跟着收尾：done；Run finished；不升 blocker。
     expect(getItem(f.db, dispatched.itemId)?.stage).toBe("done");
-    expect(getRun(f.db, dispatched.runId)?.state).toBe("finished");
+    expect(getRun(f.db, dispatched.runId!)?.state).toBe("finished");
     expect(listInbox(f.db).filter((row) => row.item_id === dispatched.itemId)).toEqual([]);
     const decisions = listActivities(f.db, dispatched.itemId).map((row) => JSON.parse(String(row.payload)).decision).filter(Boolean);
     expect(decisions).toEqual(["agent_task_started", "agent_task_finished"]);
@@ -152,11 +152,11 @@ describe("the agent task dispatcher", () => {
     cleanups.push(() => dispatcher.close());
     const dispatched = await dispatcher.dispatch(REQUEST);
     expect(dispatcher.running()).toEqual([dispatched.runId]);
-    const cancelling = dispatcher.cancel(dispatched.runId);
+    const cancelling = dispatcher.cancel(dispatched.runId!);
     release();
     await cancelling;
     expect(getItem(f.db, dispatched.itemId)?.stage).toBe("cancelled");
-    expect(getRun(f.db, dispatched.runId)?.state).toBe("stopped");
+    expect(getRun(f.db, dispatched.runId!)?.state).toBe("stopped");
     const late: AgentTaskOutcome[] = [];
     dispatcher.onFinished("channel", (outcome) => late.push(outcome));
     expect(late).toMatchObject([{ status: "cancelled", runId: dispatched.runId }]);
@@ -171,12 +171,12 @@ describe("the agent task dispatcher", () => {
     });
     const dispatched = await dispatcher.dispatch(REQUEST);
     // 模拟进程被杀：Run 留在 running，派单器不再存在。
-    updateRun(f.db, dispatched.runId, { state: "running" });
+    updateRun(f.db, dispatched.runId!, { state: "running" });
     const recovered = recoverAgentTasksAfterRestart(f.db);
     expect(recovered).toMatchObject([{ runId: dispatched.runId, status: "failed", callback: { kind: "channel", ref: "card-3" }, error: "daemon 重启，子 agent 被打断" }]);
     expect(getItem(f.db, dispatched.itemId)?.stage).toBe("cancelled");
-    expect(getRun(f.db, dispatched.runId)?.state).toBe("failed");
+    expect(getRun(f.db, dispatched.runId!)?.state).toBe("failed");
     expect(recoverAgentTasksAfterRestart(f.db)).toEqual([]);
-    void dispatcher.cancel(dispatched.runId).catch(() => {});
+    void dispatcher.cancel(dispatched.runId!).catch(() => {});
   });
 });

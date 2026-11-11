@@ -4,7 +4,7 @@
 //   - reclaimLookupRun、recoverLookupsAfterRestart：daemon 重启时被打断的记成失败，工单不进 blocked，不重新派发。
 // 旧的代查启动器（代查剧本的进程内 runtime）随代查退役了（落地计划 D1）。
 import type { Item, Run } from "@pi-lead-child/core";
-import type { LookupOutcome } from "@pi-lead-child/protocol";
+import { EXECUTION_DEFERRED_DECISION, type LookupOutcome } from "@pi-lead-child/protocol";
 import { typedFailure } from "@pi-lead-child/runtime";
 import { addActivity, getItem, getRun, transition, transitionRunState, type Db } from "@pi-lead-child/store";
 
@@ -116,8 +116,12 @@ export function recoverLookupsAfterRestart(db: Db, now: Date = new Date()): Recl
     `SELECT i.id FROM items i
      WHERE i.kind='task' AND i.purpose='lookup' AND i.stage IN ('ready','active')
        AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.state IN ('starting','running'))
+       -- 执行模式不是 self 时派的子 agent 工单（agent-tasks.ts，ruling R12）：没有 Run，留在 ready 等外部工人领走，不收。
+       AND NOT (i.stage='ready' AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id)
+         AND EXISTS (SELECT 1 FROM activities a WHERE a.item_id=i.id AND a.kind='decision'
+           AND json_extract(a.payload, '$.decision')=?))
      ORDER BY i.id`,
-  ).all() as Array<{ id: number }>;
+  ).all(EXECUTION_DEFERRED_DECISION) as Array<{ id: number }>;
   for (const item of items) {
     const done = db.transaction((): ReclaimedLookup | null => {
       const current = getItem(db, item.id);

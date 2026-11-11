@@ -24,6 +24,9 @@ import {
   createItem, createOnceTrigger, createRun, getItem, getRun, listActivities, listRuns, openDb, transition, updateRun, type Db,
 } from "@pi-lead-child/store";
 import { recoverOrphans } from "../src/server.js";
+import { createAgentTaskDispatcher } from "../src/agent-tasks.js";
+import { recoverLookupsAfterRestart } from "../src/lookup.js";
+import type { AgentTaskRequest } from "@pi-lead-child/protocol";
 
 let dir: string;
 let db: Db;
@@ -84,6 +87,24 @@ interface Entry {
   // 工单起点不是 ready 的入口（孤儿回收、恢复暂停的 Run）：闸门不改它的 stage，期望留在这个 stage。
   stage?: string;
 }
+
+// 通道派给子 agent 的工单（dispatch_agent_task → 通道 hub → 派单器）。会话工厂一调用就失败：self 下 Run 建好、马上失败收尾，
+// 不调任何模型。连接中心用不到（外部模式下没有 Run），只给收尾要的两个方法。
+function agentTasks() {
+  return createAgentTaskDispatcher({
+    db, dbPath: join(dir, "plc.db"), dataDir: dir, resolveLocalRepo: () => null, ownerName: () => "Ethan",
+    connections: { runReads: () => ({ records: () => [] }), releaseRun: () => {} } as never,
+    sessionFactory: async () => { throw new Error("no model in this test"); },
+  });
+}
+
+const AGENT_TASK: AgentTaskRequest = {
+  intent: "knowledge",
+  request: { source: "slack", requester: "Nina", summary: "where is the retry policy documented?", ref: "card:1" },
+  untrusted: { message: "where is the retry policy documented?", context: "" },
+  scope: {},
+  callback: { kind: "channel", ref: "card:1:seq:1" },
+};
 
 const DISPATCH_TRIGGERS = ["user-rework", "continuation", "runtime-recovery", "start-stall-retry", "spawn-suspended"];
 
@@ -206,6 +227,17 @@ const DISPATCH_ENTRIES: Entry[] = [
     },
   },
   {
+    name: "dispatch_agent_task (agent-tasks.ts)",
+    async invoke() {
+      const dispatcher = agentTasks();
+      const dispatched = await dispatcher.dispatch(AGENT_TASK);
+      await dispatcher.close();
+      expect(dispatched).toMatchObject({ runId: null, deferred: true });
+      expect(deferrals(dispatched.itemId)).toEqual([expect.objectContaining({ reason: "dispatch_agent_task" })]);
+      return dispatched.itemId;
+    },
+  },
+  {
     name: "routeTicketMessageToAgentRun (ticket chat)",
     invoke() {
       const itemId = ticket();
@@ -241,6 +273,31 @@ describe("the control: in self mode the same entries start the runtime", () => {
     await vi.waitFor(() => expect(starts).toHaveBeenCalled(), { timeout: 10_000 });
     expect(listRuns(db, itemId).length).toBeGreaterThan(0);
     expect(deferrals(itemId)).toEqual([]);
+  });
+});
+
+describe("a deferred agent task ticket", () => {
+  // 代查的启动修复会把没有活 Run 的代查工单收进 cancelled：等外部工人领的那张不能被收掉。
+  it("survives the lookup repair at daemon start", async () => {
+    setExecutionMode(db, "external");
+    const dispatcher = agentTasks();
+    const { itemId } = await dispatcher.dispatch(AGENT_TASK);
+    await dispatcher.close();
+    expect(recoverLookupsAfterRestart(db)).toEqual([]);
+    expect(getItem(db, itemId)!.stage).toBe("ready");
+  });
+});
+
+describe("dispatch_agent_task in self mode (control)", () => {
+  it("creates the ticket and a Run, as before", async () => {
+    const dispatcher = agentTasks();
+    const dispatched = await dispatcher.dispatch(AGENT_TASK);
+    await dispatcher.idle();
+    await dispatcher.close();
+    expect(dispatched.runId).toEqual(expect.any(Number));
+    expect(dispatched.deferred).toBeUndefined();
+    expect(listRuns(db, dispatched.itemId).map((run) => run.id)).toEqual([dispatched.runId]);
+    expect(deferrals(dispatched.itemId)).toEqual([]);
   });
 });
 

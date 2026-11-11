@@ -12,6 +12,8 @@ export const channelHubMessages = defineMessages({
       answer: (lead: string) => `the answer ${lead} wrote`,
       lookup: (playbook: string) => `a lookup result (${playbook})`,
     },
+    // 执行模式不是 self 时派的子 agent 工单（ruling R12）：发在来源里给对方看的那一句。
+    taskDeferred: (ticket: number) => `This request is now ticket #${ticket}, waiting for an external worker to pick it up.`,
   },
   zh: {
     autoReply: {
@@ -21,5 +23,6 @@ export const channelHubMessages = defineMessages({
       answer: (lead) => `${lead} 写的回复`,
       lookup: (playbook) => `代查的结果（${playbook}）`,
     },
+    taskDeferred: (ticket) => `这个请求已经记成工单 #${ticket}，等外部工人领取。`,
   },
 });
