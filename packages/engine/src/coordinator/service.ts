@@ -2,7 +2,7 @@ import type { Db } from "@pi-lead-child/store";
 import { runUpdatedEvent } from "@pi-lead-child/store";
 import { resolveProjectForWorkdir } from "./project-resolver.js";
 import { canonicalProjectId, createProject, findProject, getProject } from "@pi-lead-child/store";
-import { createItem } from "@pi-lead-child/store";
+import { createItem, isExternalOrigin } from "@pi-lead-child/store";
 import { addAcceptanceCriteria, listAcceptanceCriteria, normalizeCriterionTexts } from "@pi-lead-child/store";
 import { getItem, updateOrchestrationState } from "@pi-lead-child/store";
 import { getRun } from "@pi-lead-child/store";
@@ -190,6 +190,8 @@ export function createCoordinator(args: { db: Db; now?: () => Date }): Coordinat
         runtime: input.runtime ?? parent.requested_runtime ?? undefined,
         model: input.model ?? parent.requested_model ?? undefined,
         purpose: input.purpose ?? "execution", verificationPolicy: "independent_reviewer",
+        // 外部来源的单拆出来的子单照样是外部来源的（external-worker-hub P1-2）。
+        externalOrigin: isExternalOrigin(db, parent.id),
       });
       if (criteria.length) addAcceptanceCriteria(db, { itemId: id, texts: criteria, by: "child", runId: context.runId });
       db.prepare(

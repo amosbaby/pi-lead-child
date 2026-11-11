@@ -92,10 +92,13 @@ describe("a Slack request handled by an external worker", () => {
     const itemId = dispatched.itemId;
     expect(listRuns(db, itemId)).toEqual([]);
     expect(summaryOf(itemId)).toMatchObject({ stage: "ready", status: "ready", hasRun: false, runtime: { state: "idle", activeAttemptId: null } });
-    // 来源：卡所在的对话和卡的锚点（线程的根或者开卡的那条消息）；Nina 的消息，所以工单来自外部来源。
+    // 来源：卡所在的对话、卡的锚点（线程的根或者开卡的那条消息）和在 Slack 里打开这条消息的链接（来源插件的 link()，和消息事件的
+    // link 是同一个）；Nina 的消息，所以工单来自外部来源。
     const card = getChannelCard(db, cardId)!;
+    const link = listEvents(db, { kind: MESSAGE_EVENT_KIND }).filter((entry) => entry.payload.cardId === cardId).at(-1)!.payload.link;
+    expect(link).toMatch(/^https:\/\//);
     expect(ticketSources(db, itemId)).toEqual([expect.objectContaining({
-      kind: "slack", conversation: card.objectKey, messageTs: card.replyTarget.thread_ts, url: null, externalKey: null,
+      kind: "slack", conversation: card.objectKey, messageTs: card.replyTarget.thread_ts, url: link, externalKey: null,
     })]);
     expect(card.replyTarget.thread_ts).toEqual(expect.any(String));
     expect(db.prepare("SELECT external_origin FROM items WHERE id=?").get(itemId)).toEqual({ external_origin: 1 });
@@ -141,6 +144,29 @@ describe("a Slack request handled by an external worker", () => {
       { actor: "system", runId, from: "ready", to: "active" },
       { actor: "system", runId, from: "active", to: "review" },
     ]);
+  });
+});
+
+// 派单器建的单一律是外部来源（失败时宁可多算外部）：通道 hub 记来源这一步没做成（这里直接调派单器，hub 那一步根本没跑），
+// 两个分支（external 下只建单、self 下建单开跑）的工单都留着 external_origin = 1。
+describe("the dispatcher on its own", () => {
+  const request = {
+    intent: "knowledge" as const, request: { source: "slack", requester: "Nina", summary: "find the retry policy" },
+    untrusted: { message: "where is the retry policy?" }, scope: {}, callback: { kind: "channel", ref: "card:1:1" },
+  };
+  it("creates every ticket as external, deferred or started", async () => {
+    setExecutionMode(db, "external");
+    const dispatcher = agentTasks();
+    const deferred = await dispatcher.dispatch(request);
+    setExecutionMode(db, "self");
+    const started = await dispatcher.dispatch(request);
+    await dispatcher.close();
+    expect(deferred).toMatchObject({ deferred: true, runId: null });
+    expect(started.runId).toEqual(expect.any(Number));
+    for (const itemId of [deferred.itemId, started.itemId]) {
+      expect(db.prepare("SELECT external_origin FROM items WHERE id=?").get(itemId)).toEqual({ external_origin: 1 });
+      expect(ticketSources(db, itemId)).toEqual([]);
+    }
   });
 });
 

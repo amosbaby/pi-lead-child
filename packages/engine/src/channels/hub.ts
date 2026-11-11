@@ -90,7 +90,7 @@ import {
   appendEvent, appendEventGuarded, channelAuthorityTable, getChannelCatchUpMark, setChannelCatchUpMark, channelDelegatePolicy, channelHandbook, CHANNEL_HANDBOOK_ORDER_ID, channelDeliveryPolicy, channelPolicy, channelReplyPolicy,
   clipEventText, createChannelLookup, findNoteByTitle, getActiveLookupForCard, getChannelCard, getChannelLane,
   getChannelLaneById, getChannelLookup, getEvent, getLocale, getRun, getLatestChannelCard, getLatestLookupForCard, getOpenChannelCard, hasRecentChannelLane, isActiveLookupState,
-  leadDisplayName, listActiveLookups, listChannelCards, listChannelCardsForObject, listDueSnoozedChannelCards, markExternalOrigin,
+  leadDisplayName, listActiveLookups, listChannelCards, listChannelCardsForObject, listDueSnoozedChannelCards,
   listOpenChannelLanes, listRecentChannelLanes, openChannelCard,
   recordChannelLaneMessage, setChannelLaneOrigin, setChannelLaneSummary, setEventDisposition, syncSystemStandingOrders, updateChannelCard,
   updateChannelLookup, CHANNEL_LANE_ORIGIN_LIMIT,
@@ -98,7 +98,7 @@ import {
   type Db, type EventRecord,
 } from "@pi-lead-child/store";
 import { channelDeliveryDecision } from "./delivery.js";
-import { isOwnMessageEvent, recordCardTicketSource } from "../ticket-sources.js";
+import { recordDispatchedCardSource } from "../ticket-sources.js";
 import {
   AUTHORITY_ANSWER_WINDOW_MS, AUTHORITY_ORDER, AUTHORITY_REFUSAL_TEXT, AUTHORITY_REVOKE_WINDOW_MS, closingReaction, type AuthorityAction,
 } from "./authority.js";
@@ -2043,9 +2043,11 @@ export class ChannelHub {
         });
         updateChannelLookup(db, created.id, { itemId: dispatched.itemId, runId: dispatched.runId }, { at });
         updateChannelCard(db, card.id, {}, { at });
-        // 工单从哪来（external-worker-hub P1-2）：这张卡（对话和锚点，ticket-sources.ts）；不是用户本人的消息时工单来自外部来源。
-        recordCardTicketSource(db, { itemId: dispatched.itemId, cardId: card.id, now: at });
-        if (!isOwnMessageEvent(db, request.forSeq)) markExternalOrigin(db, dispatched.itemId);
+        // 工单从哪来（external-worker-hub P1-2）：这张卡（对话、锚点、在来源里打开这条消息的链接，ticket-sources.ts）。
+        // 派单器建单时已经记成来自外部来源；派活的消息是用户本人写的时清掉。
+        recordDispatchedCardSource(db, {
+          itemId: dispatched.itemId, cardId: card.id, eventSeq: request.forSeq, url: linkOf(adapter, getEvent(db, request.forSeq)?.payload), now: at,
+        });
       })();
     } catch (error) {
       this.log(`[channels] ${adapter.id}: could not record the task of card #${card.id}: ${errorText(error)}`);

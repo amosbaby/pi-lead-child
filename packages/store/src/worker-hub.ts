@@ -92,10 +92,17 @@ export function addConversationSource(
   })();
 }
 
-/** 把一张工单记成来自外部来源（external_origin = 1）。只改这一列，不碰 stage 和别的生命周期字段。工单不存在时抛错。 */
-export function markExternalOrigin(db: Db, itemId: number): void {
-  const result = db.prepare("UPDATE items SET external_origin = 1 WHERE id = ?").run(itemId);
-  if (result.changes !== 1) throw new Error(`markExternalOrigin: item ${itemId} does not exist`);
+/** 改一张工单是不是来自外部来源（external_origin）。只改这一列，不碰 stage 和别的生命周期字段。工单不存在时抛错。 */
+export function setExternalOrigin(db: Db, itemId: number, external: boolean): void {
+  const result = db.prepare("UPDATE items SET external_origin = ? WHERE id = ?").run(external ? 1 : 0, itemId);
+  if (result.changes !== 1) throw new Error(`setExternalOrigin: item ${itemId} does not exist`);
+}
+
+/** 这张工单是不是来自外部来源（external_origin = 1）。工单不存在时 false。派生的单（子单、续作、后台检查的轻工单）照它继承。 */
+export function isExternalOrigin(db: Db, itemId: number | null | undefined): boolean {
+  if (itemId === null || itemId === undefined) return false;
+  const row = db.prepare("SELECT external_origin FROM items WHERE id = ?").get(itemId) as { external_origin: number } | undefined;
+  return row?.external_origin === 1;
 }
 
 /** 一张工单的来源，按记下的先后。 */

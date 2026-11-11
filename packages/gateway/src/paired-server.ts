@@ -1746,6 +1746,7 @@ export async function startPairedServer(
         if (input.workdir !== undefined) await warmRepositoryIdentity(input.workdir.trim());
         let itemId: number;
         try {
+          // external_origin 不给（0）：ruling R16，现在每一种配对凭证的来历都是用户本人（页面、plc、App），经 HTTP 建的单是用户自己的。
           itemId = createCoordinator({ db: bridge.db }).createRootItem({
             title: input.title.trim(),
             brief: input.brief.trim(),

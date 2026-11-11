@@ -11,7 +11,7 @@ import {
   type ContinuationRow,
 } from "@pi-lead-child/store";
 import { delegationAuthorityLabel, type DelegationPolicy } from "@pi-lead-child/store";
-import { createItem, getItem } from "@pi-lead-child/store";
+import { createItem, getItem, isExternalOrigin } from "@pi-lead-child/store";
 import { capabilityReadyForLeadUse, getCapability } from "@pi-lead-child/store";
 import { addInbox, addNotification } from "@pi-lead-child/store";
 import { listBlockingDependencies, linkTickets } from "@pi-lead-child/store";
@@ -268,6 +268,8 @@ function createTask(
     runtime: action.runtime,
     model: action.model,
     verificationPolicy: action.verificationPolicy,
+    // 续作挂着的工单来自外部来源时，它建的单也是（external-worker-hub P1-2）。
+    externalOrigin: isExternalOrigin(db, row.item_id),
   });
   for (const relation of action.relations ?? []) {
     linkTickets(db, {

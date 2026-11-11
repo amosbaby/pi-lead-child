@@ -203,6 +203,8 @@ describe("every owner action records an event", () => {
 
       // 低风险：建工单、加里程碑、开始、收回确认。
       const created = await ok("POST", "/v1/tickets", { title: "新工单", brief: "b" });
+      // ruling R16：现在每一种配对凭证的来历都是用户本人，经 HTTP 建的单不是外部来源。
+      expect(db.prepare("SELECT external_origin FROM items WHERE id=?").get(created.id)).toEqual({ external_origin: 0 });
       await ok("POST", `/v1/tickets/${created.id}/milestones`, { kind: "custom", label: "节点", at: "2026-11-01T00:00:00.000Z" });
       const held = createItem(db, { title: "先别跑", brief: "b", createdBy: "user", hold: true });
       await ok("POST", `/v1/tickets/${held}/confirm`);

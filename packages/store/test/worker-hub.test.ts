@@ -3,8 +3,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  addConversationSource, addTicketSource, createItem, findItemByExternalKey, markExternalOrigin, missesSince, openDb, recordMiss,
-  recordTicketOrigin, setHandling, ticketSourceKindOf, ticketSources, type Db,
+  addConversationSource, addTicketSource, createItem, findItemByExternalKey, isExternalOrigin, missesSince, openDb, recordMiss,
+  recordTicketOrigin, setExternalOrigin, setHandling, ticketSourceKindOf, ticketSources, type Db,
 } from "../src/index.js";
 
 function db(): Db {
@@ -99,16 +99,20 @@ describe("sources written by the creation paths", () => {
     d.close();
   });
 
-  it("creates a ticket with external_origin when asked, and marks one later without touching the lifecycle", () => {
+  it("creates a ticket with external_origin when asked, and sets it later without touching the lifecycle", () => {
     const d = db();
     const own = ticket(d);
     const outside = createItem(d, { title: "from Nina", brief: "b", createdBy: "lead", externalOrigin: true });
     expect([origin(d, own), origin(d, outside)]).toEqual([0, 1]);
+    expect([isExternalOrigin(d, own), isExternalOrigin(d, outside), isExternalOrigin(d, null), isExternalOrigin(d, own + 1000)])
+      .toEqual([false, true, false, false]);
     const before = d.prepare("SELECT stage, stage_changed_at FROM items WHERE id=?").get(own);
-    markExternalOrigin(d, own);
+    setExternalOrigin(d, own, true);
     expect(origin(d, own)).toBe(1);
+    setExternalOrigin(d, outside, false);
+    expect(origin(d, outside)).toBe(0);
     expect(d.prepare("SELECT stage, stage_changed_at FROM items WHERE id=?").get(own)).toEqual(before);
-    expect(() => markExternalOrigin(d, own + 1000)).toThrow();
+    expect(() => setExternalOrigin(d, own + 1000, true)).toThrow();
     d.close();
   });
 });

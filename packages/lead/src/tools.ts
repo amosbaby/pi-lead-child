@@ -27,7 +27,9 @@ import {
 import {
   listTriggers, setTriggerEnabled, type Trigger,
 } from "@pi-lead-child/store";
-import { getWatch, listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice } from "@pi-lead-child/store";
+import {
+  getWatch, isExternalOrigin, listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice,
+} from "@pi-lead-child/store";
 import {
   checkRepositoryAccess, describeWatchSchedule, escalateInterventionToUser, findRepositoryCheckout, HOST_COMMAND_LIMITS,
   hostCommandInputOf, isLiveUserTurn,
@@ -124,7 +126,7 @@ import {
   type PullRequestRunner, type TicketActionHost, type UiActionServices,
 } from "@pi-lead-child/engine";
 import {
-  EXTERNAL_ORIGIN_DECISION, messageEventCardIds, recordCardTicketSource, setAutoPullRequest, workspaceOfItem,
+  EXTERNAL_ORIGIN_DECISION, recordTurnCardSources, setAutoPullRequest, workspaceOfItem,
 } from "@pi-lead-child/engine";
 import {
   integrateIsolatedWorkspace, provisionWorkspace, provisionWorkspaceAsync, requestSharedWorkspace,
@@ -478,6 +480,14 @@ export function lightTaskDir(dataDir: string): string {
   return dir;
 }
 
+// 后台检查开的轻工单来自外部来源（external-worker-hub P1-2）：检查挂着的工单来自外部来源，或者检查是在外部的一轮里设的
+// （watches.origin_json 的 kind 是 external，和 Lead 建单时的 turnOrigin().external 同一个意思）。
+function watchIsExternal(db: Db, watchId: number): boolean {
+  const watch = getWatch(db, watchId);
+  if (!watch) return false;
+  return isExternalOrigin(db, watch.item_id) || watchOrigin(watch).kind === "external";
+}
+
 /**
  * 子代理检查到点开的轻工单（.scratch/lead-watch/spec.md D2）：和 create_task(light=true) 建的一样（自己的目录、不开 PR、
  * Lead 静态核对、不进工作列表），再记一条它是哪个后台检查开的。不派发：daemon 接着 spawnItemChild。
@@ -490,7 +500,7 @@ export function createWatchLightTask(
   const id = db.transaction((): number => {
     const created = coordinator.createRootItem({
       title: args.task.title, brief: args.task.brief, workdir, runtime: args.agent.runtime, model: args.agent.model,
-      createdBy: "lead", verificationPolicy: "lead_static",
+      createdBy: "lead", verificationPolicy: "lead_static", externalOrigin: watchIsExternal(db, args.watchId),
     });
     setAutoPullRequest(db, created, false, { actor: "lead", reason: "后台检查的子 agent 只查不改，不开 PR" });
     markLightTask(db, created, "lead");
@@ -1446,7 +1456,7 @@ function createLeadSubtask(
     title: string; brief: string; workdir?: string; workflowKind?: "generic" | "coding"; priority?: ItemPriority;
     runtime?: RuntimeId; model?: string; verificationPolicy?: VerificationPolicy;
     // 刻意没有 hold：确认发生在树根（§6.6），子任务生于 ready。参数不存在，就没有再漏一次的位置。
-    // 这一轮读过外部内容（turnOrigin().external）：子工单也记成来自外部来源。
+    // 这一轮读过外部内容（turnOrigin().external）：子工单也记成来自外部来源。上级工单来自外部来源时也是。
     externalOrigin?: boolean;
   },
 ): number {
@@ -1487,7 +1497,8 @@ function createLeadSubtask(
     runtime: input.runtime ?? parent.requested_runtime ?? undefined,
     model: input.model ?? parent.requested_model ?? undefined,
     verificationPolicy: input.verificationPolicy,
-    externalOrigin: input.externalOrigin,
+    // 外部来源的单拆出来的子单照样是外部来源的（子单是派生的，来历跟着上级走）。
+    externalOrigin: input.externalOrigin === true || isExternalOrigin(db, parent.id),
   });
 }
 
@@ -2225,9 +2236,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
                 priority: params.priority, runtime: params.runtime, model,
                 verificationPolicy, externalOrigin: turnOrigin.external,
               });
-          for (const cardId of messageEventCardIds(db, turnOrigin.externalEvents ?? [])) {
-            recordCardTicketSource(db, { itemId: createdId, cardId });
-          }
+          recordTurnCardSources(db, { itemId: createdId, eventSeqs: turnOrigin.externalEvents ?? [] });
           if (criteria.length) addAcceptanceCriteria(db, { itemId: createdId, texts: criteria, by: template ? "system" : "lead" });
           // 外部消息叫醒的一轮里建的工单（和 bash 被拦的是同一种轮次，hands.ts 的 handsBlockedInTurn）：记下来源，
           // 用户不能给它打开「沙箱外执行」（engine 的 ticket-actions/unsandboxed.ts，工单 #62）。

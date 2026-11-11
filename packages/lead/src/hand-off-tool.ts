@@ -11,7 +11,9 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { createCoordinator, setAutoPullRequest, warmRepositoryIdentity, warmRunWorkspaceFacts, warmWorkdirFacts } from "@pi-lead-child/engine";
+import {
+  createCoordinator, recordTurnCardSources, setAutoPullRequest, warmRepositoryIdentity, warmRunWorkspaceFacts, warmWorkdirFacts,
+} from "@pi-lead-child/engine";
 import { getItem, itemUpdatedEvent, markLightTask, publishGatewayEvents, recordItemHandoff, type Db } from "@pi-lead-child/store";
 import { firstLine } from "./overflow.js";
 import { clip, committedWrites, type HandoffPackage } from "./scheduler/handoff-package.js";
@@ -42,7 +44,10 @@ function text(t: string, details: Record<string, unknown> = {}) {
   return { content: [{ type: "text" as const, text: t }], details };
 }
 
-export function createHandOffTools(deps: { handoff?: LeadHandoffDeps }, helpers: HandOffToolHelpers): ToolDefinition<any>[] {
+export function createHandOffTools(
+  deps: { handoff?: LeadHandoffDeps; turnOrigin?: () => { external: boolean; externalEvents?: readonly number[] } },
+  helpers: HandOffToolHelpers,
+): ToolDefinition<any>[] {
   const service = deps.handoff;
   if (!service) return [];
   const { db, dataDir } = helpers;
@@ -84,10 +89,13 @@ export function createHandOffTools(deps: { handoff?: LeadHandoffDeps }, helpers:
         await Promise.all([warmRepositoryIdentity(workdir), warmWorkdirFacts(workdir)]);
         const coordinator = createCoordinator({ db });
         const ticketId = db.transaction((): number => {
-          // 交接包记着这一轮读没读过外部内容（turnOrigin().external）：Lead 建的单照它记来源（external-worker-hub P1-2）。
+          // 工单从哪来（external-worker-hub P1-2），和 create_task 一样：交接包记着那一轮读没读过外部内容（turnOrigin().external），
+          // 这一轮也算；叫醒这一轮的外部通道消息的卡记成来源（交一个挂起的单元时不记：那是以前一轮的事，这一轮的消息不一定是它的来源）。
+          const origin = deps.turnOrigin?.() ?? { external: false };
           const created = coordinator.createRootItem({
-            title, brief, workdir, createdBy: "lead", verificationPolicy: "lead_static", externalOrigin: pkg.external,
+            title, brief, workdir, createdBy: "lead", verificationPolicy: "lead_static", externalOrigin: pkg.external || origin.external,
           });
+          if (params.suspended === undefined) recordTurnCardSources(db, { itemId: created, eventSeqs: origin.externalEvents ?? [] });
           setAutoPullRequest(db, created, false, { actor: "lead", reason: "交接给轻子 agent，不改代码，不开 PR" });
           markLightTask(db, created, "lead");
           recordItemHandoff(db, created, {

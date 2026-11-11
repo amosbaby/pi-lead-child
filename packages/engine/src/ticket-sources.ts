@@ -4,9 +4,9 @@
 //   - 用户私信里让 Lead 建的单：store 的 recordTicketOrigin 记。
 //   - 工人从自己的会话建单（worker.track）：按链接认种类（trackSourceOf）。
 // 代码里不写工作区的域名：Slack、Jira、Notion 只按公开的域名后缀和路径认，链接原样存，网页按 scheme 白名单渲染。
-import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
+import { MESSAGE_EVENT_KIND, sourceLink } from "@pi-lead-child/protocol";
 import {
-  addConversationSource, getChannelCard, getEvent, ticketSourceKindOf, type ChannelCard, type Db, type TicketSourceKind,
+  addConversationSource, getChannelCard, getEvent, setExternalOrigin, ticketSourceKindOf, type ChannelCard, type Db, type TicketSourceKind,
 } from "@pi-lead-child/store";
 import { TicketActionError } from "./ticket-actions/types.js";
 
@@ -16,25 +16,53 @@ function cardAnchor(card: ChannelCard): string | null {
   return typeof ts === "string" && ts !== "" ? ts : null;
 }
 
-/** 记下这张工单来自这张通道卡。同一张工单同一个位置只记一次。卡不存在时什么都不记，返回 false。 */
-export function recordCardTicketSource(db: Db, input: { itemId: number; cardId: number; now?: Date }): boolean {
+/**
+ * 记下这张工单来自这张通道卡。同一张工单同一个位置只记一次。卡不存在时什么都不记，返回 false。
+ * url：在来源里打开那条消息的地址（来源插件的 link()，经 protocol 的 sourceLink 只收 https）。插件拼不出时为 null。
+ */
+export function recordCardTicketSource(db: Db, input: { itemId: number; cardId: number; url?: string | null; now?: Date }): boolean {
   const card = getChannelCard(db, input.cardId);
   if (!card) return false;
   return addConversationSource(db, {
     itemId: input.itemId, kind: ticketSourceKindOf(card.source), conversation: card.objectKey, messageTs: cardAnchor(card),
-    ...(input.now ? { now: input.now } : {}),
+    url: sourceLink(input.url ?? null), ...(input.now ? { now: input.now } : {}),
   });
 }
 
-/** 这几条事件（一轮的 externalEvents）里外部通道的消息事件对应的通道卡，去重，按事件的先后。 */
-export function messageEventCardIds(db: Db, eventSeqs: readonly number[]): number[] {
-  const ids: number[] = [];
+/**
+ * 这几条事件（一轮的 externalEvents）里外部通道的消息事件对应的通道卡和消息的链接（消息事件的 payload.link，hub 建事件时用
+ * 来源插件的 link() 算好的），按卡去重，按事件的先后。
+ */
+export function messageEventCards(db: Db, eventSeqs: readonly number[]): Array<{ cardId: number; url: string | null }> {
+  const cards: Array<{ cardId: number; url: string | null }> = [];
   for (const seq of eventSeqs) {
     const event = getEvent(db, seq);
     const cardId = event?.kind === MESSAGE_EVENT_KIND ? event.payload.cardId : null;
-    if (typeof cardId === "number" && !ids.includes(cardId)) ids.push(cardId);
+    if (typeof cardId === "number" && !cards.some((card) => card.cardId === cardId)) {
+      cards.push({ cardId, url: sourceLink(event!.payload.link) });
+    }
   }
-  return ids;
+  return cards;
+}
+
+/** Lead 建单（create_task、hand_off）：叫醒这一轮的外部通道消息的卡记成工单的来源。返回记下了几条。 */
+export function recordTurnCardSources(db: Db, input: { itemId: number; eventSeqs: readonly number[]; now?: Date }): number {
+  let recorded = 0;
+  for (const card of messageEventCards(db, input.eventSeqs)) {
+    if (recordCardTicketSource(db, { itemId: input.itemId, cardId: card.cardId, url: card.url, ...(input.now ? { now: input.now } : {}) })) recorded += 1;
+  }
+  return recorded;
+}
+
+/**
+ * Lead 派活（dispatch_agent_task）建的单：派单器建单时一律记成来自外部来源（每一张都来自通道卡，失败时宁可多算外部）；
+ * 这里记卡的来源（对话、锚点、消息的链接），派活的那条消息是用户本人写的（self_reply）时把 external_origin 清成 0。
+ */
+export function recordDispatchedCardSource(
+  db: Db, input: { itemId: number; cardId: number; eventSeq: number; url: string | null; now?: Date },
+): void {
+  recordCardTicketSource(db, { itemId: input.itemId, cardId: input.cardId, url: input.url, ...(input.now ? { now: input.now } : {}) });
+  if (isOwnMessageEvent(db, input.eventSeq)) setExternalOrigin(db, input.itemId, false);
 }
 
 /** 这条消息事件是不是用户本人写的（卡上的 self_reply）。别人的消息、读不到的事件都不是。 */

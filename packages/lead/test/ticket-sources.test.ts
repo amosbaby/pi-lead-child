@@ -10,8 +10,9 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { ChannelHub, ChannelRegistry, createSlackChannelAdapter } from "@pi-lead-child/engine";
 import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
-import { getChannelCard, listEvents, openDb, ticketSources, type Db } from "@pi-lead-child/store";
-import { createLeadTools, type LeadDeps } from "../src/tools.js";
+import { createItem, createWatch, getChannelCard, listEvents, openDb, ticketSources, type Db } from "@pi-lead-child/store";
+import { createHandOffTools } from "../src/hand-off-tool.js";
+import { createLeadTools, createWatchLightTask, lightTaskDir, type LeadDeps } from "../src/tools.js";
 import type { LeadTurnOrigin } from "../src/turn-origin.js";
 
 let db: Db;
@@ -76,10 +77,12 @@ describe("a ticket Lead creates", () => {
   it("records the channel card of the message that woke the turn as the ticket's source", async () => {
     const { seq, cardId } = await messageEvent("can you fix the retry policy?");
     const card = getChannelCard(db, cardId)!;
+    const link = listEvents(db, { kind: MESSAGE_EVENT_KIND }).find((event) => event.seq === seq)!.payload.link;
+    expect(link).toMatch(/^https:\/\//);
     const origin: LeadTurnOrigin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [seq] };
     const parent = createdId(await tool("create_task", origin).execute("t", { title: "修重试", brief: "b" }));
     expect(ticketSources(db, parent)).toEqual([expect.objectContaining({
-      kind: "slack", conversation: card.objectKey, messageTs: card.replyTarget.thread_ts ?? null, externalKey: null,
+      kind: "slack", conversation: card.objectKey, messageTs: card.replyTarget.thread_ts ?? null, externalKey: null, url: link,
     })]);
     expect(card.replyTarget.thread_ts).toEqual(expect.any(String));
     expect(externalOrigin(parent)).toBe(1);
@@ -87,5 +90,62 @@ describe("a ticket Lead creates", () => {
     const child = createdId(await tool("create_task", origin).execute("t", { title: "修重试的测试", brief: "b", parent_ticket_id: parent }));
     expect(ticketSources(db, child)).toMatchObject([{ kind: "slack", conversation: card.objectKey }]);
     expect(externalOrigin(child)).toBe(1);
+  });
+
+  it("marks a subtask of an external ticket external, also in the user's own turn", async () => {
+    const parent = createItem(db, { title: "按 Nina 说的改", brief: "b", createdBy: "lead", externalOrigin: true });
+    const child = createdId(await tool("create_task", { external: false, timer: null }).execute("t", { title: "改测试", brief: "b", parent_ticket_id: parent }));
+    expect(externalOrigin(child)).toBe(1);
+    const own = createItem(db, { title: "改构建脚本", brief: "b", createdBy: "lead" });
+    const ownChild = createdId(await tool("create_task", { external: false, timer: null }).execute("t", { title: "改脚本", brief: "b", parent_ticket_id: own }));
+    expect(externalOrigin(ownChild)).toBe(0);
+  });
+});
+
+describe("a ticket Lead hands off", () => {
+  // hand_off 的交接服务换成假的：交接包只带建单要的几样。开跑（startTicket）不在这里测。
+  function handOff(origin: LeadTurnOrigin, pkgExternal = false): any {
+    const pkg = { id: "hof_1", unitId: "u1", entry: "lead_first", goal: { text: "查重试", lane: 0 }, turnId: "t1", external: pkgExternal, steps: [] };
+    const handoffs = { prepare: () => ({ pkg, files: new Map() }), brief: () => ({ brief: "交接包", files: [] }), handedOff: () => {} };
+    return createHandOffTools(
+      { handoff: { handoffs: handoffs as never, forced: () => false, made: () => {} }, turnOrigin: () => origin },
+      { db, dataDir: dir, lightTaskDir, startTicket: async () => "没有开跑" },
+    ).find((candidate: any) => candidate.name === "hand_off");
+  }
+  const ticketOf = (result: any) => result.details.ticketId as number;
+
+  it("in an external turn is marked external and sourced from the card that woke the turn", async () => {
+    const { seq, cardId } = await messageEvent("can you look into the retry policy?");
+    const card = getChannelCard(db, cardId)!;
+    const ticketId = ticketOf(await handOff({ external: true, timer: null, externalEvents: [seq] }).execute("t", { note: "交给后台" }));
+    expect(externalOrigin(ticketId)).toBe(1);
+    expect(ticketSources(db, ticketId)).toMatchObject([{ kind: "slack", conversation: card.objectKey, messageTs: card.replyTarget.thread_ts }]);
+  });
+
+  it("in the user's own turn is not external and has no source", async () => {
+    const ticketId = ticketOf(await handOff({ external: false, timer: null }).execute("t", {}));
+    expect(externalOrigin(ticketId)).toBe(0);
+    expect(ticketSources(db, ticketId)).toEqual([]);
+    const fromPackage = ticketOf(await handOff({ external: false, timer: null }, true).execute("t", {}));
+    expect(externalOrigin(fromPackage)).toBe(1);
+  });
+});
+
+describe("a light task a watch opens", () => {
+  const agent = { runtime: undefined, model: undefined, effort: undefined } as never;
+  const watch = (input: { itemId?: number; origin: Parameters<typeof createWatch>[1]["origin"] }) => createWatch(db, {
+    label: "retry docs", check: { kind: "agent", brief: "看重试文档有没有更新" }, mode: "until", everySeconds: 600,
+    untilAt: new Date(Date.now() + 3_600_000).toISOString(), ...input,
+  });
+  const open = (watchId: number) => createWatchLightTask(db, { dataDir: dir, watchId, task: { title: "看文档", brief: "b" }, agent });
+
+  it("inherits external from the ticket it watches, or from the external turn that set it", () => {
+    const fromNina = createItem(db, { title: "按 Nina 说的改", brief: "b", createdBy: "lead", externalOrigin: true });
+    expect(externalOrigin(open(watch({ itemId: fromNina, origin: { kind: "user", turnId: null } })))).toBe(1);
+    expect(externalOrigin(open(watch({
+      origin: { kind: "external", via: "tool", source: "slack", sourceLabel: "Slack", sender: null, messageEvent: null, conversation: null },
+    })))).toBe(1);
+    const own = createItem(db, { title: "改构建脚本", brief: "b", createdBy: "lead" });
+    expect(externalOrigin(open(watch({ itemId: own, origin: { kind: "user", turnId: null } })))).toBe(0);
   });
 });

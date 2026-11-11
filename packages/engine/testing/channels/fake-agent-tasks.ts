@@ -28,12 +28,12 @@ export class FakeAgentTaskDispatcher implements AgentTaskDispatcher {
     const { grant, dropped } = computeRunGrant({ intent: request.intent, scope: request.scope, ...(request.bound ? { bound: request.bound } : {}), resolveLocalRepo });
     if (this.deferNext) {
       this.deferNext = false;
-      const itemId = createItem(this.db, { title: `子 agent：${request.request.summary.slice(0, 40)}`, brief: "测试", createdBy: "system", purpose: "lookup" });
+      const itemId = createItem(this.db, { title: `子 agent：${request.request.summary.slice(0, 40)}`, brief: "测试", createdBy: "system", purpose: "lookup", externalOrigin: true });
       this.requests.push({ ...request, itemId, runId: null, grant, dropped });
       return { itemId, runId: null, deferred: true, grant, dropped };
     }
     const ids = this.db.transaction(() => {
-      const itemId = createItem(this.db, { title: `子 agent：${request.request.summary.slice(0, 40)}`, brief: "测试", createdBy: "system", purpose: "lookup" });
+      const itemId = createItem(this.db, { title: `子 agent：${request.request.summary.slice(0, 40)}`, brief: "测试", createdBy: "system", purpose: "lookup", externalOrigin: true });
       const runId = createRun(this.db, { itemId, purpose: "lookup" });
       transition(this.db, { itemId, to: "active", actor: "system", reason: "agent task started", runId });
       return { itemId, runId };

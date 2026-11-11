@@ -5,6 +5,8 @@
 //     不叫醒 Lead（purpose=lookup 的 Run 不经过 onChildDone，run-finished.ts 也排除了它）。
 //   - cancel：停掉 Run（记成 stopped），工单进 cancelled，回调 cancelled。超时：停掉 Run（记成 failed），回调 failed。
 //   - daemon 重启：被打断的 Run 记成失败，交回发起方，不重新派发（recoverAgentTasksAfterRestart）。
+// 工单一律记成来自外部来源（items.external_origin = 1）：每一张都来自通道卡；派活的消息是用户本人写的时，通道 hub 记来源时清掉
+// （engine 的 recordDispatchedCardSource）。hub 那一步失败时留着 1（宁可多算外部）。
 // 工单的标题和正文只有结构化的说明，不带对方的原话：原话只进子 agent 的提示词（包在不可信的标签里）。
 // 这张工单的 Run 的 purpose 是 lookup：内核里「进程内的受限 Run，结果交给通道，不是交付」这一类。代查（lookup.ts）退役以后它只剩这一种。
 import { join } from "node:path";
@@ -270,7 +272,9 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
     if (getExecutionMode(db) !== "self") {
       // 清单挂不上 Run（run_grants 按 Run 记）：记在建单的这条活动里（AGENT_TASK_DEFERRED），外部工人领单以后读它（CARRY d）。
       const itemId = db.transaction(() => {
-        const created = createItem(db, { title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal" });
+        const created = createItem(db, {
+          title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal", externalOrigin: true,
+        });
         deferIfExternal(db, created, "dispatch_agent_task");
         addActivity(db, {
           itemId: created, actor: "system", kind: "decision",
@@ -286,7 +290,9 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       return { itemId, runId: null, deferred: true, grant, dropped };
     }
     const { itemId, runId } = db.transaction(() => {
-      const itemId = createItem(db, { title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal" });
+      const itemId = createItem(db, {
+        title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal", externalOrigin: true,
+      });
       const runId = createRun(db, {
         itemId, role: "executor", purpose: "lookup", runtime: AGENT_TASK_RUNTIME_PROFILE.runtime,
         runtimeProfileHash: runtimeProfileHash(AGENT_TASK_RUNTIME_PROFILE),
