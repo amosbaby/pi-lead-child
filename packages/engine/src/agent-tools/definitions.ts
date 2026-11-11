@@ -1,3 +1,4 @@
+import { latestCheckpointIdForAction } from "@pi-lead-child/store";
 import { createHash } from "node:crypto";
 import type { Db } from "@pi-lead-child/store";
 import { createCoordinator } from "../coordinator/service.js";
@@ -885,11 +886,23 @@ function writeTicketUpdateReceipt(
     .run(key, JSON.stringify(receipt));
 }
 
+// 阻塞的请求到时还没有答复（parkAfterMs）：告诉 agent 接下来怎么做。agent 读的是这两句。
+const PARKED_DECISION_NEXT_STEP = "No answer yet. Do not guess the answer and do not ask again. "
+  + "If the rest of the work does not depend on it, do that work first. Otherwise end your turn now and say which request you wait for. "
+  + "The system resumes this session with the answer when it arrives.";
+const PARKED_APPROVAL_NEXT_STEP = "No decision yet. Do not run the action. Do not ask again. "
+  + "If other work does not depend on it, do that work first. Otherwise end your turn now and say which approval you wait for. "
+  + "The system resumes this session with the result when it arrives.";
+
 export function createAgentToolHandlers(context: {
   db: Db; itemId: number; runId: number; dataDir?: string;
   now?: () => Date; checkpointPolicy?: CheckpointPolicyConfig;
+  // 阻塞的 request_decision、request_approval 最多等多久（毫秒）。到时还没有答复就返回 pending，叫 agent 结束这一轮
+  // （停靠，coordinator 的 parked-requests.ts）。不给时一直等：pi 的 child 在自己的进程里调用，没有时限。
+  parkAfterMs?: number;
 }): AgentToolHandlers {
   const { db, itemId, runId } = context;
+  const parkDeadline = (): number | null => (context.parkAfterMs === undefined ? null : Date.now() + context.parkAfterMs);
   const now = context.now ?? (() => new Date());
   const checkpointPolicy = context.checkpointPolicy ?? loadCheckpointPolicyConfig();
   const coordinator = createCoordinator({ db, now });
@@ -1354,12 +1367,22 @@ export function createAgentToolHandlers(context: {
             };
           }
           const approvalId = requested.approvalId;
+          const parkAt = parkDeadline();
           while (true) {
             if (signal?.aborted) {
               return {
                 approval_id: approvalId,
                 status: "aborted",
                 checkpoint_id: requested.checkpoint.id,
+              };
+            }
+            if (parkAt !== null && Date.now() >= parkAt) {
+              return {
+                approval_id: approvalId,
+                status: "pending",
+                parked: true,
+                checkpoint_id: requested.checkpoint.id,
+                next_step: PARKED_APPROVAL_NEXT_STEP,
               };
             }
             const approval = getApproval(db, approvalId);
@@ -1398,17 +1421,26 @@ export function createAgentToolHandlers(context: {
             });
           })();
           const checkpoint = mapDecisionCheckpoint(args.checkpoint);
-          const requested = coordinator.requestDecision({
-            itemId,
-            runId,
-            kind,
-            audience,
-            blocking,
-            allowCustom,
-            prompt: requiredString(args, "prompt"),
-            options,
-            checkpoint,
-          });
+          const prompt = requiredString(args, "prompt");
+          // 同一个 Run 把还没答复的同一个问题再问一次（例如上一次调用超时了）：接着等原来那一个，不另建请求。
+          const asked = db.prepare(
+            `SELECT id FROM decision_requests
+             WHERE item_id = ? AND run_id = ? AND state = 'pending' AND origin = 'agent' AND kind = ? AND prompt = ?
+             ORDER BY id DESC LIMIT 1`,
+          ).get(itemId, runId, kind, prompt) as { id: number } | undefined;
+          const requested = asked
+            ? { requestId: asked.id, checkpoint: { id: latestCheckpointIdForAction(db, "decision_request", asked.id) } }
+            : coordinator.requestDecision({
+              itemId,
+              runId,
+              kind,
+              audience,
+              blocking,
+              allowCustom,
+              prompt,
+              options,
+              checkpoint,
+            });
           if (!blocking) {
             return {
               request_id: requested.requestId,
@@ -1416,12 +1448,22 @@ export function createAgentToolHandlers(context: {
               checkpoint_id: requested.checkpoint.id,
             };
           }
+          const parkAt = parkDeadline();
           while (true) {
             if (signal?.aborted) {
               return {
                 request_id: requested.requestId,
                 status: "aborted",
                 checkpoint_id: requested.checkpoint.id,
+              };
+            }
+            if (parkAt !== null && Date.now() >= parkAt) {
+              return {
+                request_id: requested.requestId,
+                status: "pending",
+                parked: true,
+                checkpoint_id: requested.checkpoint.id,
+                next_step: PARKED_DECISION_NEXT_STEP,
               };
             }
             const decision = getDecisionRequest(db, requested.requestId);

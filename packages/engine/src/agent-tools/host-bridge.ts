@@ -1,3 +1,4 @@
+import { HOST_REQUEST_PARK_MS } from "./tool-timeouts.js";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
@@ -87,6 +88,8 @@ export async function startAgentToolBridge(args: {
     runId: args.runId,
     dataDir: args.dataDir,
     checkpointPolicy: loadCheckpointPolicyConfig(args.env ?? process.env),
+    // 桥那一头（mcp-server.ts）30 秒就超时：阻塞的请求到时没有答复就停靠。
+    parkAfterMs: HOST_REQUEST_PARK_MS,
   });
   const server: Server = createServer((socket) => {
     // 对方断开时写回答会出 EPIPE。没有 error 监听时它是未处理的 error 事件，整个 daemon 退出

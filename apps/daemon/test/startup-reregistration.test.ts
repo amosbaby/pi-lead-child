@@ -8,7 +8,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { repairDaemonStartupState, startDaemon } from "../src/server.js";
 import { recoverOutcomeSnapshot } from "@pi-lead-child/engine";
 import { reregisterFinishedRuns } from "@pi-lead-child/engine";
-import { recordRegistrationPending, type RegistrationStep } from "@pi-lead-child/engine";
+import { createCoordinator, recordRegistrationPending, type RegistrationStep } from "@pi-lead-child/engine";
 import { addActivity } from "@pi-lead-child/store";
 import { openDb, type Db } from "@pi-lead-child/store";
 import { createPairing } from "@pi-lead-child/store";
@@ -390,6 +390,33 @@ describe("startup re-registration decision boundaries", () => {
       expect(getItem(db, itemId)?.stage).toBe("review");
       expect(JSON.parse(getRun(db, runId)!.metadata).reregistration).toMatchObject({ state: "registered", fromStep: "ingest" });
       expect(reregisterFinishedRuns(db, { at }).results).toEqual([]);
+    });
+
+    // 停靠（engine 的 coordinator/parked-requests.ts，2026-11-11）：Run 结束时它自己提的阻塞请求还没有答复。daemon 在登记之前
+    // 崩了：重启以后补上停靠。停在「受阻」等答复是正常的结局，登记完成，不产生新的 blocker；答复到了照常续接。
+    it("parks a run the daemon crashed on while its own request waits for an answer, and resumes it on the answer", () => {
+      const { itemId, runId } = finishedRun({ ticketUpdate: false, outcome: null });
+      const coordinator = createCoordinator({ db });
+      // 请求是 Run 还在跑的时候提的。
+      updateRun(db, runId, { state: "running" });
+      const { requestId } = coordinator.requestDecision({
+        itemId, runId, kind: "blocker", audience: "lead_or_user", blocking: true,
+        prompt: "Replace the missing component or build it?",
+        options: [{ id: "replace", label: "Replace it" }, { id: "build", label: "Build it" }],
+        checkpoint: { title: "Component missing", summary: "DateRangePicker is not in the library." },
+      });
+      updateRun(db, runId, { state: "finished", endedAt: true, exitCode: 0 });
+      const before = blockers(itemId).length;
+
+      expect(reregisterFinishedRuns(db, { at }).results).toEqual([{ status: "registered", runId, fromStep: "ingest" }]);
+      expect(getItem(db, itemId)?.stage).toBe("blocked");
+      expect(blockers(itemId)).toHaveLength(before);
+      expect(reregisterFinishedRuns(db, { at }).results).toEqual([]);
+
+      coordinator.resolveDecision({ requestId, decision: "select", optionId: "build", actor: { kind: "lead", resolvedBy: "lead" } });
+      expect(getItem(db, itemId)?.stage).toBe("active");
+      expect(db.prepare("SELECT trigger, resume_from_run_id AS run FROM dispatch_requests WHERE item_id = ?").all(itemId))
+        .toEqual([{ trigger: "parked-answer", run: runId }]);
     });
 
     // child manager 在登记的各步之后写 attempt_end。用户后来把工单拉回 active，这个 Run 也不是崩溃留下的。

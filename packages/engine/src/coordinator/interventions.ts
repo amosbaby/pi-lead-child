@@ -39,6 +39,7 @@ import type {
   DecisionRequestKind,
 } from "@pi-lead-child/core";
 import type { CheckpointDomainService } from "./checkpoints.js";
+import { resumeParkedRun } from "./parked-requests.js";
 
 export class InterventionConflictError extends Error {
   constructor(message: string) {
@@ -837,11 +838,72 @@ export function createInterventionDomainService(args: {
 
   return {
     requestApproval,
-    resolveApproval,
+    // 有了结果以后：这张工单有停靠着等答复的 Run 时，续接它的会话（parked-requests.ts）。在这一笔事务之后做，
+    // 续接出错不影响已经记下的结果。
+    resolveApproval(input) {
+      const result = resolveApproval(input);
+      if (result.status === "resolved" && result.approval.item_id !== null) afterAnswer(result.approval.item_id);
+      return result;
+    },
     requestDecision,
-    resolveDecision,
+    resolveDecision(input) {
+      const result = resolveDecision(input);
+      if (result.status === "resolved") afterAnswer(result.request.itemId);
+      return result;
+    },
 
     expireInterventions(at): { approvalIds: number[]; decisionIds: number[] } {
+      const expired = expireNow(at);
+      const items = new Set<number>();
+      for (const id of expired.approvalIds) {
+        const itemId = getApproval(db, id)?.item_id;
+        if (typeof itemId === "number") items.add(itemId);
+      }
+      for (const id of expired.decisionIds) {
+        const itemId = getDecisionRequest(db, id)?.itemId;
+        if (typeof itemId === "number") items.add(itemId);
+      }
+      for (const itemId of items) afterAnswer(itemId);
+      return expired;
+    },
+
+    listInterventionRefs,
+
+    listInterventions(query, actor): KernelIntervention[] {
+      return [
+        ...allApprovalRows(db).filter((approval) => {
+          const ref = approvalRef(approval);
+          return ref !== null && matchesQuery(ref, query);
+        }).map((approval) => fullApproval(approval, actor.kind, externalApprovalWhy(db, approval) !== null)),
+        ...allDecisionRows(db).filter((request) => matchesQuery(decisionRef(request), query))
+          .map((request) => fullDecision(request, actor.kind)),
+      ];
+    },
+
+    repairLegacyInterventions(): { approvals: number; decisions: number } {
+      return repairLegacy();
+    },
+  };
+
+  function afterAnswer(itemId: number): void {
+    try {
+      resumeParkedRun(db, itemId, now());
+    } catch (error) {
+      // 续接没排上：结果已经记下了。告诉 Lead，由它用 continue_ticket_agent 把答复交给 agent。
+      try {
+        addInbox(db, {
+          itemId, severity: "attention", source: "structural", lossless: true,
+          summary: `工单 #${itemId} 在等的答复到了，但系统没能排上续接：${error instanceof Error ? error.message : String(error)}。`
+            + "用 get_ticket 看这个决定或审批的结果，再用 continue_ticket_agent 交给 agent。",
+          payload: { kind: "parked_run_resume_failed", wakeLead: true, needsUser: false },
+        });
+      } catch {
+        // 工单不在了。
+      }
+    }
+  }
+
+  function expireNow(at: Date): { approvalIds: number[]; decisionIds: number[] } {
       return db.transaction(() => {
         const approvalIds = expireStale(db, at);
         for (const id of approvalIds) {
@@ -917,22 +979,9 @@ export function createInterventionDomainService(args: {
         }
         return { approvalIds, decisionIds };
       }).immediate();
-    },
+  }
 
-    listInterventionRefs,
-
-    listInterventions(query, actor): KernelIntervention[] {
-      return [
-        ...allApprovalRows(db).filter((approval) => {
-          const ref = approvalRef(approval);
-          return ref !== null && matchesQuery(ref, query);
-        }).map((approval) => fullApproval(approval, actor.kind, externalApprovalWhy(db, approval) !== null)),
-        ...allDecisionRows(db).filter((request) => matchesQuery(decisionRef(request), query))
-          .map((request) => fullDecision(request, actor.kind)),
-      ];
-    },
-
-    repairLegacyInterventions(): { approvals: number; decisions: number } {
+  function repairLegacy(): { approvals: number; decisions: number } {
       return db.transaction(() => {
         const at = now();
         let approvals = 0;
@@ -1063,6 +1112,5 @@ export function createInterventionDomainService(args: {
         }
         return { approvals, decisions };
       }).immediate();
-    },
-  };
+  }
 }

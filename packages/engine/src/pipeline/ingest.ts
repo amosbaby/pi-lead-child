@@ -1,3 +1,4 @@
+import { parkRunOnPendingRequests } from "../coordinator/parked-requests.js";
 import type { Db } from "@pi-lead-child/store";
 import type { Run, TypedFailure } from "@pi-lead-child/core";
 import { getItem, transition, updateOrchestrationState } from "@pi-lead-child/store";
@@ -173,6 +174,8 @@ export function createIngestor(
           reason: "LLM error 结局", runId: ctx.runId,
         });
       } else if (!["waiting", "integrating"].includes(item.plan_state ?? "none")) {
+        // 它自己提的阻塞请求还没有答复：停靠，不算交接失败（coordinator 的 parked-requests.ts）。答复到了系统续接它的会话。
+        if (parkRunOnPendingRequests(db, { itemId: ctx.itemId, runId: ctx.runId })) return undefined;
         return { type: "terminal_handoff_required", criticalToolFailure };
       }
     }

@@ -1,6 +1,7 @@
 // 登记的后续步骤（spec D3），以及 daemon 启动时的重新登记（工单 08）。
 // 进程退出后，child manager 逐步执行这些步骤，每一步各自提交。
 // 启动修复用同一份步骤代码重新登记。这样，宿主代码修好以后，重新登记走的就是修好的代码。
+import { parkRunOnPendingRequests } from "../coordinator/parked-requests.js";
 import type { Db } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
 import { itemUpdatedEvent, publishGatewayEvents, runUpdatedEvent } from "@pi-lead-child/store";
@@ -206,11 +207,14 @@ function lastCriticalToolFailure(db: Db, runId: number): CriticalToolFailure | n
  * settle 读的是 ingestor 在内存里攒的状态，所以这里按事件重算，不重放 ingestor。
  * 重放会重写结束时间，也会重复累计用量。
  */
-function settledIngest(db: Db, run: Run, item: Item): IngestOutcome | undefined {
-  if (run.purpose === "conversation" || item.stage !== "active") return undefined;
+function settledIngest(db: Db, run: Run, item: Item, at: Date): { outcome: IngestOutcome | undefined; parked: boolean } {
+  if (run.purpose === "conversation" || item.stage !== "active") return { outcome: undefined, parked: false };
   if (endedWithLlmError(db, run.id)) throw new KeepPending("llm_error");
-  if (["waiting", "integrating"].includes(item.plan_state ?? "none")) return undefined;
-  return { type: "terminal_handoff_required", criticalToolFailure: lastCriticalToolFailure(db, run.id) };
+  if (["waiting", "integrating"].includes(item.plan_state ?? "none")) return { outcome: undefined, parked: false };
+  // 和 settle 一样：它自己提的阻塞请求还没有答复时停靠，不算交接失败（coordinator 的 parked-requests.ts）。
+  // settle 没来得及停靠的（进程在那之前死了）在这里补上。
+  if (parkRunOnPendingRequests(db, { itemId: item.id, runId: run.id, now: at })) return { outcome: undefined, parked: true };
+  return { outcome: { type: "terminal_handoff_required", criticalToolFailure: lastCriticalToolFailure(db, run.id) }, parked: false };
 }
 
 function blockerWatermark(db: Db): { inbox: number; notifications: number } {
@@ -259,7 +263,7 @@ export function reregisterRun(db: Db, input: { runId: number; at: Date }): Rereg
         });
       }
       // 2. ingest：按落库的事件推导它的结论。
-      const ingest = settledIngest(db, run, getItem(db, itemId)!);
+      const { outcome: ingest, parked } = settledIngest(db, run, getItem(db, itemId)!, at);
       // 3. 成果恢复。从出错的那一步开始：交接检查出错时，成果恢复已经完成，不再重做。
       if (fromStep === "ingest" || fromStep === "outcome_recovery") outcomeRecoveryStep(db, { itemId, runId, at });
       // 4. 交接检查。
@@ -267,7 +271,8 @@ export function reregisterRun(db: Db, input: { runId: number; at: Date }): Rereg
 
       // 只减少 blocker。现有规则要求新的 blocker 时，这次不登记。这个 Run 留给人或修复回合（工单 09）。
       if (raisedSince(db, mark)) throw new KeepPending("needs_new_blocker");
-      if (getItem(db, itemId)!.stage === "blocked") throw new KeepPending("still_blocked");
+      // 停靠着等答复的 Run 停在 blocked 是正常的结局，不算还卡着：答复到了系统续接它的会话。
+      if (getItem(db, itemId)!.stage === "blocked" && !parked) throw new KeepPending("still_blocked");
 
       resolvePendingRegistration(db, runId, at);
       clearOutcomeRegistrationBlocker(db, runId);

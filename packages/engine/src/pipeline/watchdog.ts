@@ -1,3 +1,4 @@
+import { hasPendingChildRequests } from "../coordinator/parked-requests.js";
 import type { Db } from "@pi-lead-child/store";
 import {
   addActivity, addInbox, getItem, getRun, markRunFailed, raiseBlocker, runUpdatedEvent, transition,
@@ -243,6 +244,8 @@ export function createWatchdog(db: Db, opts: WatchdogOptions = {}) {
     for (const item of stalled) {
       const child = liveChildren().get(item.id);
       if (!child) continue;
+      // 它在等自己提的决定或审批的答复（工具调用挂着）：不是卡死。负责人的答复可能要几个小时。
+      if (hasPendingChildRequests(db, item.id)) continue;
       const prior = (db.prepare(
         `SELECT COUNT(*) AS n FROM activities
          WHERE item_id=? AND kind='notification'
