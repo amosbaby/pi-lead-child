@@ -20,7 +20,7 @@
 // 谁停用的、为什么记在 config.json 的 runtimes.disabledBy（core 的 RuntimeDisabledBy）。线上的 RuntimeSettingsDto 不加字段：
 // 它是严格的契约，加字段旧客户端会失败。界面显示「Lead 停用：原因」留给后续的界面工单。
 import {
-  DISABLED_RUNTIMES_ENV, defaultReviewRuntime, disabledRuntimes, isRuntimeId, runtimeAdapters, runtimeDisplayName,
+  DISABLED_RUNTIMES_ENV, defaultReviewRuntime, disabledRuntimes, isRuntimeId, allRuntimeAdapters, runtimeDisplayName,
 } from "@pi-lead-child/runtime";
 import {
   loadPlcConfig, writePlcConfig, type RuntimeDisabledBy, type RuntimeId, type RuntimeSwitchBy,
@@ -88,7 +88,7 @@ export class RuntimeSettings implements RuntimeSettingsService {
   get(): RuntimeSettingsDto {
     const disabled = new Set(disabledRuntimes(this.env));
     const installed = new Map(probeChildRuntimeCatalog({ env: this.env }).entries.map((entry) => [entry.id, entry.available]));
-    const runtimes = runtimeAdapters()
+    const runtimes = allRuntimeAdapters()
       .filter((adapter): adapter is typeof adapter & { id: KernelRuntimeId } =>
         (KERNEL_RUNTIME_IDS as readonly string[]).includes(adapter.id))
       .map((adapter) => ({
@@ -171,7 +171,7 @@ export class RuntimeSettings implements RuntimeSettingsService {
         }
         current.add(request.runtime);
       }
-      const disabled = runtimeAdapters().map((adapter) => adapter.id).filter((id) => current.has(id));
+      const disabled = allRuntimeAdapters().map((adapter) => adapter.id).filter((id) => current.has(id));
       for (const runtime of Object.keys(who)) if (!current.has(runtime as RuntimeId)) delete who[runtime];
       writePlcConfig({
         ...file, runtimes: { ...runtimes, disabled, ...(Object.keys(who).length ? { disabledBy: who } : {}) },

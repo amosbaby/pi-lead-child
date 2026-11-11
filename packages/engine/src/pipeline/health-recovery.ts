@@ -21,7 +21,9 @@ import {
 export type RecheckOutcome =
   | "recovered"
   | "probe_failed"
-  | "profile_changed";
+  | "profile_changed"
+  // 用户停用了这个 runtime：不探针，故障原样留着，用户重新启用以后再探。
+  | "disabled";
 
 export interface RecheckResult {
   incidentId: number;
@@ -48,6 +50,7 @@ function waitsForRecheck(incident: RuntimeIncident): boolean {
 type ProbeOutcome =
   | { kind: "probed"; result: RuntimeProbeResult; recorded: boolean }
   | { kind: "profile_changed" }
+  | { kind: "disabled" }
   | { kind: "stopped" };
 
 // 探针失败时记在故障上的一句诊断。只取证据的第一行：证据里可能有 stderr。
@@ -62,7 +65,8 @@ export function createHealthRecovery(
   options: {
     // 这个 daemon 里执行这个 runtime 的 adapter。探针必须检查执行时用的同一个 profile。
     runtime: (id: RuntimeId) => AgentRuntime | null;
-    // 用户停用的 runtime（设置 → 执行器）。它不派发，自动探针跳过它的故障；plc recheck 照常探。缺省读 daemon 的环境。
+    // 用户停用的 runtime（设置 → 执行器）。它不派发，自动探针和 plc recheck 都跳过它的故障：探针会起它的 CLI，而停用的 runtime
+    // 一个进程也不起（2026-11-12）。缺省读 daemon 的环境。
     isDisabled?: (id: RuntimeId) => boolean;
     now?: () => Date;
     log?: (line: string) => void;
@@ -76,6 +80,7 @@ export function createHealthRecovery(
   let stopped = false;
 
   const runProbe = async (incident: RuntimeIncident, manual: boolean): Promise<ProbeOutcome> => {
+    if (isDisabled(incident.runtime)) return { kind: "disabled" };
     const adapter = options.runtime(incident.runtime);
     // 配置换了（例如换了可执行文件或配置目录），就是另一个 profile。派发 gate 按现在的 profile 查账本，
     // 所以这次故障只挂起用旧配置的派发。探针说明不了旧配置，所以不探，只推迟到下一个退避时间。
@@ -134,6 +139,9 @@ export function createHealthRecovery(
         return `${head}：重检通过，故障已关闭，挂起的请求马上放行。`;
       case "probe_failed":
         return `${head}：重检没有通过（${detail ?? "原因未知"}）。派发保持挂起。`;
+      case "disabled":
+        return `${head}：${runtimeDisplayName(incident.runtime)} 在设置里停用了，所以没有重检（重检会起它的进程）。`
+          + "故障保持原样，重新启用它以后再重检。";
       case "profile_changed":
         return `${head}：daemon 现在用的 ${runtimeDisplayName(incident.runtime)} 配置不是这次故障的配置，`
           + "所以没有重检。这次故障只挂起用那个配置的派发。";
@@ -166,6 +174,9 @@ export function createHealthRecovery(
         const outcome = await probe(incident, true);
         if (outcome.kind === "profile_changed") {
           return { ...base, outcome: "profile_changed", summary: summary(incident, "profile_changed") };
+        }
+        if (outcome.kind === "disabled") {
+          return { ...base, outcome: "disabled", summary: summary(incident, "disabled") };
         }
         if (outcome.kind === "stopped") {
           return { ...base, outcome: "probe_failed", summary: summary(incident, "probe_failed", "daemon 正在关闭") };

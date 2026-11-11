@@ -5,7 +5,9 @@
 //   - 发现失败的 runtime 记成 unknown：不替 Run 选模型，Lead 明确给的模型也不核对，照原样交给 CLI。
 import type { RuntimeId } from "@pi-lead-child/core";
 import type { Db } from "@pi-lead-child/store";
-import { resolveRuntimeModel, runtimeAdapters, type DiscoveredModel, type RuntimeEnv } from "@pi-lead-child/runtime";
+import {
+  allRuntimeAdapters, isRuntimeDisabled, resolveRuntimeModel, type DiscoveredModel, type RuntimeEnv,
+} from "@pi-lead-child/runtime";
 
 export interface RuntimeModelCatalog {
   runtime: RuntimeId;
@@ -46,7 +48,7 @@ function unknownEntry(runtime: RuntimeId, error: string): RuntimeModelCatalog {
 }
 
 function emptyCatalog(): ModelCatalog {
-  return { runtimes: runtimeAdapters().map((adapter) => unknownEntry(adapter.id, "not discovered yet")), refreshedAt: null };
+  return { runtimes: allRuntimeAdapters().map((adapter) => unknownEntry(adapter.id, "not discovered yet")), refreshedAt: null };
 }
 
 function readStored(db: Db): ModelCatalog | null {
@@ -99,8 +101,13 @@ export function refreshModelCatalog(options: ModelCatalogRefreshOptions): Promis
   const previous = currentModelCatalog(options.db);
   inFlight = (async () => {
     const at = (options.now ?? (() => new Date()))().toISOString();
-    const runtimes = await Promise.all(runtimeAdapters().map(async (adapter): Promise<RuntimeModelCatalog> => {
+    const runtimes = await Promise.all(allRuntimeAdapters().map(async (adapter): Promise<RuntimeModelCatalog> => {
       const before = previous.runtimes.find((entry) => entry.runtime === adapter.id);
+      // 用户停用的 runtime 不问它的 CLI 要目录（那会起它的进程）。目录里留着上一次的结果，没有就是 unknown。
+      // 停用名单在 daemon 的进程环境里；options.env 是给 CLI 的环境，也认它里面的名单。
+      if (isRuntimeDisabled(adapter.id) || isRuntimeDisabled(adapter.id, options.env ?? {})) {
+        return before ?? unknownEntry(adapter.id, "disabled in settings; not discovered");
+      }
       if (!adapter.discoverModels) return before ?? unknownEntry(adapter.id, "runtime has no model discovery");
       const result = await adapter.discoverModels({ cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs })
         .catch((error: unknown) => ({ ok: false as const, error: String((error as Error)?.message ?? error), source: "discovery" }));

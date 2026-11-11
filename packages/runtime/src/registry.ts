@@ -32,13 +32,22 @@ export function registerRuntimeAdapter(adapter: RuntimeAdapter): () => void {
   };
 }
 
-export function runtimeAdapters(): readonly RuntimeAdapter[] {
+// 所有登记的 adapter，包括用户停用的。只给不会启动、探测 runtime 的地方用：按 id 认已有数据、设置页的开关列表、
+// 展示名和能力。要选 runtime、探测、发现模型，用 runtimeAdapters(env)。
+export function allRuntimeAdapters(): readonly RuntimeAdapter[] {
   return [...BUILTIN_ADAPTERS, ...registeredAdapters];
 }
 
-// 所有登记的 runtime id，按优先顺序排列。
-export function runtimeIds(): RuntimeId[] {
-  return runtimeAdapters().map((adapter) => adapter.id);
+// 没停用的 adapter，按优先顺序排列。注册、预检、健康探针、模型发现都从这里取，停用的 runtime 在这里就没有了，
+// 所以 daemon 不会对它跑 --version、--help 或 auth status。env 缺省是进程环境（daemon 把停用名单写在那里）。
+export function runtimeAdapters(env: RuntimeEnv = process.env): readonly RuntimeAdapter[] {
+  const disabled = disabledRuntimes(env);
+  return allRuntimeAdapters().filter((adapter) => !disabled.includes(adapter.id));
+}
+
+// 没停用的 runtime id，按优先顺序排列。
+export function runtimeIds(env: RuntimeEnv = process.env): RuntimeId[] {
+  return runtimeAdapters(env).map((adapter) => adapter.id);
 }
 
 // value 来自外部输入（CLI 参数、环境变量、库里的旧数据）时，用它判断是不是登记的 runtime。
@@ -46,8 +55,9 @@ export function isRuntimeId(value: unknown): value is RuntimeId {
   return typeof value === "string" && findRuntimeAdapter(value) !== undefined;
 }
 
+// 按 id 查 adapter，停用的也查得到：旧 Run、设置页和失败说明要认得它。查到不等于可以启动或探测它。
 export function findRuntimeAdapter(id: string): RuntimeAdapter | undefined {
-  return runtimeAdapters().find((adapter) => adapter.id === id);
+  return allRuntimeAdapters().find((adapter) => adapter.id === id);
 }
 
 export function runtimeAdapter(id: RuntimeId): RuntimeAdapter {
@@ -60,7 +70,7 @@ export function runtimeAdapter(id: RuntimeId): RuntimeAdapter {
 // 配置里的名字没有登记时，丢掉它。
 export function runtimeFallbackOrder(env: RuntimeEnv = process.env): RuntimeId[] {
   const configured = (env.PLC_RUNTIME_FALLBACKS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
-  return [...configured, ...runtimeIds()].filter((runtime, index, all): runtime is RuntimeId =>
+  return [...configured, ...allRuntimeAdapters().map((adapter) => adapter.id)].filter((runtime, index, all): runtime is RuntimeId =>
     isRuntimeId(runtime) && all.indexOf(runtime) === index);
 }
 
@@ -92,7 +102,7 @@ export function runtimeDisabledReason(runtime: RuntimeId): string {
 // 跳过停用和故障的 runtime 要查健康账本，由 engine 的 reviewer-choice.ts 做；这里只给顺序。
 export function reviewRuntimeOrder(env: RuntimeEnv = process.env): RuntimeId[] {
   const configured = env.PLC_REVIEW_RUNTIME?.trim();
-  const adapters = runtimeAdapters();
+  const adapters = allRuntimeAdapters();
   return [
     ...(configured && isRuntimeId(configured) ? [configured] : []),
     ...adapters.filter((adapter) => adapter.capabilities.executableReadOnlyReview).map((adapter) => adapter.id),
@@ -142,7 +152,8 @@ export function createDefaultRuntimeRegistry(options?: {
   claude?: ClaudeRuntimeOptions;
 }): RuntimeRegistry {
   const configured: Partial<Record<string, unknown>> = { ...options };
-  return new RuntimeRegistry(runtimeAdapters().map((adapter) => adapter.create(configured[adapter.id])));
+  // 停用的 runtime 也有实例：创建实例不起进程，停用靠派发 gate 挡住启动，用户在设置里重新启用后不用重启 daemon。
+  return new RuntimeRegistry(allRuntimeAdapters().map((adapter) => adapter.create(configured[adapter.id])));
 }
 
 // 默认 registry 里这个 runtime 的 profile。daemon 没有注入自己的 registry 时，派发和执行用的就是它。

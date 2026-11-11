@@ -27,6 +27,23 @@ const okProbes: DoctorProbes = {
   nodeVersion: () => "v22.1.0",
 };
 
+describe("runDoctor: the daemon and Claude Code", () => {
+  const claudeLine = (checks: DoctorCheck[]) => checks.find((check) => check.name === "Claude Code");
+
+  it("reports that the daemon does not call Claude when it is disabled", async () => {
+    const check = claudeLine(await runDoctor({ ...okProbes, claudeDisabled: () => true }, "en"))!;
+    expect(check).toMatchObject({ ok: true, detail: "Disabled. The daemon does not run claude (no --version, --help or auth status)." });
+    expect(check.fix).toBeUndefined();
+    expect(claudeLine(await runDoctor({ ...okProbes, claudeDisabled: () => true }, "zh"))!.detail).toContain("不会执行 claude");
+  });
+
+  it("says the daemon checks Claude when it is not disabled, and is not listed without the probe", async () => {
+    expect(claudeLine(await runDoctor({ ...okProbes, claudeDisabled: () => false }, "en")))
+      .toMatchObject({ ok: null, detail: expect.stringContaining("runs claude") });
+    expect(claudeLine(await runDoctor(okProbes))).toBeUndefined();
+  });
+});
+
 describe("runDoctor: the gateway's exposed address", () => {
   const exposure = (state: "listening" | "retrying", lastError: string | null = null) => ({
     host: "100.64.0.7", port: 5100, state, attempts: 3, lastError, nextRetryAt: state === "retrying" ? "2026-10-13T04:00:00.000Z" : null,

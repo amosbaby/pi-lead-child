@@ -5,13 +5,13 @@ import type { Db } from "@pi-lead-child/store";
 import { getItem } from "@pi-lead-child/store";
 import type { RuntimeId } from "@pi-lead-child/core";
 import {
-  isRuntimeDisabled, runtimeAdapter, runtimeAdapters, runtimeDisabledReason, runtimeIds,
+  allRuntimeAdapters, isRuntimeDisabled, runtimeAdapter, runtimeDisabledReason,
 } from "@pi-lead-child/runtime";
 import type { RuntimeCapabilities } from "@pi-lead-child/runtime";
 
 // 内置 runtime 的优先顺序，在模块加载时从 registry 取一次。保留它是为了已有的脚本。
-// 内核读 registry 的 runtimeIds()，它也包括之后登记的 runtime（工单 12）。
-export const CHILD_RUNTIME_ORDER: readonly RuntimeId[] = runtimeIds();
+// 内核读 registry 的 runtimeIds(env)，它也包括之后登记的 runtime（工单 12），不含用户停用的。
+export const CHILD_RUNTIME_ORDER: readonly RuntimeId[] = allRuntimeAdapters().map((adapter) => adapter.id);
 
 export interface RuntimeCatalogEntry {
   id: RuntimeId;
@@ -75,7 +75,8 @@ export function probeChildRuntimeCatalog(options: RuntimeCatalogProbe = {}): Run
   const env = options.env ?? process.env;
   const cwd = options.cwd ?? projectRoot();
   return {
-    entries: runtimeAdapters().map((adapter) => {
+    // 目录要列出停用的 runtime（设置页的开关、选型建议的排除原因）。这里只找可执行文件，不起进程。
+    entries: allRuntimeAdapters().map((adapter) => {
       const { id } = adapter;
       const executable = options.findExecutable ? options.findExecutable(id) : adapter.locateExecutable(cwd);
       const models = modelsFor(id, env);

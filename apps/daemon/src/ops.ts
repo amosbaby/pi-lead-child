@@ -34,7 +34,7 @@ import { join, resolve } from "node:path";
 import {
   DAEMON_ONLY_ENV_NAMES,
   captureLoginShellPath, dataDir, dbPath, defaultDataDir, distDir, envConfigPath, isPreRenameDataDir, loadEnvConfig,
-  isReleaseRuntime, packageSource, preRenameDataDir, projectRoot, runtimeAssetPaths, saveLoginShellPath, workspaceDir,
+  isReleaseRuntime, loadPlcConfig, packageSource, preRenameDataDir, projectRoot, runtimeAssetPaths, saveLoginShellPath, workspaceDir,
 } from "@pi-lead-child/core";
 import {
   activeLaunchdLabel, AGENT_BINARY, agentStatus, autoStartRefusal, bootstrapAgent, installAgentBinary, itemsBlockingMaintenance,
@@ -47,6 +47,7 @@ import {
   loadLeadModelConfig, resolveLeadApiKey, selectedLeadModelSpec, setLeadModelInConfig,
 } from "@pi-lead-child/lead";
 import { defaultWebRoot } from "@pi-lead-child/gateway";
+import { claudeAdapter } from "@pi-lead-child/runtime";
 import { isLocale, type DaemonLocalStatus, type LocalSocketCommand } from "@pi-lead-child/protocol";
 import {
   dropLedgerGuards, importLegacyDb, ledgerGuardedTables, ledgerGuardDropSql, ledgerGuardTriggers, missingLedgerGuards, openExistingDb,
@@ -581,6 +582,12 @@ async function doctor(): Promise<number> {
     },
     releaseMode: () => hasReleaseManifest(PROJECT_ROOT),
     gatewayExposure: async () => (await daemonLocalStatus())?.gatewayExposure ?? null,
+    // 停用名单有两处：设置页写的 config.json，和手设的环境变量。读不出 config.json 时只看环境变量，不让 doctor 因此失败。
+    claudeDisabled: () => {
+      let configured: readonly string[] = [];
+      try { configured = loadPlcConfig(dataDir()).runtimes?.disabled ?? []; } catch { /* configParses 会报告 */ }
+      return [...configured, ...(process.env.PLC_DISABLED_RUNTIMES ?? "").split(",").map((id) => id.trim())].includes(claudeAdapter.id);
+    },
   };
   const checks = await runDoctor(probes);
   console.log(formatChecks(checks));

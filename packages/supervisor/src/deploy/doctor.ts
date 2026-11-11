@@ -8,7 +8,8 @@ import {
 import { LATEST_SCHEMA_VERSION, SCHEMA_MIGRATION_VERSIONS, type Db } from "@pi-lead-child/store";
 import { loadAishConn } from "@pi-lead-child/store";
 
-import type { GatewayExposureStatus } from "@pi-lead-child/protocol";
+import type { GatewayExposureStatus, Locale } from "@pi-lead-child/protocol";
+import { doctorMessages } from "./doctor.messages.js";
 import { keychainSetCommand } from "./keychain.js";
 
 export interface DoctorCheck { name: string; ok: boolean | null; detail: string; fix?: string }
@@ -55,9 +56,12 @@ export interface DoctorProbes {
   releaseMode?(): boolean;
   // 网关在回环之外的那个地址的状态（daemon 的 status 里有）。只监听回环或 daemon 没在运行时为 null。
   gatewayExposure?(): Promise<GatewayExposureStatus | null>;
+  // 用户有没有停用 Claude Code（config.json 的 runtimes.disabled，加上进程环境里的名单）。缺席时不列 Claude Code 那一项。
+  claudeDisabled?(): boolean;
 }
 
-export async function runDoctor(p: DoctorProbes): Promise<DoctorCheck[]> {
+// locale 只管用 messages 写的检查项；其余检查项还是中文，所以缺省是 zh，整份输出语言一致。
+export async function runDoctor(p: DoctorProbes, locale: Locale = "zh"): Promise<DoctorCheck[]> {
   const checks: DoctorCheck[] = [];
   const alive = await p.daemonAlive();
   checks.push({
@@ -152,8 +156,17 @@ export async function runDoctor(p: DoctorProbes): Promise<DoctorCheck[]> {
   const fts5 = p.fts5Available();
   checks.push({ name: "FTS5 检索", ok: fts5, detail: fts5 ? "可用" : "不可用，notes 检索降级 LIKE" });
   checks.push({ name: "node", ok: true, detail: p.nodeVersion() });
+  if (p.claudeDisabled) checks.push(claudeCheck(p.claudeDisabled(), locale));
   if (p.agentNodeVersion && !release) checks.push(agentNodeCheck(p.agentNodeVersion(), p.nodeVersion()));
   return checks;
+}
+
+// daemon 对 Claude Code 的态度：停用了就一个进程也不起（2026-11-12）。没停用时 daemon 会为预检、探针和模型发现起它。
+function claudeCheck(disabled: boolean, locale: Locale): DoctorCheck {
+  const m = doctorMessages(locale);
+  return disabled
+    ? { name: m.claudeName, ok: true, detail: m.claudeDisabled }
+    : { name: m.claudeName, ok: null, detail: m.claudeEnabled, fix: m.claudeEnabledFix };
 }
 
 // 开发机的后台服务用 Node 的副本运行（设计第 8.7 节，P0-8）。开发机换了 Node 以后副本还是旧的：launchd 跑的和
