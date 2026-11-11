@@ -11,7 +11,7 @@ import {
 } from "../src/scheduler/index.js";
 
 const LIMITS: SchedulerLimits = {
-  yellowToolCalls: 100, yellowMs: 600_000, budgetMs: 150_000, writeGraceMs: 30_000, handoffMs: 30_000,
+  yellowToolCalls: 100, yellowMs: 600_000, budgetMs: 150_000, handoffMs: 30_000,
   queueNoticeMs: 300_000, userQueueNoticeMs: 60_000,
 };
 

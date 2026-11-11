@@ -16,6 +16,7 @@ import {
   type LeadHandsOptions,
 } from "../src/hands.js";
 import type { LeadTurnOrigin } from "../src/turn-origin.js";
+import { installToolAbortGuard, type ToolAbortGuardOptions } from "../src/tool-abort-guard.js";
 
 // 用真的沙箱，只在 macOS 上跑。Linux 上的沙箱要 bubblewrap、socat 和 ripgrep，CI 的 ubuntu runner 不装它们，
 // 产品也只有 macOS 版，所以在别的系统上跳过（docs/testing.md 的「只在 macOS 上跑的测试」）。
@@ -28,7 +29,9 @@ interface ToolEvent { type: string; toolName: string; parentToolCallId?: string;
 
 async function leadLikeSession(
   dataDir: string, steps: Step[], origin: () => LeadTurnOrigin,
-  hands: Pick<LeadHandsOptions, "bashTimeoutSeconds" | "backgroundJobs" | "bashSoftLimitMs"> = {},
+  hands: Pick<LeadHandsOptions, "bashTimeoutSeconds"> = {},
+  // 和 Lead 的会话一样装上中止兜底（session.ts）；不给时不装。
+  guard?: ToolAbortGuardOptions,
 ) {
   const faux = fauxProvider({ provider: "plc-hands-test", api: "plc-hands-test-api" });
   faux.setResponses([...steps, fauxAssistantMessage("好了。")]);
@@ -52,6 +55,7 @@ async function leadLikeSession(
     resourceLoader: loader, sessionManager: SessionManager.inMemory(dataDir), settingsManager,
     tools: ["read", "grep", "find", "ls", "bash", "edit", "write", "codemode"],
   });
+  if (guard) installToolAbortGuard(session.agent, guard);
   await session.bindExtensions({});
   // 和 Lead 一样：codemode 注册时不激活，按名单激活（session.ts 的 syncToolAccess）。
   session.setActiveToolsByName(["read", "grep", "find", "ls", "bash", "edit", "write", "codemode"]);
@@ -185,9 +189,9 @@ describe.runIf(supported)("Lead's hands in a pi session", () => {
     expect(ends[1]?.text).toContain("in-time");
   }, 90_000);
 
-  // lead-scheduler spec D6（P3）：只读的命令过了软时限转后台，这一步结束，命令接着跑，结束时把输出交出去。
-  // 改东西的命令不转后台，照旧按硬时限（上一条测试）。
-  it("moves a read-only command that outlasts the soft limit to the background, and hands over its output when it ends", async () => {
+  // lead-scheduler spec D6（P3）、.scratch/tool-occupancy/spec.md L2：命令过了软时限转后台，这一步结束，命令接着跑，
+  // 结束时把输出交出去。2026-11-11 起改东西的命令也转后台（以前只有 read_only 的），由中止兜底按工具清单统一做。
+  it("moves a command that outlasts the soft limit to the background, and hands over its output when it ends", async () => {
     const dir = tempDir("plc-hands-");
     const started: string[] = [];
     const finished: Array<{ id: string; text: string; isError: boolean }> = [];
@@ -199,17 +203,21 @@ describe.runIf(supported)("Lead's hands in a pi session", () => {
     const events = await leadLikeSession(dir, [
       call("bash", { command: "echo quick-read", read_only: true }),
       call("bash", { command: "sleep 3; echo late-read", read_only: true }),
-    ], userTurn, { backgroundJobs, bashSoftLimitMs: 700 });
+      call("bash", { command: "sleep 3; echo late-write" }),
+    ], userTurn, {}, { jobs: backgroundJobs, softMs: 700 });
     const ends = events.filter((e) => e.type === "end" && e.toolName === "bash");
     expect(ends[0]?.text).toContain("quick-read");
-    expect(ends[1]?.isError).toBeFalsy();
-    expect(ends[1]?.text).toMatch(/已经转到后台：作业 job_[a-z0-9]+/u);
+    for (const end of ends.slice(1)) {
+      expect(end.isError).toBeFalsy();
+      expect(end.text).toMatch(/转到后台：作业 job_[a-z0-9]+/u);
+    }
     // 这一步没有等命令跑完。
-    expect(Date.now() - before).toBeLessThan(3_000);
-    expect(started).toHaveLength(1);
-    await vi.waitFor(() => expect(finished).toHaveLength(1), { timeout: 10_000 });
-    expect(finished[0]).toMatchObject({ id: started[0], isError: false });
-    expect(finished[0]!.text).toContain("late-read");
+    expect(Date.now() - before).toBeLessThan(5_000);
+    expect(started).toHaveLength(2);
+    await vi.waitFor(() => expect(finished).toHaveLength(2), { timeout: 10_000 });
+    expect(finished.map((job) => job.isError)).toEqual([false, false]);
+    expect(finished.map((job) => job.text).join("\n")).toContain("late-read");
+    expect(finished.map((job) => job.text).join("\n")).toContain("late-write");
   }, 90_000);
 
   it("runs bash in a turn that only read connection results", async () => {

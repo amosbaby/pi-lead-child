@@ -236,11 +236,13 @@ describe("the 2026-11-03 queue, replayed", () => {
     expect(logs.some((line) => line.includes("decision=handoff_again"))).toBe(true);
   }, 20_000);
 
-  it("lets a running bash command finish before it stops the turn", async () => {
+  // 2026-11-11（.scratch/tool-occupancy/spec.md 第 7 节第 1 条）：以前过了红线先等在跑的 bash 做完（最多 30 秒）再停。
+  // 现在中止兜底让改东西的调用转到后台接着跑（tool-abort-guard.ts），红线马上停下这一轮。
+  it("stops the turn at once while a bash command runs, because the command moves to the background", async () => {
     lights(150, 300);
     const pushed = deferred();
     const { say, lead, logs, turn } = await boot((call) => {
-      if (has(call, RED)) return { say: "推送做完了，剩下的派出去了。" };
+      if (has(call, RED)) return { say: "推送转到后台了，剩下的派出去了。" };
       if (has(call, "把 acme/a 的分支推上去")) return { tools: [github] };
       if (call.index === 1) return { tools: [{ name: "bash", args: { command: "git push" }, until: pushed.promise }] };
       if (call.index === 2) return { say: [never] };
@@ -250,14 +252,12 @@ describe("the 2026-11-03 queue, replayed", () => {
     await say("d1", "把 acme/a 的分支推上去");
     await vi.waitFor(() => expect(lead.calls.length).toBe(2), { timeout: 5_000 });
     const queued = await say("d2", "推完告诉我", "followUp");
-    await sleep(700);
 
-    // 过了红线，有人在等，但 bash 还在跑：先不停。
-    expect(lead.aborts()).toBe(0);
-    expect(logs.some((line) => line.includes("lead red line") && line.includes("bash"))).toBe(true);
-
-    pushed.resolve();
+    // 过了红线，有人在等，bash 还在跑：照样马上停。
     await vi.waitFor(() => expect(lead.aborts()).toBe(1), { timeout: 5_000 });
+    expect(logs.some((line) => line.includes("lead red line: bash is running; it moves to the background"))).toBe(true);
+    expect(logs.some((line) => line.includes("decision=write_wait"))).toBe(false);
+    pushed.resolve();
     await vi.waitFor(() => expect(turn(queued.turnId).state).toBe("completed"), { timeout: 5_000 });
   }, 20_000);
 });

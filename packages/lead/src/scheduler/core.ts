@@ -9,7 +9,8 @@
 // 两盏灯（lead 的 overflow.ts、red-line.ts，用户 2026-11-03）：
 //   · 黄灯（缺省 2 分钟或 10 次工具调用）：提醒一次；
 //   · 红灯（就地预算，缺省 2 分 30 秒）：有人在等时停下这一轮，叫 Lead 交接；没有人在等时再提醒一次，之后有人开始等时
-//     照样停下。正在跑的写操作先做完（最多 writeGraceMs），然后中断；交接最多 handoffMs，到时再中断一次。
+//     照样停下。正在跑的调用不等：改东西的转到后台接着跑（tool-abort-guard.ts，.scratch/tool-occupancy/spec.md 第 7 节
+//     第 1 条），然后中断；交接最多 handoffMs，到时再中断一次。
 // 排队说明（lead-self-routing spec C）：一个对话排队超过阈值时插一条说明，同一个单元只插一次。
 //
 // 优先级反转（spec「背景」，用户 2026-11-09 的决定 2）：外部的人的消息不能抢占用户本人的 L0 单元。L0 单元里，
@@ -41,7 +42,6 @@ export interface SchedulerLimits {
   yellowMs: number;
   // 红灯：就地预算（red-line.ts）。
   budgetMs: number;
-  writeGraceMs: number;
   handoffMs: number;
   // 排队说明的阈值：外部的人、用户本人（overflow.ts 的 queueNoticeMs、userQueueNoticeMs）。
   queueNoticeMs: number;
@@ -56,20 +56,17 @@ export interface WaitingEntry extends WaitingConversation {
 export type RedLinePhase = "stopping" | "aborting" | "handoff" | "closing" | "done";
 
 export interface RedLineState {
-  // stopping：等正在跑的写操作做完，然后中断；aborting：已经中断，这一次 prompt 返回后送红线消息；
+  // stopping：决定停下、还没中断；aborting：已经中断，这一次 prompt 返回后送红线消息；
   // handoff：Lead 在交接，只能用交接的工具；closing：交接超时，又中断了一次；done：交接完了。
   phase: RedLinePhase;
   // 停下时在等的人（送交接消息时都已经送到了，就用这一份）。
   waiting: WaitingEntry[];
-  writeDeadline: number;
-  // 正在等它做完的写操作（只为了日志不重复）。
-  waitingFor: string | null;
   stoppedAt: number;
 }
 
 export interface ToolInFlight {
   name: string;
-  // 停下这一轮会不会把它做到一半（red-line.ts 的 interruptibleWrite）。
+  // 它改不改东西（red-line.ts 的 writeCall，按工具清单）。红线不再等它：改东西的调用转到后台。
   write: boolean;
 }
 
@@ -146,7 +143,6 @@ export type SchedulerEvent =
   | { type: "tool.end"; id: string }
   | { type: "budget.check"; facts: BudgetFacts }
   | { type: "queue.check"; facts: BudgetFacts }
-  | { type: "write.recheck"; canAbort: boolean }
   | { type: "budget.restart"; why: "follow_up" | "steer_after_handoff" | "resume" }
   | { type: "prompt.returned"; limits: SchedulerLimits }
   | { type: "handoff.timeout" }
@@ -184,8 +180,6 @@ export type SchedulerEffect =
   | { type: "abort"; reason: LeadAbortReason }
   // 会话不能中断：把红线消息插进这一轮，照样只能交接。
   | { type: "redline.steer"; elapsedMs: number; waiting: WaitingEntry[] }
-  // 写操作还在跑：afterMs 以后再看一次（write.recheck）。
-  | { type: "redline.recheck"; afterMs: number }
   // 红线中断以后这一次 prompt 返回了：在同一个单元里送红线消息，并在 timeoutMs 以后发 handoff.timeout。
   | { type: "redline.handoff"; elapsedMs: number; waiting: WaitingEntry[]; timeoutMs: number }
   // P2：把这个单元挂起（H10）：交接包存下来，不需要模型调用。
@@ -335,7 +329,7 @@ function redLineStop(
   const alone = !someoneWaiting(unit, counted);
   unit = {
     ...unit,
-    redLine: { phase: "stopping", waiting: counted, writeDeadline: now + limits.writeGraceMs, waitingFor: null, stoppedAt: now },
+    redLine: { phase: "stopping", waiting: counted, stoppedAt: now },
   };
   effects.push({ type: "log", line: alone
     ? `lead red line: ${Math.round(elapsed / 1_000)}s and nobody is waiting; stopping the turn for a hand-off`
@@ -354,26 +348,17 @@ function redLineStop(
   return { state: stopped.state, effects: [...effects, ...stopped.effects] };
 }
 
-/** 红线停下这一轮：正在跑的写操作先做完（最多 writeGraceMs），然后中断（以前的 stopForRedLine）。 */
+/**
+ * 红线停下这一轮：马上中断（以前的 stopForRedLine）。以前先等正在跑的写操作做完（最多 30 秒）；现在中止兜底让改东西的
+ * 调用转到后台接着跑，不会做到一半被杀掉（tool-abort-guard.ts，用户 2026-11-11），所以不等。
+ */
 function stopForRedLine(state: SchedulerState, canAbort: boolean, now: number): SchedulerStep {
   const unit = state.unit;
   const line = unit?.redLine;
   if (!unit || !line || line.phase !== "stopping") return { state, effects: [] };
   const effects: SchedulerEffect[] = [];
   const write = Object.values(unit.tools).find((tool) => tool.write)?.name ?? null;
-  if (write && now < line.writeDeadline) {
-    let next = line;
-    if (line.waitingFor !== write) {
-      next = { ...line, waitingFor: write };
-      effects.push({ type: "log", line: `lead red line: waiting for ${write} to finish before stopping the turn` });
-      effects.push({ type: "log", line: schedulerLine("decide", {
-        ...unitFields(unit), decision: "write_wait", tool: write, graceLeftMs: line.writeDeadline - now,
-      }) });
-    }
-    effects.push({ type: "redline.recheck", afterMs: 250 });
-    return { state: withUnit(state, { ...unit, redLine: next }), effects };
-  }
-  if (write) effects.push({ type: "log", line: `lead red line: ${write} still runs after the grace period; stopping the turn anyway` });
+  if (write) effects.push({ type: "log", line: `lead red line: ${write} is running; it moves to the background and the turn stops now` });
   const elapsed = now - (unit.budgetStartedAt ?? now);
   if (!canAbort) {
     // 会话不能中断（老的会话端口）：把红线消息插进这一轮，照样只能交接。
@@ -531,8 +516,6 @@ export function schedulerStep(state: SchedulerState, event: SchedulerEvent, now:
       return checkBudget(state, event.facts, now);
     case "queue.check":
       return checkQueue(state, event.facts, now);
-    case "write.recheck":
-      return stopForRedLine(state, event.canAbort, now);
     case "budget.restart": {
       // 排着的消息在这一次运行里开始答：那是用户新的一件事，两盏灯重新算。红线没走完时不重算。
       if (!unit || (unit.redLine && unit.redLine.phase !== "done")) return { state, effects: [] };

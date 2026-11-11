@@ -9,7 +9,7 @@ import {
 } from "../src/scheduler/index.js";
 
 const LIMITS: SchedulerLimits = {
-  yellowToolCalls: 10, yellowMs: 120_000, budgetMs: 150_000, writeGraceMs: 30_000, handoffMs: 180_000,
+  yellowToolCalls: 10, yellowMs: 120_000, budgetMs: 150_000, handoffMs: 180_000,
   queueNoticeMs: 300_000, userQueueNoticeMs: 60_000,
 };
 
@@ -174,35 +174,17 @@ describe("the red line", () => {
     expect(abortedByRedLine(m.state)).toBe(true);
   });
 
-  it("lets a running write finish within the grace period, then stops", () => {
+  // 2026-11-11（.scratch/tool-occupancy/spec.md 第 7 节第 1 条）：以前先等写操作做完（最多 30 秒）再停。现在改东西的调用
+  // 由中止兜底转到后台接着跑，红线马上停下这一轮，abort 行里照样写出在跑的写操作。
+  it("stops at once while a write runs, because the write moves to the background", () => {
     const m = machine();
     openUnit(m);
     m.send({ type: "tool.start", id: "w1", name: "bash", write: true, top: true, facts: facts([user(0)]) });
     m.advance(150_000);
     m.send({ type: "budget.check", facts: facts([user(150_000)]) });
-    expect(m.of("abort")).toEqual([]);
-    expect(m.of("redline.recheck")).toEqual([{ type: "redline.recheck", afterMs: 250 }]);
-    expect(m.logs().filter((line) => line.includes("decision=write_wait"))).toHaveLength(1);
-    m.advance(250);
-    m.send({ type: "write.recheck", canAbort: true });
-    // 同一个写操作只记一次日志。
-    expect(m.logs().filter((line) => line.includes("decision=write_wait"))).toHaveLength(1);
-    m.send({ type: "tool.end", id: "w1" });
-    m.advance(250);
-    m.send({ type: "write.recheck", canAbort: true });
     expect(m.of("abort")).toEqual([{ type: "abort", reason: { kind: "budget" } }]);
-  });
-
-  it("stops anyway when the write outlasts the grace period", () => {
-    const m = machine();
-    openUnit(m);
-    m.send({ type: "tool.start", id: "w1", name: "bash", write: true, top: true, facts: facts([user(0)]) });
-    m.advance(150_000);
-    m.send({ type: "budget.check", facts: facts([user(150_000)]) });
-    m.advance(30_000);
-    m.send({ type: "write.recheck", canAbort: true });
-    expect(m.of("abort")).toHaveLength(1);
-    expect(m.effects.some((effect) => effect.type === "log" && effect.line.includes("bash still runs after the grace period"))).toBe(true);
+    expect(m.logs().some((line) => line.includes("decision=write_wait"))).toBe(false);
+    expect(m.logs().some((line) => line.startsWith("[sched] abort") && line.includes("write=bash"))).toBe(true);
   });
 
   it("steers the red-line message when the session cannot abort", () => {

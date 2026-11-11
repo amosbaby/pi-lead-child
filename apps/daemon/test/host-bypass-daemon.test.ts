@@ -10,7 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { withCallObserver } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
-import { createLeadTools, hostCommandRoute } from "@pi-lead-child/lead";
+import { createLeadTools, guardToolAbort, hostCommandRoute, leadToolGuardOptions } from "@pi-lead-child/lead";
 import {
   HOST_BYPASS_ENABLED_KIND, HOST_BYPASS_EXPIRED_KIND, HOST_COMMAND_FINISHED_KIND, HOST_COMMAND_STARTED_KIND,
 } from "@pi-lead-child/protocol";
@@ -209,10 +209,11 @@ describe("commands outside the sandbox through the daemon", () => {
       else process.env.PLC_LEAD_TOOL_SOFT_MS = savedSoft;
     });
     type Outcome = { text: string; ms: number };
-    // run_on_host 收到 pi 给的这一步的 signal；中止的原因由调度器给（deps.abortReason）。
+    // run_on_host 包上和 Lead 会话里一样的中止兜底（session.ts 的 leadToolGuardOptions，daemon 给的出口和插话登记），
+    // 收到 pi 给的这一步的 signal；中止的原因由调度器给，这里换成测试的。
     const runStoppable = async (deps: any, command: string, stop: { afterMs: number; reason: unknown } | null): Promise<Outcome> => {
-      const tool = createLeadTools({ ...deps, abortReason: () => stop?.reason ?? null })
-        .find((candidate: any) => candidate.name === "run_on_host") as any;
+      const raw = createLeadTools(deps).find((candidate: any) => candidate.name === "run_on_host") as any;
+      const tool = guardToolAbort(raw, { ...leadToolGuardOptions(deps), abortReason: () => (stop?.reason ?? null) as never });
       const controller = new AbortController();
       if (stop) setTimeout(() => controller.abort(), stop.afterMs);
       const started = Date.now();

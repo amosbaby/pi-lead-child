@@ -93,6 +93,8 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "attach_to_ticket",
   // 处理消息事件的通用工具（统一消息事件工单 05）：结果是派出的工单、发出的话或者卡上的草稿、卡的状态。
   "dispatch_agent_task", "reply_to_source",
+  // 停掉一个后台作业（.scratch/tool-occupancy/spec.md）：结果是停了哪个作业、还有哪些在跑。
+  "stop_job",
   // 改选交接说明里的一句（自动代你处理方案 B，D1）：结果是用户写的句子和重算的上限，没有外部的原文。
   "repick_situation",
   // 交接（lead-scheduler spec P2）：hand_off 的结果是建了哪张单、交接包多大。resume_unit 的结果是挂起时存下的交接包，

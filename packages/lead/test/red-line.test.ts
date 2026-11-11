@@ -1,19 +1,19 @@
-// 红灯（用户 2026-11-03，red-line.ts）：阈值、红线消息、停下以前要等做完的写操作、红线以后的工具限制。
+// 红灯（用户 2026-11-03，red-line.ts）：阈值、红线消息、哪些调用算写操作、红线以后的工具限制。
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_HANDOFF_MS, DEFAULT_RED_LINE_MS, DEFAULT_WRITE_GRACE_MS, durationText, interruptibleWrite, overflowSecondReminder,
-  RED_LINE_GATE_REASON, RED_LINE_HANDOFF_TOOLS, redLineGateExtension, redLineLimits, redLineMessage,
+  DEFAULT_HANDOFF_MS, DEFAULT_RED_LINE_MS, durationText, overflowSecondReminder,
+  RED_LINE_GATE_REASON, RED_LINE_HANDOFF_TOOLS, redLineGateExtension, redLineLimits, redLineMessage, writeCall,
 } from "../src/red-line.js";
 
 describe("red line limits", () => {
   // P2（lead-scheduler spec H8）：交接是一次 hand_off，窗口从 3 分钟缩到 30 秒。
-  it("defaults to 2.5 minutes, waits up to 30 s for a running write and 30 s for the hand-off", () => {
-    expect(redLineLimits({})).toEqual({ ms: DEFAULT_RED_LINE_MS, writeGraceMs: DEFAULT_WRITE_GRACE_MS, handoffMs: DEFAULT_HANDOFF_MS });
+  // 2026-11-11 起红线不再等写操作（改东西的调用转到后台），PLC_LEAD_WRITE_GRACE_MS 不再起作用。
+  it("defaults to 2.5 minutes and 30 s for the hand-off", () => {
+    expect(redLineLimits({})).toEqual({ ms: DEFAULT_RED_LINE_MS, handoffMs: DEFAULT_HANDOFF_MS });
     expect(DEFAULT_RED_LINE_MS).toBe(150_000);
-    expect(DEFAULT_WRITE_GRACE_MS).toBe(30_000);
     expect(DEFAULT_HANDOFF_MS).toBe(30_000);
     expect(redLineLimits({ PLC_LEAD_RED_LINE_MS: "300", PLC_LEAD_WRITE_GRACE_MS: "0", PLC_LEAD_HANDOFF_MS: "x" }))
-      .toEqual({ ms: 300, writeGraceMs: DEFAULT_WRITE_GRACE_MS, handoffMs: DEFAULT_HANDOFF_MS });
+      .toEqual({ ms: 300, handoffMs: DEFAULT_HANDOFF_MS });
   });
 
   it("writes durations the way the messages say them", () => {
@@ -57,22 +57,27 @@ describe("the red line message", () => {
   });
 });
 
-describe("writes the red line waits for", () => {
+// 交接包记「状态未知的写操作」、调度器日志写 write=：按工具清单（tool-manifest.ts），连接调用再看服务器的 readOnlyHint。
+describe("which calls count as writes", () => {
   const readOnly = (connection: string, tool: string) => connection === "github" && tool === "search_pull_requests";
 
-  it("waits for bash, edit, write and connection writes", () => {
-    expect(interruptibleWrite("bash", { command: "git push" }, readOnly)).toBe(true);
-    expect(interruptibleWrite("edit", {}, readOnly)).toBe(true);
-    expect(interruptibleWrite("write", {}, readOnly)).toBe(true);
-    expect(interruptibleWrite("call_connection_tool", { connection: "github", tool: "add_comment" }, readOnly)).toBe(true);
-    expect(interruptibleWrite("call_connection_tool", {}, readOnly)).toBe(true);
+  it("counts bash without read_only, edit, write, run_on_host, codemode, Lead's own writes and connection writes", () => {
+    expect(writeCall("bash", { command: "git push" }, readOnly)).toBe(true);
+    expect(writeCall("edit", {}, readOnly)).toBe(true);
+    expect(writeCall("write", {}, readOnly)).toBe(true);
+    expect(writeCall("run_on_host", {}, readOnly)).toBe(true);
+    expect(writeCall("codemode", {}, readOnly)).toBe(true);
+    expect(writeCall("create_task", {}, readOnly)).toBe(true);
+    expect(writeCall("call_connection_tool", { connection: "github", tool: "add_comment" }, readOnly)).toBe(true);
+    expect(writeCall("call_connection_tool", {}, readOnly)).toBe(true);
+    expect(writeCall("a_tool_added_later", {}, readOnly)).toBe(true);
   });
 
-  it("does not wait for read-only connection calls or Lead's own tools, which finish anyway", () => {
-    expect(interruptibleWrite("call_connection_tool", { connection: "github", tool: "search_pull_requests" }, readOnly)).toBe(false);
-    expect(interruptibleWrite("codemode", {}, readOnly)).toBe(false);
-    expect(interruptibleWrite("create_task", {}, readOnly)).toBe(false);
-    expect(interruptibleWrite("read", {}, readOnly)).toBe(false);
+  it("does not count read-only bash, read-only connection calls or reads", () => {
+    expect(writeCall("bash", { command: "grep -r x .", read_only: true }, readOnly)).toBe(false);
+    expect(writeCall("call_connection_tool", { connection: "github", tool: "search_pull_requests" }, readOnly)).toBe(false);
+    expect(writeCall("read", {}, readOnly)).toBe(false);
+    expect(writeCall("get_ticket", {}, readOnly)).toBe(false);
   });
 });
 

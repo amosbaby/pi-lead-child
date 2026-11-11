@@ -8,10 +8,7 @@ import { promisify } from "node:util";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
-import {
-  detachOnAbort, newBackgroundJobId, runWithSoftLimit, toolResultText, toolSoftLimitMs, type ForegroundWaits, type LeadBackgroundJobs,
-} from "./background-jobs.js";
-import type { LeadAbortReason } from "./scheduler/controller.js";
+import type { BackgroundJobRegistry } from "./background-jobs.js";
 import { ticketNeedsUser, ticketNeedsUserLabel, type LeadStatus, type TicketSummary } from "@pi-lead-child/protocol";
 import { TICKET_ACTION_IDS, type TicketActionId } from "@pi-lead-child/protocol";
 import { EVENT_LEVELS, SYSTEM_COMPONENTS, type EventLevel, type SystemComponent } from "@pi-lead-child/protocol";
@@ -288,12 +285,8 @@ export interface LeadDeps {
   turnUserActions?: TurnUserActions;
   // 交接和挂起（lead-scheduler spec P2，hand-off-tool.ts）：daemon 给。缺省时（测试）没有 hand_off、resume_unit。
   handoff?: LeadHandoffDeps;
-  // 长的工具转后台（background-jobs.ts）：daemon 给出口。缺省时（测试）免沙箱的 run_on_host 照旧在前台跑，中止时停掉。
-  backgroundJobs?: LeadBackgroundJobs;
-  // 这一步被中止的原因（调度器的 controller 记着；pi 的 signal 不带原因）。run_on_host 据此决定停掉命令还是转后台。
-  abortReason?: () => LeadAbortReason | null;
-  // 用户插话时，正在等的 run_on_host 马上转后台（background-jobs.ts 的 ForegroundWaits）。daemon 给。
-  foregroundWaits?: ForegroundWaits;
+  // 正在跑的后台作业（background-jobs.ts）：stop_job 用它停掉一个。daemon 给；缺省时（测试）stop_job 说没有作业。
+  backgroundJobRegistry?: BackgroundJobRegistry;
   supervisor?: {
     status(): Promise<SupervisorStatus>;
     request(input: {
@@ -3163,7 +3156,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "cwd 是绝对路径（缺省是 home）。reason 写清为什么要跑、为什么沙箱里做不了，会显示在卡上。"
         + "通常结果是一张确认卡（user_action）：用 render_ui 发给用户；用户确认后命令才跑，跑完以后结果进你的收件箱。"
         + "用户在设置里打开了免沙箱、而且这是用户本人发话的一轮时，命令马上跑：20 秒内跑完的，结果直接给你；"
-        + "跑得更久的（下载、升级）转到后台，你拿到作业编号，命令结束时系统叫醒你、把输出交给你，这期间你可以接着处理别的消息。"
+        + "跑得更久的（下载、升级）转到后台，你拿到作业编号，命令结束时系统叫醒你、把输出交给你，这期间你可以接着处理别的消息；"
+        + "要停掉它用 stop_job。"
         + "timeout_seconds 是命令最多跑多久，到点停掉。完整输出在你的临时目录里。",
       parameters: Type.Object({
         command: Type.String({ minLength: 1, maxLength: HOST_COMMAND_LIMITS.command }),
@@ -3173,7 +3167,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         spends_money: Type.Optional(Type.Boolean({ description: "认为这条命令会花钱（云资源、付费 API、部署）时填 true。" })),
       }),
       execute: async (
-        toolCallId,
+        _toolCallId,
         params: { command: string; cwd?: string; timeout_seconds?: number; reason: string; spends_money?: boolean },
         signal?: AbortSignal,
       ) => {
@@ -3184,28 +3178,14 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         });
         if (route.route === "host") {
           // 2026-11-10：这里以前不接收 signal，前台下载 3.2 GB 占住了这一步，红线中止也停不下（.scratch/tool-occupancy/spec.md）。
-          // 现在：用户 /stop 时停掉整个进程组；调度器为了空出 Lead 而中止，或者超过软时限，命令转后台，结果以后交回 Lead。
-          const run = async (jobSignal: AbortSignal | undefined) => {
-            const result = await runRecordedHostCommand(db, input, route.record, { dataDir: deps.dataDir, run: route.run, signal: jobSignal });
-            return {
-              ...text(`${HOST_RUN_MARK}免沙箱开着，这是用户本人发话的一轮：命令直接跑了，没有发确认卡。退出码 ${result.exitCode ?? "未知"}。\n${result.text}`),
-              details: {
-                exitCode: result.exitCode, timedOut: result.timedOut, aborted: result.aborted, outputPath: result.outputPath,
-              } as Record<string, unknown>,
-            };
+          // 现在命令收到中止信号时停掉整个进程组。什么时候发信号、什么时候转后台由中止兜底按工具清单决定（tool-abort-guard.ts）。
+          const result = await runRecordedHostCommand(db, input, route.record, { dataDir: deps.dataDir, run: route.run, signal });
+          return {
+            ...text(`${HOST_RUN_MARK}免沙箱开着，这是用户本人发话的一轮：命令直接跑了，没有发确认卡。退出码 ${result.exitCode ?? "未知"}。\n${result.text}`),
+            details: {
+              exitCode: result.exitCode, timedOut: result.timedOut, aborted: result.aborted, outputPath: result.outputPath,
+            } as Record<string, unknown>,
           };
-          const jobs = deps.backgroundJobs;
-          if (!jobs) return run(signal);
-          const result = await runWithSoftLimit({
-            softMs: toolSoftLimitMs(), stepSignal: signal, jobs,
-            detachOnAbort: () => detachOnAbort(deps.abortReason?.() ?? null),
-            ...(deps.foregroundWaits ? { waits: deps.foregroundWaits } : {}),
-            job: { id: newBackgroundJobId(), tool: "run_on_host", command: input.command.slice(0, 300), toolCallId },
-            run,
-          });
-          const details = result.details as { backgroundJob?: string } | undefined;
-          if (!details?.backgroundJob) return result as Awaited<ReturnType<typeof run>>;
-          return { ...text(`${HOST_RUN_MARK}${toolResultText(result)}`), details: details as Record<string, unknown> };
         }
         const card = authorizationCardResult(db, deps, {
           tool: "run_on_host", code: "needs_authorization", input,
@@ -3215,6 +3195,31 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         });
         if (!card) throw new Error("没能存下这条命令，确认卡没有发出。请把命令告诉用户，请他在终端里跑。");
         return card;
+      },
+    }),
+
+    // 停掉一个后台作业（.scratch/tool-occupancy/spec.md 第 7 节第 1 条，用户 2026-11-11）：插话到达时在跑的调用都转后台、
+    // 不停；Lead 读完插话，插话要它停下或者说前面做错了，用这个停掉。命令停掉整个进程组，已经做了的不会自动撤回。
+    defineTool({
+      name: "stop_job",
+      label: "Stop Job",
+      description: "停掉一个转到后台、还在跑的作业（工具结果里写着「作业 job_…」）。用户插话要你停下、或者说前面的做法错了时用："
+        + "命令会停掉整个进程组，它停下后已有的输出照常交给你。已经做了的不会自动撤回：看输出，自己收拾做了一半的事（删掉下了一半的文件、"
+        + "撤回改动），再告诉用户。不填 job_id 时列出正在跑的作业。",
+      parameters: Type.Object({
+        job_id: Type.Optional(Type.String({ maxLength: 80 })),
+      }),
+      execute: async (_toolCallId, params: { job_id?: string }) => {
+        const registry = deps.backgroundJobRegistry;
+        const running = registry?.list() ?? [];
+        const listing = running.length
+          ? running.map((job) => `- ${job.id}：${job.tool}，已经跑了 ${Math.round(job.runningMs / 1_000)} 秒（${job.command}）`).join("\n")
+          : "现在没有在跑的后台作业。";
+        const id = params.job_id?.trim();
+        if (!id) return text(listing);
+        const stopped = registry?.stop(id) ?? null;
+        if (!stopped) return text(`没有在跑的作业 ${id}：它可能已经结束了，结果在收件箱里。\n${listing}`);
+        return text(`已经叫停作业 ${id}（${stopped.tool}：${stopped.command}）。它停下后，已有的输出和「被停掉了」会交给你；做了一半的事要你自己收拾。`);
       },
     }),
 

@@ -109,7 +109,7 @@ describe("LeadSchedulerRuntime", () => {
     rt.openUnit({ source: "system", lane: 2, origin: "system:blocker", turnId: null });
     rt.dispatch({ type: "unit.begin" });
     rt.dispatch({ type: "queue.check", facts: {
-      limits: { yellowToolCalls: 10, yellowMs: 120_000, budgetMs: 150_000, writeGraceMs: 1, handoffMs: 1, queueNoticeMs: 0, userQueueNoticeMs: 0 },
+      limits: { yellowToolCalls: 10, yellowMs: 120_000, budgetMs: 150_000, handoffMs: 1, queueNoticeMs: 0, userQueueNoticeMs: 0 },
       compacting: false, canAbort: true,
       waiting: () => [{ who: "Nina", conversation: "Nina 的私信", count: 1, waitedMs: 5, lane: 1 }],
     } });

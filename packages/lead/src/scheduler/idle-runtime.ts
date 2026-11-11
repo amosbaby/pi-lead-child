@@ -46,7 +46,7 @@ export interface IdleLaneHost {
   thresholdRatio?(): number | null;
   // 开整理笔记的 L4 单元，等它结束。yielded：给更高车道让了路；skipped：没开成（忙、断网）。
   runPrecipitation(): Promise<PrecipitationOutcome>;
-  // 正在跑的单元里有没有正在跑的写操作（spec D5：写操作不打断）。返回工具名。
+  // 正在跑的单元里有没有正在跑的写操作。返回工具名（只写进日志：它转到后台接着跑，tool-abort-guard.ts）。
   writeInFlight(): string | null;
   // 让正在跑的 L4 单元停下（调度器的 idle.yield，经控制层中止）。
   yieldUnit(by: Lane): void;
@@ -60,8 +60,6 @@ export interface IdleLaneRuntimeOptions {
   now?: () => number;
   // 写摘要的子进程最多跑多久（daemon 的压缩时限，PLC_LEAD_COMPACTION_TIMEOUT_MS）。
   compactionTimeoutMs?: number;
-  // 让路时最多等正在跑的写操作多久。
-  writeGraceMs?: number;
   // 上下文溢出时，最多等正在写的摘要多久（等不到就让 pi 就地压缩）。
   overflowWaitMs?: number;
   // 测试换掉子进程。
@@ -96,7 +94,6 @@ export class IdleLaneRuntime {
   readonly #host: IdleLaneHost;
   readonly #now: () => number;
   readonly #timeoutMs: number;
-  readonly #writeGraceMs: number;
   readonly #overflowWaitMs: number;
   readonly #summarize: NonNullable<IdleLaneRuntimeOptions["summarize"]>;
   #timer: ReturnType<typeof setTimeout> | null = null;
@@ -126,7 +123,6 @@ export class IdleLaneRuntime {
     this.#limits = options.limits ?? idleLaneLimitsFromEnv();
     this.#now = options.now ?? Date.now;
     this.#timeoutMs = options.compactionTimeoutMs ?? 10 * 60_000;
-    this.#writeGraceMs = options.writeGraceMs ?? 10_000;
     this.#overflowWaitMs = options.overflowWaitMs ?? 60_000;
     this.#summarize = options.summarize ?? summarizeInChild;
     this.#state = initialIdleLaneState(this.#now());
@@ -534,25 +530,13 @@ export class IdleLaneRuntime {
     void settled.finally(() => { if (this.#childSettled === settled) this.#childSettled = null; });
   }
 
-  // 让路：正在跑的写操作先做完（最多 writeGraceMs，spec D5），然后停下那个 L4 单元。
+  // 让路：马上停下那个 L4 单元。以前先等正在跑的写操作做完（spec D5，最多 10 秒）；现在改东西的调用转到后台接着跑，
+  // 不会做到一半被杀掉（tool-abort-guard.ts，.scratch/tool-occupancy/spec.md 第 7 节第 1 条），所以不等。
   #yieldWhenSafe(by: Lane, unitId: string): void {
-    const started = this.#now();
-    let logged = false;
-    const attempt = () => {
-      if (this.#stopped || this.#host.currentUnit() !== unitId) return;
-      const write = this.#host.writeInFlight();
-      if (write && this.#now() - started < this.#writeGraceMs) {
-        if (!logged) {
-          logged = true;
-          this.#host.log(schedulerLine("idle.yield_wait", { unit: unitId, tool: write, graceMs: this.#writeGraceMs }));
-        }
-        const timer = setTimeout(attempt, 250);
-        timer.unref?.();
-        return;
-      }
-      this.#host.yieldUnit(by);
-    };
-    attempt();
+    if (this.#stopped || this.#host.currentUnit() !== unitId) return;
+    const write = this.#host.writeInFlight();
+    if (write) this.#host.log(schedulerLine("idle.yield_detach", { unit: unitId, tool: write }));
+    this.#host.yieldUnit(by);
   }
 
   #reschedule(): void {

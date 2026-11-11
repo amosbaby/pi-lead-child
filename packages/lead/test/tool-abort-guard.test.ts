@@ -1,9 +1,10 @@
-// 工具中止兜底的决策边界（tool-abort-guard.ts，.scratch/tool-occupancy/spec.md L1）：工具先返回、宽限内响应中止、
-// 过了宽限还不返回三种结局；以及 run_on_host 用的「中止时停掉还是转后台」（background-jobs.ts 的 detachOnAbort）。
+// 工具中止兜底的决策边界（tool-abort-guard.ts，.scratch/tool-occupancy/spec.md L1、L2）：工具先返回、宽限内响应中止、
+// 过了宽限还不返回；按工具清单，改东西的调用在调度器中止时转后台、只读的停下；软时限、插话、stop_job 和作业上限。
 import { describe, expect, it } from "vitest";
 import {
-  detachOnAbort, ForegroundWaits, runWithSoftLimit, type LeadBackgroundJob, type LeadBackgroundJobs,
+  BackgroundJobRegistry, detachOnAbort, ForegroundWaits, type LeadBackgroundJob, type LeadBackgroundJobs,
 } from "../src/background-jobs.js";
+import type { LeadAbortReason } from "../src/scheduler/controller.js";
 import { guardToolAbort, installToolAbortGuard, isAbortGuarded } from "../src/tool-abort-guard.js";
 
 type Result = { content: Array<{ type: string; text?: string }>; isError?: boolean; details?: unknown };
@@ -119,72 +120,175 @@ describe("stopping or detaching a host command when the step is aborted", () => 
     expect(detachOnAbort({ kind: "idle_yield", by: "L0" })).toBe(true);
   });
 
-  it("detaches at once when detachOnAbort says so, without stopping the job", async () => {
-    const { jobs, started, finished } = recorder();
+});
+
+// 一个永远不自己结束的调用：记下它拿到的信号，信号来了才结束（像接收中止的 run_on_host）。
+function hanging() {
+  const seen: { signal: AbortSignal | null } = { signal: null };
+  const late = deferred<Result>();
+  const execute = (_id: string, _params: unknown, signal: AbortSignal) => {
+    seen.signal = signal;
+    signal.addEventListener("abort", () => late.resolve(result("停掉了")), { once: true });
+    return late.promise;
+  };
+  return { seen, late, execute };
+}
+
+describe("what an abort does to a call, by the tool manifest", () => {
+  const abortWith = (reason: LeadAbortReason | null) => {
     const step = new AbortController();
-    let jobSignal: AbortSignal | null = null;
-    const late = deferred<Result>();
-    const running = runWithSoftLimit({
-      softMs: 60_000, stepSignal: step.signal, jobs, detachOnAbort: () => true,
-      job: { id: "job_x", tool: "run_on_host", command: "sleep", toolCallId: "c1" },
-      run: (signal) => { jobSignal = signal; return late.promise; },
-    });
+    return { step, abortReason: () => reason };
+  };
+
+  it("moves a write to the background for the scheduler's own abort, without stopping it", async () => {
+    const { jobs, started, finished } = recorder();
+    const call = hanging();
+    const { step, abortReason } = abortWith({ kind: "budget" });
+    const tool = guardToolAbort({ name: "run_on_host", execute: call.execute }, { jobs, abortReason, settleMs: 20 });
+    const running = tool.execute("c1", { command: "sleep 60" }, step.signal);
     step.abort();
-    const answer = await running;
-    expect(textOf(answer)).toContain("这一步被系统停下了，命令没有停");
-    expect(jobSignal!.aborted).toBe(false);
+    const answer = await running as Result;
+    expect(textOf(answer)).toContain("这一步被系统停下了，run_on_host 没有停");
+    expect(call.seen.signal!.aborted).toBe(false);
     expect(started).toHaveLength(1);
-    late.resolve(result("做完了"));
+    call.late.resolve(result("做完了"));
     await expect.poll(() => finished.length).toBe(1);
+    expect(finished[0]!.text).toBe("做完了");
   });
 
-  it("stops the job when detachOnAbort says no", async () => {
+  it("stops a write for the user's /stop", async () => {
     const { jobs, started } = recorder();
-    const step = new AbortController();
-    const answer = runWithSoftLimit({
-      softMs: 60_000, stepSignal: step.signal, jobs, detachOnAbort: () => false,
-      job: { id: "job_y", tool: "run_on_host", command: "sleep", toolCallId: "c1" },
-      run: (signal) => new Promise<Result>((resolve) => {
-        signal.addEventListener("abort", () => resolve(result("停掉了")), { once: true });
-      }),
-    });
+    const call = hanging();
+    const { step, abortReason } = abortWith({ kind: "user_stop" });
+    const tool = guardToolAbort({ name: "run_on_host", execute: call.execute }, { jobs, abortReason, settleMs: 20 });
+    const running = tool.execute("c1", {}, step.signal);
     step.abort();
-    expect(textOf(await answer)).toBe("停掉了");
+    expect(textOf(await running)).toBe("停掉了");
+    expect(started).toEqual([]);
+  });
+
+  it("stops a read for the scheduler's own abort", async () => {
+    const { jobs, started } = recorder();
+    const call = hanging();
+    const { step, abortReason } = abortWith({ kind: "budget" });
+    const tool = guardToolAbort({ name: "grep", execute: call.execute }, { jobs, abortReason, settleMs: 20 });
+    const running = tool.execute("c1", {}, step.signal);
+    step.abort();
+    expect(textOf(await running)).toBe("停掉了");
+    expect(started).toEqual([]);
+  });
+
+  it("returns the real result of a write that ends within the settle window after the abort", async () => {
+    const { jobs, started } = recorder();
+    const late = deferred<Result>();
+    const step = new AbortController();
+    const tool = guardToolAbort({ name: "save_note", execute: (..._args: unknown[]) => late.promise }, {
+      jobs, abortReason: () => ({ kind: "budget" }), settleMs: 200,
+    });
+    const running = tool.execute("c1", {}, step.signal);
+    step.abort();
+    late.resolve(result("记下了"));
+    expect(textOf(await running)).toBe("记下了");
     expect(started).toEqual([]);
   });
 });
 
-describe("moving a waiting call to the background when the user steers in", () => {
-  it("detaches at once without stopping the job, and says the user steered in", async () => {
+describe("the soft limit and steering in", () => {
+  it("moves a call that outlasts the soft limit to the background", async () => {
     const { jobs, started, finished } = recorder();
+    const call = hanging();
+    const tool = guardToolAbort({ name: "codemode", execute: call.execute }, { jobs, softMs: 30 });
+    const answer = await tool.execute("c1", { code: "await tools.x()" }, new AbortController().signal) as Result;
+    expect(textOf(answer)).toMatch(/codemode 跑了 0 秒还没结束，转到后台：作业 job_/u);
+    expect(call.seen.signal!.aborted).toBe(false);
+    expect(started).toHaveLength(1);
+    call.late.resolve(result("脚本跑完了"));
+    await expect.poll(() => finished.length).toBe(1);
+  });
+
+  it("moves a waiting call to the background when the user steers in, and says to answer the user first", async () => {
+    const { jobs, started } = recorder();
     const waits = new ForegroundWaits();
-    let jobSignal: AbortSignal | null = null;
-    const late = deferred<Result>();
-    const running = runWithSoftLimit({
-      softMs: 60_000, jobs, waits,
-      job: { id: "job_s", tool: "run_on_host", command: "sleep", toolCallId: "c1" },
-      run: (signal) => { jobSignal = signal; return late.promise; },
-    });
+    const call = hanging();
+    const tool = guardToolAbort({ name: "run_on_host", execute: call.execute }, { jobs, waits, settleMs: 0 });
+    const running = tool.execute("c1", {}, new AbortController().signal);
     expect(waits.detachAll()).toBe(1);
     const answer = await running;
-    expect(textOf(answer)).toContain("用户插话了，命令没有停");
-    expect(jobSignal!.aborted).toBe(false);
+    expect(textOf(answer)).toContain("用户插话了，run_on_host 没有停");
+    expect(textOf(answer)).toContain("stop_job");
+    expect(call.seen.signal!.aborted).toBe(false);
     expect(started).toHaveLength(1);
-    late.resolve(result("做完了"));
-    await expect.poll(() => finished.length).toBe(1);
     expect(waits.detachAll()).toBe(0);
+  });
+
+  it("lets a call that ends within the settle window answer for itself when the user steers in", async () => {
+    const { jobs, started } = recorder();
+    const waits = new ForegroundWaits();
+    const late = deferred<Result>();
+    const tool = guardToolAbort({ name: "get_ticket", execute: (..._args: unknown[]) => late.promise }, { jobs, waits, settleMs: 200 });
+    const running = tool.execute("c1", {}, new AbortController().signal);
+    waits.detachAll();
+    late.resolve(result("工单 #3"));
+    expect(textOf(await running)).toBe("工单 #3");
+    expect(started).toEqual([]);
   });
 
   it("leaves a call that already returned alone", async () => {
     const { jobs, started } = recorder();
     const waits = new ForegroundWaits();
-    const answer = await runWithSoftLimit({
-      softMs: 60_000, jobs, waits,
-      job: { id: "job_q", tool: "bash", command: "ls", toolCallId: "c1" },
-      run: async () => result("很快"),
-    });
-    expect(textOf(answer)).toBe("很快");
+    const tool = guardToolAbort({ name: "bash", execute: async (..._args: unknown[]) => result("很快") }, { jobs, waits });
+    expect(textOf(await tool.execute("c1", { command: "ls" }, new AbortController().signal))).toBe("很快");
     expect(waits.detachAll()).toBe(0);
     expect(started).toEqual([]);
+  });
+});
+
+describe("background jobs", () => {
+  it("stops a job when Lead calls stop_job, and says so in the result it hands back", async () => {
+    const { jobs, started, finished } = recorder();
+    const registry = new BackgroundJobRegistry();
+    const call = hanging();
+    const tool = guardToolAbort({ name: "run_on_host", execute: call.execute }, { jobs, registry, softMs: 10 });
+    await tool.execute("c1", { command: "brew upgrade" }, new AbortController().signal);
+    expect(registry.list().map((job) => job.id)).toEqual([started[0]!.id]);
+    expect(registry.stop(started[0]!.id)).toMatchObject({ tool: "run_on_host", command: "brew upgrade" });
+    expect(call.seen.signal!.aborted).toBe(true);
+    await expect.poll(() => finished.length).toBe(1);
+    expect(finished[0]!.text).toBe("（这个作业被 stop_job 停掉了。）停掉了");
+    expect(registry.list()).toEqual([]);
+    expect(registry.stop(started[0]!.id)).toBeNull();
+  });
+
+  it("stops a job that runs past the background limit", async () => {
+    const { jobs, finished } = recorder();
+    const call = hanging();
+    const tool = guardToolAbort({ name: "codemode", execute: call.execute }, { jobs, softMs: 10, maxJobMs: 60 });
+    await tool.execute("c1", {}, new AbortController().signal);
+    await expect.poll(() => finished.length).toBe(1);
+    expect(finished[0]!.text).toContain("后台作业的上限");
+  });
+
+  it("keeps a longer limit the tool was given", async () => {
+    const { jobs, finished } = recorder();
+    const call = hanging();
+    const tool = guardToolAbort({ name: "run_on_host", execute: call.execute }, { jobs, softMs: 10, maxJobMs: 60 });
+    await tool.execute("c1", { timeout_seconds: 600 }, new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(call.seen.signal!.aborted).toBe(false);
+    expect(finished).toEqual([]);
+    call.late.resolve(result("下完了"));
+    await expect.poll(() => finished.length).toBe(1);
+  });
+});
+
+describe("an instant tool that takes too long", () => {
+  it("writes a tool.overrun line", async () => {
+    const lines: string[] = [];
+    const late = deferred<Result>();
+    const tool = guardToolAbort({ name: "get_ticket", execute: (..._args: unknown[]) => late.promise }, { log: (line) => lines.push(line) });
+    const running = tool.execute("c9", {}, new AbortController().signal);
+    await expect.poll(() => lines.some((line) => line.startsWith("[sched] tool.overrun tool=get_ticket call=c9")), { timeout: 4_000 }).toBe(true);
+    late.resolve(result("好了"));
+    expect(textOf(await running)).toBe("好了");
   });
 });

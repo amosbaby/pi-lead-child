@@ -32,9 +32,7 @@ import { credentialPathReason, resolveLikePi } from "./credential-guard.js";
 import { tildeHome } from "./home-paths.js";
 import { isLiveUserTurn } from "@pi-lead-child/engine";
 import { authorityTurnId, hostBypassActive, type LeadTurnOrigin, type TurnOriginDeps } from "./turn-origin.js";
-import {
-  bashSoftLimitMs, DEFAULT_BACKGROUND_JOB_MAX_SECONDS, newBackgroundJobId, runWithSoftLimit, type ForegroundWaits, type LeadBackgroundJobs,
-} from "./background-jobs.js";
+import { DEFAULT_BACKGROUND_JOB_MAX_SECONDS } from "./background-jobs.js";
 
 export const LEAD_HAND_TOOLS = ["bash", "edit", "write"] as const;
 export const LEAD_CODEMODE_TOOL = "codemode";
@@ -251,12 +249,6 @@ export interface LeadHandsOptions {
   log?: (line: string) => void;
   // bash 不填 timeout 时的时限（秒），缺省 LEAD_BASH_DEFAULT_TIMEOUT_SECONDS。测试用短的。
   bashTimeoutSeconds?: number;
-  // 长的只读命令转后台（lead-scheduler spec D6，background-jobs.ts）：daemon 给出口。不给时 read_only 不起作用。
-  backgroundJobs?: LeadBackgroundJobs;
-  // 软时限（毫秒），缺省 PLC_LEAD_BASH_SOFT_MS 或 20 秒。测试用短的。
-  bashSoftLimitMs?: number;
-  // 用户插话时，正在等的只读命令马上转后台（background-jobs.ts 的 ForegroundWaits）。
-  foregroundWaits?: ForegroundWaits;
 }
 
 /** 工具结果的第一段文字前面加一句。 */
@@ -301,8 +293,8 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
         })),
         read_only: Type.Optional(Type.Boolean({
           description: "true when the command only reads or is safe to run again (grep, find, tests, builds, reading a system). "
-            + "If it still runs after about 20 seconds, it moves to the background and you get its output in a later event. "
-            + "Leave it out for a command that changes anything.",
+            + "Without timeout it may run up to 30 minutes. When the system stops your step, a read_only command stops too; "
+            + "any other command keeps running in the background. Leave it out for a command that changes anything.",
         })),
       }),
       // 每次调用按这一次的命令和目录选沙箱或主机（hostCommandRoute）。pi 的 bash 工具照旧管输出、截断和错误写法。
@@ -330,28 +322,12 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
             return hostBashOperations(options.db, { record: route.record, dataDir: options.dataDir }).exec(route.run, cwd, run);
           },
         };
-        // 只读的命令（read_only）：过了软时限还没结束就转后台（lead-scheduler spec D6）。它最多跑 timeout 或 30 分钟。
-        const jobs = options.backgroundJobs;
-        if (jobs && (params as { read_only?: unknown }).read_only === true) {
-          const longCall = createBashToolDefinition(scratch, { operations: withDefaultTimeout(routed, DEFAULT_BACKGROUND_JOB_MAX_SECONDS) });
-          const result = await runWithSoftLimit({
-            softMs: options.bashSoftLimitMs ?? bashSoftLimitMs(), stepSignal: signal, jobs,
-            ...(options.foregroundWaits ? { waits: options.foregroundWaits } : {}),
-            job: { id: newBackgroundJobId(), tool: "bash", command: String((params as { command?: unknown }).command ?? "").slice(0, 300), toolCallId },
-            run: async (jobSignal) => {
-              try {
-                return await longCall.execute(toolCallId, params, jobSignal, undefined, ctx);
-              } catch (error) {
-                return { content: [{ type: "text" as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
-              }
-            },
-          });
-          const hint = hostHint(resultText(result));
-          if (result.isError) throw new Error(`${note ? `${note}\n` : ""}${resultText(result)}${hint ? `\n${hint}` : ""}`);
-          const hinted = hint ? withTrailingNote(result, hint) : result;
-          return (note ? withLeadingNote(hinted, note) : hinted) as Awaited<ReturnType<typeof longCall.execute>>;
-        }
-        const call = createBashToolDefinition(scratch, { operations: withDefaultTimeout(routed, timeoutSeconds) });
+        // 跑过软时限、用户插话、调度器为了空出 Lead 而中止时，中止兜底把这次调用转到后台（tool-abort-guard.ts）。
+        // 只读的命令（read_only）没填 timeout 时最多跑 30 分钟；改东西的命令照旧按 Lead 的缺省时限。
+        const readOnly = (params as { read_only?: unknown }).read_only === true;
+        const call = createBashToolDefinition(scratch, {
+          operations: withDefaultTimeout(routed, readOnly ? DEFAULT_BACKGROUND_JOB_MAX_SECONDS : timeoutSeconds),
+        });
         try {
           const result = await call.execute(toolCallId, params, signal, onUpdate, ctx);
           const hint = hostHint(resultText(result));
@@ -367,7 +343,8 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
       // 工具说明每一轮都发给模型服务商：用户目录写成 ~（home-paths.ts，用户 2026-10-30）。
       description: tildeHome(`${bash.description}\n工作目录是 ${scratch}。`
         + `不填 timeout 时，命令跑到 ${timeoutSeconds} 秒就结束；要跑更久的命令（装依赖、跑测试）自己填 timeout。`
-        + (options.backgroundJobs ? "只读或可以重跑的命令（搜索、跑测试、构建、查外部系统）标 read_only=true：跑过 20 秒还没完就转后台，结束时系统把输出交给你，这期间用户的消息能送到你这里。改东西的命令不要标。" : "")
+        + "命令跑过 20 秒还没完、或者用户插话时，转到后台：你拿到作业编号，结束时系统把输出交给你，这期间用户的消息能送到你这里；要停掉它用 stop_job。"
+        + "只读或可以重跑的命令（搜索、跑测试、构建、查外部系统）标 read_only=true。改东西的命令不要标。"
         + "在仓库里找文件、搜代码用 find、grep 工具，读已知的文件用 read：它们按 .gitignore 跳过 node_modules 这类目录。"
         + "bash 里的 grep -r、find 不会跳过它们，在大仓库里会跑很久。"
         + sandboxToolNote(leadSandboxPolicy(options.db, options.dataDir), "整个 home（挡住会在沙箱外执行的地方，清单和改法见 run_on_host 的说明）、plc 的隔离 worktree")

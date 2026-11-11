@@ -22,12 +22,12 @@ import {
 } from "@pi-lead-child/lead";
 import { overflowLimits, overflowReminder, queueNotice, queueNoticeMs, waitingText } from "@pi-lead-child/lead";
 import {
-  durationText, firstLine, interruptibleWrite, overflowSecondReminder, RED_LINE_HANDOFF_TOOLS, redLineLimits, redLineMessage,
+  durationText, firstLine, overflowSecondReminder, RED_LINE_HANDOFF_TOOLS, redLineLimits, redLineMessage, writeCall,
   userQueueNoticeMs,
 } from "@pi-lead-child/lead";
 import {
   abortedByRedLine, abortedForPreempt, abortedForRestart, admitSystemUnit, budgetStatusLine, canInterruptForSteer, countedWaiting,
-  ForegroundWaits, handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LANES, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
+  BackgroundJobRegistry, ForegroundWaits, handoffGate, IdleLaneRuntime, idleLaneLimitsFromEnv, LANES, LeadHandoffs, LeadSchedulerRuntime, redLinePhase as schedRedLinePhase,
   schedulerLine, stepP90Ms, stoppedByUser, unitLane, yieldedToInput, type PrecipitationOutcome,
   type BudgetFacts, type Lane, type LeadBackgroundJobs, type SchedulerEffect, type SchedulerLimits, type UnitOutcome,
   type WaitingEntry,
@@ -864,7 +864,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     record: (kind, payload) => {
       recordSchedulerEvent(db, kind, payload as Parameters<typeof recordSchedulerEvent>[2]);
     },
-    isWrite: (name, args) => isInterruptibleWrite(name, args),
+    isWrite: (name, args) => isWriteCall(name, args),
     isExternalTool: isExternalTextTool,
     turnOrigin: () => ({
       external: runOrigin.external,
@@ -884,6 +884,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }>();
   // 这一步里正在等、能转后台的工具调用：用户插话时 interruptForSteer 让它们马上转后台（.scratch/tool-occupancy/spec.md）。
   const foregroundWaits = new ForegroundWaits();
+  // 正在跑的后台作业：Lead 用 stop_job 停掉一个（.scratch/tool-occupancy/spec.md 第 7 节第 1 条）。
+  const backgroundJobRegistry = new BackgroundJobRegistry();
   const backgroundJobs: LeadBackgroundJobs = {
     started: (job) => {
       const unit = sched.unit;
@@ -2987,11 +2989,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       stepStatus: (status) => publishLeadStep(status),
     },
     backgroundJobs,
-    // 这一步被中止的原因：run_on_host 据此决定停掉命令（/stop）还是转后台（红线、抢占）（.scratch/tool-occupancy/spec.md L4）。
+    backgroundJobRegistry,
+    // 这一步被中止的原因：改东西的调用据此停掉（/stop）还是转后台（红线、抢占）（tool-abort-guard.ts）。
     abortReason: () => sched.controller?.abortReason ?? null,
-    // 用户插话时，正在等的 run_on_host 和只读的 bash 马上转后台（interruptForSteer）。
+    // 用户插话时，正在等的调用马上转后台（interruptForSteer）。
     foregroundWaits,
-    // 工具不听中止、被转到后台时（tool-abort-guard.ts）写的 [sched] 行。
+    // 调用转到后台、作业被停掉、instant 工具超时（tool-abort-guard.ts）写的 [sched] 行。
     log,
     handoff: {
       handoffs,
@@ -3465,7 +3468,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 告诉调度器：正在跑的工具（红线停下以前，正在跑的写操作先做完），顶层的调用次数（黄灯；codemode 脚本里的嵌套调用不算）。
       sched.dispatch({
         type: "tool.start", id: String(event.toolCallId), name: String(event.toolName),
-        write: isInterruptibleWrite(String(event.toolName), event.args), top: !event.parentToolCallId, facts: budgetFacts(),
+        write: isWriteCall(String(event.toolName), event.args), top: !event.parentToolCallId, facts: budgetFacts(),
       });
       const args = JSON.stringify(event.args ?? {});
       broadcast({ type: "tool", name: event.toolName, args: args.length > 120 ? args.slice(0, 120) + "…" : args });
@@ -5384,7 +5387,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const red = redLineLimits();
     return {
       yellowToolCalls: overflow.toolCalls, yellowMs: overflow.ms,
-      budgetMs: red.ms, writeGraceMs: red.writeGraceMs, handoffMs: red.handoffMs,
+      budgetMs: red.ms, handoffMs: red.handoffMs,
       queueNoticeMs: queueNoticeMs(), userQueueNoticeMs: userQueueNoticeMs(),
     };
   }
@@ -5431,9 +5434,6 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       case "redline.steer":
         steerNotice(redLineMessage(effect.elapsedMs, redLineWaiting(effect.waiting)), "red line message");
         return;
-      case "redline.recheck":
-        setNodeTimeout(() => sched.dispatch({ type: "write.recheck", canAbort: Boolean(session.abort) }), effect.afterMs).unref();
-        return;
       // 送交接消息在 continueAfterRedLine 里：它要等这一次 prompt 结束。
       case "redline.handoff":
         return;
@@ -5452,9 +5452,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     });
   }
 
-  // 正在跑的工具：停下这一轮会不会把它做到一半（lead 的 red-line.ts 的 interruptibleWrite）。
-  function isInterruptibleWrite(name: string, args: unknown): boolean {
-    return interruptibleWrite(name, args, (key, tool) => connections.isReadOnlyTool(key, tool));
+  // 正在跑的工具改不改东西（lead 的 red-line.ts 的 writeCall，按工具清单）：交接包记「状态未知的写操作」，日志写 write=。
+  function isWriteCall(name: string, args: unknown): boolean {
+    return writeCall(name, args, (key, tool) => connections.isReadOnlyTool(key, tool));
   }
 
   // 红线消息里写的在等的人：送的时候重新算（这期间可能又来了人）；都已经送到时用停下时的那一份。

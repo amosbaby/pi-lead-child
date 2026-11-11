@@ -56,7 +56,7 @@ export interface LeadHandoffsOptions {
   // events 表（scheduler.*）。
   record?: (kind: SchedulerRecordKind, payload: Record<string, string | number | boolean | null> & { unitId: string }) => void;
   now?: () => number;
-  // 停下这一轮会不会把这个调用做到一半（red-line.ts 的 interruptibleWrite）。
+  // 这个调用改不改东西（red-line.ts 的 writeCall，按工具清单）。
   isWrite?: (name: string, args: unknown) => boolean;
   // 这个工具的输出算不算外部内容（turn-origin.ts）。
   isExternalTool?: (name: string) => boolean;

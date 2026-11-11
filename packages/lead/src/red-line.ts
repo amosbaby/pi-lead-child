@@ -1,8 +1,8 @@
 // 红灯（用户 2026-11-03：「黄灯转红灯」，lead-tools-and-routing spec D7）。黄灯是 overflow.ts 的提醒。
 // 就地做的一轮做到 2 分半，有人在等（用户或外部的人；系统事件不算）时，daemon 停下这一轮：
-//   · 正在跑的写操作（bash、往外写的连接调用）先做完，最多等 PLC_LEAD_WRITE_GRACE_MS：中途打断的写操作结果写成
-//     「已中断」，事情却可能已经做了，Lead 或接手的子 agent 会再做一次（例如同一条消息发两遍）；
-//   · 然后中断这一轮（pi 的 abort），在同一轮里马上给 Lead 一条红线消息，排在排队的消息前面：谁在等、等了多久，
+//   · 中断这一轮（pi 的 abort）。正在跑的改东西的调用不停，转到后台接着跑（tool-abort-guard.ts）。以前先等它做完
+//     （最多 30 秒，PLC_LEAD_WRITE_GRACE_MS），因为中途打断的写操作可能已经做了一半（2026-11-11 起不再等）；
+//   · 在同一轮里马上给 Lead 一条红线消息，排在排队的消息前面：谁在等、等了多久，
 //     请它把手上没做完的交给子 agent，写好交接；
 //   · 之后这一轮只能用交接的工具（redLineGateExtension），交接完限制解除，接着答排队的消息。
 // 没有人在等时不停，只再提醒一次。2026-11-03 那天：一轮就地查了 6 分多钟，三条消息排了 6–9 分钟；31 次黄灯提醒，
@@ -12,12 +12,11 @@
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { leadSystemEvent } from "./envelope.js";
 import { waitingText, type WaitingConversation } from "./overflow.js";
+import { toolEffect } from "./tool-manifest.js";
 
 export const LEAD_RED_LINE_MS_ENV = "PLC_LEAD_RED_LINE_MS";
-export const LEAD_WRITE_GRACE_MS_ENV = "PLC_LEAD_WRITE_GRACE_MS";
 export const LEAD_HANDOFF_MS_ENV = "PLC_LEAD_HANDOFF_MS";
 export const DEFAULT_RED_LINE_MS = 150_000;
-export const DEFAULT_WRITE_GRACE_MS = 30_000;
 // 红线消息送到以后，交接最多做多久。到点还没做完，daemon 再中断一次，这一轮结束，单元挂起，排着的消息照常交给 Lead。
 // 影子回放（2026-11-03 的真实会话、真实模型）：手写任务说明再建单、派出，交接一件调查约 40 秒，建 4 张工单再派出约 80–90 秒，
 // 所以以前的上限是 3 分钟。P2 起交接是一次 hand_off 调用加一句话（交接包由系统拼），目标 10 秒以内，窗口是 30 秒（spec H8）。
@@ -25,7 +24,6 @@ export const DEFAULT_HANDOFF_MS = 30_000;
 
 export interface RedLineLimits {
   ms: number;
-  writeGraceMs: number;
   handoffMs: number;
 }
 
@@ -37,7 +35,6 @@ function positive(value: string | undefined, fallback: number): number {
 export function redLineLimits(env: Record<string, string | undefined> = process.env): RedLineLimits {
   return {
     ms: positive(env[LEAD_RED_LINE_MS_ENV], DEFAULT_RED_LINE_MS),
-    writeGraceMs: positive(env[LEAD_WRITE_GRACE_MS_ENV], DEFAULT_WRITE_GRACE_MS),
     handoffMs: positive(env[LEAD_HANDOFF_MS_ENV], DEFAULT_HANDOFF_MS),
   };
 }
@@ -91,18 +88,19 @@ export function overflowSecondReminder(elapsedMs: number, extra: { context?: str
 }
 
 /**
- * 停下这一轮会不会把这个调用做到一半（要先等它做完）：bash 和 pi 的 edit、write 收到中断就停；连接调用除了只读的
- * （服务器标了 readOnlyHint）都算写。Lead 自己的工具不理中断信号，pi 等它们做完，不算。
+ * 这一次调用改不改东西（工具清单 tool-manifest.ts）。连接调用按连接再判断：服务器标了 readOnlyHint 的只读。
+ * 交接包据此记「状态未知的写操作」，调度器的日志写 write=。
  * readOnlyConnectionTool：这个连接的这个工具是不是只读（连接 hub 的 isReadOnlyTool）。
  */
-export function interruptibleWrite(
+export function writeCall(
   name: string, args: unknown, readOnlyConnectionTool: (connection: string, tool: string) => boolean,
 ): boolean {
-  if (name === "bash" || name === "edit" || name === "write") return true;
-  if (name !== "call_connection_tool") return false;
-  const input = (args ?? {}) as { connection?: unknown; tool?: unknown };
-  return !(typeof input.connection === "string" && typeof input.tool === "string"
-    && readOnlyConnectionTool(input.connection, input.tool));
+  if (name === "call_connection_tool") {
+    const input = (args ?? {}) as { connection?: unknown; tool?: unknown };
+    return !(typeof input.connection === "string" && typeof input.tool === "string"
+      && readOnlyConnectionTool(input.connection, input.tool));
+  }
+  return toolEffect(name, args) === "write";
 }
 
 /** pi 扩展：红线以后这一轮只能用交接的工具。gate 返回现在能用的工具；没有限制时为 null。 */
