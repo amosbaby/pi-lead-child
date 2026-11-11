@@ -47,6 +47,7 @@ export * from "./light-tasks.js";
 export * from "./ledger-guard.js";
 export * from "./notes.js";
 export * from "./memory-sync.js";
+export * from "./migration-reconcile.js";
 export * from "./core-memory-changes.js";
 export * from "./widgets.js";
 export * from "./notifications.js";

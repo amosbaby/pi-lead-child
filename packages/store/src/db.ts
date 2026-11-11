@@ -33,6 +33,7 @@ import {
   migrateSpuriousOutcomeRecords,
   migrateTicketAgentTurnText,
 } from "./data-corrections.js";
+import { reconcileMigrationRows } from "./migration-reconcile.js";
 import { syncSystemStandingOrders } from "./standing-orders.js";
 import { migrateAuthorityToHandbook } from "./channel-handbook.js";
 import { dropLedgerGuards, installLedgerGuards, ledgerGuardsEnabled, registerLedgerWriter } from "./ledger-guard.js";
@@ -208,6 +209,10 @@ export function openDb(path: string): Db {
     //      items，RENAME 完自引用就永久错位，foreign_key_check 当场报违规。
     // 代价是 v16 要能吃下任意历史形状——它按列名逐表匹配、缺列即跳过，正是为此。
     // 好处是从这一行往后，整条链条只讲一种词汇。
+    // 两条分支的 v64–v67 号码相同、内容不同：打开别的分支迁移过的库时，先按名字把 schema_migrations 的号码对齐
+    // （migration-reconcile.ts），否则下面每个 migrate* 按号码判断「已做过」就会错过 hub 自己的迁移。
+    // 只改 schema_migrations 的行；全新库没有这张表，直接跳过。放在最前面，早于任何读 schema_migrations 的迁移。
+    reconcileMigrationRows(db);
     migrateItemRename(db);
     // 必须排在 exec(SCHEMA) 之前：SCHEMA 里的 items 索引与触发器都引用 kind，而
     // CREATE TABLE IF NOT EXISTS 不会给已存在的老表补列——老库上 exec(SCHEMA) 会直接抛
