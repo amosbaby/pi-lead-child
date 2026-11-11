@@ -247,6 +247,8 @@ const CASES: Case[] = [
     return { itemId, input: { criterionId } };
   } },
   { action: "ticket.release", authority: "lead", fixture: (db) => ({ itemId: claimedByWorker(db) }) },
+  // 改处理方式（external-worker-hub P1-3）：只有你本人能改，Lead 调用总是被拒。
+  { action: "ticket.set_handling", authority: "user_direct", fixture: (db) => ({ itemId: ready(db), input: { handling: "needs_user" } }) },
   { action: "unconfirm_criterion", authority: "on_behalf", fixture: (db) => {
     const { itemId, criterionId } = deliveredWithCriteria(db, true);
     return { itemId, input: { criterionId } };

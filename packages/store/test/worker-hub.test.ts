@@ -3,7 +3,8 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  addTicketSource, createItem, findItemByExternalKey, missesSince, openDb, recordMiss, setHandling, ticketSources, type Db,
+  addConversationSource, addTicketSource, createItem, findItemByExternalKey, markExternalOrigin, missesSince, openDb, recordMiss,
+  recordTicketOrigin, setHandling, ticketSourceKindOf, ticketSources, type Db,
 } from "../src/index.js";
 
 function db(): Db {
@@ -62,6 +63,52 @@ describe("ticket sources", () => {
     expect(() => addTicketSource(d, { itemId: id, kind: "jira", externalKey: "  " })).toThrow(/externalKey/);
     expect(() => addTicketSource(d, { itemId: 9999, kind: "jira", externalKey: "PROJ-9" })).toThrow(/FOREIGN KEY/);
     expect(findItemByExternalKey(d, "jira", "PROJ-9")).toBeNull();
+    d.close();
+  });
+});
+
+describe("sources written by the creation paths", () => {
+  const at = new Date("2026-11-12T01:00:00.000Z");
+  const origin = (d: Db, id: number) => (d.prepare("SELECT external_origin FROM items WHERE id=?").get(id) as { external_origin: number }).external_origin;
+
+  it("records the owner DM of a ticket as a source once, the same shape as the v68 backfill", () => {
+    const d = db();
+    const id = ticket(d);
+    expect(recordTicketOrigin(d, { itemId: id, conversation: "slack:D0SELF:main", now: at })).toBe(true);
+    expect(recordTicketOrigin(d, { itemId: id, conversation: "slack:D0SELF:main", now: at })).toBe(false);
+    expect(ticketSources(d, id)).toEqual([expect.objectContaining({
+      kind: "slack", conversation: "slack:D0SELF:main", messageTs: null, url: null, externalKey: null, createdAt: at.toISOString(),
+    })]);
+    d.close();
+  });
+
+  it("maps a channel to a source kind by the kind list only", () => {
+    expect(ticketSourceKindOf("slack")).toBe("slack");
+    expect(ticketSourceKindOf("jira")).toBe("jira");
+    expect(ticketSourceKindOf("webhook")).toBe("manual");
+    expect(ticketSourceKindOf("manual")).toBe("manual");
+  });
+
+  it("writes one conversation source per position", () => {
+    const d = db();
+    const id = ticket(d);
+    expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: "1762934400.000100" })).toBe(true);
+    expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: "1762934400.000100" })).toBe(false);
+    expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: null })).toBe(true);
+    expect(ticketSources(d, id)).toHaveLength(2);
+    d.close();
+  });
+
+  it("creates a ticket with external_origin when asked, and marks one later without touching the lifecycle", () => {
+    const d = db();
+    const own = ticket(d);
+    const outside = createItem(d, { title: "from Nina", brief: "b", createdBy: "lead", externalOrigin: true });
+    expect([origin(d, own), origin(d, outside)]).toEqual([0, 1]);
+    const before = d.prepare("SELECT stage, stage_changed_at FROM items WHERE id=?").get(own);
+    markExternalOrigin(d, own);
+    expect(origin(d, own)).toBe(1);
+    expect(d.prepare("SELECT stage, stage_changed_at FROM items WHERE id=?").get(own)).toEqual(before);
+    expect(() => markExternalOrigin(d, own + 1000)).toThrow();
     d.close();
   });
 });

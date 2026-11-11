@@ -358,6 +358,7 @@ describe("the listing and the run agree", () => {
       case "change_executor_runtime": return { runtime: "codex" };
       case "set_auto_pr": return { enabled: false };
       case "set_unsandboxed": return { enabled: true };
+      case "ticket.set_handling": return { handling: "needs_user" };
       case "open_delivery_file": return { path: "docs/plan.md" };
       case "edit_acceptance_criteria": return { add: ["空输入返回 400"] };
       case "confirm_criterion":

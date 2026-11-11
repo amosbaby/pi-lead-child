@@ -3,6 +3,7 @@
 // 消息上显示的状态（shown_state）和决定请求的状态不一样时，daemon 改写那条消息。
 // 工单的来源对话：用户在自己私信那一轮里让 Lead 建的工单，之后 Lead 为它写给用户的话同步发回那个私信。
 import type { Db } from "./db.js";
+import { addConversationSource, ticketSourceKindOf } from "./worker-hub.js";
 
 export interface DecisionPush {
   decisionId: number;
@@ -116,11 +117,21 @@ export function unpushedUserDecisions(db: Db, args: { since: Date; lead?: boolea
   ).all(args.lead ? 1 : 0, args.since.toISOString()) as Array<{ id: number; itemId: number; origin: "agent" | "lead" }>);
 }
 
-/** 记下这张工单是用户在哪个私信对话里让 Lead 建的。已经记过时不改，返回 false。 */
+/**
+ * 记下这张工单是用户在哪个私信对话里让 Lead 建的。已经记过时不改，返回 false。
+ * 同时记进来源表（worker-hub.ts 的 ticket_sources，v68 回填的同一个形状）：种类按对话键的第一段（来源插件的 id），
+ * 对话是这个私信，没有消息位置。
+ */
 export function recordTicketOrigin(db: Db, input: { itemId: number; conversation: string; now: Date }): boolean {
-  const result = db.prepare("INSERT OR IGNORE INTO channel_ticket_origins (item_id, conversation, created_at) VALUES (?, ?, ?)")
-    .run(input.itemId, input.conversation, input.now.toISOString());
-  return result.changes === 1;
+  return db.transaction((): boolean => {
+    const result = db.prepare("INSERT OR IGNORE INTO channel_ticket_origins (item_id, conversation, created_at) VALUES (?, ?, ?)")
+      .run(input.itemId, input.conversation, input.now.toISOString());
+    if (result.changes !== 1) return false;
+    addConversationSource(db, {
+      itemId: input.itemId, kind: ticketSourceKindOf(input.conversation.split(":")[0] ?? ""), conversation: input.conversation, now: input.now,
+    });
+    return true;
+  })();
 }
 
 /**

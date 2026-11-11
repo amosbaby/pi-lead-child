@@ -6,8 +6,9 @@
 // （authority.ts）、同样的实现（定义里的 run）、同样的线上事件和主人操作。账本里只有 actor 不同。
 import type { Item } from "@pi-lead-child/core";
 import {
-  OWNER_ACTIONS, TICKET_ACTION_IDS, TICKET_ACTION_INPUT_SCHEMAS, WORKER_ACTION_IDS, WORKER_ACTION_INPUT_SCHEMAS, isTicketActionId,
-  isWorkerActionId, type OwnerActionSource, type TicketAction, type TicketActionId, type WorkerActionId,
+  OWNER_ACTIONS, TICKET_ACTION_IDS, TICKET_ACTION_INPUT_SCHEMAS, WORKER_ACTION_IDS, WORKER_ACTION_INPUT_SCHEMAS, WORKER_TRACK_ACTION_ID,
+  WorkerTrackInputSchema, isTicketActionId, isWorkerActionId, type OwnerActionSource, type TicketAction, type TicketActionId,
+  type WorkerActionId,
 } from "@pi-lead-child/protocol";
 import type { TSchema } from "typebox";
 import {
@@ -30,7 +31,7 @@ import {
   type TicketActionEnv, type TicketActionRun, type WorkerActionDefinition, type WorkerAttribution,
 } from "./types.js";
 import { OWN_CLAIM_WORKER_ACTIONS, WORKER_ACTIONS } from "./worker.js";
-import { ownClaimBlocker } from "../worker-queue/index.js";
+import { ownClaimBlocker, trackTicket } from "../worker-queue/index.js";
 
 export * from "./attribution.js";
 export * from "./authority.js";
@@ -166,7 +167,7 @@ export interface TicketActionRequest {
 
 export interface TicketActionOutcome {
   ticketId: number;
-  action: TicketActionId | WorkerActionId;
+  action: TicketActionId | WorkerActionId | typeof WORKER_TRACK_ACTION_ID;
   result: unknown;
   // 工人的操作（protocol 的 worker.ts）是 WorkerAttribution，别的是你或 Lead。
   by: ActionAttribution | WorkerAttribution;
@@ -330,6 +331,42 @@ async function runWorkerAction(db: Db, request: TicketActionRequest): Promise<Ti
   publishGatewayEvent(db, itemUpdatedEvent(item.id));
   return {
     ticketId: item.id, action: id, result,
+    by: { actor: "worker", bindingId: caller.bindingId, workerName: caller.workerName },
+    authority: "worker", ownerActionEventId: null,
+  };
+}
+
+export interface WorkerTrackRequest {
+  input?: unknown;
+  caller: TicketActionCaller;
+  host?: TicketActionHost;
+  now?: Date;
+}
+
+/**
+ * 外部工人从自己的会话建单（protocol 的 WORKER_TRACK_ACTION_ID，业务规则在 worker-queue/track.ts）。没有工单编号，所以不走
+ * runTicketAction；检查的顺序和工人的别的操作一样：认人（worker 调用方，凭证活着、带 worker 权限）→ 输入 → 做（建单、来源、
+ * 领取、挂会话一笔事务，哪一步被拒都不留东西）。不记主人操作。
+ */
+export async function runWorkerTrack(db: Db, request: WorkerTrackRequest): Promise<TicketActionOutcome> {
+  const { caller } = request;
+  if (caller.kind !== "worker") {
+    throw new TicketActionError("forbidden", `${WORKER_TRACK_ACTION_ID}：只有外部工人（带 worker 权限的配对凭证）能做。`);
+  }
+  const blocker = workerCallerBlocker(db, caller);
+  if (blocker) throw new TicketActionError("forbidden", `${WORKER_TRACK_ACTION_ID}：${blocker}`);
+  const input = request.input ?? {};
+  if (!Value.Check(WorkerTrackInputSchema, input)) {
+    throw new TicketActionError("invalid_input", `${WORKER_TRACK_ACTION_ID} 的输入不对：${inputError(WorkerTrackInputSchema, input)}`);
+  }
+  const result = trackTicket(db, {
+    ...input, bindingId: caller.bindingId, workerName: caller.workerName, liveItemIds: liveItemIdsOf(request.host ?? {}),
+    ...(request.now ? { now: request.now } : {}),
+  });
+  publishGatewayEvent(db, runUpdatedEvent(result.ticketId, result.runId));
+  publishGatewayEvent(db, itemUpdatedEvent(result.ticketId));
+  return {
+    ticketId: result.ticketId, action: WORKER_TRACK_ACTION_ID, result,
     by: { actor: "worker", bindingId: caller.bindingId, workerName: caller.workerName },
     authority: "worker", ownerActionEventId: null,
   };

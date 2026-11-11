@@ -159,6 +159,8 @@ describe("a hand-off, from the user's request to the relayed result", () => {
     // 交接包进了账本（工单上的一条决定）和数据目录；子 agent 的说明就是交接包。
     const recorded = itemHandoff(db, ticketId)!;
     expect(recorded).toMatchObject({ entry: "lead_midway", lane: 0, steps: 2, committed: 0, external: false });
+    // 用户自己的一轮交的：工单不算来自外部来源（items.external_origin 跟着交接包的 external）。
+    expect(db.prepare("SELECT external_origin FROM items WHERE id=?").get(ticketId)).toEqual({ external_origin: 0 });
     expect(isLightTask(db, ticketId)).toBe(true);
     const pkg = storedPackage(recorded.packageId);
     expect(pkg.goal).toMatchObject({ text: "查清 acme/a 的发版为什么变慢了", source: "user", lane: 0 });

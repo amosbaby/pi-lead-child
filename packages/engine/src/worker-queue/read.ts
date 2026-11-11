@@ -5,7 +5,9 @@
 //     active 执行中的；recent 最近交付或完成的。needs_me 和 claimable 排序 priority → complexity → 建单时间。
 //     每行有标题、来源、状态、处理方式、领取人和会话链接。
 import type { Item } from "@pi-lead-child/core";
-import { EXTERNAL_RUNTIME_ID, type WorkerSession, type WorkerTicketFilter } from "@pi-lead-child/protocol";
+import {
+  AGENT_TASK_DEFERRED, EXTERNAL_RUNTIME_ID, type GrantIntent, type RunGrant, type WorkerSession, type WorkerTicketFilter,
+} from "@pi-lead-child/protocol";
 import {
   getItem, ticketSources, type Db, type TicketComplexity, type TicketHandling, type TicketSource, type TicketSourceKind,
 } from "@pi-lead-child/store";
@@ -41,6 +43,29 @@ export interface WorkerNote {
   text: string;
 }
 
+// 派单时算好的权限清单（通道派的单，执行模式不是 self 时只建了工单、没有 Run，清单记在建单的活动里，protocol 的 AGENT_TASK_DEFERRED）。
+// 工人照它的范围做：intent 是意图，grant 是清单本身，labels 是给人看的说法，dropped 是超出上限、没有给的部分。
+export interface WorkerTicketGrant {
+  intent: GrantIntent;
+  grant: RunGrant;
+  labels: string[];
+  dropped: string[];
+}
+
+function deferredGrantOf(db: Db, itemId: number): WorkerTicketGrant | null {
+  const row = db.prepare(
+    `SELECT payload FROM activities WHERE item_id=? AND kind='decision' AND json_valid(payload)
+       AND json_extract(payload, '$.decision')=? ORDER BY id DESC LIMIT 1`,
+  ).get(itemId, AGENT_TASK_DEFERRED) as { payload: string } | undefined;
+  if (!row) return null;
+  const payload = JSON.parse(row.payload) as Partial<WorkerTicketGrant>;
+  if (!payload.grant || typeof payload.intent !== "string") return null;
+  return {
+    intent: payload.intent, grant: payload.grant,
+    labels: Array.isArray(payload.labels) ? payload.labels : [], dropped: Array.isArray(payload.dropped) ? payload.dropped : [],
+  };
+}
+
 export interface WorkerTicketView extends Judgment {
   ticketId: number;
   title: string;
@@ -48,6 +73,8 @@ export interface WorkerTicketView extends Judgment {
   stage: Item["stage"];
   priority: Item["priority"];
   sources: TicketSource[];
+  // 通道派的单的权限清单（见 WorkerTicketGrant）。别的单没有，为 null。
+  grant: WorkerTicketGrant | null;
   claim: WorkerClaim;
   // 这张单上全部的进展笔记（worker_report），按时间。
   reports: Array<WorkerNote & { runId: number | null }>;
@@ -79,6 +106,7 @@ export function workerTicket(db: Db, itemId: number, bindingId: number): WorkerT
     ticketId: item.id, title: item.title, brief: item.brief, stage: item.stage, priority: item.priority,
     ...judgmentOf(db, itemId),
     sources: ticketSources(db, itemId),
+    grant: deferredGrantOf(db, itemId),
     claim, reports, userMessages,
   };
 }

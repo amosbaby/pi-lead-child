@@ -157,9 +157,10 @@ describe("the v68 worker hub migration", () => {
     const path = join(tempDir("plc-v68-rerun-"), "plc.db");
     const db = openDb(path);
     const item = createItem(db, { title: "t", brief: "b", createdBy: "lead" });
+    // recordTicketOrigin 现在建单时就记来源（Task 7b），和回填会写的是同一行：重跑迁移时不能再记一行。
     recordTicketOrigin(db, { itemId: item, conversation: "slack:D0SELF:main", now: new Date("2026-11-05T09:30:00.000Z") });
+    expect(db.prepare("SELECT COUNT(*) AS n FROM ticket_sources WHERE item_id = ?").get(item)).toEqual({ n: 1 });
     db.prepare("DELETE FROM schema_migrations WHERE version = 68").run();
-    db.prepare("INSERT INTO ticket_sources (item_id, kind, conversation, created_at) VALUES (?, 'slack', 'slack:D0SELF:main', 'x')").run(item);
     db.close();
     const again = openDb(path);
     expect(again.prepare("SELECT COUNT(*) AS n FROM ticket_sources WHERE item_id = ?").get(item)).toEqual({ n: 1 });

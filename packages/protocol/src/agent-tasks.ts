@@ -21,6 +21,10 @@ const Literals = <T extends readonly string[]>(values: T) =>
 // 派单器开工单的那笔事务里记的活动（kind=decision，payload.decision 是它）：来源、发起人、通道卡。daemon 写，store 读
 // （agent-task-origin.ts：外部消息派的执行要的审批只有用户本人能批）。
 export const AGENT_TASK_STARTED = "agent_task_started";
+// 执行模式不是 self 时派单器只建工单、不建 Run（ruling R12），权限清单没有 Run 可挂（run_grants 按 Run 记）。
+// 建单的那笔事务里记这条活动（kind=decision）：意图、算好的清单、Lead 选的范围、丢掉的部分、来源和回调。
+// 外部工人领这张单以后读它（engine 的 workerTicket 的 grant），照清单的范围做事。
+export const AGENT_TASK_DEFERRED = "agent_task_deferred";
 
 export const AGENT_TASK_LIMITS = {
   summaryChars: 1_000,

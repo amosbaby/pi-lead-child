@@ -17,7 +17,7 @@ import {
   type AgentTaskToolLimits, type LookupSessionFactory,
 } from "@pi-lead-child/lead";
 import {
-  AGENT_TASK_STARTED, AgentTaskRequestSchema, computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS, describeRunGrant, redactSecretText,
+  AGENT_TASK_DEFERRED, AGENT_TASK_STARTED, AgentTaskRequestSchema, computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS, describeRunGrant, redactSecretText,
   type AgentTaskAction, type AgentTaskDispatch, type AgentTaskDispatcher, type AgentTaskOutcome, type AgentTaskRequest,
   type GrantLocalRepo, type RunGrant,
 } from "@pi-lead-child/protocol";
@@ -268,9 +268,18 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
     // 执行模式不是 self（engine 的 execution-mode.ts，ruling R12）：只建工单，不建 Run、不起会话。工单留在 ready，
     // 记一条 execution_deferred，等外部工人领走。没有结果回调：外部工人写回以后在来源里回复是以后的事（Task 11）。
     if (getExecutionMode(db) !== "self") {
+      // 清单挂不上 Run（run_grants 按 Run 记）：记在建单的这条活动里（AGENT_TASK_DEFERRED），外部工人领单以后读它（CARRY d）。
       const itemId = db.transaction(() => {
         const created = createItem(db, { title: agentTaskTitle(request), brief, createdBy: "system", purpose: "lookup", priority: "normal" });
         deferIfExternal(db, created, "dispatch_agent_task");
+        addActivity(db, {
+          itemId: created, actor: "system", kind: "decision",
+          payload: {
+            decision: AGENT_TASK_DEFERRED, intent: request.intent, grant, labels, scope: request.scope, bound, dropped,
+            callback: request.callback, source: oneLine(request.request.source, 60), requester: oneLine(request.request.requester, 100),
+            ...(request.request.ref ? { ref: oneLine(request.request.ref, 200) } : {}),
+          },
+        });
         return created;
       }).immediate();
       log(`[agent-task] ${request.intent} deferred: ticket #${itemId} waits for an external worker`);

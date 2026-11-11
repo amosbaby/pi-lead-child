@@ -84,8 +84,9 @@ export function createHandOffTools(deps: { handoff?: LeadHandoffDeps }, helpers:
         await Promise.all([warmRepositoryIdentity(workdir), warmWorkdirFacts(workdir)]);
         const coordinator = createCoordinator({ db });
         const ticketId = db.transaction((): number => {
+          // 交接包记着这一轮读没读过外部内容（turnOrigin().external）：Lead 建的单照它记来源（external-worker-hub P1-2）。
           const created = coordinator.createRootItem({
-            title, brief, workdir, createdBy: "lead", verificationPolicy: "lead_static",
+            title, brief, workdir, createdBy: "lead", verificationPolicy: "lead_static", externalOrigin: pkg.external,
           });
           setAutoPullRequest(db, created, false, { actor: "lead", reason: "交接给轻子 agent，不改代码，不开 PR" });
           markLightTask(db, created, "lead");

@@ -1411,6 +1411,9 @@ CREATE TABLE IF NOT EXISTS channel_ticket_origins (
 // 外部工人 hub（v68，worker-hub.ts）。
 // ticket_sources：工单从哪来，一张工单可以有几个来源。kind 是 slack、jira、notion、manual；url 是来源的链接（拼不出来时为空），
 // external_key 是来源里的编号（Jira 的 key 之类），conversation、message_ts 是 Slack 里的对话和消息位置。
+// 通道卡来的来源（Lead 派活、Lead 在外部消息叫醒的一轮里建单，以及 v68 从代查回填的），message_ts 是卡的锚点
+// （卡的 reply_target.thread_ts：线程的根或者开卡的那条消息），不一定是叫醒那一轮、触发派活的那条消息。
+// 用户私信里建的单（channel_ticket_origins）只有对话，message_ts 为空。
 // 同一个 (kind, external_key) 只能属于一张工单（部分唯一索引）：同一个 Jira 单第二次进来时归到已有的工单。没有 external_key 的来源不去重。
 // ticket_pushes：每张工单最多一条推给用户私信的消息（item_id 是主键），状态变了就改写那条消息（shown_state 是消息上现在显示的状态，
 // message_ref 是那条消息在来源里的位置，发出去以后才有）。

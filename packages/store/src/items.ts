@@ -30,6 +30,9 @@ export function createItem(
     deliveryPolicy?: DeliveryPolicy;
     maxDepth?: number; maxChildren?: number; maxConcurrency?: number;
     tokenBudget?: number; costBudgetUsd?: number; retryLimit?: number;
+    // 工单来自外部来源（v68 的 external_origin，.scratch/external-worker-hub/spec.md P1-2）：Lead 在读过外部内容的一轮里建的、
+    // 别人的消息派的。不给时是 0（用户自己的）。
+    externalOrigin?: boolean;
   },
 ): number {
   const kind = args.kind ?? "task";
@@ -71,8 +74,8 @@ export function createItem(
         requested_runtime, requested_model, purpose,
         verification_policy, acceptance_policy, rework_policy, delivery_policy,
         max_depth, max_children, max_concurrency, token_budget, cost_budget_usd, retry_limit,
-        remind_at, defer_until, reminder_policy, stage_changed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        remind_at, defer_until, reminder_policy, external_origin, stage_changed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                 datetime('now'))`,
     ).run(
       kind, isTask ? args.workflowKind ?? "generic" : "generic", stage, args.title, args.brief, args.createdBy,
@@ -98,6 +101,7 @@ export function createItem(
       kind === "reminder" ? args.remindAt ?? null : null,
       isTask ? args.deferUntil ?? null : null,
       kind === "reminder" && args.reminderPolicy ? JSON.stringify(args.reminderPolicy) : null,
+      args.externalOrigin ? 1 : 0,
     );
     const id = Number(r.lastInsertRowid);
     // 自根行的 insert-then-update 协议只对 task 有意义：(C2) 要求 reminder 的 root 恒为 NULL。

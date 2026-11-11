@@ -53,6 +53,8 @@ export interface Coordinator extends CheckpointDomainService, InterventionDomain
     verificationPolicy?: VerificationPolicy;
     // 用户要求"先别动，等我确认"时为 true —— 建成 draft。缺省 false：常规路径建完即跑。
     hold?: boolean;
+    // 工单来自外部来源（items.external_origin，store 的 createItem）。Lead 建单时取这一轮的 turnOrigin().external。
+    externalOrigin?: boolean;
   }): number;
   beginPlanning(context: Omit<PlanningContext, "revision">): number;
   reopenPlanning(context: Omit<PlanningContext, "revision">, options?: { retainChildIds?: number[] }): number;
@@ -243,7 +245,7 @@ export function createCoordinator(args: { db: Db; now?: () => Date }): Coordinat
         workdir: input.workdir, priority: input.priority, project: projectName,
         projectId, runtime: input.runtime, model: input.model,
         purpose: input.purpose, verificationPolicy: input.verificationPolicy, hold: input.hold,
-        workflowKind: input.workflowKind,
+        workflowKind: input.workflowKind, externalOrigin: input.externalOrigin,
       });
     },
 

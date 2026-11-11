@@ -37,6 +37,7 @@ export * from "./reply-style.js";
 export * from "./host-bypass.js";
 export * from "./execution-mode.js";
 export * from "./worker-queue/index.js";
+export * from "./ticket-sources.js";
 export * from "./execution-mode.messages.js";
 export * from "./reply-style-extract.js";
 export * from "./handbook-propose.js";

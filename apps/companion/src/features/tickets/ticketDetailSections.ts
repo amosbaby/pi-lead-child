@@ -385,6 +385,8 @@ const HEADER_MORE: readonly TicketOperationId[] = ['set_priority', 'set_project'
 const PLACED_ELSEWHERE = new Set<string>([
   ...HEADER_MORE, 'unlink', 'set_due', 'set_budget', 'delegate', 'confirm_criterion', 'unconfirm_criterion',
   'change_reviewer', 'set_run_profile', 'open_delivery_file', 'set_unsandboxed',
+  // 改处理方式（ticket.set_handling）要选 auto 或 needs_user，不能从「更多」直接点；入口在工单详情的处理方式（external-worker-hub Task 10）。
+  'ticket.set_handling',
 ]);
 
 // 合并、开 PR、放弃改动要带上你看到的那份交付（expectedHead、expectedTarget）。交付还没读到时不能点。

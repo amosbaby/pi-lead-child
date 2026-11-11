@@ -63,6 +63,41 @@ export function addTicketSource(db: Db, source: NewTicketSource): number {
   })();
 }
 
+/**
+ * 一个通道（来源插件的 id，例如对话键的第一段）对应的来源种类：本身就是来源种类清单里的一个时用它，别的都是 manual。
+ * 代码里不写来源的名字（通道内核不点名来源，spec D14）：只按清单认。
+ */
+export function ticketSourceKindOf(channel: string): TicketSourceKind {
+  return channel !== "manual" && (TICKET_SOURCE_KINDS as readonly string[]).includes(channel) ? channel as TicketSourceKind : "manual";
+}
+
+/**
+ * 记一条对话里的来源（通道卡、用户私信），同一张工单同一个位置 (kind, conversation, message_ts) 只记一次，和 v68 回填同一条规则。
+ * 没有 externalKey，不去重到别的工单。记下了返回 true，已经有了返回 false。
+ */
+export function addConversationSource(
+  db: Db, source: { itemId: number; kind: TicketSourceKind; conversation: string; messageTs?: string | null; url?: string | null; now?: Date },
+): boolean {
+  return db.transaction((): boolean => {
+    const messageTs = source.messageTs ?? null;
+    const existing = db.prepare(
+      "SELECT 1 FROM ticket_sources WHERE item_id = ? AND kind = ? AND conversation = ? AND message_ts IS ? LIMIT 1",
+    ).get(source.itemId, source.kind, source.conversation, messageTs);
+    if (existing) return false;
+    addTicketSource(db, {
+      itemId: source.itemId, kind: source.kind, conversation: source.conversation, messageTs, url: source.url ?? null,
+      ...(source.now ? { now: source.now } : {}),
+    });
+    return true;
+  })();
+}
+
+/** 把一张工单记成来自外部来源（external_origin = 1）。只改这一列，不碰 stage 和别的生命周期字段。工单不存在时抛错。 */
+export function markExternalOrigin(db: Db, itemId: number): void {
+  const result = db.prepare("UPDATE items SET external_origin = 1 WHERE id = ?").run(itemId);
+  if (result.changes !== 1) throw new Error(`markExternalOrigin: item ${itemId} does not exist`);
+}
+
 /** 一张工单的来源，按记下的先后。 */
 export function ticketSources(db: Db, itemId: number): TicketSource[] {
   const rows = db.prepare("SELECT * FROM ticket_sources WHERE item_id = ? ORDER BY id").all(itemId) as TicketSourceRow[];

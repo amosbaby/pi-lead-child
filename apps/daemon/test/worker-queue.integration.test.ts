@@ -9,14 +9,14 @@ import { Value } from "typebox/value";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { EXTERNAL_RUNTIME_ID, KernelTicketSchema, TicketSummarySchema } from "@pi-lead-child/protocol";
 import {
-  ChannelHub, ChannelRegistry, createCoordinator, createSlackChannelAdapter, executionModeMessages, runTicketAction, setExecutionMode,
-  workerTicket, type TicketActionCaller,
+  ChannelHub, ChannelRegistry, createCoordinator, createSlackChannelAdapter, executionModeMessages, runTicketAction, runWorkerTrack,
+  setExecutionMode, workerTicket, type TicketActionCaller,
 } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
 import { createControlPlaneService } from "@pi-lead-child/gateway";
 import {
-  createLoopbackBinding, createPairing, getItem, getLatestOutcomeSnapshot, listActivities, listEvents, listInbox, listRuns, openDb,
-  redeemPairing, type Db,
+  createLoopbackBinding, createPairing, getChannelCard, getItem, getLatestOutcomeSnapshot, listActivities, listEvents, listInbox, listRuns,
+  openDb, redeemPairing, ticketSources, type Db,
 } from "@pi-lead-child/store";
 import { RuntimeRegistry } from "@pi-lead-child/runtime";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
@@ -92,6 +92,13 @@ describe("a Slack request handled by an external worker", () => {
     const itemId = dispatched.itemId;
     expect(listRuns(db, itemId)).toEqual([]);
     expect(summaryOf(itemId)).toMatchObject({ stage: "ready", status: "ready", hasRun: false, runtime: { state: "idle", activeAttemptId: null } });
+    // 来源：卡所在的对话和卡的锚点（线程的根或者开卡的那条消息）；Nina 的消息，所以工单来自外部来源。
+    const card = getChannelCard(db, cardId)!;
+    expect(ticketSources(db, itemId)).toEqual([expect.objectContaining({
+      kind: "slack", conversation: card.objectKey, messageTs: card.replyTarget.thread_ts, url: null, externalKey: null,
+    })]);
+    expect(card.replyTarget.thread_ts).toEqual(expect.any(String));
+    expect(db.prepare("SELECT external_origin FROM items WHERE id=?").get(itemId)).toEqual({ external_origin: 1 });
 
     // 工人领单：外部 Run，工单进 active。
     const { binding } = createLoopbackBinding(db, { name: "Ethan's Claude Code", scopes: ["worker"] });
@@ -100,6 +107,11 @@ describe("a Slack request handled by an external worker", () => {
     const runId = (claim.result as { runId: number }).runId;
     expect(listRuns(db, itemId)).toMatchObject([{ id: runId, runtime: EXTERNAL_RUNTIME_ID, state: "running" }]);
     expect(summaryOf(itemId)).toMatchObject({ stage: "active", status: "active", hasRun: true, runtime: { activeAttemptId: runId } });
+    // 派单时算好的权限清单（没有 Run 挂不上 run_grants）：工人读工单时看得到，照它的范围做。
+    expect(workerTicket(db, itemId, binding.id)).toMatchObject({
+      grant: { intent: "knowledge", grant: { intent: "knowledge" }, labels: expect.any(Array), dropped: [] },
+      sources: [{ kind: "slack", conversation: card.objectKey }],
+    });
 
     // 挂会话、写进展：工单不动。
     await runTicketAction(db, { itemId, action: "worker.attach_session", input: { url: "claude://resume?session=abc", sessionId: "abc" }, caller: ethan });
@@ -123,6 +135,35 @@ describe("a Slack request handled by an external worker", () => {
     expect(getLatestOutcomeSnapshot(db, itemId)).toMatchObject({ executorRunId: runId, summary: "The retry policy is in docs/retry.md." });
     expect(summaryOf(itemId)).toMatchObject({ stage: "review", status: "review", hasRun: true, runtime: { activeAttemptId: null } });
     // 账本里 stage 的每一步都是 system 推的，带着工人的外部 Run。
+    const transitions = listActivities(db, itemId, 1000).filter((activity) => activity.kind === "transition")
+      .map((activity) => ({ actor: activity.actor, runId: activity.run_id, ...JSON.parse(activity.payload) }));
+    expect(transitions).toMatchObject([
+      { actor: "system", runId, from: "ready", to: "active" },
+      { actor: "system", runId, from: "active", to: "review" },
+    ]);
+  });
+});
+
+// 工人从自己的会话建单（worker.track）：建单、来源、领取、挂会话一次做完，之后和领来的单一样交付。TicketSummary 跟着变。
+describe("a worker tracking its own session", () => {
+  it("creates, sources, claims and attaches in one call, then delivers to review", async () => {
+    const { binding } = createLoopbackBinding(db, { name: "Ethan's Claude Code", scopes: ["worker"] });
+    const ethan: TicketActionCaller = { kind: "worker", bindingId: binding.id, workerName: binding.display_name };
+    const tracked = await runWorkerTrack(db, {
+      caller: ethan, host: { liveItemIds: () => [] },
+      input: { title: "PROJ-123 retry policy", sourceUrl: "https://acme.atlassian.net/browse/PROJ-123", sessionId: "s1" },
+    });
+    const { ticketId: itemId, runId } = tracked.result as { ticketId: number; runId: number };
+    expect(ticketSources(db, itemId)).toMatchObject([{ kind: "jira", externalKey: "PROJ-123" }]);
+    expect(db.prepare("SELECT external_origin FROM items WHERE id=?").get(itemId)).toEqual({ external_origin: 0 });
+    expect(listRuns(db, itemId)).toMatchObject([{ id: runId, runtime: EXTERNAL_RUNTIME_ID, state: "running" }]);
+    expect(summaryOf(itemId)).toMatchObject({ stage: "active", status: "active", hasRun: true, runtime: { activeAttemptId: runId } });
+    expect(workerTicket(db, itemId, binding.id)).toMatchObject({ grant: null, claim: { sessions: [{ sessionId: "s1" }] } });
+
+    await runTicketAction(db, {
+      itemId, action: "worker.complete", caller: ethan, input: { summary: "documented the policy", evidence: "docs/retry.md updated" },
+    });
+    expect(summaryOf(itemId)).toMatchObject({ stage: "review", status: "review", hasRun: true, runtime: { activeAttemptId: null } });
     const transitions = listActivities(db, itemId, 1000).filter((activity) => activity.kind === "transition")
       .map((activity) => ({ actor: activity.actor, runId: activity.run_id, ...JSON.parse(activity.payload) }));
     expect(transitions).toMatchObject([

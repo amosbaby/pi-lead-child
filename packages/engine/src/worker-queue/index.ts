@@ -9,4 +9,5 @@ export {
   completeTicket, handBackTicket, releaseBlocker, releaseTicket, writeBackBlocker,
   type CompleteTicketInput, type CompleteTicketResult, type HandBackInput,
 } from "./complete.js";
-export { listTickets, workerTicket, type WorkerNote, type WorkerTicketRow, type WorkerTicketView } from "./read.js";
+export { trackTicket, WORKER_TRACKED_DECISION, type TrackTicketInput, type TrackTicketResult } from "./track.js";
+export { listTickets, workerTicket, type WorkerNote, type WorkerTicketGrant, type WorkerTicketRow, type WorkerTicketView } from "./read.js";

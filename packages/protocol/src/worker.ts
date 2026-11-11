@@ -62,6 +62,20 @@ export const WORKER_ACTION_INPUT_SCHEMAS = {
 
 export type WorkerActionInputs = { [K in WorkerActionId]: Static<typeof WORKER_ACTION_INPUT_SCHEMAS[K]> };
 
+// 从工人自己的会话建单（spec P1-5 的 track）：建单、记来源、领取、挂会话，一次调用。没有工单编号，所以不在 WORKER_ACTION_IDS 里：
+// 入口是 engine 的 runWorkerTrack（caller 是 worker），不是 runTicketAction。
+//   sourceUrl 只收 https：按链接认来源（Slack、Jira、Notion），认不出时记成 manual；同一个 Jira 单、Notion 页已经是一张工单的来源时
+//   不再建单，领那张单。sessionUrl、sessionId 同 worker.attach_session，都不给时不挂会话。
+export const WORKER_TRACK_ACTION_ID = "worker.track" as const;
+export const WorkerTrackInputSchema = StrictObject({
+  title: Type.String({ minLength: 1, maxLength: 200 }),
+  sourceUrl: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+  note: Type.Optional(Type.String({ minLength: 1, maxLength: 20_000 })),
+  sessionUrl: Type.Optional(Type.String({ minLength: 1, maxLength: 2048 })),
+  sessionId: Type.Optional(Type.String({ minLength: 1, maxLength: 200, pattern: "^[A-Za-z0-9][A-Za-z0-9._-]*$" })),
+});
+export type WorkerTrackInput = Static<typeof WorkerTrackInputSchema>;
+
 // 外部 Run 的 metadata（runs.metadata）：工人的 binding id（不是名字）、领取方式、会话。
 export const WORKER_CLAIM_MODES = ["manual", "auto"] as const;
 export type WorkerClaimMode = typeof WORKER_CLAIM_MODES[number];

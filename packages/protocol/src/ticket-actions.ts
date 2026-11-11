@@ -34,6 +34,8 @@ export const TICKET_ACTION_IDS = [
   "set_unsandboxed",
   // 放掉外部工人领走的单（.scratch/external-worker-hub/spec.md P1-4）：外部 Run 结束，工单回到待开始。工人自己的操作在 worker.ts。
   "ticket.release",
+  // 改工单的处理方式（.scratch/external-worker-hub/spec.md P1-3）：自动处理还是要用户拿主意。只有用户本人能改（user_direct）。
+  "ticket.set_handling",
   // 验收标准（工单 05）：编辑、确认一条、取消确认。
   ...ACCEPTANCE_CRITERIA_ACTION_IDS,
 ] as const;
@@ -177,6 +179,8 @@ export const TICKET_ACTION_INPUT_SCHEMAS = {
   set_unsandboxed: StrictObject({ enabled: Type.Boolean() }),
   // 放掉外部工人领走的单：没有输入，原因写在请求体的 reason。
   "ticket.release": Empty,
+  // 处理方式：auto（可以自动处理）或 needs_user（要用户拿主意）。理由写在请求体的 reason。
+  "ticket.set_handling": StrictObject({ handling: Type.Union([Type.Literal("auto"), Type.Literal("needs_user")]) }),
   // 验收标准（工单 05）。
   ...ACCEPTANCE_CRITERIA_ACTION_INPUT_SCHEMAS,
 } as const satisfies Record<TicketActionId, TSchema>;

@@ -123,7 +123,9 @@ import {
   createUiForm, listUiActions, permissionOf, ticketActionDefinition, TicketActionError,
   type PullRequestRunner, type TicketActionHost, type UiActionServices,
 } from "@pi-lead-child/engine";
-import { EXTERNAL_ORIGIN_DECISION, setAutoPullRequest, workspaceOfItem } from "@pi-lead-child/engine";
+import {
+  EXTERNAL_ORIGIN_DECISION, messageEventCardIds, recordCardTicketSource, setAutoPullRequest, workspaceOfItem,
+} from "@pi-lead-child/engine";
 import {
   integrateIsolatedWorkspace, provisionWorkspace, provisionWorkspaceAsync, requestSharedWorkspace,
   runWorkspaceFactsReady, runWorkspaceRefusal, setPullRequestReviewTarget, warmRepositoryIdentity, warmRunWorkspaceFacts,
@@ -1444,6 +1446,8 @@ function createLeadSubtask(
     title: string; brief: string; workdir?: string; workflowKind?: "generic" | "coding"; priority?: ItemPriority;
     runtime?: RuntimeId; model?: string; verificationPolicy?: VerificationPolicy;
     // 刻意没有 hold：确认发生在树根（§6.6），子任务生于 ready。参数不存在，就没有再漏一次的位置。
+    // 这一轮读过外部内容（turnOrigin().external）：子工单也记成来自外部来源。
+    externalOrigin?: boolean;
   },
 ): number {
   const parent = getItem(db, parentId);
@@ -1483,6 +1487,7 @@ function createLeadSubtask(
     runtime: input.runtime ?? parent.requested_runtime ?? undefined,
     model: input.model ?? parent.requested_model ?? undefined,
     verificationPolicy: input.verificationPolicy,
+    externalOrigin: input.externalOrigin,
   });
 }
 
@@ -2202,6 +2207,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           : [];
         // 建单的事务里要认项目（仓库根目录、origin）、判断 PR 工单的仓库：git 的事实先异步查好，事务里只读缓存（git-facts.ts）。
         await Promise.all([warmRepositoryIdentity(workdir), warmWorkdirFacts(workdir)]);
+        // 这一轮的来历（external-worker-hub P1-2）：读过外部内容时工单记成来自外部来源；叫醒这一轮的外部通道消息有卡时，
+        // 卡记成工单的来源（engine 的 ticket-sources.ts）。用户私信那一轮的来源在这一轮结束时由 daemon 记（recordTicketOrigin）。
+        const turnOrigin = turnOriginOf(deps);
         const id = db.transaction(() => {
           const createdId = params.parent_ticket_id === undefined
             ? coordinator.createRootItem({
@@ -2209,14 +2217,17 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
                 workflowKind: params.workflow_kind,
                 priority: params.priority, project: params.project,
                 runtime: params.runtime, model,
-                createdBy: "lead", verificationPolicy, hold: params.hold,
+                createdBy: "lead", verificationPolicy, hold: params.hold, externalOrigin: turnOrigin.external,
               })
           : createLeadSubtask(db, params.parent_ticket_id, {
                 title: params.title, brief, workdir,
                 workflowKind: params.workflow_kind,
                 priority: params.priority, runtime: params.runtime, model,
-                verificationPolicy,
+                verificationPolicy, externalOrigin: turnOrigin.external,
               });
+          for (const cardId of messageEventCardIds(db, turnOrigin.externalEvents ?? [])) {
+            recordCardTicketSource(db, { itemId: createdId, cardId });
+          }
           if (criteria.length) addAcceptanceCriteria(db, { itemId: createdId, texts: criteria, by: template ? "system" : "lead" });
           // 外部消息叫醒的一轮里建的工单（和 bash 被拦的是同一种轮次，hands.ts 的 handsBlockedInTurn）：记下来源，
           // 用户不能给它打开「沙箱外执行」（engine 的 ticket-actions/unsandboxed.ts，工单 #62）。
