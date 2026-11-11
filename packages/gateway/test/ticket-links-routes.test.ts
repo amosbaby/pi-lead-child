@@ -80,8 +80,31 @@ describe("GET /v1/tickets/meta", () => {
     expect(reply.status).toBe(200);
     expect(Value.Check(TicketMetaListSchema, reply.body)).toBe(true);
     expect(reply.body).toEqual([
-      { id: plain, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: "Slack" },
-      { id: claimed, handling: "needs_user", complexity: "medium", claimedBy: "ethan-cc", claimMode: "manual", idleHours: 5, sourceLabel: "PROJ-123" },
+      { id: plain, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: "Slack", needsYou: false },
+      {
+        id: claimed, handling: "needs_user", complexity: "medium", claimedBy: "ethan-cc", claimMode: "manual", idleHours: 5,
+        sourceLabel: "PROJ-123", needsYou: false,
+      },
+    ]);
+  });
+
+  // ruling R18：needsYou 和工人的 needs_me（R15）同一条规则：needs_user、没结束、没有活着的外部 Run。
+  it("says needsYou only for a needs_user ticket that is not finished and not claimed", async () => {
+    const { get } = await start();
+    const waiting = ticket("waiting");
+    setHandling(db, waiting, { handling: "needs_user", reason: "交给你判断" });
+    const done = ticket("done");
+    setHandling(db, done, { handling: "needs_user", reason: "交给你判断" });
+    db.prepare("UPDATE items SET stage='done' WHERE id=?").run(done);
+    const claimed = ticket("claimed");
+    setHandling(db, claimed, { handling: "needs_user", reason: "交给你判断" });
+    claim(claimed);
+    const automatic = ticket("automatic");
+    setHandling(db, automatic, { handling: "auto", reason: "只读查询" });
+
+    const reply = await get(`/v1/tickets/meta?ids=${waiting},${done},${claimed},${automatic}`);
+    expect(reply.body.map((row: any) => [row.id, row.needsYou])).toEqual([
+      [waiting, true], [done, false], [claimed, false], [automatic, false],
     ]);
   });
 

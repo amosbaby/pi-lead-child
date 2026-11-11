@@ -13,6 +13,8 @@ import { useLocale } from '@/i18n';
 import { useLeadAvatarSource } from '@/components/useLeadAvatarSource';
 import { leadFairy } from '@/components/leadPresence';
 
+import { HUB_FACTS_REFRESH_MS } from '@/features/tickets/ticketLinks';
+
 import { isWorkspaceControlActionId, resolveWorkspaceTickets, type Ticket, type TicketHubFacts } from './model';
 import { sortUpcoming, watchReminder, type UpcomingReminder } from './inboxModel';
 import { userOutboxNotifications } from './notificationOutbox';
@@ -139,6 +141,13 @@ export function ConnectedWorkRail({
   // 批量读。工单有变化（编号或 updatedAt 变了）时再读一次。读不到（旧 daemon）时为 null：列表照旧，不显示这两个筛选。
   const [ticketMeta, setTicketMeta] = useState<TicketHubFacts | null>(null);
   const metaKey = ticketSummaries.map((ticket) => `${ticket.id}:${ticket.updatedAt}`).join(',');
+  // 「N 小时无动静」随时间变：工单不变时也每 10 分钟重读一次（ruling R18）。
+  const [metaTick, setMetaTick] = useState(0);
+  useEffect(() => {
+    if (!ready) return undefined;
+    const timer = setInterval(() => setMetaTick((tick) => tick + 1), HUB_FACTS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [ready]);
   useEffect(() => {
     if (!ready) return undefined;
     const ids = ticketSummaries.map((ticket) => ticket.id);
@@ -150,7 +159,7 @@ export function ConnectedWorkRail({
     return () => controller.abort();
     // metaKey 已经包含了 ticketSummaries 里用到的部分。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [metaKey, ready, runtime]);
+  }, [metaKey, metaTick, ready, runtime]);
   // 取消是操作层的 timer.cancel（页面和 Lead 同一个操作），取消以后重读一次列表。
   const cancelTimer = useCallback(async (ref: string) => {
     await runtime.cancelTimer(ref);

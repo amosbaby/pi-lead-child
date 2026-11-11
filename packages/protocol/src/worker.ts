@@ -139,6 +139,9 @@ export const TicketMetaSchema = StrictObject({
   idleHours: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
   // 第一条来源的标签（ticketSourceLabel）。没有来源时 null。
   sourceLabel: NullableString,
+  // 要你拿主意：handling=needs_user、没结束、没有活着的外部 Run（和工人 list_tickets 的 needs_me 同一条规则，ruling R15、R18）。
+  // 网页的标签和「要你拿主意」筛选只看它，不自己拿 handling 算。
+  needsYou: Type.Boolean(),
 });
 export type TicketMeta = Static<typeof TicketMetaSchema>;
 export const TicketMetaListSchema = Type.Array(TicketMetaSchema);

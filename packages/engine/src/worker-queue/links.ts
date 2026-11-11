@@ -3,11 +3,13 @@
 //   - 来源：子工单自己没有来源时用根工单的（来源记在建单的那张根工单上）。
 //   - idleHours：领着它的工人多少个整小时没动静。动静是领取、挂会话、进展笔记（worker_report）里最晚的一次。
 //     手动领的单没有租约，网页按它写「N 小时无动静」，给释放按钮（ticket.release）。
+//   - needsYou：要你拿主意，和工人的 needs_me 同一条规则（ruling R15、R18）：needs_user、没结束、没有活着的外部 Run。
 //   - sessions：这张单所有外部 Run 挂过的会话，最近一次领取的在前，同一个链接或 id 只给一次。
 import { EXTERNAL_RUNTIME_ID, ticketSourceLabel, type TicketLinks, type TicketMeta } from "@pi-lead-child/protocol";
 import { getItem, ticketSources, type Db, type TicketComplexity, type TicketHandling, type TicketSource } from "@pi-lead-child/store";
 import { TicketActionError } from "../ticket-actions/types.js";
 import { openWorkerClaim, WORKER_REPORT_ROUTE } from "./claim.js";
+import { ticketNeedsMe } from "./read.js";
 import { parseMetadata } from "../pipeline/run-registration.js";
 
 const HOUR_MS = 3_600_000;
@@ -57,6 +59,7 @@ export function ticketMeta(db: Db, ids: readonly number[], now: Date = new Date(
       complexity: row.complexity,
       ...idleHoursOf(db, id, now),
       sourceLabel: first ? ticketSourceLabel(first) : null,
+      needsYou: ticketNeedsMe(db, id),
     }];
   });
 }

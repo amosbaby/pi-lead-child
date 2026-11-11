@@ -20,7 +20,9 @@ vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
 afterEach(() => setViewportWidth(0));
 
 function meta(id: number, overrides: Partial<TicketMeta> = {}): TicketMeta {
-  return { id, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: null, ...overrides };
+  return {
+    id, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: null, needsYou: false, ...overrides,
+  };
 }
 
 const source = (id: number, overrides: Partial<TicketLinks['sources'][number]>): TicketLinks['sources'][number] => ({
@@ -61,9 +63,9 @@ describe('the source and session block in the ticket detail', () => {
     const { section } = await openDetail();
     expect(within(section).getByTestId('ticket-source-1').getAttribute('role')).toBe('link');
     expect(within(section).getByTestId('ticket-source-1').textContent).toBe('PROJ-123');
-    // 私信建的单没有地址：写来源和对话，不是链接。
+    // 私信建的单没有地址：只写来源的标签，不是链接，也不写内部的对话编号（P14.6）。
     expect(within(section).getByTestId('ticket-source-2').getAttribute('role')).toBeNull();
-    expect(within(section).getByTestId('ticket-source-2').textContent).toBe('Slack · slack:dm:alice');
+    expect(within(section).getByTestId('ticket-source-2').textContent).toBe('Slack');
     expect(within(section).getByTestId('ticket-source-3').getAttribute('role')).toBeNull();
 
     const claude = within(section).getByTestId('ticket-session-link');
@@ -104,12 +106,17 @@ function summary(id: number, overrides: Partial<TicketSummary> = {}): TicketSumm
 }
 
 describe('the ticket list with the hub facts', () => {
-  const items = resolveWorkspaceTickets(true, [summary(1), summary(2), summary(3), summary(4)]);
+  const items = resolveWorkspaceTickets(true, [
+    summary(1), summary(2), summary(3), summary(4), summary(5, { stage: 'done', status: 'done' }), summary(6),
+  ]);
+  // needsYou 由服务端按 needs_me 的规则算（ruling R18）：#2 要你拿主意；#5 已完成、#1 被工人领着，handling 虽是 needs_user 也不算。
   const facts = new Map<string, TicketMeta>([
-    ['1', meta(1, { sourceLabel: 'PROJ-123', complexity: 'simple', claimedBy: 'ethan-cc', claimMode: 'manual', idleHours: 5 })],
-    ['2', meta(2, { sourceLabel: 'Slack', handling: 'needs_user', claimedBy: 'nina-cc', claimMode: 'manual', idleHours: 2 })],
+    ['1', meta(1, { sourceLabel: 'PROJ-123', complexity: 'simple', handling: 'needs_user', claimedBy: 'ethan-cc', claimMode: 'manual', idleHours: 5 })],
+    ['2', meta(2, { sourceLabel: 'Slack', handling: 'needs_user', needsYou: true })],
     ['3', meta(3, { claimedBy: 'queue-cc', claimMode: 'auto', idleHours: 9 })],
     ['4', meta(4, { handling: 'auto' })],
+    ['5', meta(5, { handling: 'needs_user' })],
+    ['6', meta(6, { sourceLabel: 'Slack', claimedBy: 'nina-cc', claimMode: 'manual', idleHours: 2 })],
   ]);
 
   it('writes the source, the complexity and the worker on the row', () => {
@@ -121,14 +128,22 @@ describe('the ticket list with the hub facts', () => {
     expect(screen.getByTestId('ticket-handling-2').textContent).toBe('Needs your call');
   });
 
+  it('marks only what needsYou says: not a finished ticket, not a claimed one', () => {
+    renderUI(<TicketList items={items} grouped meta={facts} onSelect={() => {}} />);
+    fireEvent.click(screen.getByTestId('ticket-group-completed'));
+    expect(screen.getByTestId('ticket-row-5')).toBeTruthy();
+    expect(screen.queryByTestId('ticket-handling-5')).toBeNull();
+    expect(screen.queryByTestId('ticket-handling-1')).toBeNull();
+  });
+
   it('shows N h no activity and a release button for a manual claim idle over 4 hours only', async () => {
     const onReleaseTicket = vi.fn(async () => {});
     renderUI(<TicketList items={items} grouped meta={facts} onSelect={() => {}} onReleaseTicket={onReleaseTicket} />);
     expect(screen.getByTestId('ticket-idle-1').textContent).toBe('5 h no activity');
-    expect(screen.queryByTestId('ticket-idle-2')).toBeNull();
+    expect(screen.queryByTestId('ticket-idle-6')).toBeNull();
     // 从队列领的单有租约，到期由系统收回，不给释放。
     expect(screen.queryByTestId('ticket-idle-3')).toBeNull();
-    expect(screen.queryByTestId('ticket-release-2')).toBeNull();
+    expect(screen.queryByTestId('ticket-release-6')).toBeNull();
     expect(screen.queryByTestId('ticket-release-3')).toBeNull();
     await act(async () => { fireEvent.click(screen.getByTestId('ticket-release-1')); });
     expect(onReleaseTicket).toHaveBeenCalledWith(expect.objectContaining({ id: '1' }));
@@ -138,9 +153,38 @@ describe('the ticket list with the hub facts', () => {
     const ids = (filter: TicketFilter, query = '') =>
       buildTicketRailPresentation(items, { filter, query, meta: facts }).groups.flatMap((group) => group.items.map((ticket) => ticket.id));
     expect(ids('needs_call')).toEqual(['2']);
-    expect(ids('worker').sort()).toEqual(['1', '2', '3']);
+    expect(ids('worker').sort()).toEqual(['1', '3', '6']);
     expect(ids('all', 'proj-123')).toEqual(['1']);
-    expect(ids('all', 'nina')).toEqual(['2']);
+    expect(ids('all', 'nina')).toEqual(['6']);
     expect(buildTicketRailPresentation(items, { filter: 'all', meta: facts }).filterCounts).toMatchObject({ needs_call: 1, worker: 3 });
+  });
+});
+
+// ruling R18：idleHours 是服务端在请求那一刻算的。工单不变时也要每 10 分钟重读一次，「N 小时无动静」才会按时出现。
+describe('reading the hub facts again as time passes', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('shows the idle hint after the interval, with no ticket update', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] });
+    let idleHours = 3;
+    const getTicketsMeta = vi.fn(async () => [meta(66, { claimedBy: 'ethan-cc', claimMode: 'manual', idleHours })]);
+    const getTicketLinks = vi.fn(async () => links);
+    const runtime = renderWorkbenchWithTicket(ticket66(), { client: { getTicketLinks, getTicketsMeta } as never });
+    act(() => { runtime.workspace.getState().setRailView('tickets'); });
+    expect(await screen.findByTestId('ticket-row-66')).toBeTruthy();
+    const section = await screen.findByTestId('ticket-links');
+    await act(async () => {});
+    expect(screen.queryByTestId('ticket-idle-66')).toBeNull();
+    expect(section.textContent).not.toContain('no activity');
+    const listReads = getTicketsMeta.mock.calls.length;
+    const linkReads = getTicketLinks.mock.calls.length;
+
+    idleHours = 4;
+    await act(async () => { vi.advanceTimersByTime(10 * 60_000); });
+    await act(async () => {});
+    expect(getTicketLinks.mock.calls.length).toBeGreaterThan(linkReads);
+    expect(getTicketsMeta.mock.calls.length).toBeGreaterThan(listReads);
+    expect(screen.getByTestId('ticket-idle-66').textContent).toBe('4 h no activity');
+    expect(screen.getByTestId('ticket-links').textContent).toContain('4 h no activity');
   });
 });

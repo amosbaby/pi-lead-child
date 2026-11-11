@@ -241,7 +241,8 @@ function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTi
       ? hub.idle(idle)
       : ticket.turn !== 'ended' && ticket.stageChangedAt ? waitedText(ticket.stageChangedAt, undefined, locale) : null;
   const attentionTime = overdue || idle !== null;
-  const needsCall = facts?.handling === 'needs_user';
+  // 只看服务端的 needsYou：已结束的、被工人领着的单不标（ruling R18）。
+  const needsCall = facts?.needsYou === true;
   const due = ticket.turn !== 'ended' && ticket.nextMilestone ? milestoneChip(ticket.nextMilestone, undefined, locale) : null;
   const assigned = ticket.status === 'review'
     || (Boolean(ticket.agentLabel || ticket.runtimeName) && !ticket.needsAttention);
@@ -303,7 +304,7 @@ function TicketRailCard({ ticket, selected, onSelect, onResumeTicket, onCancelTi
               {ticketRailCaptionWithFacts(ticket, ticketMetaCaptionParts(facts, locale), locale)}
             </Text>
             {needsCall ? (
-              // 要你拿主意（handling=needs_user，spec P1-4「在网页里标出」）：「等你」的琥珀色小标签，写着字（设计规范 P7.2、P7.7）。
+              // 要你拿主意（needsYou，spec P1-4「在网页里标出」）：「等你」的琥珀色小标签，写着字（设计规范 P7.2、P7.7）。
               <Badge testID={`ticket-handling-${ticket.id}`} label={hub.handlingNeedsUser} tone="warning" size="sm" />
             ) : null}
             {due ? (

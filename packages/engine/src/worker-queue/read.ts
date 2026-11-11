@@ -130,6 +130,15 @@ export interface WorkerTicketRow {
 const PRIORITY_RANK = "CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4 END";
 const COMPLEXITY_RANK = "CASE i.complexity WHEN 'simple' THEN 0 WHEN 'medium' THEN 1 WHEN 'complex' THEN 2 ELSE 3 END";
 const NO_LIVE_RUN = "NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.state IN ('starting','running'))";
+// needs_me（ruling R15）：要用户拿主意的单。工人的 list_tickets 和网页的「要你拿主意」（ticketMeta 的 needsYou，ruling R18）用同一条。
+// 一个 ? 参数：EXTERNAL_RUNTIME_ID。表的别名是 i。
+const NEEDS_ME = `i.kind='task' AND i.handling='needs_user' AND i.stage NOT IN ('done','cancelled')
+  AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.runtime=? AND r.state IN ('starting','running'))`;
+
+/** 这张单现在要不要用户拿主意（needs_me 的同一条规则）。不存在的单为 false。 */
+export function ticketNeedsMe(db: Db, itemId: number): boolean {
+  return db.prepare(`SELECT 1 FROM items i WHERE i.id=? AND ${NEEDS_ME}`).get(itemId, EXTERNAL_RUNTIME_ID) !== undefined;
+}
 
 function idsFor(db: Db, filter: WorkerTicketFilter, bindingId: number): number[] {
   const rows = (sql: string, ...params: unknown[]) => (db.prepare(sql).all(...params) as Array<{ id: number }>).map((row) => row.id);
@@ -145,8 +154,7 @@ function idsFor(db: Db, filter: WorkerTicketFilter, bindingId: number): number[]
     case "needs_me":
       return rows(
         `SELECT i.id FROM items i
-         WHERE i.kind='task' AND i.handling='needs_user' AND i.stage NOT IN ('done','cancelled')
-           AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.runtime=? AND r.state IN ('starting','running'))
+         WHERE ${NEEDS_ME}
          ORDER BY ${PRIORITY_RANK}, ${COMPLEXITY_RANK}, i.created_at, i.id LIMIT ?`,
         EXTERNAL_RUNTIME_ID, LIST_LIMIT,
       );

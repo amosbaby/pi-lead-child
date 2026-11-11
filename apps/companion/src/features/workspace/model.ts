@@ -739,7 +739,8 @@ export function isPausedTicket(ticket: Ticket): boolean {
 }
 
 function ticketMatchesFilter(ticket: Ticket, filter: TicketFilter, facts?: TicketMeta): boolean {
-  if (filter === 'needs_call') return facts?.handling === 'needs_user';
+  // 要你拿主意只看服务端算好的 needsYou（和工人的 needs_me 同一条规则：没结束、没被领着，ruling R18）。
+  if (filter === 'needs_call') return facts?.needsYou === true;
   if (filter === 'worker') return Boolean(facts?.claimedBy);
   if (filter === 'running') return ticket.turn === 'running';
   if (filter === 'paused') return isPausedTicket(ticket);

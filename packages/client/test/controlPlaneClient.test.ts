@@ -1774,7 +1774,9 @@ describe('ticket meta and links', () => {
     });
     return { client: new ControlPlaneClient({ fetch: fetcher, credentials }), asked };
   }
-  const meta = (id: number) => ({ id, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: null });
+  const meta = (id: number) => ({
+    id, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: null, needsYou: false,
+  });
 
   it('asks in batches of at most 200 ids, and asks nothing for no ids', async () => {
     const { client, asked } = await clientWith((url) => url.searchParams.get('ids')!.split(',').map((id) => meta(Number(id))));

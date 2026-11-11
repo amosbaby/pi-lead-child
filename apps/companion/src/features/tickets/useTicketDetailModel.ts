@@ -18,6 +18,7 @@ import {
   type Ticket,
 } from '@/features/workspace/model';
 import { runtimeDisplayName } from '@/features/workspace/runtimeNames';
+import { HUB_FACTS_REFRESH_MS } from '@/features/tickets/ticketLinks';
 import { useCompanionRuntime, useControlPlaneStore, useWorkspaceStore } from '@/state/CompanionStateProvider';
 import {
   useAttemptLogsByAttempt,
@@ -399,6 +400,12 @@ export function useTicketDetailModel(
   // 来源与会话（external-worker-hub Task 10）：GET /v1/tickets/:id/links 和这张单的 GET /v1/tickets/meta。不进工单快照
   // （TicketSummary 是严格校验的）。工单更新、做完一个操作以后再读。旧 daemon 没有这两个接口时为 null，详情不画这一块。
   const [linksRevision, setLinksRevision] = useState(0);
+  // 「N 小时无动静」随时间变：工单不变时也每 10 分钟重读一次（ruling R18）。
+  useEffect(() => {
+    if (!connected) return undefined;
+    const timer = setInterval(() => setLinksRevision((revision) => revision + 1), HUB_FACTS_REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [connected, ticketId]);
   const [hubFacts, setHubFacts] = useState<{ ticketId: number; links: TicketLinks; meta: TicketMeta | null } | null>(null);
   useEffect(() => {
     if (!connected) return undefined;

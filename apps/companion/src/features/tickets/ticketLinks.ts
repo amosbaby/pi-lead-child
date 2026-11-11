@@ -13,6 +13,8 @@ import { ticketLinksMessages } from './ticketLinks.messages';
 
 export const LINK_PROTOCOLS: readonly string[] = WORKER_SESSION_URL_SCHEMES;
 export const IDLE_RELEASE_HOURS = 4;
+// idleHours 是服务端在读的那一刻算的：工单不变时也每 10 分钟重读一次列表和详情的这些事实（ruling R18）。
+export const HUB_FACTS_REFRESH_MS = 10 * 60_000;
 
 /** 能画成链接的地址；不能时 null。 */
 export function linkHref(url: string | null | undefined): string | null {
@@ -24,7 +26,7 @@ export type SourcePresentation = {
   label: string;
   // 能点的地址。没有地址、或者地址不是 https:、claude: 时为 null，这时写 text。
   href: string | null;
-  // 不能点时写的文字：标签，后面是对话（私信建的单没有地址，只有对话）或者原样的地址。
+  // 不能点时写的文字：没有地址时只写标签（私信建的单；对话编号是内部的记录，不写，P14.6）；地址不能点时标签后面写原样的地址。
   text: string;
 };
 
@@ -32,7 +34,7 @@ export function sourcePresentation(source: TicketSourceDto, locale: Locale): Sou
   const m = ticketLinksMessages(locale);
   const label = ticketSourceLabel(source) ?? m.noSource;
   const href = linkHref(source.url);
-  const rest = href ? null : source.conversation ?? source.url;
+  const rest = href ? null : source.url;
   return { key: String(source.id), label, href, text: rest ? `${label} · ${rest}` : label };
 }
 
