@@ -1037,9 +1037,10 @@ describe("schema version", () => {
     // v62（2026-10-30，控件的数据源）：widget_sources（store/test/widgets-migration.test.ts）。
     // v63（2026-11-02，Lead 自己装本地 MCP）：connections.launch_json（store/test/connection-launch-migration.test.ts）。
     // v64（2026-11-06，token 按计费拆开）、v65（后台检查的 host_run）；本地的 v66（工单 #62：items.unsandboxed_execution）、
-    // v67（工单 #81：私信里的决定请求和工单的来源对话 channel_decision_pushes、channel_ticket_origins）。
-    expect(LATEST_SCHEMA_VERSION).toBe(67);
-    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 67 });
+    // v67（工单 #81：私信里的决定请求和工单的来源对话 channel_decision_pushes、channel_ticket_origins）、
+    // v68（外部工人 hub：ticket_sources、ticket_pushes、ticket_misses 和 items 的判断列，store/test/worker-hub-migration.test.ts）。
+    expect(LATEST_SCHEMA_VERSION).toBe(68);
+    expect(db.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 68 });
   });
 });
 

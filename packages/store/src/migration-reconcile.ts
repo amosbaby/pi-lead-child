@@ -13,6 +13,7 @@ export const HUB_MIGRATION_NAMES: ReadonlyMap<string, number> = new Map([
   ["watch-host-run-v1", 65],
   ["unsandboxed-execution-v1", 66],
   ["channel-owner-dm-v1", 67],
+  ["worker-hub-v1", 68],
 ]);
 
 // integration/latest 独有的迁移名：hub 没有对应代码，行留档但不留在 schema_migrations 里。

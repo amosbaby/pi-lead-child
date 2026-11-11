@@ -70,6 +70,7 @@ describe("reconcileMigrationRows", () => {
   it("names the hub migrations and the known foreign ones", () => {
     expect([...HUB_MIGRATION_NAMES]).toEqual([
       ["item-usage-parts-v1", 64], ["watch-host-run-v1", 65], ["unsandboxed-execution-v1", 66], ["channel-owner-dm-v1", 67],
+      ["worker-hub-v1", 68],
     ]);
     expect(KNOWN_FOREIGN_MIGRATIONS).toEqual(["claude-memory-sync-v1", "token-usage-resume-recompute-v1"]);
   });
@@ -81,8 +82,9 @@ describe("reconcileMigrationRows", () => {
     const db = openDb(path); // 完整入口：对齐、再跑 hub 自己的迁移
     expect(versions(db)).toEqual(expect.arrayContaining([
       [64, "item-usage-parts-v1"], [65, "watch-host-run-v1"], [66, "unsandboxed-execution-v1"], [67, "channel-owner-dm-v1"],
+      [68, "worker-hub-v1"],
     ]));
-    expect(versions(db)).toHaveLength(4);
+    expect(versions(db)).toHaveLength(5);
     expect(foreignNames(db)).toEqual(["claude-memory-sync-v1", "token-usage-resume-recompute-v1"]);
     expect(stageCounts(db)).toEqual(stages); // 生命周期不变
     expect(rowCounts(db, Object.keys(counts))).toEqual(counts); // 每张业务表的行数不变（对齐只改迁移账本）
@@ -137,7 +139,7 @@ describe("reconcileMigrationRows", () => {
     const db = openDb(join(tempDir("plc-reconcile-fresh-"), "plc.db"));
     expect(tableNames(db)).not.toContain("schema_migrations_foreign");
     expect(foreignNames(db)).toEqual([]);
-    expect(versions(db).map(([, name]) => name)).toEqual(["item-usage-parts-v1", "watch-host-run-v1", "unsandboxed-execution-v1", "channel-owner-dm-v1"]);
+    expect(versions(db).map(([, name]) => name)).toEqual(["item-usage-parts-v1", "watch-host-run-v1", "unsandboxed-execution-v1", "channel-owner-dm-v1", "worker-hub-v1"]);
     expect(reconcileMigrationRows(db)).toEqual({ renumbered: [], foreign: [] });
     db.close();
   });
@@ -171,7 +173,7 @@ describe("reconcileMigrationRows", () => {
     legacy.close();
     const reopened = openDb(path);
     expect(foreignNames(reopened)).toEqual([]);
-    expect(versions(reopened).map(([version]) => version)).toEqual([64, 65, 66, 67]);
+    expect(versions(reopened).map(([version]) => version)).toEqual([64, 65, 66, 67, 68]);
     // 重新打开补回 v66/v67 时新建的两张表不在「之前」里，其余表的行数和阶段分布不变。
     expect(stageCounts(reopened)).toEqual(stagesBefore);
     expect(rowCounts(reopened, Object.keys(countsBefore))).toEqual(countsBefore);

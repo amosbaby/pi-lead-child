@@ -91,6 +91,13 @@ CREATE TABLE ${ifNotExists ? "IF NOT EXISTS " : ""}${table} (
   -- 「沙箱外执行」授权（v66，工单 #62）：1 时这张工单之后的执行 Run 不进沙箱（核查、合并等别的 Run 照旧）。
   -- 只有用户本人能开关（engine 的 ticket-actions/unsandboxed.ts）。和 reminder_policy 一样放在最后，不进 C2 的 CHECK。
   unsandboxed_execution INTEGER NOT NULL DEFAULT 0 CHECK (unsandboxed_execution IN (0,1)),
+  -- 工单判断（v68，外部工人 hub）：handling 是 Lead 判断这张工单能不能自动处理（NULL 是还没判断），handling_reason 是理由，
+  -- complexity 是复杂度；external_origin 为 1 表示工单来自外部来源（Slack、Jira、Notion）而不是用户自己建的，旧工单是 0，不回填。
+  -- 放在最后，老库用 ALTER 补在末尾。不是执行列，不进 C2 的 CHECK。
+  handling        TEXT CHECK (handling IN ('auto','needs_user')),
+  handling_reason TEXT,
+  complexity      TEXT CHECK (complexity IN ('simple','medium','complex')),
+  external_origin INTEGER NOT NULL DEFAULT 0 CHECK (external_origin IN (0,1)),
 
   CHECK (kind = 'task' OR workflow_kind = 'generic'),
 
@@ -1401,6 +1408,43 @@ CREATE TABLE IF NOT EXISTS channel_ticket_origins (
 );
 `;
 
+// 外部工人 hub（v68，worker-hub.ts）。
+// ticket_sources：工单从哪来，一张工单可以有几个来源。kind 是 slack、jira、notion、manual；url 是来源的链接（拼不出来时为空），
+// external_key 是来源里的编号（Jira 的 key 之类），conversation、message_ts 是 Slack 里的对话和消息位置。
+// 同一个 (kind, external_key) 只能属于一张工单（部分唯一索引）：同一个 Jira 单第二次进来时归到已有的工单。没有 external_key 的来源不去重。
+// ticket_pushes：每张工单最多一条推给用户私信的消息（item_id 是主键），状态变了就改写那条消息（shown_state 是消息上现在显示的状态，
+// message_ref 是那条消息在来源里的位置，发出去以后才有）。
+// ticket_misses：用户说「没找到」的记录，只记数和原话。
+export const WORKER_HUB_SCHEMA = `
+CREATE TABLE IF NOT EXISTS ticket_sources (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  item_id       INTEGER NOT NULL REFERENCES items(id),
+  kind          TEXT NOT NULL CHECK (kind IN ('slack','jira','notion','manual')),
+  url           TEXT,
+  external_key  TEXT,
+  conversation  TEXT,
+  message_ts    TEXT,
+  created_at    TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ticket_sources_external_key ON ticket_sources(kind, external_key) WHERE external_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS ticket_sources_item ON ticket_sources(item_id, id);
+CREATE TABLE IF NOT EXISTS ticket_pushes (
+  item_id       INTEGER PRIMARY KEY REFERENCES items(id),
+  reason        TEXT,
+  conversation  TEXT,
+  message_ref   TEXT CHECK (message_ref IS NULL OR json_valid(message_ref)),
+  shown_state   TEXT,
+  created_at    TEXT NOT NULL,
+  updated_at    TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ticket_misses (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  text        TEXT NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ticket_misses_created ON ticket_misses(created_at);
+`;
+
 // 控件的数据源（第二期，widgets.ts，spec D3）：一个控件最多一个。daemon 按 every_seconds 在 Lead 的 bash 沙箱里跑 command，
 // 用输出解析 template（带 {"$data": …} 绑定的模板），合格了写进 widgets.surface。连续出错 5 次暂停（paused=1）。
 export const WIDGET_SOURCES_SCHEMA = `
@@ -1896,6 +1940,7 @@ ${WIDGETS_SCHEMA}
 ${WIDGET_SOURCES_SCHEMA}
 ${SURFACE_ACTIONS_SCHEMA}
 ${CHANNEL_OWNER_DM_SCHEMA}
+${WORKER_HUB_SCHEMA}
 `;
 
 export const CHECKPOINT_CONTROL_PLANE_SCHEMA = `

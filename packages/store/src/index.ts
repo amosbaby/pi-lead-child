@@ -77,6 +77,7 @@ export * from "./triggers.js";
 export * from "./watches.js";
 export * from "./triage-shadow.js";
 export * from "./workspaces.js";
+export * from "./worker-hub.js";
 export * from "./owner-actions.js";
 export * from "./lead-profile.js";
 export * from "./lead-avatar.js";

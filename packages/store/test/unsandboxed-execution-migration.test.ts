@@ -13,8 +13,8 @@ const columns = (db: Db) => (db.pragma("table_info(items)") as Array<{ name: str
 describe("the v66 unsandboxed execution migration", () => {
   it("has the column in a new database, off by default, and records the version", () => {
     const db = openDb(join(tempDir("plc-v66-fresh-"), "plc.db"));
-    // 放在最后：老库用 ALTER 补在末尾，新库和老库的列顺序一致。
-    expect(columns(db).at(-1)).toBe("unsandboxed_execution");
+    // 放在 v68 的四列之前（handling、handling_reason、complexity、external_origin）：老库用 ALTER 补在末尾。
+    expect(columns(db).at(-5)).toBe("unsandboxed_execution");
     expect(db.prepare("SELECT name FROM schema_migrations WHERE version = 66").get()).toEqual({ name: "unsandboxed-execution-v1" });
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(66);
     expect(SCHEMA_MIGRATION_VERSIONS).toContain(66);
