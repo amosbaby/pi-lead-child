@@ -78,6 +78,17 @@ describe("sandboxPolicy", () => {
     expect(policy.denyWrite).toContain("/data/worker-tokens");
   });
 
+  // 工人（Claude Code、Codex）把 plc-worker 这个 MCP 服务器连同 worker token 存在自己的配置里：读到就能冒充工人领单、回写。
+  // 只挡这两个文件，~/.claude、~/.codex 下的别的登录文件照旧能读。
+  it("denies the agents' MCP config files that hold the worker token", () => {
+    const policy = sandboxPolicy({ role: "lead", writable: [], home, dataDir: "/data", env: {} });
+    expect(policy.denyRead).toEqual(expect.arrayContaining([`${home}/.claude.json`, `${home}/.codex/config.toml`]));
+    expect(policy.denyRead).not.toContain(`${home}/.claude`);
+    expect(policy.denyRead).not.toContain(`${home}/.codex`);
+    const executor = sandboxPolicy({ role: "executor", writable: ["/repo"], home, dataDir: "/data", env: {} });
+    expect(executor.denyRead).toEqual(expect.arrayContaining([`${home}/.claude.json`, `${home}/.codex/config.toml`]));
+  });
+
   it("refuses edit and write on the same boundary", () => {
     const policy = sandboxPolicy({
       role: "lead", writable: [], home, dataDir: `${home}/.pi-lead-child`, env: { PATH: `/usr/bin:${home}/.local/bin` },

@@ -51,8 +51,10 @@ export const SANDBOX_SECRET_HOSTS: Readonly<Record<string, readonly string[]>> =
 
 // 不能读的（相对 home）：私钥和钥匙串的文件（见文件头）。~/.ssh 只挡私钥：ssh 要读 config 和 known_hosts（执行者经
 // ssh-agent 推送）。sandbox-runtime 在 macOS 上把这些写法当通配。
+// ~/.claude.json 和 ~/.codex/config.toml：外部工人（Claude Code、Codex）把 plc-worker 这个 MCP 服务器连同 worker token 存在这里，
+// 读到就能冒充工人领单、回写（gateway 的 worker-mcp.ts）。~/.claude、~/.codex 下别的文件照旧能读。
 export const SANDBOX_DENY_READ_HOME: readonly string[] = [
-  ".ssh/id_*", ".ssh/*.pem", ".ssh/*.key", ".gnupg", "Library/Keychains",
+  ".ssh/id_*", ".ssh/*.pem", ".ssh/*.key", ".gnupg", "Library/Keychains", ".claude.json", ".codex/config.toml",
 ];
 
 // 数据目录里不能读的：config.json（env 段里可能有密钥）、plc 的 CLI 凭证、保险库的密钥、Lead 自己的 pi 授权文件、
@@ -644,7 +646,8 @@ export function sandboxRuntimeConfig(policy: SandboxPolicy): {
 export function sandboxToolNote(policy: SandboxPolicy, writableNote: string): string {
   const lines = [
     `命令在沙箱里跑，像在用户的终端里：能写${writableNote}和系统临时目录。各个 CLI 自己的登录、配置能读能写，`
-      + "所以能替用户登录 CLI（设备码登录时盯着进程的输出，用户授权完就继续，不用等他回话）。读不到私钥和 plc 自己的密钥；"
+      + "所以能替用户登录 CLI（设备码登录时盯着进程的输出，用户授权完就继续，不用等他回话）。读不到私钥、plc 自己的密钥，"
+      + "和存着外部工人凭证的 ~/.claude.json、~/.codex/config.toml；"
       + "登录文件里的值不要贴进对话。网络全开，任何域名都能连"
       + (policy.allowLocalBinding ? "，也能起本机服务、连本机端口。" : "；连不了本机端口（要起本机服务跑测试，派执行者）。"),
   ];
