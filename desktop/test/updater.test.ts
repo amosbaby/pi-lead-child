@@ -1,6 +1,6 @@
 // App 的一键更新（updater.ts）。网络和系统命令换成假的：fetch 回 manifest 和 dmg 的字节，hdiutil 把一个假的 App
 // 放进挂载点，ditto 照原样复制，plutil 从假 App 的 Info.plist（这里写成 JSON）里读值。
-import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { rename } from "node:fs/promises";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -142,6 +142,8 @@ function setup(o: {
       writeApp(join(args[args.indexOf("-mountpoint") + 1]!, "Bytezard Lead.app"), version);
     }
     if (file.endsWith("ditto")) cpSync(args[0]!, args[1]!, { recursive: true });
+    // 假的 rm：照 rm -rf 删掉。删不掉（只读目录）时和真的 rm 一样失败。
+    if (file === "/bin/rm") rmSync(args.at(-1)!, { recursive: true, force: true });
     if (file.endsWith("plutil")) {
       const plist = JSON.parse(readFileSync(args.at(-1)!, "utf8")) as Record<string, string>;
       return { stdout: `${plist[args[1]!]}\n`, stderr: "" };
@@ -339,7 +341,10 @@ describe("applying an update", () => {
     const staging = readdirSync(run.applications).find((name) => name.startsWith(UPDATE_STAGING_PREFIX))!;
     run.commands.length = 0;
     await run.updater.cleanup();
-    expect(run.commands).toEqual([[LSREGISTER, "-u", join(run.applications, staging, "old.app")]]);
+    expect(run.commands).toEqual([
+      [LSREGISTER, "-u", join(run.applications, staging, "old.app")],
+      ["/bin/rm", "-rf", "--", join(run.applications, staging)],
+    ]);
     expect(readdirSync(run.applications)).toEqual(["Bytezard Lead.app"]);
   });
 
@@ -579,6 +584,29 @@ describe("staging folders left by a failed update", () => {
     expect(existsSync(leftover)).toBe(false);
     expect(run.commands).toContainEqual([LSREGISTER, "-u", join(leftover, "new.app")]);
     expect(run.relaunches).toBe(1);
+  });
+
+  // 2026-11-11：1.2.1 更新到 1.3.0 时，提示停在「正在安装」13 分钟。Electron 主进程里的 fs 把 .asar 当成目录，
+  // 进程内的 rm 删不掉旧 App 里的 Contents/Resources/app.asar，一直重试，最后报 ENOTEMPTY，目录也留了下来。
+  // 所以 App 的目录交给子进程里的 /bin/rm 删，它看到的 app.asar 是普通文件。
+  it("removes App folders with /bin/rm, because Electron's fs treats app.asar as a folder", async () => {
+    const run = setup();
+    const leftover = join(run.applications, `${UPDATE_STAGING_PREFIX}31486`);
+    mkdirSync(join(leftover, "old.app", "Contents", "Resources"), { recursive: true });
+    writeFileSync(join(leftover, "old.app", "Contents", "Resources", "app.asar"), "asar");
+    await run.updater.check();
+    await run.updater.apply();
+    expect(run.commands).toContainEqual(["/bin/rm", "-rf", "--", leftover]);
+    expect(existsSync(leftover)).toBe(false);
+    expect(run.relaunches).toBe(1);
+
+    // 更新失败时删掉暂存目录里的 new.app，也用 /bin/rm。
+    const failing = setup({ dmgVersion: "1.0.5" });
+    await failing.updater.check();
+    await failing.updater.apply();
+    const staging = stagingFolders(failing);
+    expect(staging).toHaveLength(1);
+    expect(failing.commands).toContainEqual(["/bin/rm", "-rf", "--", join(failing.applications, staging[0]!, "new.app")]);
   });
 
   it("updates in a new staging folder when a leftover cannot be removed", async () => {

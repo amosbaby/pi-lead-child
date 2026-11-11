@@ -43,8 +43,8 @@ export const DOWNLOAD_STALL_MS = 60_000;
 export const DOWNLOAD_RETRY_DELAYS_MS = [2_000, 5_000, 15_000] as const;
 /** 点「更新」时，上次检查已经过了这么久，就先重新查一次 manifest：期间可能发了更新的版本。 */
 const RECHECK_BEFORE_APPLY_MS = 10 * 60_000;
-// 删暂存目录时遇到 ENOTEMPTY、EBUSY、EPERM 这类偶发错误，按这个次数重试（Node 的 rm 自己做，间隔逐次加长）。
-const RM_RETRIES = { maxRetries: 5, retryDelay: 200 } as const;
+// 删一个 App 目录（暂存目录里的 old.app、new.app）最多等这么久。
+const REMOVE_APP_TIMEOUT_MS = 120_000;
 // 下载进度最多这么久推一次给网页。
 const PROGRESS_INTERVAL_MS = 250;
 
@@ -506,6 +506,12 @@ export function createUpdater(deps: UpdaterDeps): Updater {
     }
   };
 
+  // 删掉一个装着 App 的目录。Electron 主进程里的 fs 把 .asar 当成目录：进程内的 rm 删不掉 Contents/Resources/app.asar，
+  // 一直重试，最后报 ENOTEMPTY（2026-11-11：提示停在「正在安装」13 分钟）。所以交给子进程里的 /bin/rm。
+  const removeAppFolder = async (path: string) => {
+    await deps.execFile("/bin/rm", ["-rf", "--", path], { timeoutMs: REMOVE_APP_TIMEOUT_MS });
+  };
+
   // 删掉 App 所在目录下以前更新留下的暂存目录（keep 以外）：先去掉里面的 App 在 LaunchServices 里的登记。
   // 删不掉只记日志，不挡更新：每次更新都用新的暂存目录（2026-11-06：上次失败留下的目录删不掉，重试报 ENOTEMPTY）。
   const removeStaging = async (app: string, keep: string | null = null) => {
@@ -527,7 +533,7 @@ export function createUpdater(deps: UpdaterDeps): Updater {
         });
       }
       try {
-        await rm(staging, { recursive: true, force: true, ...RM_RETRIES });
+        await removeAppFolder(staging);
       } catch (error) {
         log(`could not remove ${staging}: ${errorText(error)}`);
       }
@@ -606,7 +612,7 @@ export function createUpdater(deps: UpdaterDeps): Updater {
       log(`update to ${version} failed (${failure.code}): ${failure.message}`);
       if (staging) {
         const copy = join(staging, "new.app");
-        await rm(copy, { recursive: true, force: true, ...RM_RETRIES }).catch((cause: unknown) => {
+        await removeAppFolder(copy).catch((cause: unknown) => {
           log(`could not remove ${copy}: ${errorText(cause)}`);
         });
       }
