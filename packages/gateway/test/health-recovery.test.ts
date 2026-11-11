@@ -304,18 +304,23 @@ describe("recovery of an unavailable profile", () => {
   });
 
   // 2026-11-07：用户 11-04 停用了 Codex（本机没装），它的故障 #1 没关，恢复循环照样每隔一阵探一次，一天失败 24 次。
-  // 停用的 runtime 不派发，探它没有用。用户手动 plc recheck 时照常探。
-  it("does not probe a disabled runtime on its own, but still on plc recheck", async () => {
+  // 停用的 runtime 不派发，探它没有用。2026-11-12 起 plc recheck 也不探它（探针会起它的 CLI）：回 disabled，故障原样留着。
+  it("does not probe a disabled runtime, neither on its own nor on plc recheck", async () => {
     const { db } = await codexCreditOutage();
     const { adapter, calls } = probingCodex([LOGGED_OUT]);
     const recovery = createHealthRecovery(db, {
       runtime: () => adapter, now: () => new Date(Date.now() + 2 * HOUR), isDisabled: (id) => id === "codex",
     });
+    const incidentBefore = db.prepare("SELECT * FROM runtime_incidents").all();
 
     await recovery.tick();
     expect(calls).toHaveLength(0);
-    await recovery.recheck({ runtime: "codex" });
-    expect(calls).toHaveLength(1);
+    const results = await recovery.recheck({ runtime: "codex" });
+    expect(calls).toHaveLength(0);
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ runtime: "codex", outcome: "disabled" });
+    expect(results[0]!.summary).toContain("没有重检");
+    expect(db.prepare("SELECT * FROM runtime_incidents").all()).toEqual(incidentBefore);
     db.close();
   });
 
