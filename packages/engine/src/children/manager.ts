@@ -79,6 +79,7 @@ import {
   sharedWorkspaceReason, type RunWorkspacePreparation,
 } from "../coordinator/workspace-policy.js";
 import { isDisposableCheckout } from "../coordinator/workspace.js";
+import { deferIfExternal, executionDeferredNote, getExecutionMode } from "../execution-mode.js";
 
 export interface RunOpts {
   dbPath: string;
@@ -448,6 +449,12 @@ async function runItemLifecycle(
       });
     } catch (error) {
       throw new RunStartRefusedError(error instanceof Error ? error.message : String(error));
+    }
+    // 执行模式不是 self（execution-mode.ts）：不建 Run、不起进程。会建 Run 的入口都在更前面过了这道闸门，这里兜住
+    // 漏过去的（例如认领之后、启动之前切了模式）。已经建好的 Run 按被拒绝的启动收尾（settleRefusedStart）。
+    // 接管的 Run 不过这里：它已经在跑，切换不影响它。
+    if (deferIfExternal(db, itemId, "run_item")) {
+      throw new RunStartRefusedError(executionDeferredNote(getExecutionMode(db), itemId));
     }
   }
   const runtime = opts.runtime ?? defaultRuntime(opts);

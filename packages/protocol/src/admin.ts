@@ -1,7 +1,7 @@
 // 网关上给 plc 用的路由：管理路由（admin scope）、runtime 重检、列表视图，以及对 lead 授权的查询。
 // plc 和 companion 一样是 daemon 的客户端，这些路由就是它不再直接打开账本之后需要的那部分契约。
 import { Type, type Static, type TProperties } from "typebox";
-import { KernelRuntimeIdSchema } from "./runtime-ids.ts";
+import { KernelRuntimeIdSchema, RunRuntimeIdSchema } from "./runtime-ids.ts";
 import { BindingDtoSchema, ScopeSchema, type Scope } from "./scopes.ts";
 
 const StrictObject = <T extends TProperties>(properties: T) =>
@@ -88,7 +88,7 @@ export type RuntimeRecheckRequest = Static<typeof RuntimeRecheckRequestSchema>;
 
 export const RuntimeRecheckResultSchema = StrictObject({
   incidentId: Type.Integer({ minimum: 1 }),
-  runtime: KernelRuntimeIdSchema,
+  runtime: RunRuntimeIdSchema,
   outcome: Type.String(),
   // 给人看的一句话，plc recheck 原样打印。
   summary: Type.String(),

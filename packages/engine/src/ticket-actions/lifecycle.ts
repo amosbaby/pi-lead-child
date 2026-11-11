@@ -24,6 +24,7 @@ import type { FileOpener } from "../coordinator/file-opener.js";
 import { reviewerProgress, unreviewedDelivery, verificationState } from "../coordinator/review-authority.js";
 import { automaticReviewRuntime } from "../pipeline/automatic-review.js";
 import { latestDeliveryRunId } from "../pipeline/delivery-run.js";
+import { deferIfExternal, executionDeferredNote, getExecutionMode } from "../execution-mode.js";
 import { BY_USER, behalfCursor, behalfFields, transitionBy, type ActionAttribution } from "./attribution.js";
 import { restoreItemTree, type ItemRestoreMode, type ItemRestoreResult } from "./restore.js";
 
@@ -428,6 +429,9 @@ export function startItem(
 ): string | null {
   const item = getItem(db, itemId);
   if (!item) throw new Error(`item ${itemId} not found`);
+  // 执行模式不是 self（execution-mode.ts）：不拉起执行者，也不走下面没有 runner 的那条建 Run 的路。工单留在原来的 stage，
+  // 等外部工人领走。回给页面和 Lead 的话说明为什么没开始。
+  if (deferIfExternal(db, itemId, "start")) return executionDeferredNote(getExecutionMode(db), itemId);
   // daemon 注入的 runner 自己负责通过统一闸门并完成 ready/blocked → active。
   // 必须先调用它：若 runtime/model/workdir 预检失败，工单应保持原状，而不是留下"active 但没有 Run"的假状态。
   if (host.startRun) {

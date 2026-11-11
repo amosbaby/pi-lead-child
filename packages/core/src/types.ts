@@ -10,7 +10,10 @@ export type ActivityKind =
   | "attempt_start" | "attempt_end" | "crash";
 
 export type ItemPriority = "urgent" | "high" | "normal" | "low";
-export type RuntimeId = "pi" | "codex" | "claude";
+// external 是外部工人领单时建的 Run 的 runtime（runtime 包的 external.ts）：daemon 不为它起进程，它也不是能选的执行器。
+export type RuntimeId = "pi" | "codex" | "claude" | "external";
+// 能选来跑工单的 runtime（执行器）。工单点名的 runtime（requested_runtime）只会是它们。
+export type ExecutorRuntimeId = Exclude<RuntimeId, "external">;
 // outcome_repair 是成果修复回合（spec D4）：它 resume 一个执行 Run 的外部 session，只补交成果。
 // lookup 是代查（slack-takeover spec D5）：进程内的受限 pi 会话，只读查询，结果交给通道 hub。它不是交付，
 // 不进瞬时重试，崩溃和重启不把工单打成 blocked，结束不叫醒 Lead。
@@ -54,7 +57,7 @@ export interface Item {
   // 两步之间它就是 NULL，类型不该断言一条 DDL 与写入协议都不保证的不变量。
   project_id: number | null; parent_item_id: number | null; root_item_id: number | null;
   created_by_run_id: number | null; plan_state: PlanState | null;
-  requested_runtime: RuntimeId | null; requested_model: string | null;
+  requested_runtime: ExecutorRuntimeId | null; requested_model: string | null;
   purpose: RunPurpose | null;
   // 谁核查。items 表里还有一列 v56 停用的旧列（代码不读写，见 store 的 schema.ts），这里不列它。
   verification_policy: VerificationPolicy | null;

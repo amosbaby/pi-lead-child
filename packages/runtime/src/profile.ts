@@ -47,13 +47,15 @@ export interface RuntimeProfile extends RuntimeProfileIdentity {
 
 // 每个 CLI 用自己的环境变量指定配置目录。没有设置时，用 CLI 自己的默认目录。
 // 配置目录是 profile 身份的一部分。child 继承 daemon 的环境，所以它用的就是这个目录。
-const CONFIG_DIR_ENV: Record<RuntimeId, { name: string; fallback: () => string }> = {
+// 外部工人的 runtime 没有配置目录（它的 profile 自己写 configDir: null，external.ts），不在这张表里。
+type CliRuntimeId = Exclude<RuntimeId, "external">;
+const CONFIG_DIR_ENV: Record<CliRuntimeId, { name: string; fallback: () => string }> = {
   codex: { name: "CODEX_HOME", fallback: () => join(homedir(), ".codex") },
   claude: { name: "CLAUDE_CONFIG_DIR", fallback: () => join(homedir(), ".claude") },
   pi: { name: "PI_CODING_AGENT_DIR", fallback: () => join(homedir(), ".pi", "agent") },
 };
 
-export function runtimeConfigDir(runtime: RuntimeId, env: Record<string, string | undefined>): string {
+export function runtimeConfigDir(runtime: CliRuntimeId, env: Record<string, string | undefined>): string {
   const { name, fallback } = CONFIG_DIR_ENV[runtime];
   return env[name]?.trim() || fallback();
 }
@@ -62,7 +64,7 @@ export function runtimeConfigDir(runtime: RuntimeId, env: Record<string, string 
 // child 的环境由 environment.ts 构造。adapter 启动 child 时用的是同一个函数。
 // interpreter 由 adapter 给出时，不按 shebang 解析（pi，工单 10）。
 export function adapterProfile(
-  runtime: RuntimeId,
+  runtime: CliRuntimeId,
   bin: string,
   env: Record<string, string | undefined> = {},
   content: {

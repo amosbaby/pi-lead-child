@@ -71,6 +71,7 @@ import {
   autoReplyDisclosure, disclosureAssistantName, disclosureOwnerName, fairyEyeReply, leadAvatarSlackEmoji, setLeadAvatarFairyEye,
   slackEmojiPreview,
 } from "@pi-lead-child/engine";
+import { deferIfExternal, ExecutionDeferredError, executionModeMessages } from "@pi-lead-child/engine";
 import { outageStart, outageStep, restoreOutages, type OpenOutage, type OutageItem } from "./lead-outage.js";
 import { DEFAULT_WAKE_RETRY_MAX_FAILURES, nextWakeRetry as nextCappedRetry, wakeRetryBlocks, type WakeRetry } from "./lead-wake-retry.js";
 import type { LeadDaemonEnvironment, LeadEngine, LeadEngineFactoryResult } from "@pi-lead-child/lead";
@@ -441,7 +442,10 @@ export function recoverOrphans(
     // redispatch 抛错→返回 false→走 blocker 现行为，交 lead 心跳裁决。可接受，不专门处理。
     const after = getItem(db, o.item_id)?.stage;
     const terminal = after === "done" || after === "cancelled";
-    if (!terminal && opts?.redispatch && autoRedispatchCount(db, o.item_id) === 0) {
+    // 执行模式不是 self（engine 的 execution-mode.ts）：不重派，工单留着等外部工人领走（领单认 blocked 的单）。
+    // 闸门记一条 execution_deferred，下面照常给 Lead 一条 Run 被回收的 blocker，正文不写「已重派」。
+    const deferred = !terminal && Boolean(opts?.redispatch) && deferIfExternal(db, o.item_id, "orphan_reclaim");
+    if (!terminal && !deferred && opts?.redispatch && autoRedispatchCount(db, o.item_id) === 0) {
       // 决策 activity 必须先于 spawn 落账——它是崩溃循环收敛的判据（spawn 挂死/二次孤儿据此不再重派）。
       addActivity(db, {
         itemId: o.item_id, runId: o.id, actor: "system", kind: "decision",
@@ -1921,6 +1925,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 发件箱当临时错误重发了 177 次，后面发给 Lead 的消息也一直发不出去。现在和排队消息转交失败一样
       // （deliverQueuedTicketMessages）：这一轮失败，写明原因，消息交给 Lead。
       const reason = error instanceof Error ? error.message : String(error);
+      // 执行模式不是 self：消息已经记在工单上（外部工人会看到），这里不起 agent。这一轮写明原因收口，不交给 Lead。
+      if (error instanceof ExecutionDeferredError) {
+        const entry = startTicketAgentChannelTurn(turnCommand, null, "run_end");
+        failChannelTurn(entry, executionModeMessages(getLocale(db)).chatDeferred(error.mode));
+        return { mode: "started", turnId: entry.turn.id };
+      }
       log(`ticket message undelivered: ${reason}`);
       const entry = startTicketAgentChannelTurn(turnCommand, null, "run_end");
       failChannelTurn(entry, reason);
@@ -2028,6 +2038,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         payload: turnStartedPayload(turn, null, "started"),
       });
     } catch (error) {
+      // 执行模式不是 self：消息已经记在工单上，这一轮写明原因收口，不交给 Lead。
+      if (error instanceof ExecutionDeferredError) {
+        failChannelTurn({ turn, assistantText: "", sealAt: "run_end", messageText: "" }, executionModeMessages(getLocale(db)).chatDeferred(error.mode));
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       log(`queued ticket message undelivered: ${message}`);
       failChannelTurn({ turn, assistantText: "", sealAt: "run_end", messageText: "" }, message);

@@ -24,6 +24,7 @@ import {
   staleReviewRequestReason, verificationBoundaryRunId, verificationState,
 } from "./review-authority.js";
 import { latestDeliveryRunId } from "../pipeline/delivery-run.js";
+import { deferIfExternal, getExecutionMode } from "../execution-mode.js";
 import { normalizeReviewVerdict, type ReviewVerdictSubmission } from "./review-verdict.js";
 import type { BlockingTicket } from "@pi-lead-child/store";
 import {
@@ -890,10 +891,23 @@ export function createDispatcher(
     options.log(`[dispatch] ticket #${row.item_id} still has a live run; request #${row.id} waits`);
   };
 
+  // 执行模式不是 self 时（execution-mode.ts）不认领：请求留在 pending，工单不建 Run，等外部工人领走，
+  // 或者用户切回 self 后照常认领。每个请求只在工单上记一次 execution_deferred（这个派发器活着的时候），
+  // 不然每一拍都记一条。daemon 重启后每个还排着的请求再记一次，有上限。
+  const deferredRequests = new Set<number>();
+
   const claimNext = (): DispatchClaim | null => {
     const rows = db.prepare(
       "SELECT * FROM dispatch_requests WHERE state='pending' ORDER BY id",
     ).all() as DispatchRequestRow[];
+    if (getExecutionMode(db) !== "self") {
+      for (const row of rows) {
+        if (deferredRequests.has(row.id)) continue;
+        deferredRequests.add(row.id);
+        deferIfExternal(db, row.item_id, `dispatch:${row.trigger}`);
+      }
+      return null;
+    }
     for (const row of rows) {
       if (db.prepare("SELECT 1 FROM dispatch_claims WHERE item_id=?").get(row.item_id)) continue;
       if (db.prepare("SELECT 1 FROM runs WHERE item_id=? AND state IN ('starting','running') LIMIT 1")

@@ -171,6 +171,8 @@ describe("the rule-change flag in the catalog", () => {
       "host_bypass.enable",
       // Lead 忙时你发的消息怎么放（2026-11-09）：设置页的选项。
       "busy_placement.set",
+      // 执行模式（spec P1-1）：切换是改规则的正式操作，只有用户本人能做（user_direct）。
+      "execution_mode.set",
       // 不在看 App 时同步到 Slack 私信（2026-11-06，工单 #88）：设置页的选项。
       "owner_dm_sync.enable", "owner_dm_sync.disable",
     ]);

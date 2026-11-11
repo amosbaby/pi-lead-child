@@ -51,6 +51,9 @@ import { cancelLeadFollowUp, listInbox, recordInboxDisposition, type InboxState 
 import { listRunEventSteps, type RunEventStep } from "@pi-lead-child/store";
 import { getNote, NOTE_KINDS, type NoteKind } from "@pi-lead-child/store";
 import { NotesMemory, saveNoteRecorded, updateNoteRecorded, type CoreMemoryWriteOutcome, type NoteSearchResult } from "@pi-lead-child/engine";
+import {
+  assertNotDeferred, deferIfExternal, executionDeferredNote, ExecutionDeferredError, getExecutionMode,
+} from "@pi-lead-child/engine";
 import { updateRun } from "@pi-lead-child/store";
 import { agentMcpServer, buildChildPrompt, buildReviewerPrompt, sessionDir } from "@pi-lead-child/core";
 import { buildOutcomeRepairPrompt } from "@pi-lead-child/engine";
@@ -676,6 +679,11 @@ export function spawnItemChild(
   // fire-and-forget 之前必须前置校验：runItem 的报错发生在 promise 里，工具调用早已返回。
   // 缺省 purpose 必须与 runItem / createRun 算的一模一样，否则这里放行、那里拒绝。
   assertRunAllowed(deps.db, { itemId: t.id, ...childRunInput(t, role) });
+  // 执行模式不是 self（engine 的 execution-mode.ts）：不建 Run、不起进程，工单留着等外部工人领走。
+  // 触发器、后台检查、spawn_child 的核查员都经过这里；开始执行（工单操作 start）在 startItem 里先过了这道闸门。
+  if (deferIfExternal(deps.db, t.id, role === "reviewer" ? "spawn_child:reviewer" : "spawn_child")) {
+    return executionDeferredNote(getExecutionMode(deps.db), t.id);
+  }
   // 同样要前置：没有合适的工作区时（例如 workdir 是仓库里没有跟踪的目录），runItem 会在 promise 里拒绝。
   const workspaceRefusal = runWorkspaceRefusal(deps.db, t, childRunInput(t, role));
   if (workspaceRefusal) throw new Error(workspaceRefusal);
@@ -877,6 +885,20 @@ export function routeTicketMessageToAgentRun(
   const item = getItem(deps.db, args.itemId);
   if (!item) throw new Error(`item #${args.itemId} not found`);
   if (running.has(item.id)) throw new Error(`item #${item.id} 已有 child 在运行`);
+  // 执行模式不是 self（engine 的 execution-mode.ts）：不开对话 Run、不起进程。消息记在工单的活动里，外部工人下次读
+  // 工单时看得到（spec P1-2：已被外部工人领走的单上，用户发的消息进工单活动，不路由到任何进程）。抛 ExecutionDeferredError：
+  // daemon 按它收口这一轮，不交给 Lead；Lead 的工具把原因交给 Lead。
+  const executionMode = getExecutionMode(deps.db);
+  if (executionMode !== "self") {
+    deps.db.transaction(() => {
+      addActivity(deps.db, {
+        itemId: item.id, actor: args.actor ?? "user", kind: "comment",
+        payload: { content: args.message, route: "execution_deferred" },
+      });
+      deferIfExternal(deps.db, item.id, "ticket_message");
+    }).immediate();
+    throw new ExecutionDeferredError(item.id, executionMode, "ticket_message");
+  }
   assertExternalChildWorkdir(deps.dataDir, item.workdir);
 
   const runs = listRuns(deps.db, item.id);
@@ -1031,6 +1053,8 @@ export function resumeItemChild(
     itemId: t.id, role: run.role, purpose: run.purpose,
     ...(run.purpose === "outcome_repair" ? { sourceRunId: run.resumed_from_run_id, repairRunId: run.id } : {}),
   });
+  // 执行模式不是 self：不恢复（恢复要起进程）。抛错，恢复控制把 Run 留在 paused，原因交给用户。
+  assertNotDeferred(deps.db, t.id, "resume_run");
   trackChild(deps, t.id, runItem(deps.db, t.id, {
     dbPath: deps.dbPath, dataDir: deps.dataDir,
     sessionDir: sessionDir(t.id),

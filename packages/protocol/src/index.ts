@@ -24,7 +24,7 @@ const StrictObject = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
 
 import { BindingDtoSchema, ScopeSchema } from "./scopes.ts";
-import { KernelRuntimeIdSchema } from "./runtime-ids.ts";
+import { KernelRuntimeIdSchema, RunRuntimeIdSchema } from "./runtime-ids.ts";
 export * from "./scopes.ts";
 export * from "./runtime-ids.ts";
 
@@ -525,9 +525,8 @@ export const AttemptSchema = StrictObject({
   model: Type.Union([Type.String(), Type.Null()]),
   // Lead 或内核给这次 Run 选的 effort（2026-10-15）。可选：旧服务端不发这个字段。
   effort: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-  runtime: Type.Optional(Type.Union([
-    Type.Literal("pi"), Type.Literal("codex"), Type.Literal("claude"),
-  ])),
+  // 外部工人领单建的 Run 是 external（runtime-ids.ts）。
+  runtime: Type.Optional(RunRuntimeIdSchema),
   purpose: Type.Optional(Type.Union([
     Type.Literal("execution"), Type.Literal("review"), Type.Literal("integration"),
     Type.Literal("learning"), Type.Literal("conversation"),
@@ -699,7 +698,8 @@ export const KernelAttemptSchema = StrictObject({
   ticketId: Type.Integer({ minimum: 1 }),
   role: Type.Union([Type.Literal("executor"), Type.Literal("reviewer")]),
   state: AttemptStateSchema,
-  runtime: KernelRuntimeIdSchema,
+  // 外部工人领单建的 Run 是 external（runtime-ids.ts）。
+  runtime: RunRuntimeIdSchema,
   purpose: KernelAttemptPurposeSchema,
   model: Type.Union([Type.String(), Type.Null()]),
   runtimeVersion: Type.Union([Type.String(), Type.Null()]),
@@ -1316,6 +1316,7 @@ export * from "./design-preferences.ts";
 export * from "./i18n.ts";
 export * from "./reply-style.ts";
 export * from "./host-bypass.ts";
+export * from "./execution-mode.ts";
 export * from "./busy-placement.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";

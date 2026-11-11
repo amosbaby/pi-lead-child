@@ -29,6 +29,7 @@ import { latestInstantOf, leadUserTurnOf } from "./authority.js";
 import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
+import { EXECUTION_MODE_ACTIONS, EXECUTION_MODE_TARGET } from "./execution-mode.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
 import { OWNER_DM_SYNC_ACTIONS, OWNER_DM_SYNC_TARGET } from "./owner-dm-sync.js";
 import { joinProblems } from "./problems.messages.js";
@@ -1227,6 +1228,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   skill: SKILL_TARGET,
   host_bypass: HOST_BYPASS_TARGET,
   busy_placement: BUSY_PLACEMENT_TARGET,
+  execution_mode: EXECUTION_MODE_TARGET,
   owner_dm_sync: OWNER_DM_SYNC_TARGET,
   pull_request: PULL_REQUEST_TARGET,
 };
@@ -1278,6 +1280,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   host_bypass: HOST_BYPASS_ACTIONS,
   // Lead 忙时你发的消息怎么放（2026-11-09）：排队或插话。改规则，Lead 也能改。定义在 busy-placement.ts。
   busy_placement: BUSY_PLACEMENT_ACTIONS,
+  // 执行模式（spec P1-1）：self、external、paused。只有用户本人能切（user_direct）。定义在 execution-mode.ts。
+  execution_mode: EXECUTION_MODE_ACTIONS,
   // 不在看 App 时同步到 Slack 私信的开关（2026-11-06，工单 #88）。定义在 owner-dm-sync.ts。
   owner_dm_sync: OWNER_DM_SYNC_ACTIONS,
   // 「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」（2026-11-06，工单 #99）。定义在 pull-requests.ts。

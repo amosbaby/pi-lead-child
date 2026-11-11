@@ -8,7 +8,7 @@
 // （daemon 的 ticket-reply-actions.ts）。判断的结果记成一条事件，客户端在这一轮回复下面给这些动作的按钮。
 import { Type, type Static } from "typebox";
 
-import { KernelRuntimeIdSchema } from "./runtime-ids.ts";
+import { RunRuntimeIdSchema } from "./runtime-ids.ts";
 
 // chat.send 的 context.answerer：工单 08 的第一版让你选由 Lead 还是执行 agent 回答。
 // 2026-10-19 起 daemon 不再宣布 TICKET_CHAT_ANSWERER_CAPABILITY，新客户端不再带这个字段。
@@ -22,7 +22,7 @@ export const TICKET_CHAT_ANSWERER_CAPABILITY = "chat.ticket-answerer.v1";
 export const TicketChatResumeSchema = Type.Object({
   attemptId: Type.Integer({ minimum: 1 }),
   role: Type.Union([Type.Literal("executor"), Type.Literal("reviewer")]),
-  runtime: KernelRuntimeIdSchema,
+  runtime: RunRuntimeIdSchema,
   lastTokens: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
 }, { additionalProperties: false });
 export type TicketChatResume = Static<typeof TicketChatResumeSchema>;

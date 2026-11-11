@@ -27,6 +27,7 @@ import { ReminderRescheduleRequestSchema } from "./reminders.ts";
 import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from "./reply-style.ts";
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
+import { SetExecutionModeRequestSchema } from "./execution-mode.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
 import { TimerRequestDecisionSchema } from "./timer-origins.ts";
@@ -98,12 +99,13 @@ export const ActionPermissionSchema = Type.Union([
 //     编号只有 user。
 //   pull_request  GitHub 上的一个 PR 的一个提交（「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」，2026-11-06，工单 #99）。
 //     编号是 pullRequestTargetId 拼的 <owner>_<repo>_<PR 编号>_<head sha>，例如 acme_web_12_<40 位 sha>。
+//   execution_mode  执行模式：self、external（外部工人领单）、paused（总闸）（execution-mode.ts）。编号只有 daemon。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement", "owner_dm_sync", "pull_request",
+  "busy_placement", "owner_dm_sync", "pull_request", "execution_mode",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -429,6 +431,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   pull_request: {
     // 交给 Lead 分析这个提交的 CI 失败：能修就修好推到 PR 的分支，修不了就建工单。参数全在编号里，不带文字。
     auto_fix_ci: Empty,
+  },
+  execution_mode: {
+    // 切执行模式。只有你本人能做（user_direct），改规则。正在跑的 Run 不受影响。
+    set: SetExecutionModeRequestSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

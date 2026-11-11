@@ -15,7 +15,9 @@
 import type { Actor, RuntimeId } from "@pi-lead-child/core";
 import type { Db, ReviewerChooser } from "@pi-lead-child/store";
 import { addActivity, getItem, getReviewerSetting, leadDisplayName, setReviewerSetting } from "@pi-lead-child/store";
-import { isRuntimeDisabled, isRuntimeId, runtimeDisabledReason, runtimeDisplayName, runtimeIds } from "@pi-lead-child/runtime";
+import {
+  EXTERNAL_RUNTIME_ID, isRuntimeDisabled, isRuntimeId, runtimeDisabledReason, runtimeDisplayName, runtimeIds,
+} from "@pi-lead-child/runtime";
 import { createDispatcher } from "./dispatch.js";
 import { reviewerProgress, staleReviewRequestReason, unreviewedDelivery } from "./review-authority.js";
 import {
@@ -94,7 +96,8 @@ export function changeReviewer(
 ): ChangeReviewerResult {
   const item = getItem(db, itemId);
   if (!item) throw new ReviewerChangeError("not_found", `item #${itemId} not found`);
-  if (!isRuntimeId(runtime)) {
+  // 外部工人的 runtime 认得出来，但它不是执行器，不能当核查员（runtime 的 external.ts）。
+  if (!isRuntimeId(runtime) || runtime === EXTERNAL_RUNTIME_ID) {
     throw new ReviewerChangeError("unknown_runtime", `unknown runtime: ${String(runtime).slice(0, 40)} (${runtimeIds().join(" | ")})`);
   }
   const name = runtimeDisplayName(runtime);

@@ -34,10 +34,12 @@ export type KernelTicketTiming = Static<typeof KernelTicketTimingSchema>;
 export const KernelActiveExecutionSchema = StrictObject({
   attemptId: Type.Integer({ minimum: 1 }),
   role: Type.Union([Type.Literal("executor"), Type.Literal("reviewer")]),
+  // 外部工人领单建的 Run 是 external（runtime-ids.ts 的 RunRuntimeIdSchema）：领走的单的活跃执行就是它。
   runtime: Type.Union([
     Type.Literal("pi"),
     Type.Literal("codex"),
     Type.Literal("claude"),
+    Type.Literal("external"),
   ]),
   // 'paused' 是 Run 的状态，不是 item 的（kernel spec §3.2）：暂停中的 Run 仍是
   // 这张工作台的活跃执行，UI 需要看到它，否则暂停会表现成"执行凭空消失"。

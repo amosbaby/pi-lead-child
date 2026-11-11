@@ -6,6 +6,7 @@
 import { ClaudeRuntime } from "../src/claude.js";
 import { CodexRuntime } from "../src/codex.js";
 import { PiRuntime } from "../src/pi.js";
+import { externalAdapter } from "../src/external.js";
 import type {
   AgentRuntime, RuntimeCapabilities, RuntimeEvent, RuntimeEventInput, RuntimeExit,
   RuntimeHandle, RuntimeStartRequest,
@@ -29,6 +30,7 @@ const ADAPTERS: Record<RuntimeId, AgentRuntime> = {
   pi: new PiRuntime(),
   codex: new CodexRuntime(),
   claude: new ClaudeRuntime(),
+  external: externalAdapter.create(),
 };
 
 function isTerminal(event: RecordedEvent): event is TerminalEvent {

@@ -43,10 +43,12 @@ export const CheckpointSourceSchema = Type.Union([
 ]);
 export type CheckpointSource = Static<typeof CheckpointSourceSchema>;
 
+// 写检查点的 Run 的 runtime。外部工人领单建的 Run 是 external（runtime-ids.ts 的 RunRuntimeIdSchema）。
 export const CheckpointRuntimeSchema = Type.Union([
   Type.Literal("pi"),
   Type.Literal("codex"),
   Type.Literal("claude"),
+  Type.Literal("external"),
 ]);
 
 export const CheckpointFactSchema = StrictObject({

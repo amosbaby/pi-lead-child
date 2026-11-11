@@ -5,6 +5,7 @@ export * from "./codex.js";
 export * from "./environment.js";
 export * from "./event-queue.js";
 export * from "./executable.js";
+export * from "./external.js";
 export * from "./failure.js";
 export * from "./interpreter.js";
 export * from "./jsonl.js";

@@ -10,6 +10,7 @@ import type { Run, RuntimeId, TypedFailure } from "@pi-lead-child/core";
 import { piAdapter, type PiRuntimeOptions } from "./pi.js";
 import { codexAdapter, type CodexRuntimeOptions } from "./codex.js";
 import { claudeAdapter, type ClaudeRuntimeOptions } from "./claude.js";
+import { EXTERNAL_RUNTIME_ID, externalAdapter } from "./external.js";
 import {
   classifyHostFailure, matchProviderFailure, residualFailureCode, storedFailure, typedFailure,
   type FailureEvidence,
@@ -56,8 +57,14 @@ export function isRuntimeId(value: unknown): value is RuntimeId {
 }
 
 // 按 id 查 adapter，停用的也查得到：旧 Run、设置页和失败说明要认得它。查到不等于可以启动或探测它。
+// 外部工人的 runtime（external.ts）也查得到：它不是执行器，不在 allRuntimeAdapters() 里，但外部工人领单建的 Run 记着它。
 export function findRuntimeAdapter(id: string): RuntimeAdapter | undefined {
-  return allRuntimeAdapters().find((adapter) => adapter.id === id);
+  return allRuntimeAdapters().find((adapter) => adapter.id === id) ?? (id === externalAdapter.id ? externalAdapter : undefined);
+}
+
+// 能选来跑工单的 runtime（执行器）。外部工人的 runtime 认得出来（isRuntimeId），但不能选：配置里点名它也不算。
+function isExecutorRuntime(runtime: string): runtime is RuntimeId {
+  return runtime !== EXTERNAL_RUNTIME_ID && isRuntimeId(runtime);
 }
 
 export function runtimeAdapter(id: RuntimeId): RuntimeAdapter {
@@ -71,7 +78,7 @@ export function runtimeAdapter(id: RuntimeId): RuntimeAdapter {
 export function runtimeFallbackOrder(env: RuntimeEnv = process.env): RuntimeId[] {
   const configured = (env.PLC_RUNTIME_FALLBACKS ?? "").split(",").map((value) => value.trim()).filter(Boolean);
   return [...configured, ...allRuntimeAdapters().map((adapter) => adapter.id)].filter((runtime, index, all): runtime is RuntimeId =>
-    isRuntimeId(runtime) && all.indexOf(runtime) === index);
+    isExecutorRuntime(runtime) && all.indexOf(runtime) === index);
 }
 
 // 用户停用的 runtime（2026-10-19，设置页「执行器」，config.json 的 runtimes.disabled）。
@@ -104,7 +111,7 @@ export function reviewRuntimeOrder(env: RuntimeEnv = process.env): RuntimeId[] {
   const configured = env.PLC_REVIEW_RUNTIME?.trim();
   const adapters = allRuntimeAdapters();
   return [
-    ...(configured && isRuntimeId(configured) ? [configured] : []),
+    ...(configured && isExecutorRuntime(configured) ? [configured] : []),
     ...adapters.filter((adapter) => adapter.capabilities.executableReadOnlyReview).map((adapter) => adapter.id),
     ...adapters.filter((adapter) => !adapter.capabilities.executableReadOnlyReview).map((adapter) => adapter.id),
   ].filter((runtime, index, all) => all.indexOf(runtime) === index);

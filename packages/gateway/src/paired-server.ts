@@ -133,6 +133,7 @@ import { handleChannelPolicyRoute } from "./channel-policy-routes.js";
 import { handleHandbookRoute } from "./handbook-routes.js";
 import { handleReplyStyleRoute } from "./reply-style-routes.js";
 import { handleHostBypassRoute } from "./host-bypass-routes.js";
+import { handleExecutionModeRoute } from "./execution-mode-routes.js";
 import { handleRuleChangeRoute } from "./rule-change-routes.js";
 import { handleTimerRoute } from "./timer-routes.js";
 import type { LeadCapability, LeadGrant, LeadGrantChannel } from "@pi-lead-child/store";
@@ -2088,6 +2089,17 @@ export async function startPairedServer(
         requireAuth: (scope) => { requireAuth(req, scope); },
         perform: async (action, input, scope) => (await performUiActionAsUser(req, requireAuth(req, scope), {
           target: { type: "host_bypass", id: "lead" }, action, input,
+        })).result,
+      })) return;
+
+      // 执行模式（self、external、paused，spec P1-1）：切换是操作层的 execution_mode.set（user_direct），Lead 调它总是被拒绝。
+      if (await handleExecutionModeRoute({
+        req, res, url, db: bridge.db,
+        json: (status, value) => json(req, res, status, value),
+        readBody: async () => parseJson(await readBody(req, maxBodyBytes)) ?? {},
+        requireAuth: (scope) => { requireAuth(req, scope); },
+        perform: async (input, scope) => (await performUiActionAsUser(req, requireAuth(req, scope), {
+          target: { type: "execution_mode", id: "daemon" }, action: "set", input,
         })).result,
       })) return;
 
