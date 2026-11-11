@@ -29,7 +29,9 @@ describe("deniedHomeWritesIn", () => {
 
   it("does not match a longer name, another home, or a path outside home", () => {
     expect(deniedHomeWritesIn(`${home}/.pip/x`, home)).toEqual([]);
-    expect(deniedHomeWritesIn(`${home}/.claude.json`, home)).toEqual([]);
+    // ~/.claude 这一条不算 ~/.claude.json（它有自己的一条，见 sandboxPolicy 的 worker MCP 配置测试）。
+    expect(deniedHomeWritesIn(`${home}/.claudex/settings.json`, home)).toEqual([]);
+    expect(deniedHomeWritesIn(`${home}/.claude.json`, home)).toEqual(["~/.claude.json"]);
     expect(deniedHomeWritesIn("/Users/bob/.pi/x", home)).toEqual([]);
     expect(deniedHomeWritesIn("/repo/.pi/x", home)).toEqual([]);
     expect(deniedHomeWritesIn("$HOMEDIR/.pi/x", home)).toEqual([]);
@@ -87,6 +89,25 @@ describe("sandboxPolicy", () => {
     expect(policy.denyRead).not.toContain(`${home}/.codex`);
     const executor = sandboxPolicy({ role: "executor", writable: ["/repo"], home, dataDir: "/data", env: {} });
     expect(executor.denyRead).toEqual(expect.arrayContaining([`${home}/.claude.json`, `${home}/.codex/config.toml`]));
+  });
+
+  // 只挡读不够（Task 9 审查）：写得进去就能把 plc-worker 的 url 改到别处（Claude Code 照 header 里的 ${ENV} 把真 token 发过去），
+  // 或者加一个 stdio 的 MCP 服务器，用户下次开 Claude Code 时在沙箱外执行。~/.codex/config.toml 由 ~/.codex 这一条挡。
+  // 同名的临时文件、备份（~/.claude.json.tmp、~/.claude.json.backup）也挡：沙箱（sandbox-runtime、Claude Code）认 * 通配，
+  // Lead 的 edit、write 走 sandboxWriteBlocker，也按通配判断。
+  it("denies writes to the agents' MCP config files and their temp and backup siblings", () => {
+    const policy = sandboxPolicy({ role: "executor", writable: ["/repo"], home, dataDir: "/data", env: {} });
+    expect(policy.denyWrite).toEqual(expect.arrayContaining([`${home}/.claude.json`, `${home}/.claude.json.*`, `${home}/.codex`]));
+    for (const path of [
+      `${home}/.claude.json`, `${home}/.claude.json.tmp`, `${home}/.claude.json.backup`, `${home}/.codex/config.toml`,
+    ]) {
+      expect(sandboxWriteBlocker(policy, path), path).not.toBeNull();
+    }
+    // 别的同前缀的名字照旧能写。
+    expect(sandboxWriteBlocker(policy, `${home}/.claude.jsonl`)).toBeNull();
+    expect(sandboxWriteBlocker(policy, `${home}/notes/.claude.json.md`)).toBeNull();
+    expect(deniedHomeWritesIn(`mv /tmp/x ${home}/.claude.json`, home)).toEqual(["~/.claude.json"]);
+    expect(deniedHomeWritesIn(`echo {} > ~/.claude.json.tmp`, home)).toEqual(["~/.claude.json.*"]);
   });
 
   it("refuses edit and write on the same boundary", () => {

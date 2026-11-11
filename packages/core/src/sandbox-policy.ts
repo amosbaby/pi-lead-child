@@ -74,6 +74,10 @@ export const SANDBOX_DENY_WRITE_HOME: readonly string[] = [
   ".zshenv", ".zlogin", ".zlogout", ".bash_login", ".bash_logout", ".config/fish", ".config/git", ".config/starship.toml",
   ".npmrc", ".ssh", ".gnupg", "Library/LaunchAgents", "Library/Keychains",
   ".claude", ".pi", ".codex", ".gemini", ".cli-proxy-api",
+  // ~/.claude.json 不在 ~/.claude 下面：它存着 MCP 服务器（含外部工人的 plc-worker 和它的 token 引用），写得进去就能把 token
+  // 转到别的地址，或者加一个在沙箱外执行的 stdio 服务器。同名的临时文件和备份一起挡（原子替换、从备份恢复）。
+  // ~/.codex/config.toml 由 ~/.codex 挡。
+  ".claude.json", ".claude.json.*",
   ".config/nvim", ".vimrc", ".config/karabiner", ".hammerspoon", ".tmux.conf", ".config/tmux",
   "Library/Application Support/Code/User", "Library/Application Support/Cursor/User",
   // 应用的更新包（Squirrel 的 ShipIt）由应用在沙箱外安装；pre-commit 的环境由 git 钩子在沙箱外执行。
@@ -176,7 +180,8 @@ const MANDATORY_DENY_DIRS: readonly string[] = [".vscode", ".idea", ".git/hooks"
 export function sandboxWriteBlocker(policy: SandboxPolicy, path: string): string | null {
   const target = realPath(resolve(path));
   if (!policy.allowWrite.some((root) => within(target, realPath(resolve(root))))) return `${target} 不在能写的范围里`;
-  const denied = policy.denyWrite.find((root) => !root.includes("*") && within(target, resolve(root)));
+  // 带 * 的条目按沙箱的通配算（* 只匹配一段里的字符，同 sandboxReadBlocker）。
+  const denied = policy.denyWrite.find((root) => root.includes("*") ? globMatches(root, target) : within(target, resolve(root)));
   if (denied) return `${denied} 不能写：写进去的东西会在沙箱外执行，或者是凭证、plc 的账本和配置`;
   const parts = target.split("/");
   const name = parts.at(-1) ?? "";
