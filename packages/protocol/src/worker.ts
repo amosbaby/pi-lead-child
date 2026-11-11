@@ -94,3 +94,28 @@ export interface WorkerSession {
 //   recent     最近交付或完成的（review、done）。
 export const WORKER_TICKET_FILTERS = ["mine", "needs_me", "claimable", "active", "recent"] as const;
 export type WorkerTicketFilter = typeof WORKER_TICKET_FILTERS[number];
+
+// 工人的 HTTP MCP（gateway 的 worker-mcp.ts，路径 /v1/worker/mcp）给 agent 的工具。参数按下面的 schema 先校验，再交给操作层
+// （操作层按 WORKER_ACTION_INPUT_SCHEMAS、WorkerTrackInputSchema 再查一次）。带工单的工具多一个 ticketId，别的字段就是操作的输入。
+export const WORKER_MCP_TOOL_NAMES = [
+  "list_tickets", "claim", "track", "get_ticket", "report", "attach_session", "complete", "hand_back",
+] as const;
+export type WorkerMcpToolName = typeof WORKER_MCP_TOOL_NAMES[number];
+
+const TicketIdSchema = Type.Integer({ minimum: 1 });
+const withTicketId = <T extends TProperties>(properties: T) => StrictObject({ ticketId: TicketIdSchema, ...properties });
+
+export const WORKER_MCP_TOOL_INPUT_SCHEMAS = {
+  list_tickets: StrictObject({ filter: Type.Union(WORKER_TICKET_FILTERS.map((filter) => Type.Literal(filter))) }),
+  claim: withTicketId(WORKER_ACTION_INPUT_SCHEMAS["worker.claim"].properties),
+  track: WorkerTrackInputSchema,
+  get_ticket: withTicketId({}),
+  report: withTicketId(WORKER_ACTION_INPUT_SCHEMAS["worker.report"].properties),
+  attach_session: withTicketId(WORKER_ACTION_INPUT_SCHEMAS["worker.attach_session"].properties),
+  complete: withTicketId(WORKER_ACTION_INPUT_SCHEMAS["worker.complete"].properties),
+  hand_back: withTicketId(WORKER_ACTION_INPUT_SCHEMAS["worker.hand_back"].properties),
+} as const satisfies Record<WorkerMcpToolName, TSchema>;
+
+export function isWorkerMcpToolName(value: unknown): value is WorkerMcpToolName {
+  return typeof value === "string" && (WORKER_MCP_TOOL_NAMES as readonly string[]).includes(value);
+}

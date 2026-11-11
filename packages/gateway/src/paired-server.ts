@@ -124,6 +124,7 @@ import { handleExecutionPlanRoute } from "./execution-plan-routes.js";
 import { handleAcceptanceCriteriaRoute } from "./acceptance-criteria-routes.js";
 import { handleReviewRoute } from "./review-routes.js";
 import { handleTicketActionRoute, performUserTicketAction, type UserTicketActionContext } from "./ticket-action-routes.js";
+import { handleWorkerMcpHttp, WORKER_MCP_PATH } from "./worker-mcp.js";
 import { performUserUiAction, type UserUiActionContext } from "./ui-action-routes.js";
 import type { PullRequestRunner } from "@pi-lead-child/engine";
 import { handleChannelSettingsRoute, type ChannelSettingsService } from "./channel-settings-routes.js";
@@ -1316,6 +1317,20 @@ export async function startPairedServer(
 
   const server: Server = createServer(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
+    // 外部工人的 MCP（worker-mcp.ts）排在最前面，包括 OPTIONS：它自己认证（只认 Authorization 头，不走 bearerOf 的 ?token=），
+    // 不做 CORS，出错也不回 500。
+    if (url.pathname === WORKER_MCP_PATH) {
+      try {
+        await handleWorkerMcpHttp(req, res, url, {
+          db: bridge.db, host: ticketActionContext().host, log: bridge.log, flush: () => flushGatewayOutbox(),
+        });
+      } catch (err) {
+        bridge.log(`[gateway] worker MCP error: ${err instanceof Error ? err.message : String(err)}`);
+        if (!res.headersSent) json(req, res, 500, { error: { code: "internal_error", message: "internal server error" } });
+        else res.end();
+      }
+      return;
+    }
     if (req.method === "OPTIONS") {
       if (!allowedOrigin(req.headers.origin)) {
         json(req, res, 403, { error: { code: "forbidden", message: "origin not allowed" } });
