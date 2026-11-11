@@ -48,6 +48,8 @@ export type TimerSpec =
   | {
     tool: "watch"; label: string; check: { kind: "command"; command: string } | { kind: "agent"; brief: string; agent?: WatchAgentChoice };
     mode: WatchMode; everySeconds?: number; cron?: string; tz?: string; untilAt?: string; note: string; ticketId?: number;
+    // 命令检查到点时可以在沙箱外跑（免沙箱开着时）。Lead 的 watch 工具设的时候判断（lead 的 watch-commands.ts）。
+    hostRun?: boolean;
   };
 
 /** 规则到点产出的事项的模板（store 的 trigger-actions.ts 的 action_payload 契约）。 */
@@ -159,6 +161,7 @@ export async function setTimer(db: Db, spec: TimerSpec, context: SetTimerContext
       ...(spec.everySeconds !== undefined ? { everySeconds: spec.everySeconds } : {}),
       ...(spec.cron !== undefined ? { cron: spec.cron } : {}), ...(spec.tz !== undefined ? { tz: spec.tz } : {}),
       ...(spec.untilAt !== undefined ? { untilAt: spec.untilAt } : {}), ...(spec.ticketId !== undefined ? { itemId: spec.ticketId } : {}),
+      ...(spec.hostRun ? { hostRun: true } : {}),
       maxActive: watchMaxActive(),
     }, context.now ?? new Date());
     publishGatewayEvent(db, SCHEDULE_CHANGED);

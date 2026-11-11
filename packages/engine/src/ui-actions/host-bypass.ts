@@ -1,4 +1,4 @@
-// 「用户本人发话时免沙箱」开关（docs/ticket-246-user-turn-bypass.md 5.1，实施单 A）的操作：打开（enable）和关掉（disable）。
+// 「免沙箱」开关（docs/ticket-246-user-turn-bypass.md 5.1，实施单 A）的操作：打开（enable）和关掉（disable）。
 // 页面（gateway 的 host-bypass-routes.ts）和 Lead（perform_action）调同一个定义。
 //   - enable：user_direct，改规则。开关授予 Lead 权力（AGENTS.md UI Actions），只有用户本人能在设置页点。
 //     Lead 调它总是拿到结构化的拒绝，拒绝里写设置页的位置；Lead 不发「要不要打开？」这样的卡。
@@ -12,13 +12,15 @@ import type { UiActionDefinition, UiActionTargetKind } from "./types.js";
 
 export const HOST_BYPASS_TARGET: UiActionTargetKind<HostBypassDto> = {
   type: "host_bypass",
-  label: "用户本人发话时免沙箱",
+  label: "免沙箱",
   idHint: "lead",
   load: (env, id) => (id === "lead" ? getHostBypass(env.db, env.now) : null),
-  name: () => "用户本人发话时免沙箱",
+  name: () => "免沙箱",
   describe: (state) => ({
     enabled: state.enabled,
-    words: "开着时，只在用户本人正在发话、而且这一轮没读过外部内容时，你的命令在沙箱外跑。没有时限：一直开着，直到用户或你关掉。",
+    words: "开着时，你的 bash 和 run_on_host 在哪一轮都在沙箱外跑，不发确认卡。只有两种情况还要用户确认：命令碰到底线"
+      + "（读凭证、写 plc 的账本、plc CLI、你自报会花钱）；这一轮读过别人写的内容，决策模型判断命令不是用户交代的事、又难撤回。"
+      + "没有时限：一直开着，直到用户或你关掉。",
   }),
 };
 
@@ -29,7 +31,7 @@ function resolvedByOf(db: Parameters<typeof getBinding>[0], bindingId: number | 
 
 export const HOST_BYPASS_ACTIONS = {
   enable: {
-    target: "host_bypass", id: "enable", label: "打开用户本人发话时免沙箱", scope: "tickets:create",
+    target: "host_bypass", id: "enable", label: "打开免沙箱", scope: "tickets:create",
     permission: "user_direct", changesRules: true, external: false, irreversible: false,
     where: HOST_BYPASS_WHERE,
     hint: "只有用户本人能在设置页打开：你调用总是被拒绝。用户要你打开时，告诉用户去 " + HOST_BYPASS_WHERE
@@ -43,7 +45,7 @@ export const HOST_BYPASS_ACTIONS = {
     detail: (_run, result) => ({ changed: (result as HostBypassChange).changed }),
   },
   disable: {
-    target: "host_bypass", id: "disable", label: "关掉用户本人发话时免沙箱", scope: "tickets:create",
+    target: "host_bypass", id: "disable", label: "关掉免沙箱", scope: "tickets:create",
     permission: "lead_allowed", changesRules: false, external: false, irreversible: false,
     where: HOST_BYPASS_WHERE,
     hint: "关掉免沙箱：以后的命令都在沙箱里跑，沙箱外的事照旧发确认卡。用户说「关掉」、或者你认为不该再开着时用。已经关着时什么也不做。",

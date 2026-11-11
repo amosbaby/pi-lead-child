@@ -26,6 +26,7 @@ export * from "./smart-model.js";
 export * from "./tools.js";
 export { LEAD_CODEMODE_TOOLS, LEAD_CODEMODE_TOOL_GROUPS } from "./tool-exposure.js";
 export * from "./turn-origin.js";
+export * from "./watch-commands.js";
 export * from "./wait-tools.js";
 export * from "./ui-action-tools.js";
 export * from "./hand-off-tool.js";

@@ -18,18 +18,32 @@ export function hostCommandEntityKey(id: string): string {
 }
 
 // 这条命令凭哪一种一轮在沙箱外跑：用户本人在 Companion、plc、Slack 里给自己发的私信（凭证 origin channel_owner）开的一轮，
-// 或者用户在确认卡上点了「确认这一次」。
-export const HOST_COMMAND_TURN_ORIGINS = ["live_user_companion", "live_user_plc", "live_user_slack_self_dm", "confirmed_card"] as const;
+// 用户在确认卡上点了「确认这一次」，或者不是用户本人正在发话的一轮（lead_turn：系统事件、跟进到点、外部消息叫醒的一轮。
+// 用户 2026-11-11：开关开着时命令在哪一轮都在沙箱外跑，「如果 bypass 都还要我审批，那 bypass 有啥意义呢」）。
+export const HOST_COMMAND_TURN_ORIGINS = [
+  "live_user_companion", "live_user_plc", "live_user_slack_self_dm", "confirmed_card", "lead_turn",
+] as const;
 export type HostCommandTurnOrigin = typeof HOST_COMMAND_TURN_ORIGINS[number];
 export const HostCommandTurnOriginSchema = Type.Union([
   Type.Literal("live_user_companion"), Type.Literal("live_user_plc"), Type.Literal("live_user_slack_self_dm"), Type.Literal("confirmed_card"),
+  Type.Literal("lead_turn"),
 ]);
 
-export const HostCommandViaSchema = Type.Union([Type.Literal("bash"), Type.Literal("run_on_host")]);
+// 这一轮带着外部内容时，命令在沙箱外跑之前由决策模型判断一次（lead 的 host-command-judge.ts）。记下判断的结果：
+// 命令是不是在办用户交代的事（servesUser）、错了以后难不难撤回（hardToUndo），两个都是 0 到 1 的概率，以及回答的后端。
+export const HostCommandJudgementSchema = Type.Object({
+  servesUser: Type.Number(),
+  hardToUndo: Type.Number(),
+  backend: Type.String(),
+});
+export type HostCommandJudgement = Static<typeof HostCommandJudgementSchema>;
+
+// watch：后台检查的命令到点时在沙箱外跑（lead 的 watch-commands.ts）。
+export const HostCommandViaSchema = Type.Union([Type.Literal("bash"), Type.Literal("run_on_host"), Type.Literal("watch")]);
 export type HostCommandVia = Static<typeof HostCommandViaSchema>;
 
 // 筛查器的结果（engine 的 host-commands/screen.ts）。在沙箱外跑的命令都是 allow；rule 是只记日志的规则（例如
-// delete-outside-roots），没有时为 null。
+// command-substitution、delete-outside-roots），没有时为 null。
 // 确认卡上的命令不过筛查器（用户看过命令本身），为 null。
 export const HostCommandScreenSchema = Type.Object({
   verdict: Type.String({ minLength: 1 }),
@@ -38,9 +52,13 @@ export const HostCommandScreenSchema = Type.Object({
 
 export const HostCommandStartedPayloadSchema = Type.Object({
   id: Type.String({ minLength: 1 }),
-  // 凭哪一轮跑的（channel turn 的编号）。确认卡上跑的为 null。
+  // 凭哪一轮跑的（channel turn 的编号）。确认卡上跑的、不是用户本人发话的一轮里跑的为 null。
   turnId: Nullable(Type.String()),
   turnOrigin: HostCommandTurnOriginSchema,
+  // 这一轮带着的外部内容（外部消息的来源、读到外部内容的工具）。没有时不写。
+  externalContent: Type.Optional(Type.Array(Type.String())),
+  // 带着外部内容的一轮里，决策模型对这条命令的判断。没有判断时不写。
+  judgement: Type.Optional(HostCommandJudgementSchema),
   via: HostCommandViaSchema,
   confirmationId: Nullable(Type.String()),
   // 脱敏后的命令，最多 400 字。
@@ -68,7 +86,7 @@ export const HOST_COMMAND_EVENT_KINDS: readonly EventKindDefinition[] = [
     kind: HOST_COMMAND_STARTED_KIND,
     sources: ["system"],
     payload: HostCommandStartedPayloadSchema,
-    description: "一条命令开始在沙箱外跑（免沙箱开关开着时用户本人的一轮，或者用户在确认卡上确认的 run_on_host）。",
+    description: "一条命令开始在沙箱外跑（免沙箱开关开着，或者用户在确认卡上确认的 run_on_host）。",
   },
   {
     kind: HOST_COMMAND_FINISHED_KIND,

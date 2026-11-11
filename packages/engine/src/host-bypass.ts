@@ -1,4 +1,4 @@
-// 「用户本人发话时免沙箱」开关（docs/ticket-246-user-turn-bypass.md 第 5 节，实施单 A）：开和关。
+// 「免沙箱」开关（docs/ticket-246-user-turn-bypass.md 第 5 节，实施单 A）：开和关。
 // 开和关的入口是操作层的 host_bypass（ui-actions/host-bypass.ts）：设置页和 Lead 的 perform_action 调同一个定义，权限在那里判断。
 // 开关没有时限（用户 2026-11-10）：打开以后一直开着，直到用户或 Lead 关掉。没有到点的定时器，也不再写 host_bypass.expired。
 // 每一次开、关：写 kv，同一笔事务里写一条事件（5.5），然后发 snapshot.required 让界面刷新，再写一条 inbox 告诉 Lead。
@@ -11,7 +11,7 @@ import {
 } from "@pi-lead-child/store";
 
 // 用户自己去哪里打开。Lead 调 enable 被拒时，拒绝里写它。
-export const HOST_BYPASS_WHERE = "设置 → 免沙箱（用户本人发话时免沙箱）";
+export const HOST_BYPASS_WHERE = "设置 → 免沙箱";
 
 export interface HostBypassChange {
   hostBypass: HostBypassDto;
@@ -46,7 +46,7 @@ export function enableHostBypass(db: Db, input: {
     });
     return true;
   })();
-  if (changed) announce(db, "用户在设置页打开了「用户本人发话时免沙箱」。它一直开着，直到用户或你关掉。", "enabled", true);
+  if (changed) announce(db, "用户在设置页打开了「免沙箱」。它一直开着，直到用户或你关掉。", "enabled", true);
   return { hostBypass: getHostBypass(db, input.now), changed };
 }
 
@@ -70,7 +70,7 @@ export function disableHostBypass(db: Db, input: {
   if (changed) {
     announce(
       db,
-      input.by === "user" ? "用户关掉了「用户本人发话时免沙箱」。" : "你关掉了「用户本人发话时免沙箱」。",
+      input.by === "user" ? "用户关掉了「免沙箱」。" : "你关掉了「免沙箱」。",
       "disabled", input.by === "user",
     );
   }

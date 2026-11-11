@@ -1,5 +1,5 @@
-// 「用户本人发话时免沙箱」开关（工单 #246 设计 docs/ticket-246-user-turn-bypass.md 第 5 节，实施单 A）的线上契约。
-// - 开关打开时，只在用户本人正在发话、而且没读过外部内容的那一轮里，Lead 的 bash 在沙箱外跑，run_on_host 不弹卡
+// 「免沙箱」开关（工单 #246 设计 docs/ticket-246-user-turn-bypass.md 第 5 节，实施单 A）的线上契约。
+// - 开关打开时，Lead 的 bash 在哪一轮都在沙箱外跑，run_on_host 不弹卡（docs/ticket-246-user-turn-bypass.md 第 10 节，用户 2026-11-11）。
 //   （执行路径是实施单 C）。这个文件只管开关本身：存储的形状、请求、事件。
 // - 存在 plc.db 的 kv（lead.host-bypass），一行 JSON：{ enabled, bindingId, enabledAt, reason }（store 的 host-bypass.ts）。
 // - 改用操作层的 host_bypass（engine 的 ui-actions/host-bypass.ts）：enable 是 user_direct，只有用户本人能在设置页打开；
@@ -66,7 +66,7 @@ export const HOST_BYPASS_EVENT_KINDS: readonly EventKindDefinition[] = [
       // 谁在哪台设备上打开的，例如「user via Mac 网页（binding 3）」。
       resolvedBy: Type.String({ minLength: 1 }),
     }),
-    description: "用户在设置页打开了「用户本人发话时免沙箱」。它一直开着，直到用户或 Lead 关掉。",
+    description: "用户在设置页打开了「免沙箱」。它一直开着，直到用户或 Lead 关掉。",
   },
   {
     kind: HOST_BYPASS_DISABLED_KIND,
@@ -77,13 +77,13 @@ export const HOST_BYPASS_EVENT_KINDS: readonly EventKindDefinition[] = [
       turnId: Nullable(Type.String()),
       reason: Type.String(),
     }),
-    description: "用户或 Lead 关掉了「用户本人发话时免沙箱」。",
+    description: "用户或 Lead 关掉了「免沙箱」。",
   },
   {
     kind: HOST_BYPASS_EXPIRED_KIND,
     sources: ["system"],
     payload: Type.Object({ until: Type.String({ minLength: 1 }) }),
-    description: "旧版本：「用户本人发话时免沙箱」到点自动关了。2026-11-10 去掉时限以后不再产生。",
+    description: "旧版本：「免沙箱」到点自动关了。2026-11-10 去掉时限以后不再产生。",
   },
 ];
 

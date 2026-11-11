@@ -51,6 +51,8 @@ export interface Watch {
   consecutive_errors: number;
   created_at: string;
   updated_at: string;
+  // 命令检查：设的时候判断过，免沙箱开着时可以在沙箱外跑（1）。别人要求设的、以前设的是 0，在沙箱里跑。
+  host_run: number;
 }
 
 export interface WatchCheck {
@@ -123,6 +125,8 @@ export interface CreateWatchInput {
   origin: TimerOrigin;
   setBy?: FollowUpSetBy | null;
   maxActive?: number;
+  // 命令检查到点时可以在沙箱外跑（免沙箱开着时）。由设它的一方判断过才给 true；外部来源的不给。
+  hostRun?: boolean;
 }
 
 function addSeconds(at: Date, seconds: number): Date {
@@ -191,8 +195,8 @@ export function createWatch(db: Db, input: CreateWatchInput, now: Date = new Dat
   const nowIso = now.toISOString();
   const result = db.prepare(
     `INSERT INTO watches (label, check_kind, command, brief, agent_json, mode, every_seconds, cron_expr, cron_tz, until_at, note,
-       item_id, origin_json, set_by_json, next_check_at, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       item_id, origin_json, set_by_json, next_check_at, created_at, updated_at, host_run)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     label.slice(0, 200), input.check.kind,
     input.check.kind === "command" ? text : null,
@@ -201,6 +205,8 @@ export function createWatch(db: Db, input: CreateWatchInput, now: Date = new Dat
     input.mode, every ?? null, input.cron ?? null, tz, untilAt, (input.note ?? "").trim(),
     input.itemId ?? null, JSON.stringify(input.origin), input.setBy ? JSON.stringify(input.setBy) : null,
     next, nowIso, nowIso,
+    // 外部来源的检查不在沙箱外跑，不管调用方怎么说。
+    input.check.kind === "command" && input.hostRun === true && input.origin.kind !== "external" ? 1 : 0,
   );
   return Number(result.lastInsertRowid);
 }

@@ -205,7 +205,8 @@ describe("core memory goes into Lead's system prompt", () => {
   });
 });
 
-// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）：开关开着、用户本人正在发话、这一轮没读过外部内容。
+// 免沙箱（docs/ticket-246-user-turn-bypass.md 第 10 节，用户 2026-11-11）：开关开着，命令在哪一轮都在沙箱外跑。
+// 回归：11-11 上午系统叫醒的一轮、跟进到点的一轮、读过连接结果的一轮里免沙箱都不生效，推一个 PR 分支攒了 3 张确认卡。
 describe("hostBypassActive", () => {
   const turnOn = () => enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
 
@@ -219,7 +220,9 @@ describe("hostBypassActive", () => {
     turnOn();
     userTurn("turn-companion");
     turnId = "turn-companion";
-    expect(hostBypassActive(db, deps)).toEqual({ active: true, turnId: "turn-companion", turnOrigin: "live_user_companion" });
+    expect(hostBypassActive(db, deps)).toEqual({
+      active: true, turnId: "turn-companion", turnOrigin: "live_user_companion", externalContent: null,
+    });
     const cli = createCliBinding(db, { name: "plc" }).binding;
     createTurn(db, { id: "turn-plc", originBindingId: cli.id, originKind: "paired:cli", userText: "…", state: "streaming" });
     turnId = "turn-plc";
@@ -230,24 +233,29 @@ describe("hostBypassActive", () => {
     expect(hostBypassActive(db, deps)).toMatchObject({ active: true, turnOrigin: "live_user_slack_self_dm" });
   });
 
-  it("turns off for the rest of the user's turn once it reads external content", () => {
+  it("stays on after the turn reads external content, and hands the sources over", () => {
     turnOn();
     userTurn("turn-read");
     turnId = "turn-read";
-    expect(hostBypassActive(db, deps).active).toBe(true);
-    origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
-    const decision = hostBypassActive(db, deps);
-    expect(decision).toMatchObject({ active: false, code: "external_content" });
-    expect(decision.active ? "" : decision.why).toContain("read_channel_conversation");
+    origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
+    expect(hostBypassActive(db, deps)).toMatchObject({
+      active: true, turnId: "turn-read", externalContent: [{ via: "tool", tool: "call_connection_tool" }],
+    });
     // 没有声明的工具也按外部内容算。
     origin = withExternalContent({ external: false, timer: null }, { via: "tool", tool: "some_new_tool" });
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "external_content" });
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: true, externalContent: [{ via: "tool", tool: "some_new_tool" }] });
   });
 
-  it("stays off in system turns, a follow-up's turn, an external message's turn, a finished turn and after the end time", () => {
+  it("is on in system turns, a follow-up's turn, an external message's turn and a finished turn, as Lead's own turn", () => {
     turnOn();
+    const leadTurn = { active: true, turnId: null, turnOrigin: "lead_turn" };
     // 系统回合（定时器、通知、心跳、摘要、子 agent 交回）：没有 channel turn。
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
+    expect(hostBypassActive(db, deps)).toEqual({ ...leadTurn, externalContent: null });
+    // daemon 自己开的一轮有 channel turn，origin 不是 paired。
+    createTurn(db, { id: "turn-system", originKind: "system:blocker", userText: "…", state: "streaming" });
+    turnId = "turn-system";
+    expect(hostBypassActive(db, deps)).toMatchObject(leadTurn);
+    turnId = null;
     // 用户设的跟进到点的一轮：timer:<编号>。
     const bindingId = userTurn("turn-set");
     const followUp = addLeadFollowUp(db, {
@@ -255,23 +263,55 @@ describe("hostBypassActive", () => {
       setBy: { turnId: "turn-set", bindingId, startedAt: new Date().toISOString() },
     });
     origin = { external: false, timer: followUp };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // 外部消息叫醒的一轮。
+    expect(hostBypassActive(db, deps)).toMatchObject(leadTurn);
+    // 外部消息叫醒的一轮：外部内容交给调用方，由决策模型判断。
     origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack" }], externalEvents: [7] };
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
-    // 结束了的一轮。
+    expect(hostBypassActive(db, deps)).toMatchObject({ ...leadTurn, externalContent: [{ via: "message", source: "slack" }] });
+    // 结束了的一轮：不冒充用户。
     origin = { external: false, timer: null };
     turnId = "turn-set";
     completeTurn(db, "turn-set");
-    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "not_user_turn" });
+    expect(hostBypassActive(db, deps)).toMatchObject(leadTurn);
     // 打开很久以后照旧生效：没有到点的时间（用户 2026-11-10 去掉了时限）。
     userTurn("turn-late");
     turnId = "turn-late";
     expect(hostBypassActive(db, deps, new Date(Date.now() + 7 * 24 * 60 * 60_000))).toMatchObject({ active: true, turnId: "turn-late" });
   });
+
+  it("is off in a turn from a credential that was revoked or lacks tickets:create", () => {
+    turnOn();
+    userTurn("turn-readonly", ["tickets:view", "chat"]);
+    turnId = "turn-readonly";
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "credential" });
+    const revoked = userTurn("turn-revoked");
+    revokeBinding(db, revoked);
+    turnId = "turn-revoked";
+    expect(hostBypassActive(db, deps)).toMatchObject({ active: false, code: "credential" });
+  });
 });
 
-// run_on_host 在免沙箱开着时（实施单 C 验收 1、2、4、5）：用户本人的一轮直接跑、不发卡；读过外部内容、筛查不放行时发卡。
+// 假的决策模型：两个问题各给一个概率。calls 记下每次交给它的那段文字。
+function fakeSmartModel(answer: { serves: number; hard: number } | Error) {
+  const calls: string[] = [];
+  const model = {
+    backend: "fake",
+    decide: async (state: string) => {
+      calls.push(state);
+      if (answer instanceof Error) throw answer;
+      return {
+        backend: "fake", model: null, latencyMs: 1, fallbackFrom: null,
+        answers: {
+          serves_user: { type: "yes_no" as const, probability: answer.serves },
+          hard_to_undo: { type: "yes_no" as const, probability: answer.hard },
+        },
+      };
+    },
+  };
+  return { model: model as unknown as NonNullable<LeadDeps["smartModel"]>, calls };
+}
+
+// run_on_host 在免沙箱开着时（第 10 节）：哪一轮都直接跑、不发卡；碰到底线、或者带着外部内容而决策模型判断要确认时发卡。
+// 沙箱外的命令用用户的登录 shell 跑：机器忙时一条就要几秒，跑真命令的用例时限放到 60 秒。
 describe("run_on_host with the sandbox bypass on", () => {
   const turnOn = () => enableHostBypass(db, { bindingId: null, resolvedBy: "user via Mac 网页", reason: "test", now: new Date() });
   const cards = () => listEvents(db, { kind: "rule_change.requested" });
@@ -297,42 +337,94 @@ describe("run_on_host with the sandbox bypass on", () => {
       turnId: "turn-run", turnOrigin: "live_user_companion", via: "run_on_host", confirmationId: null, cwd: deps.dataDir,
       timeoutSeconds: 120, screen: { verdict: "allow", rule: null }, spendsMoney: false,
     });
+    expect(started?.payload).not.toHaveProperty("externalContent");
+    expect(started?.payload).not.toHaveProperty("judgement");
     expect(String(started?.payload.command)).toContain("echo hi-from-host");
     expect(String(started?.payload.command)).not.toContain("abc123def456ghi");
     expect(finished?.payload).toMatchObject({ id: started?.payload.id, exitCode: 0, timedOut: false, truncated: false });
     expect(finished?.entityKey).toBe(started?.entityKey);
-  });
+  }, 60_000);
 
-  it("sends the confirm card with the reason once the turn read external content, and runs nothing", async () => {
+  // 回归（11-11 上午）：系统叫醒的一轮里推送只能发卡；带 $(…) 的命令被筛查器当成读不懂，退回沙箱。
+  it("runs at once in a system turn and with command substitution, and records it as Lead's own turn", async () => {
+    turnOn();
+    const result = await tool("run_on_host").execute("t", { command: "echo $(echo from-system-turn)", cwd: deps.dataDir, reason: "test" });
+    expect(result.isError).toBeFalsy();
+    expect(result.content[0].text).toMatch(/^（沙箱外）/);
+    expect(result.content[0].text).toContain("from-system-turn");
+    expect(cards()).toEqual([]);
+    expect(hostEvents("started")[0]?.payload).toMatchObject({
+      turnId: null, turnOrigin: "lead_turn", screen: { verdict: "allow", rule: "command-substitution" },
+    });
+  }, 60_000);
+
+  // 回归（11-11 上午）：查一次连接（例如 PR 的状态）以后，同一轮里的命令全部退回确认卡。
+  it("asks the decision model once the turn read external content, and runs what serves the user or is easy to undo", async () => {
+    turnOn();
+    const bindingId = userTurn("turn-read-pr");
+    createTurn(db, { id: "turn-earlier", originBindingId: bindingId, originKind: "paired:companion", userText: "把修复推到 PR 分支", state: "completed" });
+    turnId = "turn-read-pr";
+    origin = withExternalContent(origin, { via: "tool", tool: "call_connection_tool" });
+    const serves = fakeSmartModel({ serves: 0.9, hard: 0.8 });
+    deps = { ...deps, smartModel: serves.model };
+    const pushed = await tool("run_on_host").execute("t", { command: "echo pushed", cwd: deps.dataDir, reason: "用户让我推" });
+    expect(pushed.isError).toBeFalsy();
+    expect(pushed.content[0].text).toContain("pushed");
+    // 模型看到的是用户本人的话、外部内容的来源、命令和理由；没有外部内容的原文。
+    expect(serves.calls).toHaveLength(1);
+    expect(serves.calls[0]).toContain("把修复推到 PR 分支");
+    expect(serves.calls[0]).toContain("tool call_connection_tool");
+    expect(serves.calls[0]).toContain("echo pushed");
+    expect(serves.calls[0]).toContain("用户让我推");
+    expect(hostEvents("started")[0]?.payload).toMatchObject({
+      turnId: "turn-read-pr", externalContent: ["tool call_connection_tool"],
+      judgement: { servesUser: 0.9, hardToUndo: 0.8, backend: "fake" },
+    });
+    // 不是用户交代的，但撤得回：照样跑。
+    deps = { ...deps, smartModel: fakeSmartModel({ serves: 0.1, hard: 0.2 }).model };
+    const harmless = await tool("run_on_host").execute("t", { command: "echo harmless", cwd: deps.dataDir, reason: "test" });
+    expect(harmless.isError).toBeFalsy();
+    expect(cards()).toEqual([]);
+  }, 60_000);
+
+  it("sends the confirm card when the decision model says the command is not the user's and hard to undo, or cannot answer", async () => {
     turnOn();
     userTurn("turn-read-slack");
     turnId = "turn-read-slack";
     origin = withExternalContent(origin, { via: "tool", tool: "read_channel_conversation" });
-    const result = await tool("run_on_host").execute("t", { command: "echo nope", cwd: deps.dataDir, reason: "test" });
-    expect(result.isError).toBe(true);
-    const body = JSON.parse(result.content[0].text);
-    expect(body).toMatchObject({ refused: true, kind: "needs_authorization", user_action: { kind: "confirm_rule_change" } });
-    expect(body.refusal.message).toContain("免沙箱开着，但这一次没有直接跑");
-    expect(body.refusal.message).toContain("read_channel_conversation");
-    expect(cards().length).toBe(1);
+    // 每次的命令不一样：同一条还在等确认的命令只发一张卡。
+    for (const [model, words] of [
+      [fakeSmartModel({ serves: 0.1, hard: 0.9 }).model, "不像用户本人交代的事"],
+      [fakeSmartModel(new Error("timeout")).model, "没能判断"],
+      [null, "没有配置决策模型"],
+    ] as const) {
+      deps = { ...deps, smartModel: model };
+      const result = await tool("run_on_host").execute("t", { command: `echo nope: ${words}`, cwd: deps.dataDir, reason: "test" });
+      expect(result.isError, words).toBe(true);
+      const body = JSON.parse(result.content[0].text);
+      expect(body, words).toMatchObject({ refused: true, kind: "needs_authorization", user_action: { kind: "confirm_rule_change" } });
+      expect(body.refusal.message, words).toContain("免沙箱开着，但这一次没有直接跑");
+      expect(body.refusal.message, words).toContain("read_channel_conversation");
+      expect(body.refusal.message, words).toContain(words);
+    }
+    expect(cards().length).toBe(3);
     expect(hostEvents("started")).toEqual([]);
   });
 
-  it("sends the confirm card when the screen says floor or unknown, or the command spends money", async () => {
+  it("sends the confirm card when the screen hits a floor or the command spends money", async () => {
     turnOn();
     userTurn("turn-screen");
     turnId = "turn-screen";
     for (const [params, rule] of [
       [{ command: "security find-generic-password -s x" }, "credentials"],
-      [{ command: "echo $(whoami)" }, "command-substitution"],
-      [{ command: "sudo ls" }, "privilege-escalation"],
+      [{ command: "plc status" }, "plc-cli"],
       [{ command: "echo ok", spends_money: true }, "spends-money"],
     ] as const) {
       const result = await tool("run_on_host").execute("t", { ...params, cwd: deps.dataDir, reason: "test" });
       expect(result.isError, rule).toBe(true);
       const body = JSON.parse(result.content[0].text);
       expect(body.kind, rule).toBe("needs_authorization");
-      expect(body.refusal.message, rule).toContain("命令筛查没有放行");
+      expect(body.refusal.message, rule).toContain("命令筛查碰到了底线");
     }
     expect(hostEvents("started")).toEqual([]);
   });

@@ -1272,6 +1272,7 @@ CREATE TABLE IF NOT EXISTS watches (
   consecutive_errors  INTEGER NOT NULL DEFAULT 0,
   created_at          TEXT NOT NULL,
   updated_at          TEXT NOT NULL,
+  host_run            INTEGER NOT NULL DEFAULT 0,
   CHECK (check_kind <> 'command' OR (command IS NOT NULL AND length(command) BETWEEN 1 AND 4000)),
   CHECK (check_kind <> 'agent' OR (brief IS NOT NULL AND length(brief) BETWEEN 1 AND 8000)),
   CHECK (mode <> 'until' OR (until_at IS NOT NULL AND every_seconds IS NOT NULL)),

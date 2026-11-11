@@ -337,6 +337,7 @@ const WIDGETS_MIGRATION_VERSION = 61;
 const WIDGET_SOURCES_MIGRATION_VERSION = 62;
 const CONNECTION_LAUNCH_MIGRATION_VERSION = 63;
 const ITEM_USAGE_PARTS_MIGRATION_VERSION = 64;
+const WATCH_HOST_RUN_MIGRATION_VERSION = 65;
 
 // v23 的列补齐必须发生在 exec(SCHEMA) 前：当前 DDL/索引会读取这些列，而 SQLite 的
 // CREATE TABLE IF NOT EXISTS 不会给既有表补列。跨字段的 reminder/workflow 约束由 SCHEMA
@@ -740,6 +741,18 @@ function migrateItemUsageParts(db: Db): void {
   })();
 }
 
+// v65：后台检查加一列 host_run（用户 2026-11-11）：这个命令检查设的时候判断过、免沙箱开着时可以在沙箱外跑。
+// 只加列，不重建 watches：别的列和行原样保留。已有的检查是 0，照旧在沙箱里跑（历史数据不会一下子都换到沙箱外）。
+// 新库的列由 SCHEMA 建，这里跳过。
+function migrateWatchHostRun(db: Db): void {
+  if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(WATCH_HOST_RUN_MIGRATION_VERSION)) return;
+  db.transaction(() => {
+    addColumn(db, "watches", tableColumns(db, "watches"), "host_run", "INTEGER NOT NULL DEFAULT 0");
+    db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)")
+      .run(WATCH_HOST_RUN_MIGRATION_VERSION, "watch-host-run-v1");
+  })();
+}
+
 // v38：派发请求和 Run 加一列 effort。只加列，不重建表，已有的列和行原样保留。
 // v39：工单加一列显示用的短标题。只加列，不重建 items：别的列和行原样保留。
 // 它不是执行列，不进 C2 的 CHECK（提醒也可以有短标题）。
@@ -899,6 +912,7 @@ export function migrateDb(db: Db): void {
   migrateWidgetSources(db);
   migrateConnectionLaunch(db);
   migrateItemUsageParts(db);
+  migrateWatchHostRun(db);
 }
 
 const ITEM_MODEL_MIGRATION_VERSION = 14;
@@ -910,7 +924,7 @@ const RELATION_EXECUTION_GATE_MIGRATION_VERSION = 19;
 const OUTCOME_SNAPSHOT_MIGRATION_VERSION = 20;
 const TICKET_AGENT_EXECUTION_CONTINUATION_MIGRATION_VERSION = 21;
 const OUTCOME_RECOVERY_SCOPE_MIGRATION_VERSION = 22;
-export const LATEST_SCHEMA_VERSION = ITEM_USAGE_PARTS_MIGRATION_VERSION;
+export const LATEST_SCHEMA_VERSION = WATCH_HOST_RUN_MIGRATION_VERSION;
 
 // 旧 status → 新 status。backlog 映射到 ready 而不是 draft：旧 backlog 是可以被直接派发的，
 // 映射到 draft 会让存量工单突然需要用户逐个确认，等于用迁移改变了既有行为。
@@ -2116,4 +2130,5 @@ export const SCHEMA_MIGRATION_VERSIONS: readonly number[] = [
   WIDGET_SOURCES_MIGRATION_VERSION,
   CONNECTION_LAUNCH_MIGRATION_VERSION,
   ITEM_USAGE_PARTS_MIGRATION_VERSION,
+  WATCH_HOST_RUN_MIGRATION_VERSION,
 ];

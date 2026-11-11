@@ -287,8 +287,8 @@ export function renderLeadEnvironment(): string {
 function hostBypassLines(state: LeadEnvironmentSnapshot["hostBypass"]): string[] {
   if (!state) return [];
   return [state.enabled
-    ? "- 用户本人发话时免沙箱：开着（hostBypass: { enabled: true }），没有时限，一直开着，直到用户或你关掉。只有用户能在设置里打开；你能关（perform_action 的 host_bypass / lead / disable）。"
-    : "- 用户本人发话时免沙箱：关着（hostBypass: { enabled: false }）。只有用户能在 设置 → 免沙箱 里打开。"];
+    ? "- 免沙箱：开着（hostBypass: { enabled: true }）。你的 bash 和 run_on_host 在哪一轮都在沙箱外跑，不发确认卡。没有时限，一直开着，直到用户或你关掉。只有用户能在设置里打开；你能关（perform_action 的 host_bypass / lead / disable）。"
+    : "- 免沙箱：关着（hostBypass: { enabled: false }）。只有用户能在 设置 → 免沙箱 里打开。"];
 }
 
 /**

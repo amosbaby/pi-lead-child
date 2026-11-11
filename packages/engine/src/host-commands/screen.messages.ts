@@ -1,4 +1,4 @@
-// 命令筛查器（screen.ts）不放行一条命令时给出的原因。工具结果和工具行里显示，按用户现在的语言取。
+// 命令筛查器（screen.ts）的一条规则命中时的说明：不放行的原因，或者只记下来的事。工具结果和工具行里显示，按用户现在的语言取。
 import { defineMessages } from "@pi-lead-child/protocol";
 
 export const screenMessages = defineMessages({
@@ -8,10 +8,11 @@ export const screenMessages = defineMessages({
     deleteOutsideRoots: (detail: string) => `The command deletes a path outside the working directories (${detail}). It still runs; the screener only records it.`,
     launchd: (detail: string) => `The command touches launchd or a LaunchAgents directory (${detail}).`,
     spendsMoney: (detail: string) => `The command can spend money (${detail}).`,
+    spendingCommand: (detail: string) => `The command looks like one that spends money (${detail}). It still runs; the screener only records it.`,
     privilegeEscalation: (detail: string) => `The command runs as another user (${detail}).`,
     startupFileWrite: (detail: string) => `The command writes a file that runs outside the sandbox later, for example a shell startup file (${detail}).`,
     plcCli: (detail: string) => `The command uses the plc CLI (${detail}). Use your own tools for tickets.`,
-    tooLong: (limit: number) => `The command is longer than ${limit} characters. Write it into a script in lead-scratch and run bash <script>.`,
+    tooLong: (limit: number) => `The command is longer than ${limit} characters. The screener did not read it.`,
     commandSubstitution: (detail: string) => `The screener cannot read command substitution (${detail}).`,
     eval: (detail: string) => `The screener cannot read a command that runs text as code (${detail}).`,
     xargs: (detail: string) => `The screener cannot read a command that builds other commands (${detail}).`,
@@ -32,10 +33,11 @@ export const screenMessages = defineMessages({
     deleteOutsideRoots: (detail) => `命令会删除工作目录以外的路径（${detail}）。命令照样跑，筛查器只记下来。`,
     launchd: (detail) => `命令会碰 launchd 或 LaunchAgents 目录（${detail}）。`,
     spendsMoney: (detail) => `命令可能花钱（${detail}）。`,
+    spendingCommand: (detail) => `命令看起来会花钱（${detail}）。命令照样跑，筛查器只记下来。`,
     privilegeEscalation: (detail) => `命令要用别的用户身份跑（${detail}）。`,
     startupFileWrite: (detail) => `命令会写以后在沙箱外执行的文件，例如 shell 的启动文件（${detail}）。`,
     plcCli: (detail) => `命令用了 plc CLI（${detail}）。工单的操作用你自己的工具。`,
-    tooLong: (limit) => `命令超过 ${limit} 个字符。把它写成 lead-scratch 里的脚本，再用 bash <脚本> 跑。`,
+    tooLong: (limit) => `命令超过 ${limit} 个字符，筛查器没有读它。`,
     commandSubstitution: (detail) => `筛查器读不懂命令替换（${detail}）。`,
     eval: (detail) => `筛查器读不懂把文字当代码跑的命令（${detail}）。`,
     xargs: (detail) => `筛查器读不懂拼出别的命令再跑的写法（${detail}）。`,

@@ -1,4 +1,4 @@
-// 「用户本人发话时免沙箱」开关（docs/ticket-246-user-turn-bypass.md 第 5 节，实施单 A）。store、操作层和事件是真的。核对：
+// 「免沙箱」开关（docs/ticket-246-user-turn-bypass.md 第 5 节，实施单 A）。store、操作层和事件是真的。核对：
 //   - 存储：kv 的 lead.host-bypass；打开以后一直开着，没有到点的时间（用户 2026-11-10）；坏掉的值按关算；
 //     旧版本写的行带 until：过了 until 的读出来是关，没过的照旧开到 until（那是用户当时选的时长）；
 //   - enable：只有你本人能在设置页打开（user_direct）。不带时长，请求体是 {}。开着时再打开一次什么也不写。
@@ -104,7 +104,7 @@ describe("host_bypass.enable", () => {
     }]);
     expect(reloads()).toHaveLength(1);
     expect(inbox()).toEqual([{
-      summary: "用户在设置页打开了「用户本人发话时免沙箱」。它一直开着，直到用户或你关掉。",
+      summary: "用户在设置页打开了「免沙箱」。它一直开着，直到用户或你关掉。",
       payload: expect.objectContaining({ kind: "host_bypass", state: "enabled", wakeLead: true }),
     }]);
     const ledger = listEvents(db, { kind: UI_ACTION_PERFORMED_KIND, limit: 10 }).map((event) => event.payload);

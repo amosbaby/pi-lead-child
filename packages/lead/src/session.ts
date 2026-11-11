@@ -459,6 +459,8 @@ export async function createLeadSession(opts: {
           db: opts.db, dataDir: opts.dataDir,
           ...(opts.turnOrigin ? { turnOrigin: opts.turnOrigin } : {}),
           ...(opts.currentTurnId ? { currentTurnId: opts.currentTurnId } : {}),
+          // 免沙箱开着、这一轮带着外部内容时，命令在沙箱外跑之前请决策模型判断一次（host-command-judge.ts）。
+          smartModel: () => smartModel,
           log: (line) => console.error(line),
         }),
       },

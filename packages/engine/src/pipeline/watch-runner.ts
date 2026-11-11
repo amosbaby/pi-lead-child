@@ -27,7 +27,8 @@ export interface WatchAgentTask {
 export interface WatchRunnerOptions {
   now?: () => Date;
   // 跑一条命令。跑不起来时抛错（算出错）；超时返回 timedOut。
-  runCommand: (command: string, timeoutSeconds: number) => Promise<WatchCommandResult>;
+  // watch：这一次是哪个检查（lead 的 watch-commands.ts 据此选沙箱里还是沙箱外）。只在沙箱里跑的执行函数用不着它。
+  runCommand: (command: string, timeoutSeconds: number, watch: Watch) => Promise<WatchCommandResult>;
   // 开一个轻子 agent，返回它的工单编号。daemon 里是建轻工单再 spawnItemChild。没接时子代理检查算没开起来。
   startAgentCheck?: (watch: Watch, task: WatchAgentTask) => Promise<number> | number;
   env?: Record<string, string | undefined>;
@@ -163,7 +164,7 @@ export function createWatchRunner(db: Db, opts: WatchRunnerOptions): WatchRunner
     let exitCode: number | null = null;
     let output: string;
     try {
-      const result = await opts.runCommand(watch.command ?? "", WATCH_LIMITS.commandTimeoutSeconds);
+      const result = await opts.runCommand(watch.command ?? "", WATCH_LIMITS.commandTimeoutSeconds, watch);
       exitCode = result.timedOut ? null : result.exitCode;
       status = !result.timedOut && result.exitCode === 0 ? "pass" : "fail";
       output = result.timedOut ? `${result.output}\n（超过 ${WATCH_LIMITS.commandTimeoutSeconds} 秒，命令被停了）` : result.output;
@@ -236,7 +237,7 @@ export function createWatchRunner(db: Db, opts: WatchRunnerOptions): WatchRunner
   };
 }
 
-/** 命令检查用的执行函数：Lead 的 bash 沙箱，工作目录是 Lead 的临时目录。输出只留最后一段。 */
+/** 命令检查用的执行函数：给它 Lead 的 bash 沙箱（或者沙箱外的执行，hostBashOperations），工作目录是 Lead 的临时目录。输出只留最后一段。 */
 export function sandboxWatchCommand(
   operations: Pick<BashOperations, "exec">, cwd: string,
 ): (command: string, timeoutSeconds: number) => Promise<WatchCommandResult> {

@@ -10,11 +10,12 @@
 // 子 agent，结果交回 Lead 审核。拒绝写明这是能力缺口，并给出下一条路（D11、D13）。
 // 只读了连接结果（例如用户自己 PR 的 CI 状态）的一轮、用户本人正在说话的一轮照用（用户 2026-10-29：「起码要让 lead agent
 // 有能力处理」）：命令在沙箱里跑，沙箱挡住凭证和逃出去的路，它才是边界。
-// 免沙箱（docs/ticket-246-user-turn-bypass.md，实施单 C）：开关开着、用户本人正在发话、这一轮没读过外部内容、命令过了
-// 筛查器时，这一次 bash 在沙箱外跑（engine 的 hostBashOperations），结果开头写「（沙箱外）」。每次调用重新判断
-// （hostCommandRoute）。开关开着但这一次退回沙箱时，结果开头写原因；开关关着时什么都不加，和以前一样。
-// 筛查器说 floor 的 bash 直接拒绝，不退回沙箱（.scratch/tool-occupancy/spec.md L5，用户 2026-11-11）：退回沙箱的命令常常
-// 什么都没做成，看起来却像成功了。拒绝写明碰到的每条规则和下一步（run_on_host 发确认卡）。
+// 免沙箱（docs/ticket-246-user-turn-bypass.md 第 10 节，用户 2026-11-11：「如果 bypass 都还要我审批，那 bypass 有啥意义呢」）：
+// 开关开着时，bash 在哪一轮都在沙箱外跑（engine 的 hostBashOperations），结果开头写「（沙箱外）」。每次调用重新判断
+// （hostCommandRoute）。只有两种情况不直接跑：命令碰到底线（读凭证、写 plc 的账本、plc CLI、自报花钱）；这一轮带着外部内容，
+// 决策模型判断命令不是用户交代的事、又难撤回（host-command-judge.ts）。这两种情况 bash 直接拒绝，不退回沙箱
+// （.scratch/tool-occupancy/spec.md L5：退回沙箱的命令常常什么都没做成，看起来却像成功了），拒绝写明原因和下一步
+// （run_on_host 发确认卡）。开关关着时什么都不加，和以前一样。
 import { mkdirSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
@@ -25,14 +26,16 @@ import {
   type SandboxPolicy,
 } from "@pi-lead-child/core";
 import {
-  copyScreenedScripts, HOST_COMMAND_LIMITS, hostBashOperations, newHostCommandId, sandboxedBashOperations, screenHitReason,
-  screenHostCommand, screenReason, type HostCommandRecord, type ScreenResult,
+  copyScreenedScripts, externalTurnWhy, HOST_COMMAND_LIMITS, hostBashOperations, newHostCommandId, sandboxedBashOperations,
+  screenHitReason, screenHostCommand, screenReason, type ExternalContentSource, type HostCommandRecord, type ScreenResult,
+  type SmartModel,
 } from "@pi-lead-child/engine";
 import type { HostCommandVia } from "@pi-lead-child/protocol";
-import type { Db } from "@pi-lead-child/store";
+import { recentUserTexts, type Db } from "@pi-lead-child/store";
 import { credentialPathReason, resolveLikePi } from "./credential-guard.js";
 import { tildeHome } from "./home-paths.js";
 import { isLiveUserTurn } from "@pi-lead-child/engine";
+import { judgeHostCommand } from "./host-command-judge.js";
 import { authorityTurnId, hostBypassActive, type LeadTurnOrigin, type TurnOriginDeps } from "./turn-origin.js";
 import { DEFAULT_BACKGROUND_JOB_MAX_SECONDS } from "./background-jobs.js";
 
@@ -119,7 +122,7 @@ export function shellPath(path: string, home: string): string {
 }
 
 const SAME_BOUNDARY = "你和子 agent（执行者、核查员）的沙箱是同一套边界，都写不了这里，不要建单或派子 agent 去试。";
-const HOST_RUN_NOTE = "用户在设置里开了免沙箱、又是用户本人发话的一轮时，run_on_host 直接在沙箱外跑；否则发一张确认卡，用户点了才跑。";
+const HOST_RUN_NOTE = "用户在设置里开了免沙箱时，run_on_host 直接在沙箱外跑；没开时发一张确认卡，用户点了才跑。";
 
 /** edit、write 写 SANDBOX_DENY_WRITE_HOME 里的路径被拒绝时，接在拒绝后面的改法：先写临时副本，再用 run_on_host 复制过去。 */
 export function hostOnlyWriteRefusalHint(input: {
@@ -183,46 +186,60 @@ export function sandboxFallbackNote(why: string): string {
   return `（沙箱里：免沙箱开着，但这一次没有用——${why}）`;
 }
 
-/** 筛查器读不懂的 bash 退回沙箱时，接在原因后面的下一步。 */
-const SCREEN_UNKNOWN_NEXT_STEP = "要在沙箱外跑，改成筛查器读得懂的写法（例如写成 lead-scratch 里的脚本，再用 bash <脚本>），"
-  + "或者用 run_on_host 发确认卡";
+const RUN_ON_HOST_NEXT_STEP = "真要在 Mac 上跑，用 run_on_host，系统会给用户发确认卡，用户确认后才跑";
 
 /**
  * 筛查器说 floor 的 bash：不跑，也不退回沙箱。每条命中一行，写明下一步。只给模型看。
  */
 export function bashFloorRefusal(screen: ScreenResult): string {
-  const lines = screen.hits.map((hit) => `- ${screenHitReason(hit, "zh")}下一步：${hit.severity === "floor"
-    ? "真要在 Mac 上跑，用 run_on_host，系统会给用户发确认卡，用户确认后才跑；用不着碰这个位置的，改写命令再用 bash。"
-    : `${SCREEN_UNKNOWN_NEXT_STEP}。`}`);
+  const lines = screen.hits.map((hit) => `- ${screenHitReason(hit, "zh")}下一步：${RUN_ON_HOST_NEXT_STEP}；用不着碰这个位置的，改写命令再用 bash。`);
   return "bash 没有跑这条命令：免沙箱开着，命令筛查碰到了底线。它也没有退回沙箱跑：退回沙箱的命令常常什么都没做成，"
     + `看起来却像成功了。碰到的规则：\n${lines.join("\n")}`;
 }
 
+/** 开关开着、这一次却不直接跑的 bash（碰到底线，或者决策模型判断要用户确认）：给模型的拒绝。 */
+export function bashConfirmRefusal(route: { why: string; screen?: ScreenResult }): string {
+  if (route.screen?.verdict === "floor") return bashFloorRefusal(route.screen);
+  return `bash 没有跑这条命令：${route.why}。它也没有退回沙箱跑。下一步：${RUN_ON_HOST_NEXT_STEP}，reason 里写清是谁要的、为什么。`;
+}
+
 export type HostCommandRoute =
   // 在沙箱外跑。run 是真正跑的命令（脚本换成筛查过的副本），record 写进 host_command.started。
-  // 只记日志的命中（例如删除工作目录以外的东西）记在 record.screen.rule，logged 是全部这类命中。
+  // 只记日志的命中（例如命令替换、删除工作目录以外的东西）记在 record.screen.rule，logged 是全部这类命中。
   | { route: "host"; run: string; record: Omit<HostCommandRecord, "cwd" | "timeoutSeconds">; logged: ScreenResult["logged"] }
-  // 照旧：bash 在沙箱里跑，run_on_host 发确认卡。why 是开关开着时这一次没有免沙箱的原因；开关关着时为 null。
-  // screen 是筛查器没有放行时的结果：floor 时 bash 直接拒绝（bashFloorRefusal），run_on_host 照旧发确认卡。
-  | { route: "sandbox"; why: string | null; screen?: ScreenResult };
+  // 开关关着（why 为 null），或者这一轮的凭证不能在这台 Mac 上跑命令（why 写原因）：bash 在沙箱里跑，run_on_host 发确认卡。
+  | { route: "sandbox"; why: string | null }
+  // 开关开着，这一次不直接跑：命令碰到底线（screen），或者这一轮带着外部内容、决策模型判断要用户确认。
+  // bash 直接拒绝（bashConfirmRefusal），不退回沙箱；run_on_host 发确认卡。
+  | { route: "confirm"; why: string; screen?: ScreenResult };
 
 type HostCommandRouteInput = {
   command: string; cwd: string; via: HostCommandVia; spendsMoney: boolean; dataDir: string; home?: string; now?: Date;
+  // 决策模型：这一轮带着外部内容时判断一次。没有时这样的一轮里命令不直接跑。
+  smartModel?: SmartModel | null | undefined;
+  // Lead 写的理由（run_on_host 的 reason），给决策模型看。
+  reason?: string | undefined;
 };
 
+/** 外部内容的来源写成一个名字，给决策模型和 host_command.started。不放原文。 */
+function externalSourceName(source: ExternalContentSource): string {
+  return source.via === "message" ? `message from ${source.source}` : `tool ${source.tool}`;
+}
+
 /**
- * 这一条命令在哪里跑（设计文档 3.1、第 4 节）：hostBypassActive 说能免沙箱，而且筛查器说 allow，才在沙箱外跑。
- * 筛查器的 floor 和 unknown 都退回今天的做法。bash 和 run_on_host 都用它，每次调用都重新算。判断本身出错时也退回。
+ * 这一条命令在哪里跑（设计文档第 10 节）：开关开着（hostBypassActive）就在沙箱外跑，除了两种情况：筛查器说 floor；
+ * 这一轮带着外部内容，决策模型判断命令不是用户交代的事、又难撤回（判断不了时也算）。bash 和 run_on_host 都用它，
+ * 每次调用都重新算。判断本身出错时不直接跑。
  */
-export function hostCommandRoute(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): HostCommandRoute {
+export async function hostCommandRoute(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): Promise<HostCommandRoute> {
   try {
-    return routeOf(db, deps, input);
+    return await routeOf(db, deps, input);
   } catch (error) {
-    return { route: "sandbox", why: `判断能不能免沙箱时出错（${error instanceof Error ? error.message : String(error)}）` };
+    return { route: "confirm", why: `判断能不能在沙箱外跑时出错（${error instanceof Error ? error.message : String(error)}）` };
   }
 }
 
-function routeOf(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): HostCommandRoute {
+async function routeOf(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): Promise<HostCommandRoute> {
   const decision = hostBypassActive(db, deps, input.now);
   if (!decision.active) return { route: "sandbox", why: decision.why };
   const home = input.home ?? homedir();
@@ -232,8 +249,22 @@ function routeOf(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): Ho
     credentialPathReason: (path, context) => credentialPathReason(path, context),
   });
   if (screen.verdict !== "allow") {
-    const reason = screenReason(screen, "zh") ?? screen.rule ?? screen.verdict;
-    return { route: "sandbox", why: `命令筛查没有放行（${screen.verdict}）：${reason}`, screen };
+    return { route: "confirm", why: `命令筛查碰到了底线：${screenReason(screen, "zh") ?? screen.rule ?? screen.verdict}`, screen };
+  }
+  const sources = decision.externalContent;
+  let judged: { servesUser: number; hardToUndo: number; backend: string } | null = null;
+  if (sources !== null) {
+    const judgement = await judgeHostCommand({
+      command: input.command, cwd: input.cwd, reason: input.reason, userRequests: recentUserTexts(db),
+      sources: sources.map(externalSourceName),
+    }, input.smartModel);
+    if (judgement.by === "unavailable") {
+      return { route: "confirm", why: `${externalTurnWhy(sources)}，决策模型没能判断这条命令是不是用户交代的事（${judgement.reason}）` };
+    }
+    if (judgement.ask) {
+      return { route: "confirm", why: `${externalTurnWhy(sources)}，决策模型判断这条命令不像用户本人交代的事，而且做错了难撤回` };
+    }
+    judged = { servesUser: judgement.servesUser, hardToUndo: judgement.hardToUndo, backend: judgement.backend };
   }
   return {
     route: "host",
@@ -241,6 +272,8 @@ function routeOf(db: Db, deps: TurnOriginDeps, input: HostCommandRouteInput): Ho
     record: {
       id: newHostCommandId(), turnId: decision.turnId, turnOrigin: decision.turnOrigin, via: input.via, confirmationId: null,
       command: input.command, screen: { verdict: screen.verdict, rule: screen.logged[0]?.rule ?? null }, spendsMoney: input.spendsMoney,
+      ...(sources !== null ? { externalContent: sources.map(externalSourceName) } : {}),
+      ...(judged ? { judgement: judged } : {}),
     },
     logged: screen.logged,
   };
@@ -269,6 +302,8 @@ export interface LeadHandsOptions {
   log?: (line: string) => void;
   // bash 不填 timeout 时的时限（秒），缺省 LEAD_BASH_DEFAULT_TIMEOUT_SECONDS。测试用短的。
   bashTimeoutSeconds?: number;
+  // 决策模型（host-command-judge.ts）：免沙箱开着、这一轮带着外部内容时，命令在沙箱外跑之前判断一次。每次调用时取。
+  smartModel?: () => SmartModel | null | undefined;
 }
 
 /** 工具结果的第一段文字前面加一句。 */
@@ -327,27 +362,26 @@ export function leadHandsExtension(options: LeadHandsOptions): ExtensionFactory 
         });
         const spendsMoney = (params as { spends_money?: unknown }).spends_money === true;
         const routeOfCall = (command: string, cwd: string) => hostCommandRoute(options.db, options, {
-          command, cwd, via: "bash", spendsMoney, dataDir: options.dataDir, home,
+          command, cwd, via: "bash", spendsMoney, dataDir: options.dataDir, home, smartModel: options.smartModel?.() ?? null,
         });
-        // 先按这一次的命令判断一次：碰到底线的直接拒绝，不跑，也不退回沙箱（L5）。
+        const refuse = (route: Extract<HostCommandRoute, { route: "confirm" }>): Error => {
+          options.log?.(`[lead] bash not run outside the sandbox: ${route.screen ? `screen ${route.screen.hits.map((hit) => hit.rule).join(", ")}` : route.why}`);
+          return new Error(bashConfirmRefusal(route));
+        };
+        // 先按这一次的命令判断一次：不直接跑的（碰到底线、决策模型判断要用户确认）直接拒绝，不跑，也不退回沙箱（L5）。
         // pi 的 bash 用会话的 cwd，没有时用 scratch（createBashToolDefinition）；这里按同一个目录判断，exec 时直接用这一次的结果。
         const command = String((params as { command?: unknown }).command ?? "");
         const cwd = (ctx as { cwd?: string } | undefined)?.cwd || scratch;
-        let first: HostCommandRoute | null = routeOfCall(command, cwd);
-        if (first.route === "sandbox" && first.screen?.verdict === "floor") {
-          options.log?.(`[lead] bash refused by the host screen: ${first.screen.hits.map((hit) => hit.rule).join(", ")}`);
-          throw new Error(bashFloorRefusal(first.screen));
-        }
+        let first: HostCommandRoute | null = await routeOfCall(command, cwd);
+        if (first.route === "confirm") throw refuse(first);
         const routed: BashOperations = {
-          exec: (runCommand, runCwd, run) => {
-            const route = first && runCommand === command && runCwd === cwd ? first : routeOfCall(runCommand, runCwd);
+          exec: async (runCommand, runCwd, run) => {
+            const route = first && runCommand === command && runCwd === cwd ? first : await routeOfCall(runCommand, runCwd);
             first = null;
+            // pi 改过命令或目录、又不能直接跑时，同样不退回沙箱。
+            if (route.route === "confirm") throw refuse(route);
             if (route.route === "sandbox") {
-              // pi 改过命令或目录、又碰到底线时，同样不退回沙箱。
-              if (route.screen?.verdict === "floor") return Promise.reject(new Error(bashFloorRefusal(route.screen)));
-              note = route.why
-                ? sandboxFallbackNote(route.screen?.verdict === "unknown" ? `${route.why}${SCREEN_UNKNOWN_NEXT_STEP}` : route.why)
-                : null;
+              note = route.why ? sandboxFallbackNote(route.why) : null;
               sandboxCwd = runCwd;
               return sandboxed.exec(runCommand, runCwd, run);
             }

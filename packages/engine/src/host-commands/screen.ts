@@ -1,16 +1,20 @@
-// 命令筛查器（docs/ticket-246-user-turn-bypass.md 第 4 节）。免沙箱开关打开时，bash 和 run_on_host 要在沙箱外跑的命令
-// 先过这里。结果三种：allow 直接在沙箱外跑；floor 碰到底线；unknown 筛查器读不懂。run_on_host 碰到 floor 或 unknown 都
-// 发确认卡；bash 碰到 unknown 回沙箱，碰到 floor 直接拒绝，不退回沙箱（.scratch/tool-occupancy/spec.md L5，用户
-// 2026-11-11：退回沙箱的命令常常什么都没做成，看起来却像成功了）。
-// 规则还有第三种严重程度 log：命令照样在沙箱外跑，命中只记下来（删除工作目录以外的东西）。
+// 命令筛查器（docs/ticket-246-user-turn-bypass.md 第 4 节、第 10 节）。免沙箱开关打开时，bash 和 run_on_host 要在沙箱外跑的命令
+// 先过这里。结果两种：allow 直接在沙箱外跑；floor 碰到底线。run_on_host 碰到 floor 发确认卡；bash 碰到 floor 直接拒绝，
+// 不退回沙箱（.scratch/tool-occupancy/spec.md L5，用户 2026-11-11：退回沙箱的命令常常什么都没做成，看起来却像成功了）。
+// 底线只有四条（用户 2026-11-11：「纯粹有些东西是为了安全而安全，根本不考虑用户体验」，开关开着就全部在沙箱外跑，
+// 只留密钥）：读凭证、直接写 plc 的账本和配置、用 plc CLI（它带着用户的凭证，能做只有用户本人能做的操作）、
+// Lead 自报这条命令会花钱。
+// 别的规则都是 log：命令照样在沙箱外跑，命中只记下来。筛查器读不懂的写法（$(…)、heredoc、eval、超长的命令这类）以前
+// 一律不放行，现在也只记下来：读不懂的那一段里碰没碰底线，筛查器看不到。底线是尽力而为的一道检查，不是边界；
+// 凭证的值不进对话靠输出脱敏（ui-actions/host-commands.ts 的 redactHostText）。
 // 一次报出全部命中的规则，不只第一条（ScreenResult.hits）。
 //
 // 怎么读一条命令（4.1）：
 //   1. 按 shell 的词法拆：;、&&、||、|、&、换行和括号分开简单命令，每个简单命令取程序名和参数，去掉引号。
-//   2. 读不懂的写法直接 unknown：$(…)、反引号、进程替换；eval、exec、source、.；xargs；bash -c 这类直接写代码的；
+//   2. 读不懂的写法记下来，不往下读那一段：$(…)、反引号、进程替换；eval、exec、source、.；xargs；bash -c 这类直接写代码的；
 //      heredoc；sudo、su、doas；程序名或参数的值来自筛查器不知道的变量。
 //   3. bash <脚本>：脚本在 lead-scratch 下的，读出内容逐行同样筛查，结果里带上内容；执行的一方用 copyScreenedScripts
-//      写成副本再跑副本，筛查和执行是同一份内容。脚本在别处的 unknown。
+//      写成副本再跑副本，筛查和执行是同一份内容。脚本在别处的不读，只记下来。
 //   4. 路径先展开 ~、按 cwd 解析相对路径（cd 会改后面命令的 cwd），再解析符号链接，然后比较。macOS 的文件系统不分
 //      大小写，比较按小写。
 //   5. 重定向 >、>>、tee 的目标按写入处理，只对照沙箱同一份禁写清单（账本、凭证、shell 启动文件、launchd）。
@@ -31,37 +35,38 @@ import type { Locale } from "@pi-lead-child/protocol";
 import { HOST_COMMAND_LIMITS } from "../ui-actions/host-commands.js";
 import { screenMessages } from "./screen.messages.js";
 
-export type ScreenVerdict = "allow" | "floor" | "unknown";
-/** 一条规则命中时的严重程度。floor、unknown 不让命令在沙箱外直接跑；log 照样跑，只把命中记下来。 */
-export type ScreenSeverity = Exclude<ScreenVerdict, "allow"> | "log";
+export type ScreenVerdict = "allow" | "floor";
+/** 一条规则命中时的严重程度。floor 不让命令在沙箱外直接跑；log 照样跑，只把命中记下来。 */
+export type ScreenSeverity = "floor" | "log";
 
 export const SCREEN_RULES = {
-  // 底线（4.2）
+  // 底线（第 10 节）：密钥、plc 自己的账本和配置、plc CLI、Lead 自报花钱。
   credentials: "floor",
   "ledger-write": "floor",
-  launchd: "floor",
-  "spends-money": "floor",
-  // 只记日志（用户 2026-11-11）：bash 被拦以后退回沙箱，沙箱照样能删家目录下的东西，这条拦不住什么，只让命令换了地方跑。
-  // 删的是底线保护的位置时（账本、凭证、启动文件、launchd），按那几条底线拦。
-  "delete-outside-roots": "log",
-  // 四条保守规则（4.2，用户 11-05 13:45 定）
-  "privilege-escalation": "unknown",
-  "startup-file-write": "floor",
   "plc-cli": "floor",
-  "too-long": "unknown",
-  // 读不懂（4.1 第 2、3 条）
-  "command-substitution": "unknown",
-  eval: "unknown",
-  xargs: "unknown",
-  "find-exec": "unknown",
-  "inline-code": "unknown",
-  heredoc: "unknown",
-  "dynamic-word": "unknown",
-  "shell-construct": "unknown",
-  "stdin-shell": "unknown",
-  "script-outside-scratch": "unknown",
-  "script-not-screened": "unknown",
-  unterminated: "unknown",
+  // 只有 Lead 自报的（工具参数 spends_money）。从程序名猜出来的是 spending-command，只记日志。
+  "spends-money": "floor",
+  // 只记日志（用户 2026-11-11）。以前的底线和保守规则：launchd、shell 的启动文件、换用户身份、从程序名猜出来的花钱。
+  "spending-command": "log",
+  launchd: "log",
+  "startup-file-write": "log",
+  "privilege-escalation": "log",
+  "delete-outside-roots": "log",
+  // 筛查器没有读的命令：超过 HOST_COMMAND_LIMITS.screenedCommand 的不往下读。
+  "too-long": "log",
+  // 读不懂的写法（4.1 第 2、3 条）：只记日志。
+  "command-substitution": "log",
+  eval: "log",
+  xargs: "log",
+  "find-exec": "log",
+  "inline-code": "log",
+  heredoc: "log",
+  "dynamic-word": "log",
+  "shell-construct": "log",
+  "stdin-shell": "log",
+  "script-outside-scratch": "log",
+  "script-not-screened": "log",
+  unterminated: "log",
 } as const satisfies Record<string, ScreenSeverity>;
 
 export type ScreenRule = keyof typeof SCREEN_RULES;
@@ -86,15 +91,15 @@ export interface ScreenHit {
 }
 
 export interface ScreenResult {
-  /** 有 floor 命中时是 floor，否则有 unknown 命中时是 unknown，否则 allow（log 命中不改变结果）。 */
+  /** 有 floor 命中时是 floor，否则 allow（log 命中不改变结果）。 */
   verdict: ScreenVerdict;
-  /** 第一条不放行的规则（floor 排在 unknown 前面）。allow 时为 null。 */
+  /** 第一条不放行的规则。allow 时为 null。 */
   rule: ScreenRule | null;
   /** 第一条不放行的规则命中的那一段。 */
   detail?: string;
   line?: number;
   script?: string;
-  /** 全部不放行的命中：floor 在前，unknown 在后，各自按命令里的顺序。allow 时为空。 */
+  /** 全部不放行的命中，按命令里的顺序。allow 时为空。 */
   hits: ScreenHit[];
   /** 只记日志的命中（log）。命令照样跑。 */
   logged: ScreenHit[];
@@ -173,13 +178,14 @@ export function screenHostCommand(input: ScreenInput): ScreenResult {
     startup: SANDBOX_DENY_WRITE_HOME.map((path) => join(home, path)),
   };
   const scripts: ScreenedScript[] = [];
-  // 太长的命令不往下读（确认卡上要能看全）；花钱是 Lead 自报的，命令照样往下筛，一起报出来。
-  const found: Hit[] = input.command.length > HOST_COMMAND_LIMITS.command
-    ? [{ rule: "too-long", detail: `${input.command.length}`, line: 1 }]
-    : [
-      ...(input.spendsMoney ? [{ rule: "spends-money" as const, detail: "spends_money", line: 1 }] : []),
-      ...screenSource(input.command, { cwd, vars: initialVars(home, cwd), depth: 0, scripts }, env),
-    ];
+  // 花钱是 Lead 自报的，命令照样往下筛，一起报出来。特别长的命令不往下读，只记下来（确认卡的 400 字上限在
+  // hostCommandInputOf，只管 run_on_host）。
+  const found: Hit[] = [
+    ...(input.spendsMoney ? [{ rule: "spends-money" as const, detail: "spends_money", line: 1 }] : []),
+    ...(input.command.length > HOST_COMMAND_LIMITS.screenedCommand
+      ? [{ rule: "too-long" as const, detail: `${input.command.length}`, line: 1 }]
+      : screenSource(input.command, { cwd, vars: initialVars(home, cwd), depth: 0, scripts }, env)),
+  ];
   const seen = new Set<string>();
   const all: ScreenHit[] = [];
   for (const hit of found) {
@@ -188,12 +194,12 @@ export function screenHostCommand(input: ScreenInput): ScreenResult {
     seen.add(key);
     all.push({ ...hit, severity: SCREEN_RULES[hit.rule] });
   }
-  const hits = [...all.filter((hit) => hit.severity === "floor"), ...all.filter((hit) => hit.severity === "unknown")];
+  const hits = all.filter((hit) => hit.severity === "floor");
   const logged = all.filter((hit) => hit.severity === "log");
   const first = hits[0];
   if (!first) return { verdict: "allow", rule: null, hits: [], logged, scripts };
   return {
-    verdict: first.severity === "floor" ? "floor" : "unknown", rule: first.rule, detail: first.detail, line: first.line,
+    verdict: "floor", rule: first.rule, detail: first.detail, line: first.line,
     ...(first.script ? { script: first.script } : {}), hits, logged, scripts: [],
   };
 }
@@ -214,10 +220,11 @@ export function screenHitReason(hit: ScreenHit, locale: Locale): string {
     "delete-outside-roots": () => m.deleteOutsideRoots(detail),
     launchd: () => m.launchd(detail),
     "spends-money": () => m.spendsMoney(detail),
+    "spending-command": () => m.spendingCommand(detail),
     "privilege-escalation": () => m.privilegeEscalation(detail),
     "startup-file-write": () => m.startupFileWrite(detail),
     "plc-cli": () => m.plcCli(detail),
-    "too-long": () => m.tooLong(HOST_COMMAND_LIMITS.command),
+    "too-long": () => m.tooLong(HOST_COMMAND_LIMITS.screenedCommand),
     "command-substitution": () => m.commandSubstitution(detail),
     eval: () => m.eval(detail),
     xargs: () => m.xargs(detail),
@@ -604,7 +611,7 @@ interface PathRef {
   glob: { dir: string; pattern: string } | null;
 }
 
-// 一条简单命令命中的全部规则。读不懂的写法（unknown）以后不再读这条命令的参数，只看它的重定向；底线命中以后接着往下看，
+// 一条简单命令命中的全部规则。读不懂的写法以后不再读这条命令的参数，只看它的重定向；底线命中以后接着往下看，
 // 一次报全。
 function screenCommand(command: SimpleCommand, context: ScreenContext, env: ScreenEnv): Hit[] {
   const hits: Hit[] = [];
@@ -679,10 +686,10 @@ function screenCommand(command: SimpleCommand, context: ScreenContext, env: Scre
   if (LAUNCHD_PROGRAMS.has(name)) at("launchd", name);
   const spending = SPENDING_COMMANDS.find((entry) => entry.programs.includes(name));
   const spendingWord = spending?.spends(argTexts.filter((arg) => !arg.startsWith("-")));
-  if (spendingWord) at("spends-money", `${name} ${spendingWord}`);
+  if (spendingWord) at("spending-command", `${name} ${spendingWord}`);
   if (HTTP_CLIENTS.has(name)) {
     const paid = argTexts.find((arg) => paidHost(arg));
-    if (paid) at("spends-money", `${name} ${paidHost(paid)}`);
+    if (paid) at("spending-command", `${name} ${paidHost(paid)}`);
   }
 
   // git：-C 换目录；git config --global 写 ~/.gitconfig；git clean 是删除。

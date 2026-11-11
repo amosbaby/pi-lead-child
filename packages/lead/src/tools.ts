@@ -27,7 +27,7 @@ import {
 import {
   listTriggers, setTriggerEnabled, type Trigger,
 } from "@pi-lead-child/store";
-import { listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice } from "@pi-lead-child/store";
+import { getWatch, listWatches, watchOrigin, WatchInputError, WATCH_LIMITS, type WatchAgentChoice } from "@pi-lead-child/store";
 import {
   checkRepositoryAccess, describeWatchSchedule, findRepositoryCheckout, HOST_COMMAND_LIMITS, hostCommandInputOf, isLiveUserTurn,
   parseRepositorySpec, recordTicketRepository, recordTicketRepositoryClone, runRecordedHostCommand, startRepositoryClone, workspaceRepository,
@@ -201,6 +201,7 @@ import { createHandOffTools, type LeadHandoffDeps } from "./hand-off-tool.js";
 import {
   authorityTurnId, authorizationCardResult, coreMemoryRefusal, setTimerInTurn, turnOriginOf, type CoreMemoryRefusal, type LeadTurnOrigin,
 } from "./turn-origin.js";
+import { decideWatchCommand, type WatchSetDecision } from "./watch-commands.js";
 import { deliverySnapshotLines } from "./delivery-snapshot-lines.js";
 
 const execFileAsync = promisify(execFile);
@@ -3154,10 +3155,12 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "能用沙箱、连接工具或专门的工具（list_processes、派子 agent）做的，不要用它。命令用用户的登录 shell（zsh -l）跑，"
         + `和他的终端一样；不超过 ${HOST_COMMAND_LIMITS.command} 个字符（卡上要能看全），长的先写成你临时目录里的脚本，命令写 bash <脚本>。`
         + "cwd 是绝对路径（缺省是 home）。reason 写清为什么要跑、为什么沙箱里做不了，会显示在卡上。"
-        + "通常结果是一张确认卡（user_action）：用 render_ui 发给用户；用户确认后命令才跑，跑完以后结果进你的收件箱。"
-        + "用户在设置里打开了免沙箱、而且这是用户本人发话的一轮时，命令马上跑：20 秒内跑完的，结果直接给你；"
+        + "用户在设置里打开了免沙箱时，命令在哪一轮都马上跑，不发卡（这时 bash 也在沙箱外跑，通常直接用 bash 就行）：20 秒内跑完的，结果直接给你；"
         + "跑得更久的（下载、升级）转到后台，你拿到作业编号，命令结束时系统叫醒你、把输出交给你，这期间你可以接着处理别的消息；"
         + "要停掉它用 stop_job。"
+        + "没开免沙箱、命令碰到底线（读凭证、写 plc 的账本、plc CLI、你自报会花钱），或者这一轮读过别人写的内容而决策模型判断"
+        + "这条命令不是用户交代的事、又难撤回时，结果是一张确认卡（user_action）：用 render_ui 发给用户；用户确认后命令才跑，"
+        + "跑完以后结果进你的收件箱。"
         + "timeout_seconds 是命令最多跑多久，到点停掉。完整输出在你的临时目录里。",
       parameters: Type.Object({
         command: Type.String({ minLength: 1, maxLength: HOST_COMMAND_LIMITS.command }),
@@ -3172,16 +3175,18 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         signal?: AbortSignal,
       ) => {
         const input = hostCommandInputOf(params);
-        // 免沙箱开着、用户本人正在发话、没读过外部内容、筛查器放行时直接跑，不发卡（docs/ticket-246-user-turn-bypass.md 3.1）。
-        const route = hostCommandRoute(db, deps, {
+        // 免沙箱开着时直接跑，不发卡（docs/ticket-246-user-turn-bypass.md 第 10 节）。碰到底线、或者这一轮带着外部内容而决策模型
+        // 判断要用户确认时发卡。
+        const route = await hostCommandRoute(db, deps, {
           command: input.command, cwd: input.cwd, via: "run_on_host", spendsMoney: input.spends_money === true, dataDir: deps.dataDir,
+          smartModel: deps.smartModel ?? null, reason: params.reason,
         });
         if (route.route === "host") {
           // 2026-11-10：这里以前不接收 signal，前台下载 3.2 GB 占住了这一步，红线中止也停不下（.scratch/tool-occupancy/spec.md）。
           // 现在命令收到中止信号时停掉整个进程组。什么时候发信号、什么时候转后台由中止兜底按工具清单决定（tool-abort-guard.ts）。
           const result = await runRecordedHostCommand(db, input, route.record, { dataDir: deps.dataDir, run: route.run, signal });
           return {
-            ...text(`${HOST_RUN_MARK}免沙箱开着，这是用户本人发话的一轮：命令直接跑了，没有发确认卡。退出码 ${result.exitCode ?? "未知"}。\n${result.text}`),
+            ...text(`${HOST_RUN_MARK}免沙箱开着：命令直接跑了，没有发确认卡。退出码 ${result.exitCode ?? "未知"}。\n${result.text}`),
             details: {
               exitCode: result.exitCode, timedOut: result.timedOut, aborted: result.aborted, outputPath: result.outputPath,
             } as Record<string, unknown>,
@@ -4672,7 +4677,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "通过时叫醒你，到 until 还没通过也叫醒你，然后检查结束。发出请求的同一轮里就设，不要在自己的一轮里循环等。\n"
         + "2. 定时做一件小事，例如每 20 分钟刷新一次登录。mode='repeat'：按 cron 或 every_seconds 一直查，"
         + "只在状态变化时叫醒你（第一次没通过、从通过变成没通过、恢复成通过）。不要用 follow_up 一次次叫醒自己，也不要让用户装 cron 或 launchd。\n"
-        + `check='command'：在你的 bash 沙箱里跑 command（工作目录是你的临时目录），退出码 0 算通过，非 0 或超过 ${WATCH_LIMITS.commandTimeoutSeconds} 秒算没通过。`
+        + `check='command'：到点跑 command（工作目录是你的临时目录），退出码 0 算通过，非 0 或超过 ${WATCH_LIMITS.commandTimeoutSeconds} 秒算没通过。`
+        + "命令缺省在你的 bash 沙箱里跑。用户打开了免沙箱时，为用户交代的事设的检查到点在沙箱外跑，用得到用户的凭证（gh、git）："
+        + "例如推完代码以后等 CI，用 `gh pr checks <编号>` 这类命令。设好以后的结果里写着它在哪里跑。别人要求设的检查照旧在沙箱里跑。"
         + "不用模型，不花 token：能用一条命令判断的优先用它，条件写进命令（例如 `... | grep -q ready`）。\n"
         + "check='agent'：开一个轻子 agent，brief 写清看什么、怎样算有结果。until 只开一个，由它自己在期限内反复查；"
         + "repeat 每次开一个。子 agent 交回时叫醒你。\n"
@@ -4708,11 +4715,16 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (params.check === "command" && !params.command?.trim()) throw new Error("check='command' 要写 command");
         if (params.check === "agent" && !params.brief?.trim()) throw new Error("check='agent' 要写 brief：看什么、怎样算有结果");
         if (params.ticket_id !== undefined && !getItem(db, params.ticket_id)) throw new Error(`item #${params.ticket_id} not found`);
-        // 命令检查到点会在沙箱里跑命令：和 bash 一样，外部消息叫醒的一轮里不设（hands.ts 的 handsBlockedInTurn，能力缺口）。
+        // 命令检查到点会跑命令：和 bash 一样，外部消息叫醒的一轮里不设（hands.ts 的 handsBlockedInTurn，能力缺口）。
+        // 到点在哪里跑、照哪条路设，设的时候判断一次（watch-commands.ts）：免沙箱开着时，用户交代的事带出来的检查在沙箱外跑。
+        let placed: WatchSetDecision = { path: "default", hostRun: false };
         if (params.check === "command") {
           const origin = turnOriginOf(deps);
           const live = origin.external && isLiveUserTurn(db, authorityTurnId(deps), "tickets:create");
           if (handsBlockedInTurn(origin, live)) throw new Error(EXTERNAL_TURN_WATCH_REFUSAL);
+          placed = await decideWatchCommand(db, deps, {
+            command: params.command!, dataDir: deps.dataDir, note: params.note, smartModel: deps.smartModel ?? null,
+          });
         }
         const model = params.check === "agent" && params.runtime
           ? assertModelChoice(db, params.runtime, params.model, params.effort)
@@ -4730,8 +4742,18 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             ...(params.every_seconds !== undefined ? { everySeconds: params.every_seconds } : {}),
             ...(params.cron !== undefined ? { cron: params.cron } : {}), ...(params.tz !== undefined ? { tz: params.tz } : {}),
             ...(until ? { untilAt: until.toISOString() } : {}), ...(params.ticket_id !== undefined ? { ticketId: params.ticket_id } : {}),
-          }, { ...(params.event !== undefined ? { event: params.event } : {}) });
-          return "refused" in done ? done.refused : text(done.set.text + (done.note ? ` ${done.note}` : ""));
+            ...(placed.hostRun ? { hostRun: true } : {}),
+          }, {
+            ...(params.event !== undefined ? { event: params.event } : {}),
+            ...(placed.path !== "default" ? { path: placed.path } : {}),
+            ...(placed.path === "external" ? { reason: placed.why } : {}),
+          });
+          if ("refused" in done) return done.refused;
+          // 到点在哪里跑：照设好的那一行说（外部来源的不在沙箱外跑，store 的 createWatch）。
+          const where = params.check !== "command" ? ""
+            : getWatch(db, done.set.id)?.host_run === 1 ? " 免沙箱开着：到点命令在沙箱外跑，用得到用户的凭证（gh、git）。"
+              : placed.path === "external" ? ` 到点命令在沙箱里跑：${placed.why}。` : "";
+          return text(done.set.text + where + (done.note ? ` ${done.note}` : ""));
         } catch (error) {
           if (error instanceof WatchInputError) throw new Error(`没有设：${error.message}`);
           throw error;

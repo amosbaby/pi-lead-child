@@ -3,7 +3,7 @@
 // 最差没考虑到的场景应该弹一个授权卡给我授权 lead 处理」。
 // 只在用户点了确认卡以后跑（rule-change-confirmations.ts 的 run_on_host）：命令和目录原样显示在卡上，账本记下是哪台设备
 // 确认的。命令用用户的登录 shell 跑（zsh -l，和终端里一样的 PATH），输出脱敏后存进 Lead 的临时目录，Lead 再读。
-// 免沙箱开关开着时（docs/ticket-246-user-turn-bypass.md，实施单 C），用户本人的一轮里 run_on_host 不弹卡、直接跑，Lead 的
+// 免沙箱开关开着时（docs/ticket-246-user-turn-bypass.md 第 10 节），run_on_host 在哪一轮都不弹卡、直接跑，Lead 的
 // bash 也在沙箱外跑（sandbox/host-bash.ts）。三条路共用这里的 spawn、时限、脱敏和落盘，每条命令都写 host_command.started
 // 和 finished（5.5）。
 import { spawn } from "node:child_process";
@@ -13,7 +13,7 @@ import { isAbsolute, join } from "node:path";
 import { dataDir as defaultDataDir } from "@pi-lead-child/core";
 import {
   HOST_COMMAND_FINISHED_KIND, HOST_COMMAND_STARTED_KIND, hostCommandEntityKey, redactKnownValues, redactSecretText, secretEnvValues,
-  type HostCommandTurnOrigin, type HostCommandVia,
+  type HostCommandJudgement, type HostCommandTurnOrigin, type HostCommandVia,
 } from "@pi-lead-child/protocol";
 import { appendEvent, type Db } from "@pi-lead-child/store";
 import { UiActionError } from "./types.js";
@@ -21,6 +21,8 @@ import { UiActionError } from "./types.js";
 export const HOST_COMMAND_LIMITS = {
   // 卡上能完整显示的长度（RULE_CHANGE_CONFIRMATION_LIMITS.value）：用户看不全的命令不能让他确认。
   command: 400,
+  // 筛查器最多读这么长的命令（免沙箱直接跑的 bash 没有 400 字的上限）。更长的不读，只记下来。
+  screenedCommand: 20_000,
   defaultTimeoutSeconds: 120,
   maxTimeoutSeconds: 1_800,
   // 存下的输出最多这么多字节，多的截掉并写明。
@@ -199,6 +201,10 @@ export interface HostCommandRecord {
   timeoutSeconds: number | null;
   screen: { verdict: string; rule: string | null } | null;
   spendsMoney: boolean;
+  // 这一轮带着的外部内容的来源（名字）。没有时不写。
+  externalContent?: string[];
+  // 带着外部内容的一轮里，决策模型对这条命令的判断。
+  judgement?: HostCommandJudgement;
 }
 
 /** 新的沙箱外命令的编号。确认卡上跑的用卡的编号。 */

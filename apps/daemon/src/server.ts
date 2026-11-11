@@ -15,7 +15,7 @@ import {
 } from "@pi-lead-child/lead";
 import {
   createLeadSession, DEFAULT_LOOKUP_ROOTS, findPullRequestRef, isExternalTextTool, LEAD_QUIET_TOOLS, leadSystemEvent, leadUserMessage,
-  listLookupCandidates, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
+  listLookupCandidates, watchCommandRunner, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
 } from "@pi-lead-child/lead";
 import {
   assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
@@ -5741,12 +5741,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   });
   tickReminders = () => scheduler.tickReminders();
 
-  // 后台检查（.scratch/lead-watch/spec.md）：命令检查在 Lead 的 bash 沙箱里跑（同一份 policy、同一个临时目录）；
+  // 后台检查（.scratch/lead-watch/spec.md）：命令检查在 Lead 的 bash 沙箱里跑（同一份 policy、同一个临时目录）。
+  // 免沙箱开着时，设的时候判断过的检查（watches.host_run）在沙箱外跑（lead 的 watch-commands.ts，用户 2026-11-11）；
   // 子代理检查建一张轻工单再派发，和 create_task(light=true) + spawn_child 一样。派发失败时取消这张工单，不让它留在 ready。
   const leadScratch = leadScratchDir(opts.dataDir);
   mkdirSync(leadScratch, { recursive: true, mode: 0o700 });
   const watchRunner = createWatchRunner(db, {
-    runCommand: sandboxWatchCommand(sandboxedBashOperations(() => leadSandboxPolicyAsync(db, opts.dataDir)), leadScratch),
+    runCommand: watchCommandRunner(db, {
+      dataDir: opts.dataDir, log,
+      sandboxed: sandboxWatchCommand(sandboxedBashOperations(() => leadSandboxPolicyAsync(db, opts.dataDir)), leadScratch),
+    }),
     startAgentCheck: (watch, task) => {
       const itemId = createWatchLightTask(db, { dataDir: opts.dataDir, watchId: watch.id, task, agent: watchAgentChoice(watch) });
       try {

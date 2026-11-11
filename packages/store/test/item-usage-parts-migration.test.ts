@@ -13,7 +13,7 @@ describe("the v64 item usage parts migration", () => {
     const db = openDb(join(tempDir("plc-v64-fresh-"), "plc.db"));
     expect(columns(db)).toEqual(expect.arrayContaining(PARTS));
     expect(db.prepare("SELECT name FROM schema_migrations WHERE version = 64").get()).toEqual({ name: "item-usage-parts-v1" });
-    expect(LATEST_SCHEMA_VERSION).toBe(64);
+    expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(64);
     expect(SCHEMA_MIGRATION_VERSIONS).toContain(64);
     const itemId = createItem(db, { title: "t", brief: "b", createdBy: "user" });
     expect(getItem(db, itemId)).toMatchObject({ uncached_input_tokens: 0, cache_write_tokens: 0, cache_read_tokens: 0, output_tokens: 0 });

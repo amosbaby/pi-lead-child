@@ -24,7 +24,9 @@
 //      （engine 的 external-content.ts），还没登记成 UI 动作的工具（改常设指令）用 ruleChangeRefusal。拒绝时系统存下这一个
 //      操作，结果里带着确认卡的 user_action：用户在卡上点「确认这一次」以后，系统只执行这一个操作
 //      （engine 的 rule-change-confirmations.ts，工单 09）。
-import { activePairedUserTurn, CORE_KINDS, getBinding, getHostBypass, type Db, type NoteKind, type PairedUserTurn } from "@pi-lead-child/store";
+import {
+  activePairedUserTurn, bindingScopes, CORE_KINDS, getBinding, getHostBypass, getTurn, type Db, type NoteKind, type PairedUserTurn,
+} from "@pi-lead-child/store";
 import { bindingOriginOf, type HostCommandTurnOrigin, type Scope, type TimerOrigin } from "@pi-lead-child/protocol";
 import {
   externalTimerOriginOf, externalTurnWhy, isLiveUserTurn, leadUserTurnOf, requestExternalTimer, requestRuleChangeConfirmation,
@@ -156,14 +158,17 @@ export function ruleChangeRefusal(
   };
 }
 
-// 免沙箱（docs/ticket-246-user-turn-bypass.md 3.1、3.2，实施单 C）。和改规则的拒绝用同一份数据：这一轮是不是用户本人
-// 正在说话（isLiveUserTurn）、这一轮带没带外部内容（externalContentOf）。不同的是读过外部内容以后用户本人的一轮也不放开
-// （沿用 2.3 的「收紧」档）：在沙箱外跑错的命令改不回来，而注入的路正是「用户让 Fairy 读 Slack，Slack 里写着请运行 X」。
+// 免沙箱（docs/ticket-246-user-turn-bypass.md 第 10 节）。用户 2026-11-11：「如果 bypass 都还要我审批，那 bypass 有啥意义呢」
+// 「当然要免 bypass 啊」「读过外部内容就退回沙箱太死了」。开关开着时，命令在哪一轮都在沙箱外跑：用户本人发话的一轮、系统事件
+// 叫醒的一轮、跟进到点的一轮都一样，读没读过外部内容也一样。这里只回答两件事：开关开没开，这一轮是谁的（写进
+// host_command.started）。这一轮带着的外部内容一起交出去：调用方（hands.ts 的 hostCommandRoute）据此请决策模型判断一次。
+// 唯一不生效的：用户端发起的一轮，它的凭证被撤销了，或者没有 tickets:create（受限的设备不能借 Lead 在这台 Mac 上跑命令）。
 // 每一次 bash、run_on_host 调用都重新算：同一轮里 externalBy 会变，开关也可能被关掉。
 export type HostBypassDecision =
-  | { active: true; turnId: string; turnOrigin: HostCommandTurnOrigin }
-  // off：开关关着，一切照旧，结果里也不写原因。另外两种开关开着，结果里写明为什么这一次没有免沙箱。
-  | { active: false; code: "off" | "not_user_turn" | "external_content"; why: string | null };
+  // turnId：用户本人发话的一轮的编号；别的一轮（turnOrigin 是 lead_turn）为 null，不冒充用户。
+  | { active: true; turnId: string | null; turnOrigin: HostCommandTurnOrigin; externalContent: readonly ExternalContentSource[] | null }
+  // off：开关关着，一切照旧，结果里也不写原因。credential：开关开着，这一轮的凭证不够，结果里写明原因。
+  | { active: false; code: "off" | "credential"; why: string | null };
 
 /** 这一轮凭证的来历写进 host_command.started：Slack 里给自己发的私信、plc、Companion。 */
 function liveTurnOrigin(db: Db, bindingId: number): HostCommandTurnOrigin {
@@ -175,32 +180,33 @@ function liveTurnOrigin(db: Db, bindingId: number): HostCommandTurnOrigin {
 }
 
 /**
- * 这一次能不能在沙箱外跑：开关开着、用户本人正在说话的一轮（Slack 里给自己发的私信开的一轮也算，3.3）、
- * 这一轮没有外部内容。不能时给出原因。
+ * 这一次能不能在沙箱外跑：开关开着就能，不管这一轮是谁叫醒的、读没读过外部内容。用户端发起的一轮要凭证有效而且有
+ * tickets:create。不能时给出原因。
  */
 export function hostBypassActive(db: Db, deps: TurnOriginDeps, now: Date = new Date()): HostBypassDecision {
   if (!getHostBypass(db, now).enabled) return { active: false, code: "off", why: null };
-  const turnId = authorityTurnId(deps);
-  if (!turnId || !isLiveUserTurn(db, turnId, "tickets:create")) {
+  const externalContent = externalContentOf(deps);
+  const leadTurn: HostBypassDecision = { active: true, turnId: null, turnOrigin: "lead_turn", externalContent };
+  const current = deps.currentTurnId?.() ?? null;
+  const turn = current ? getTurn(db, current) : undefined;
+  // 系统事件、跟进到点、外部消息叫醒的一轮（daemon 自己开的，或者没有编号）：Lead 自己的一轮。
+  if (!current || !turn || turn.origin_binding_id === null || !turn.origin_kind.startsWith("paired:")) return leadTurn;
+  // 用户端发起的一轮：凭证被撤销、或者没有 tickets:create 时不生效。
+  const binding = getBinding(db, turn.origin_binding_id);
+  if (!binding || binding.status !== "active" || !bindingScopes(binding).includes("tickets:create")) {
     return {
-      active: false, code: "not_user_turn",
-      why: "这一轮不是用户本人正在发话的一轮（定时器、跟进到点、外部消息或系统叫醒的），免沙箱只在用户本人发话的那一轮生效",
-    };
-  }
-  const sources = externalContentOf(deps);
-  if (sources !== null) {
-    return {
-      active: false, code: "external_content",
-      why: `${externalTurnWhy(sources)}，从那以后这一轮的命令不在沙箱外跑。用户在新的一条消息里再说一句，新的一轮又能免沙箱`,
+      active: false, code: "credential",
+      why: "这一轮来自的凭证不能在这台 Mac 上跑命令（凭证已经撤销，或者没有 tickets:create 这个权限）",
     };
   }
   let user: PairedUserTurn;
   try {
-    user = activePairedUserTurn(db, turnId, "host_bypass", "tickets:create");
+    user = activePairedUserTurn(db, current, "host_bypass", "tickets:create");
   } catch {
-    return { active: false, code: "not_user_turn", why: "这一轮不是用户本人正在发话的一轮，免沙箱只在用户本人发话的那一轮生效" };
+    // 凭证没问题，只是这一轮已经不是用户正在发话的一轮（例如结束了）：照 Lead 自己的一轮记，不冒充用户。
+    return leadTurn;
   }
-  return { active: true, turnId, turnOrigin: liveTurnOrigin(db, user.origin_binding_id) };
+  return { active: true, turnId: user.id, turnOrigin: liveTurnOrigin(db, user.origin_binding_id), externalContent };
 }
 
 /**
@@ -302,16 +308,19 @@ export type TimerInTurn =
  *   - 别的外部的一轮：按这一轮读的外部消息走决策模型。event 是 Lead 指明要求它的那条；不指明时用交给这一轮的第一条，
  *     但不写成发信人要求的（2026-10-28）。
  * 设了时返回设好的定时器和给 Lead 的一句话；被拦下时返回给 Lead 的结果（isError）。
+ * options.path 只给命令检查用（watch-commands.ts 的 decideWatchCommand，设的时候决策模型判断过一次）：
+ *   - own：这一轮只读过工具带回来的外部内容，命令是在办用户交代的事，照 Lead 自己（或者用户）的定时器设；
+ *   - external：命令不像用户交代的事、又难撤回，照别人要求的定时器走，即使这是用户本人的一轮。
  */
 export async function setTimerInTurn(
   db: Db, deps: TurnOriginDeps & { uiActionServices?: UiActionServices },
-  spec: TimerSpec, options: { event?: number; reason?: string } = {},
+  spec: TimerSpec, options: { event?: number; reason?: string; path?: "own" | "external" } = {},
 ): Promise<TimerInTurn> {
   const origin = turnOriginOf(deps);
   const turnId = authorityTurnId(deps);
   const user = userTurn(db, deps, spec.tool, "tickets:create");
   const common = { turnId, externalContent: externalContentOf(deps), services: deps.uiActionServices ?? {} };
-  if (!origin.external || user) {
+  if (options.path !== "external" && (!origin.external || user || options.path === "own")) {
     const setBy = !origin.external && user ? { turnId: user.id, bindingId: user.origin_binding_id, startedAt: user.created_at } : null;
     // 提醒的时间算谁定的（ui-action-parity P04）：和改提醒时间、停下工单同一个判断（engine 的 leadUserTurnOf）。
     const askedIn = spec.tool === "create_reminder" ? leadUserTurnOf(db, { actor: "lead" }, turnId, "create_reminder", "tickets:create") : null;

@@ -502,6 +502,19 @@ export function listLeadTurns(db: Db, opts?: { limit?: number }): ChannelTurnRow
   ).all(...DAEMON_NOTICE_ORIGINS, opts?.limit ?? 10) as ChannelTurnRow[];
 }
 
+/**
+ * 用户本人最近发给 Lead 的几句话，从新到旧（lead 的 host-command-judge.ts：判断一条命令是不是在办用户交代的事）。
+ * 只算用户端发起的一轮（origin 以 paired: 开头）；工单对话、系统发起的一轮、空的不算。
+ */
+export function recentUserTexts(db: Db, limit = 5): string[] {
+  return (db.prepare(
+    `SELECT user_text FROM channel_turns
+     WHERE origin_kind LIKE 'paired:%' AND origin_kind NOT LIKE '%:ticket-agent' AND origin_kind NOT LIKE '%:ticket'
+       AND trim(user_text) <> ''
+     ORDER BY created_at DESC, id DESC LIMIT ?`,
+  ).all(limit) as Array<{ user_text: string }>).map((row) => row.user_text);
+}
+
 export type ConversationFeedItem =
   | {
       id: string;
