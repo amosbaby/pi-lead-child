@@ -385,6 +385,14 @@ describe("ops commands", () => {
     expect(h.gatewayCalls()).toBe(0);
   });
 
+  // hub 导入旧库：要打开账本，在 daemon 一侧的运维入口里做（plc 不引用 store），不连网关。
+  it("hub import-db runs the ops entry with the source data directory", async () => {
+    const h = harness();
+    await h.run("hub", "import-db", "--from", "/Users/alice/legacy-data");
+    expect(h.calls).toEqual([["runOps", ["hub-import-db", "--from", "/Users/alice/legacy-data"]]]);
+    expect(h.gatewayCalls()).toBe(0);
+  });
+
   // 部署闸门（审查 2026-10-20 B）：plc daemon start 也经过闸门，--force 是显式的绕过。
   it("start passes --force to the ops entry only when it is given", async () => {
     const h = harness();

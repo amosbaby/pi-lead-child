@@ -18,6 +18,9 @@
 //   doctor         只读诊断
 //   lead-model     显示 Lead 模型与 provider
 //   lead-use SPEC  把 Lead 默认模型写入 config.json
+//   hub-import-db --from <旧数据目录>
+//                  把旧数据目录的 plc.db 复制进当前数据目录（store 的 hub-import.ts）：WAL 安全，原库不动，目标已有账本时拒绝，
+//                  在副本上执行对齐和迁移。只打印表名和行数
 //   sched-trace ID [--log FILE]...
 //                  一个工作单元（unit_…）或一轮（turn_…）的调度时间线（lead-scheduler spec D12）：daemon 日志、Lead 的会话文件和
 //                  events 表里的 scheduler.* 合在一起。只读文件、只读打开账本，daemon 卡住时照样能查。缺省读
@@ -46,13 +49,13 @@ import {
 import { defaultWebRoot } from "@pi-lead-child/gateway";
 import { isLocale, type DaemonLocalStatus, type LocalSocketCommand } from "@pi-lead-child/protocol";
 import {
-  dropLedgerGuards, ledgerGuardedTables, ledgerGuardDropSql, ledgerGuardTriggers, missingLedgerGuards, openExistingDb,
+  dropLedgerGuards, importLegacyDb, ledgerGuardedTables, ledgerGuardDropSql, ledgerGuardTriggers, missingLedgerGuards, openExistingDb,
   schedulerEventsOfUnit, schedulerUnitsOfTurn, type EventRecord,
 } from "@pi-lead-child/store";
 import { formatSchedTrace, readTraceLogLines, readTraceSessionEntries, SCHED_TRACE_ID, schedTrace, unitsOf } from "./sched-trace.js";
 
 const PROJECT_ROOT = projectRoot();
-const USAGE = "usage: ops.mjs start [--auto] | stop | install | desktop-install --root <dir> [--locale en|zh] [--progress-json] | login-shell-path | selfcheck | migrate-data-dir [--locale en|zh] [--follow] | uninstall | doctor | lead-model | lead-use <provider/model> | ledger-guard status|uninstall | sched-trace <unit_…|turn_…> [--log <file>]...";
+const USAGE = "usage: ops.mjs start [--auto] | stop | install | desktop-install --root <dir> [--locale en|zh] [--progress-json] | login-shell-path | selfcheck | migrate-data-dir [--locale en|zh] [--follow] | uninstall | doctor | lead-model | lead-use <provider/model> | ledger-guard status|uninstall | hub-import-db --from <dir> | sched-trace <unit_…|turn_…> [--log <file>]...";
 const SCHED_TRACE_USAGE = "usage: plc sched trace <unit_…|turn_…> [--log <file>]...";
 // start --auto 被 supervisor 拒绝（plc 的 daemon-link.ts 认这个退出码）。
 const AUTO_START_REFUSED = 3;
@@ -659,6 +662,30 @@ async function ledgerGuard(action: string | undefined): Promise<number> {
   return 0;
 }
 
+// 旧库导入 hub 数据目录。--from 是旧数据目录，目标是当前数据目录的 plc.db。输出只有表名、阶段名和数字。
+async function hubImportDb(args: string[]): Promise<number> {
+  const from = flagValue(args, "--from");
+  if (!from) { console.error(USAGE); return 2; }
+  const report = await importLegacyDb({ from: join(resolve(from), "plc.db"), to: dbPath() });
+  const line = (name: string, counts: { before: number; after: number }) =>
+    `  ${name}: ${counts.before} -> ${counts.after}${counts.before === counts.after ? "" : " (changed)"}`;
+  const tables = Object.entries(report.tableRows);
+  console.log(`imported the legacy database: ${tables.length} tables, ${tables.filter(([, counts]) => counts.before || counts.after).length} with rows`);
+  console.log("table rows (before -> after):");
+  for (const [name, counts] of tables) if (counts.before || counts.after) console.log(line(name, counts));
+  console.log("items by stage (before -> after):");
+  for (const [stage, counts] of Object.entries(report.stages)) console.log(line(stage, counts));
+  if (report.reconcile.renumbered.length) {
+    console.log("migration rows renumbered:");
+    for (const row of report.reconcile.renumbered) console.log(`  ${row.name}: v${row.from} -> v${row.to}`);
+  }
+  if (report.reconcile.foreign.length) {
+    console.log("migration rows from another branch, set aside:");
+    for (const name of report.reconcile.foreign) console.log(`  ${name}`);
+  }
+  return 0;
+}
+
 // 一个单元（或一轮）的调度时间线（lead-scheduler spec D12）。
 async function schedTraceCommand(args: string[]): Promise<number> {
   const [id, ...rest] = args;
@@ -725,6 +752,7 @@ try {
     case "lead-model": leadModel(); break;
     case "lead-use": process.exitCode = await leadUse(args[0]); break;
     case "ledger-guard": process.exitCode = await ledgerGuard(args[0]); break;
+    case "hub-import-db": process.exitCode = await hubImportDb(args); break;
     case "sched-trace": process.exitCode = await schedTraceCommand(args); break;
     default:
       console.error(USAGE);

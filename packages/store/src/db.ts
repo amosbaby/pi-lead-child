@@ -33,7 +33,7 @@ import {
   migrateSpuriousOutcomeRecords,
   migrateTicketAgentTurnText,
 } from "./data-corrections.js";
-import { reconcileMigrationRows } from "./migration-reconcile.js";
+import { reconcileMigrationRows, type ReconcileReport } from "./migration-reconcile.js";
 import { syncSystemStandingOrders } from "./standing-orders.js";
 import { migrateAuthorityToHandbook } from "./channel-handbook.js";
 import { dropLedgerGuards, installLedgerGuards, ledgerGuardsEnabled, registerLedgerWriter } from "./ledger-guard.js";
@@ -192,7 +192,8 @@ export function cacheStatements(db: Db, size = STATEMENT_CACHE_SIZE): Db {
   return db;
 }
 
-export function openDb(path: string): Db {
+// onReconcile 给要报告「对齐改了什么」的调用方（hub 导入旧库）；其他调用方不传。
+export function openDb(path: string, options: { onReconcile?: (report: ReconcileReport) => void } = {}): Db {
   const db = cacheStatements(new Database(path));
   try {
     db.pragma("journal_mode = WAL");
@@ -212,7 +213,8 @@ export function openDb(path: string): Db {
     // 两条分支的 v64–v67 号码相同、内容不同：打开别的分支迁移过的库时，先按名字把 schema_migrations 的号码对齐
     // （migration-reconcile.ts），否则下面每个 migrate* 按号码判断「已做过」就会错过 hub 自己的迁移。
     // 只改 schema_migrations 的行；全新库没有这张表，直接跳过。放在最前面，早于任何读 schema_migrations 的迁移。
-    reconcileMigrationRows(db);
+    const reconciled = reconcileMigrationRows(db); // 先执行，再交给回调：可选调用在没有回调时不会求值参数
+    options.onReconcile?.(reconciled);
     migrateItemRename(db);
     // 必须排在 exec(SCHEMA) 之前：SCHEMA 里的 items 索引与触发器都引用 kind，而
     // CREATE TABLE IF NOT EXISTS 不会给已存在的老表补列——老库上 exec(SCHEMA) 会直接抛

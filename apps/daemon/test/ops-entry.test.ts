@@ -6,7 +6,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { openDb } from "@pi-lead-child/store";
+import { createItem, openDb } from "@pi-lead-child/store";
 import { beforeEach, describe, expect, it } from "vitest";
 import { packageSource } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
@@ -104,6 +104,33 @@ describe("the ops entry", () => {
     } finally {
       await new Promise((resolve) => server.close(resolve));
     }
+  }, OPS_RUN_MS);
+
+  // hub 导入旧库：--from 是旧数据目录，目标是当前 PLC_DATA_DIR 的 plc.db。只打印表名和数字。
+  it("imports a legacy database into the data dir and prints counts only", async () => {
+    const legacyDir = tempDir("plc-ops-legacy-");
+    const legacy = openDb(join(legacyDir, "plc.db"));
+    createItem(legacy, { title: "secret title", brief: "secret brief", createdBy: "user" });
+    legacy.close();
+    const result = await ops(["hub-import-db", "--from", legacyDir]);
+    expect(result.code).toBe(0);
+    expect(result.stdout).toMatch(/items: 1 -> 1/);
+    expect(result.stdout).toMatch(/ready: 1 -> 1/);
+    expect(result.stdout).not.toContain("secret");
+    expect(existsSync(join(dir, "plc.db"))).toBe(true);
+    const copy = new Database(join(dir, "plc.db"), { readonly: true });
+    expect(copy.prepare("SELECT COUNT(*) AS n FROM items").get()).toEqual({ n: 1 });
+    copy.close();
+    // 再导一次：目标已经有库，拒绝，退出码 1。
+    const again = await ops(["hub-import-db", "--from", legacyDir]);
+    expect(again.code).toBe(1);
+    expect(again.stderr).toContain("already exists");
+  }, 2 * OPS_RUN_MS);
+
+  it("hub-import-db needs --from", async () => {
+    const result = await ops(["hub-import-db"]);
+    expect(result.code).toBe(2);
+    expect(existsSync(join(dir, "plc.db"))).toBe(false);
   }, OPS_RUN_MS);
 
   it("runs the read-only doctor", async () => {

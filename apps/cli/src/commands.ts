@@ -421,6 +421,13 @@ export function buildProgram(deps: CliDeps): Command {
     .description("账本的写入守卫：status 查看；uninstall 卸掉（先停 daemon，只回滚代码之前用）")
     .action((action: string) => ops(["ledger-guard", action])());
 
+  // hub 数据目录：旧库只读复制进来（hub 不和旧 daemon 共用数据目录）。要打开账本，所以在 daemon 一侧的运维入口里做。
+  const hubCmd = program.command("hub").description("ticket hub：把旧数据目录里的账本复制进当前数据目录");
+  hubCmd.command("import-db")
+    .description("把旧数据目录的 plc.db 复制进当前 PLC_DATA_DIR（WAL 安全，原库不动；目标已有账本时拒绝），并在副本上执行迁移；只打印表名和行数")
+    .requiredOption("--from <dir>", "旧数据目录（里面有 plc.db）")
+    .action((opts: { from: string }) => ops(["hub-import-db", "--from", opts.from])());
+
   program.command("doctor").description("只读诊断：只读打开账本，不执行迁移，不修改账本和配置").action(ops(["doctor"]));
 
   // Lead 调度器的查询入口（lead-scheduler spec D12）。只读文件和账本，不经过 daemon：daemon 卡住时照样能查。
