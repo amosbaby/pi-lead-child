@@ -258,7 +258,7 @@ export class ChannelSettings implements ChannelSettingsService, ChannelConnectio
     const timer = this.warnTimers.get(source);
     if (timer) clearTimeout(timer);
     this.warnTimers.delete(source);
-    const state = this.state(source);
+    const state = this.sourceState(source);
     if (this.stopped || !this.waitingForEvents(source, state)) return;
     const left = this.warnAt(state) - this.now().getTime();
     if (left <= 0) return;

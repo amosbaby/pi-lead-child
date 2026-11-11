@@ -18,7 +18,6 @@ import {
   DEFAULT_LOCAL_EMBEDDING, DEFAULT_LOCAL_RERANKER, HINDSIGHT_SECRETS_AAD, hindsightSecretsPath, isUsableDatabasePassword,
   MemoryController, newDatabasePassword, PINNED_MODEL_REVISIONS, type MemoryControllerHooks,
 } from "../src/memory-controller.js";
-import { SealedSecrets } from "../src/sealed-secrets.js";
 import type { SummaryModels } from "../src/memory-backend.js";
 import { memoryHarness, type MemoryHarness } from "./memory-fakes.js";
 

@@ -49,7 +49,7 @@ afterEach(() => {
   db.close();
 });
 
-function adapter(): ChannelAdapter {
+function adapter(connection?: ChannelAdapter["connection"]): ChannelAdapter {
   const settings: ChannelSettingsSpec = {
     secrets: [
       { name: ONE, label: "第一个", prefix: "fake-", hint: (locale) => (locale === "zh" ? "在这里生成" : "Generate it here") },
@@ -64,17 +64,17 @@ function adapter(): ChannelAdapter {
       return answer(secrets);
     },
   };
-  return { id: "fake", label: "Fake", auth: { connectionProvider: "fake", secrets: [ONE, TWO] }, settings } as unknown as ChannelAdapter;
+  return { id: "fake", label: "Fake", auth: { connectionProvider: "fake", secrets: [ONE, TWO] }, settings, connection } as unknown as ChannelAdapter;
 }
 
-function setup(options: { vault?: Vault; testTimeoutMs?: number } = {}) {
+function setup(options: { vault?: Vault; testTimeoutMs?: number; connection?: ChannelAdapter["connection"] } = {}) {
   const settings = new ChannelSettings({
     db, vault: options.vault ?? new Vault(randomBytes(32)), log: (line) => logs.push(line),
     env: (name) => env[name] ?? null, keychain: (name) => keychain[name] ?? null,
     publish: () => { publishes += 1; },
     ...(options.testTimeoutMs ? { testTimeoutMs: options.testTimeoutMs } : {}),
   });
-  const fake = adapter();
+  const fake = adapter(options.connection);
   settings.attach({ adapters: () => [fake], reload: async (source) => { reloads.push(source); } });
   return settings;
 }

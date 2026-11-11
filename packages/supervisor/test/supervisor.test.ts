@@ -37,10 +37,9 @@ async function waitStatus(
       phase: latest.supervisor.phase,
       maintenance: latest.supervisor.maintenance && {
         state: latest.supervisor.maintenance.state, error: latest.supervisor.maintenance.error,
-        failureKind: latest.supervisor.maintenance.failureKind,
       },
       daemonPid: latest.daemon?.pid ?? null,
-      deploy: latest.deploy && { ready: latest.deploy.ready, rebuild: latest.deploy.rebuild, reasons: latest.deploy.reasons },
+      deploy: latest.deploy && { ready: latest.deploy.ready, reasons: latest.deploy.reasons },
     };
     expect(predicate(latest), `last status: ${JSON.stringify(seen)}`).toBe(true);
   }, { timeout: 15_000, interval: 100 });

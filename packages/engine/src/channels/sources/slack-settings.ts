@@ -272,7 +272,7 @@ const SESSION_SECRETS: readonly ChannelSecretSpec[] = [
     name: SLACK_SESSION_COOKIE_ENV,
     label: "Slack 会话",
     prefix: SLACK_SESSION_COOKIE_PREFIX,
-    hint: "在设置 → 消息通道 → Slack 里点「登录 Slack」，在弹出的窗口里登录。它等于你整个 Slack 账号的权限，只存在这台 Mac 上。",
+    hint: () => "在设置 → 消息通道 → Slack 里点「登录 Slack」，在弹出的窗口里登录。它等于你整个 Slack 账号的权限，只存在这台 Mac 上。",
     // 网页版的 d cookie 可能超过 1000 个字符（#220）：用协议的上限。
     maxLength: CHANNEL_SECRET_MAX_LENGTH,
   },
