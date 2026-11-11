@@ -2,6 +2,7 @@
 //   - complete：工单 active → review（system 的边），外部 Run 结束（finished）。成果复用执行者的成果快照：完成的 checkpoint
 //     加一份 agent_reported 的成果（摘要、交付物）。证据（evidence）不是一条验证记录（系统没有跑过它），记在 Run 的
 //     metadata.completion 和 worker_completed 这条活动里。之后由用户验收；不新增 active → done。
+//     只读类（代查）的单回复发出以后由 system 走 review → done（closeout.ts）：关联的卡你已经回过了时，交完马上走。
 //   - hand_back：工单记成 needs_user（原因是工人给的），active → blocked（system 的边），外部 Run 结束（stopped）。
 //   - release（工单操作 ticket.release，用户或 Lead）：外部 Run 结束（stopped），工单 active → ready（user/lead 的边）。
 import type { Item } from "@pi-lead-child/core";
@@ -14,6 +15,7 @@ import { parseMetadata } from "../pipeline/run-registration.js";
 import { behalfCursor, behalfFields, transitionBy, type ActionAttribution } from "../ticket-actions/attribution.js";
 import { TicketActionError } from "../ticket-actions/types.js";
 import { openWorkerClaim, requireOwnClaim, touchItem } from "./claim.js";
+import { closeOutAnsweredTicket, settleDeferredLookups } from "./closeout.js";
 
 /** 回写结果（complete、hand_back）要工单在执行中。能做时为 null。 */
 export function writeBackBlocker(item: Item): string | null {
@@ -44,7 +46,8 @@ export interface CompleteTicketInput {
 export interface CompleteTicketResult {
   ticketId: number;
   runId: number;
-  stage: "review";
+  // done：只读类的单，关联的卡你已经回过了（closeout.ts）。
+  stage: "review" | "done";
   outcomeSnapshotId: number;
 }
 
@@ -86,7 +89,9 @@ export function completeTicket(db: Db, input: CompleteTicketInput): CompleteTick
       },
     });
     touchItem(db, input.itemId);
-    return { ticketId: input.itemId, runId: run.id, stage: "review", outcomeSnapshotId: snapshot.id };
+    settleDeferredLookups(db, { itemId: input.itemId, reason: `外部工人 ${input.workerName} 交了结果`, now });
+    const closed = closeOutAnsweredTicket(db, input.itemId, now);
+    return { ticketId: input.itemId, runId: run.id, stage: closed?.to ?? "review", outcomeSnapshotId: snapshot.id };
   }).immediate();
 }
 
@@ -115,6 +120,7 @@ export function handBackTicket(db: Db, input: HandBackInput): { ticketId: number
       payload: { decision: "worker_handed_back", reason: input.reason, workerName: input.workerName, bindingId: input.bindingId },
     });
     touchItem(db, input.itemId);
+    settleDeferredLookups(db, { itemId: input.itemId, reason: `外部工人 ${input.workerName} 交回给你了` });
     return { ticketId: input.itemId, runId: claim.runId, stage: "blocked" as const };
   }).immediate();
 }
@@ -146,6 +152,7 @@ export function releaseTicket(
       transition(db, { itemId: input.itemId, to: "ready", ...transitionBy(input.by), reason: input.reason, runId: claim.runId });
     }
     touchItem(db, input.itemId);
+    settleDeferredLookups(db, { itemId: input.itemId, reason: `放掉了外部工人 ${claim.workerName} 领着的单` });
     return { ticketId: input.itemId, runId: claim.runId, stage: getItem(db, input.itemId)!.stage };
   }).immediate();
 }

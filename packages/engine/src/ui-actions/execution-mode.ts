@@ -6,6 +6,7 @@
 import type { ExecutionModeDto, SetExecutionModeRequest } from "@pi-lead-child/protocol";
 import { EXECUTION_MODE_WHERE, getExecutionMode, setExecutionMode, type ExecutionModeChange } from "../execution-mode.js";
 import { AVAILABLE } from "../ticket-actions/types.js";
+import { settleDeferredLookups } from "../worker-queue/closeout.js";
 import type { UiActionDefinition, UiActionTargetKind } from "./types.js";
 
 const WORDS: Record<ExecutionModeDto["mode"], string> = {
@@ -31,7 +32,13 @@ export const EXECUTION_MODE_ACTIONS = {
     hint: "只有用户本人能切：你调用总是被拒绝。用户要切时，告诉用户去 " + EXECUTION_MODE_WHERE + " 切。不要发确认卡。",
     defaultReason: "切了执行模式",
     available: () => AVAILABLE,
-    run: (run): ExecutionModeChange => setExecutionMode(run.db, (run.input as SetExecutionModeRequest).mode),
+    run: (run): ExecutionModeChange => {
+      const change = setExecutionMode(run.db, (run.input as SetExecutionModeRequest).mode);
+      // 切回 self：没人领着的、外部模式下派的子 agent 工单不会再有外部工人接着做，它们在卡上排着的记录结束，卡又能派活
+      // （worker-queue/closeout.ts 的 settleDeferredLookups，CARRY→Task 11）。工单本身不动。
+      if (change.changed && change.mode === "self") settleDeferredLookups(run.db, { reason: "执行模式切回了 self，没有外部工人领着这张单" });
+      return change;
+    },
     forLead: (_run, result) => {
       const change = result as ExecutionModeChange;
       return change.changed ? { result: "updated", mode: change.mode } : { result: "unchanged", mode: change.mode };

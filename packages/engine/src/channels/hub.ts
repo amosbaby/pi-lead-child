@@ -99,6 +99,7 @@ import {
 } from "@pi-lead-child/store";
 import { channelDeliveryDecision } from "./delivery.js";
 import { recordDispatchedCardSource } from "../ticket-sources.js";
+import { onCardDisposed } from "../worker-queue/closeout.js";
 import {
   AUTHORITY_ANSWER_WINDOW_MS, AUTHORITY_ORDER, AUTHORITY_REFUSAL_TEXT, AUTHORITY_REVOKE_WINDOW_MS, closingReaction, type AuthorityAction,
 } from "./authority.js";
@@ -4668,6 +4669,25 @@ export class ChannelHub {
       `UPDATE events SET disposition = ?, disposition_detail = ?, disposed_at = ?
        WHERE kind = ? AND correlation_id = ? AND json_valid(payload) AND json_extract(payload, '$.cardId') = ? AND disposition IS NULL`,
     ).run(disposition, JSON.stringify(detail), this.now().toISOString(), MESSAGE_EVENT_KIND, `channel:${card.objectKey}`, card.id);
+    this.closeOutTickets(card.id);
+  }
+
+  /**
+   * 不记两遍账（external-worker-hub spec P1-6）：卡结束成 replied / resolved_elsewhere（你已经回了对方）时，关联的工单收尾
+   * （worker-queue/closeout.ts）。调用方都已经先改了卡的状态，这里按卡现在的状态判断。onCardDisposed 自己一笔事务，在调用方的
+   * 事务里是一个保存点：收尾出错时它自己回滚，这里只记日志，卡照样结束。
+   */
+  private closeOutTickets(cardId: number): void {
+    const card = getChannelCard(this.db, cardId);
+    if (!card) return;
+    try {
+      const closed = onCardDisposed(this.db, card, { state: card.state, now: this.now() });
+      for (const ticket of closed) {
+        this.log(`[channels] card #${card.id} was answered in the source (${card.state}): ticket #${ticket.ticketId} ${ticket.from} -> ${ticket.to}`);
+      }
+    } catch (error) {
+      this.log(`[channels] could not close out the tickets of card #${card.id}: ${errorText(error)}`);
+    }
   }
 
   /**

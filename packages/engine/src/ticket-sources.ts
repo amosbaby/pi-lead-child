@@ -11,7 +11,7 @@ import {
 import { TicketActionError } from "./ticket-actions/types.js";
 
 // 卡的锚点：卡回复的位置里的线程根（开卡的那条消息或者它所在线程的根）。
-function cardAnchor(card: ChannelCard): string | null {
+export function cardAnchor(card: ChannelCard): string | null {
   const ts = card.replyTarget.thread_ts;
   return typeof ts === "string" && ts !== "" ? ts : null;
 }
