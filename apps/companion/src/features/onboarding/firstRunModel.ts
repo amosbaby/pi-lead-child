@@ -9,7 +9,7 @@ import { onboardingMessages } from './onboarding.messages';
 // 首次启动页（2026-10-30，.scratch/onboarding/spec.md，画布 A1、A3）的纯函数：服务商预设、接入时的请求、推荐哪个模型。
 // 首次启动时还没有任何服务商（用户 2026-10-30）：先选接口类型、填 key 或地址，连接后读这家的模型列表，再选模型。
 
-export type FirstRunPresetId = 'anthropic' | 'openai' | 'google' | 'vibeproxy' | 'custom';
+export type FirstRunPresetId = 'openai' | 'google' | 'vibeproxy' | 'custom';
 
 export interface FirstRunPreset {
   id: FirstRunPresetId;
@@ -24,7 +24,6 @@ export interface FirstRunPreset {
 export const VIBEPROXY_BASE_URL = 'http://127.0.0.1:8317/v1';
 
 const PRESETS: readonly Omit<FirstRunPreset, 'label' | 'description'>[] = [
-  { id: 'anthropic', name: 'anthropic', baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages' },
   { id: 'openai', name: 'openai', baseUrl: 'https://api.openai.com/v1', api: 'openai-responses' },
   // Gemini 走 Google 的 OpenAI 兼容端点：目录和对话都用 Bearer key。
   { id: 'google', name: 'google', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', api: 'openai-completions' },
@@ -36,7 +35,7 @@ const PRESETS: readonly Omit<FirstRunPreset, 'label' | 'description'>[] = [
 
 // 品牌名不翻译；其他服务的名字和每一项的说明按界面语言。
 const BRAND_LABELS: Record<Exclude<FirstRunPresetId, 'custom'>, string> = {
-  anthropic: 'Anthropic', openai: 'OpenAI', google: 'Google', vibeproxy: 'vibeproxy',
+  openai: 'OpenAI', google: 'Google', vibeproxy: 'vibeproxy',
 };
 
 /** 预设的服务商，名字和说明按界面语言。 */

@@ -426,6 +426,29 @@ describe("ModelSettings: Claude targets are refused", () => {
     expect(t.providerRefreshes()).toBe(0);
   });
 
+  it("refuses a decision (intuition) model on the Anthropic host or with a Claude model name, and stores nothing", async () => {
+    const t = setup();
+    const before = JSON.stringify(loadPlcConfig(t.dataDir).decision ?? null);
+    await expectRefused(t.settings.saveFastModel({ name: "x", baseUrl: "https://api.anthropic.com", model: "decision-1", apiKey: "sk-test-0123456789" }),
+      "invalid_input", /never sends requests to Claude models/);
+    await expectRefused(t.settings.saveFastModel({ name: "y", baseUrl: "https://decide.example.com", model: "claude-haiku-5-5", apiKey: "sk-test-0123456789" }),
+      "invalid_input", /claude-haiku-5-5 \(decide\.example\.com\) is a Claude model/);
+    expect(JSON.stringify(loadPlcConfig(t.dataDir).decision ?? null)).toBe(before);
+    expect(t.secrets().get("decision.apiKey.x")).toBeNull();
+    // Editing an existing entry to point at Claude is refused the same way.
+    await t.settings.saveFastModel({ name: "fine", baseUrl: "https://decide.example.com", model: "decision-1" });
+    const id = loadDecisionModels(t.dataDir).entries.find((entry) => entry.name === "fine")!.id;
+    await expectRefused(t.settings.saveFastModel({ id, name: "fine", baseUrl: "https://api.anthropic.com", model: "decision-1" }), "invalid_input", /is a Claude model/);
+    updateDesignPreferences(t.db, { request: { locale: "zh" }, caller: { kind: "user" } });
+    await expectRefused(t.settings.saveFastModel({ name: "z", baseUrl: "https://decide.example.com", model: "claude-haiku-5-5" }), "invalid_input", /不会向 Claude 模型发请求/);
+  });
+
+  it("shows a hand-edited Claude decision entry with its reason and no address", async () => {
+    const t = setup({ decision: { models: [{ id: "c", name: "hand-written", baseUrl: "https://decide.example.com", model: "claude-sonnet-5" }], chain: ["c"] } });
+    const entry = (await t.settings.get()).fast.models.find((model) => model.id === "c")!;
+    expect(entry).toMatchObject({ baseUrl: null, apiKeySet: false, problem: expect.stringContaining("是 Claude 模型") });
+  });
+
   it("does not ask a provider named anthropic or claude-code for its catalog when it is already in config.json", async () => {
     const dataDir = tempDir("plc-model-settings-claude-");
     const db = openDb(join(dataDir, "plc.db"));

@@ -1,10 +1,9 @@
-// 首次启动页的文案（第一步大脑，第二步执行器）。服务商的品牌名（Anthropic、OpenAI、Google）不翻译。
+// 首次启动页的文案（第一步大脑，第二步执行器）。服务商的品牌名（OpenAI、Google）不翻译。
 import { defineMessages } from '@/i18n';
 
 export const onboardingMessages = defineMessages({
   en: {
     presets: {
-      anthropic: 'Claude models · key only',
       openai: 'GPT models · key only',
       google: 'Gemini models · key only',
       vibeproxy: 'A local proxy · Groups models by account when you have more than one',
@@ -76,7 +75,6 @@ export const onboardingMessages = defineMessages({
   },
   zh: {
     presets: {
-      anthropic: 'Claude 系列 · 只填 key',
       openai: 'GPT 系列 · 只填 key',
       google: 'Gemini 系列 · 只填 key',
       vibeproxy: '本机代理 · 多个账号时按账号分组',

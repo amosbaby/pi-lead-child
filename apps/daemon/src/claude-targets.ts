@@ -3,7 +3,7 @@
 import { isClaudeTarget, loadPlcConfig } from "@pi-lead-child/core";
 import { isClaudeLeadSpec, loadLeadModelConfig, refusedLeadModels } from "@pi-lead-child/lead";
 import { readServiceFile } from "@pi-lead-child/supervisor";
-import { loadDecisionModels } from "./decision-models.js";
+import { decisionEntryInputs, loadDecisionModels } from "./decision-models.js";
 
 export interface ClaudeModelTarget {
   where: string;
@@ -26,6 +26,10 @@ export function collectClaudeModelTargets(
   if (smart && isClaudeLeadSpec(smart, lead)) add("PLC_SMART_MODEL", smart);
   const fallback = loadDecisionModels(dataDir).llmFallback;
   if (fallback && isClaudeLeadSpec(fallback, lead)) add("decision.llmFallback", fallback);
+  // Decision (intuition) entries are loaded as "problem" entries when they are Claude: read the raw config here.
+  for (const entry of decisionEntryInputs(dataDir)) {
+    if (isClaudeTarget({ model: entry.model, baseUrl: entry.baseUrl })) add(`decision.models.${entry.id}`, `${entry.model} (${entry.baseUrl})`);
+  }
   const memory = loadPlcConfig(dataDir).memory?.llm ?? {};
   for (const slot of ["default", "consolidation"] as const) {
     const spec = memory[slot];

@@ -17,7 +17,7 @@ import {
 } from './firstRunModel';
 
 // 首次启动页（2026-10-30，.scratch/onboarding/spec.md，画布 A1、A3）：大脑不能用时整页显示，两步。
-//   1. 接入服务商：选接口类型（Anthropic、OpenAI、Google、其他 OpenAI 兼容），填 key（其他服务还要地址和接口格式），
+//   1. 接入服务商：选接口类型（OpenAI、Google、其他 OpenAI 兼容），填 key（其他服务还要地址和接口格式），
 //      连接后 daemon 读这家的模型目录。用的是设置 → 模型的 save_provider，和 Lead 的 perform_action 同一个操作。
 //   2. 选一个模型当大脑：set_brain_chain。daemon 热切换模型，设置状态说大脑能用了，这一页就换成会话（RootTabs）。
 // 「先进去看看」只在这次打开 App 时跳过；Lead 保持离线。
@@ -53,7 +53,7 @@ export function FirstRunBrain({ onSkip }: { onSkip: () => void }) {
   const avatar = useLeadAvatarSource({ state: 'idle', tone: 'quiet' });
   const { modelSettings } = useModelSettings();
   const { busy, run } = useModelAction();
-  const [preset, setPreset] = useState<FirstRunPresetId>('anthropic');
+  const [preset, setPreset] = useState<FirstRunPresetId>('openai');
   const [apiKey, setApiKey] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [api, setApi] = useState<ModelProviderApi>('openai-completions');

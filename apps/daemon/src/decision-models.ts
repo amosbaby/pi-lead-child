@@ -11,7 +11,8 @@ import {
   fastModelAuthHeaderMessages, fastModelAuthHeaderProblem, MODEL_MAX_CHAIN, normalizeFastModelAuthHeader, normalizeServiceUrl,
   SERVICE_URL_MESSAGES, serviceUrlHost, serviceUrlProblem,
 } from "@pi-lead-child/protocol";
-import { loadPlcConfig, writePlcConfig } from "@pi-lead-child/core";
+import { isClaudeTarget, loadPlcConfig, writePlcConfig } from "@pi-lead-child/core";
+import { claudeGuardMessages } from "@pi-lead-child/lead";
 import type { SealedSecrets } from "./sealed-secrets.js";
 
 export const DEFAULT_DECISION_BASE_URL = "https://api.typesafe.ai";
@@ -67,6 +68,11 @@ function entryOf(id: string, name: string, rawBaseUrl: string, model: string, ra
     : rawAuthHeader === undefined || rawAuthHeader === null ? null : "invalid";
   if (headerProblem) {
     return { id, name, baseUrl: null, host: null, model, authHeader: null, problem: `${name} 的鉴权头：${fastModelAuthHeaderMessages("zh")[headerProblem]}` };
+  }
+  // The daemon never sends requests to Claude: an entry that names a Claude model or the Anthropic host is kept in config.json
+  // but not used (no address, so SmartModel, the memory reranker and the test button all skip it), and its problem says why.
+  if (isClaudeTarget({ model, baseUrl: rawBaseUrl })) {
+    return { id, name, baseUrl: null, host: null, model, authHeader: null, problem: `${name}：${claudeGuardMessages("zh").modelRefused(model)}` };
   }
   return {
     id, name, baseUrl: normalizeServiceUrl(rawBaseUrl), host: serviceUrlHost(rawBaseUrl), model,

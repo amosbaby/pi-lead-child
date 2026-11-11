@@ -1024,6 +1024,9 @@ export class MemoryController implements MemoryService {
         ...(request.model ? { model: request.model } : {}),
       } : entry));
       const updated = inputs.find((entry) => entry.id === target.id);
+      if (updated && isClaudeTarget({ model: updated.model, baseUrl: updated.baseUrl })) {
+        throw new MemoryError("invalid_request", claudeGuardMessages(getLocale(this.options.db)).modelRefused(`${updated.model} (${serviceUrlHost(updated.baseUrl)})`));
+      }
       const host = serviceUrlHost(updated?.baseUrl ?? DEFAULT_DECISION_BASE_URL);
       writeDecisionModels(this.options.dataDir, { models: inputs, chain: models.chain, llmFallback: models.llmFallback });
       // key 只发给存它时的主机。换了主机又没带新 key：旧 key 删掉。

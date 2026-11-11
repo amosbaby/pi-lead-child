@@ -20,14 +20,14 @@ vi.mock('expo-router', () => ({
 
 function model(id: string): BrainModel {
   return {
-    model: `anthropic/${id}`, id, name: id, image: true, contextWindow: 1_000_000, efforts: [], defaultEffort: null,
+    model: `openai/${id}`, id, name: id, image: true, contextWindow: 1_000_000, efforts: [], defaultEffort: null,
     released: null, blockedUntil: null,
   };
 }
 
-const anthropic: ModelProvider = {
-  name: 'anthropic', baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages', keySet: true, keySource: 'settings', keyHost: 'api.anthropic.com',
-  problem: null, models: [model('claude-sonnet-5-5')],
+const openai: ModelProvider = {
+  name: 'openai', baseUrl: 'https://api.openai.com/v1', api: 'openai-responses', keySet: true, keySource: 'settings', keyHost: 'api.openai.com',
+  problem: null, models: [model('gpt-5-5')],
 };
 
 function modelSettings(providers: ModelProvider[]): ModelSettingsDto {
@@ -56,12 +56,12 @@ const FIRST_LOOK: RuntimeSettingsDto = {
 type Perform = (type: string, id: string, action: string, request: unknown) => Promise<{ target: unknown; action: string; result: unknown }>;
 
 function onboardingRuntime(options: { brain: boolean; runtimeSettings?: RuntimeSettingsDto[] }) {
-  const state = { providers: options.brain ? [anthropic] : [] as ModelProvider[], brain: options.brain };
+  const state = { providers: options.brain ? [openai] : [] as ModelProvider[], brain: options.brain };
   // 每次 GET 回下一份（重新检测时 daemon 重新找可执行文件），用完了一直回最后一份。
   const answers = [...(options.runtimeSettings ?? [FIRST_LOOK])];
   let current = answers[0]!;
   const perform = vi.fn<Perform>(async (_type, _id, action) => {
-    if (action === 'save_provider') state.providers = [anthropic];
+    if (action === 'save_provider') state.providers = [openai];
     if (action === 'set_brain_chain') state.brain = true;
     return { target: { type: 'model_settings', id: 'models' }, action, result: { summary: 'ok', note: null } };
   });
@@ -94,7 +94,7 @@ function onboardingRuntime(options: { brain: boolean; runtimeSettings?: RuntimeS
 
 // 第一步：接入服务商、选模型、上线。
 async function finishBrainStep() {
-  fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-ant-test' } });
+  fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-test-openai' } });
   fireEvent.click(screen.getByTestId('first-run-connect'));
   await waitFor(() => expect(screen.getByTestId('first-run-go')).toBeTruthy());
   fireEvent.click(screen.getByTestId('first-run-go'));
@@ -139,7 +139,7 @@ describe('the runtime step of the first-run guide', { timeout: 30_000 }, () => {
     resetFirstRunMemoryForTests();
     const again = onboardingRuntime({ brain: false });
     renderWithRuntime(<RootTabs />, again.runtime);
-    fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-ant-test' } });
+    fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-test-openai' } });
     fireEvent.click(screen.getByTestId('first-run-connect'));
     await waitFor(() => expect(screen.getByTestId('first-run-go')).toBeTruthy());
     fireEvent.click(screen.getByTestId('first-run-go'));
@@ -203,7 +203,7 @@ describe('the runtime step of the first-run guide', { timeout: 30_000 }, () => {
     const { runtime, client } = onboardingRuntime({ brain: false });
     (client as { getRuntimeSettings?: unknown }).getRuntimeSettings = undefined;
     renderWithRuntime(<RootTabs />, runtime);
-    fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-ant-test' } });
+    fireEvent.change(screen.getByTestId('first-run-api-key'), { target: { value: 'sk-test-openai' } });
     fireEvent.click(screen.getByTestId('first-run-connect'));
     await waitFor(() => expect(screen.getByTestId('first-run-go')).toBeTruthy());
     fireEvent.click(screen.getByTestId('first-run-go'));

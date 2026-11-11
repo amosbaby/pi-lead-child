@@ -24,7 +24,15 @@ describe("collectClaudeModelTargets (what plc doctor reports)", () => {
         },
         models: ["proxy/claude-haiku-5-5", "proxy/deepseek-chat"],
       },
-      decision: { llmFallback: "proxy/claude-haiku-5-5" },
+      decision: {
+        llmFallback: "proxy/claude-haiku-5-5",
+        models: [
+          { id: "named", name: "named", baseUrl: "https://decide.example.com", model: "claude-haiku-5-5" },
+          { id: "host", name: "host", baseUrl: "https://api.anthropic.com", model: "decision-1" },
+          { id: "fine", name: "fine", baseUrl: "https://decide2.example.com", model: "decision-1" },
+        ],
+        chain: ["named", "host", "fine"],
+      },
       memory: { llm: { default: "claude-code/haiku", consolidation: "proxy/deepseek-chat" } },
     }, {
       database: { kind: "pg0" }, embedding: { provider: "openai" }, databaseUrl: "x",
@@ -36,6 +44,8 @@ describe("collectClaudeModelTargets (what plc doctor reports)", () => {
       { where: "lead.providers.anthropic", spec: "http://127.0.0.1:9/v1" },
       { where: "PLC_SMART_MODEL", spec: "proxy/claude-sonnet-5" },
       { where: "decision.llmFallback", spec: "proxy/claude-haiku-5-5" },
+      { where: "decision.models.named", spec: "claude-haiku-5-5 (https://decide.example.com)" },
+      { where: "decision.models.host", spec: "decision-1 (https://api.anthropic.com)" },
       { where: "memory.llm.default", spec: "claude-code/haiku" },
       { where: "PLC_HINDSIGHT_LLM", spec: "proxy/claude-haiku-5-5" },
       { where: "hindsight service.json llm", spec: "claude-code/haiku" },

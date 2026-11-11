@@ -415,6 +415,8 @@ export class ModelSettings implements ModelSettingsService {
       const m = modelSettingsMessages(locale);
       const baseUrl = checkedUrl(request.baseUrl, locale);
       const host = serviceUrlHost(baseUrl);
+      // The daemon never sends requests to Claude: a decision model on the Anthropic host or with a Claude model name is not saved.
+      if (isClaudeTarget({ model: request.model, baseUrl })) invalid(claudeGuardMessages(locale).modelRefused(`${request.model} (${host})`));
       const current = loadDecisionModels(this.options.dataDir);
       const inputs = decisionEntryInputs(this.options.dataDir);
       let id = request.id;

@@ -4,25 +4,37 @@ import type { BrainModel, ModelProvider, RuntimeSettingsDto } from '@pi-lead-chi
 import { describe, expect, it } from 'vitest';
 
 import {
-  customProviderName, firstRunModelList, firstRunProviderFacts, firstRunProviderRequest, firstRunRuntimeRequests, firstRunRuntimeRows,
+  customProviderName, firstRunModelList, firstRunPreset, firstRunPresets, firstRunProviderFacts, firstRunProviderRequest, firstRunRuntimeRequests, firstRunRuntimeRows,
   firstRunStep, modelPrefixes, prefixAnswerRequest, prefixQuestion, recommendedBrainModel, type FirstRunStepInput,
 } from './firstRunModel';
 
 function model(id: string, extra: Partial<BrainModel> = {}): BrainModel {
   return {
-    model: `anthropic/${id}`, id, name: null, image: true, contextWindow: 1_000_000, efforts: [], defaultEffort: null,
+    model: `openai/${id}`, id, name: null, image: true, contextWindow: 1_000_000, efforts: [], defaultEffort: null,
     released: null, blockedUntil: null, ...extra,
   };
 }
 
 function provider(models: BrainModel[], problem: string | null = null): ModelProvider {
-  return { name: 'anthropic', baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages', keySet: true, keySource: 'settings', keyHost: 'api.anthropic.com', models, problem };
+  return { name: 'openai', baseUrl: 'https://api.openai.com/v1', api: 'openai-responses', keySet: true, keySource: 'settings', keyHost: 'api.openai.com', models, problem };
 }
+
+// The daemon never sends requests to Claude models, so the first-run guide offers no Anthropic preset (R11).
+describe('the provider presets', () => {
+  it('offer no Claude provider, in either language, and the first one is OpenAI', () => {
+    for (const locale of ['en', 'zh'] as const) {
+      const presets = firstRunPresets(locale);
+      expect(presets.map((preset) => preset.id)).toEqual(['openai', 'google', 'vibeproxy', 'custom']);
+      expect(JSON.stringify(presets)).not.toMatch(/anthropic|claude/i);
+    }
+    expect(firstRunPreset('anthropic' as never, 'en').id).toBe('openai');
+  });
+});
 
 describe('the provider request', () => {
   it('fills the preset address and protocol and needs only a key', () => {
-    expect(firstRunProviderRequest({ preset: 'anthropic', apiKey: ' sk-ant ', baseUrl: '', api: 'openai-completions' }, [], 'en')).toEqual({
-      ok: true, input: { name: 'anthropic', baseUrl: 'https://api.anthropic.com', api: 'anthropic-messages', apiKey: 'sk-ant' },
+    expect(firstRunProviderRequest({ preset: 'openai', apiKey: ' sk-test ', baseUrl: '', api: 'openai-completions' }, [], 'en')).toEqual({
+      ok: true, input: { name: 'openai', baseUrl: 'https://api.openai.com/v1', api: 'openai-responses', apiKey: 'sk-test' },
     });
     expect(firstRunProviderRequest({ preset: 'google', apiKey: 'g', baseUrl: '', api: 'openai-completions' }, [], 'en')).toMatchObject({
       ok: true, input: { baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai', api: 'openai-completions' },
@@ -64,23 +76,23 @@ describe('the provider request', () => {
 
 describe('the model choice', () => {
   it('recommends the newest model that is not a small one, and lists it first', () => {
-    const models = [model('claude-haiku-5-5'), model('claude-sonnet-5-5'), model('claude-opus-5-5')];
-    expect(recommendedBrainModel(models)?.id).toBe('claude-sonnet-5-5');
-    expect(firstRunModelList(models, 2).map((entry) => entry.id)).toEqual(['claude-sonnet-5-5', 'claude-haiku-5-5']);
+    const models = [model('gpt-5-mini'), model('gpt-5-5'), model('gpt-5-pro')];
+    expect(recommendedBrainModel(models)?.id).toBe('gpt-5-5');
+    expect(firstRunModelList(models, 2).map((entry) => entry.id)).toEqual(['gpt-5-5', 'gpt-5-mini']);
     expect(recommendedBrainModel([model('gpt-mini')])?.id).toBe('gpt-mini');
     expect(recommendedBrainModel([])).toBeNull();
   });
 
   it('stays on step one with the reason when the catalog is empty or failed', () => {
     expect(firstRunProviderFacts(null, 'en')).toMatchObject({ connected: false, problem: null });
-    expect(firstRunProviderFacts(provider([], 'GET https://api.anthropic.com/v1/models failed: 401'), 'en')).toMatchObject({
-      connected: false, problem: 'GET https://api.anthropic.com/v1/models failed: 401',
+    expect(firstRunProviderFacts(provider([], 'GET https://api.openai.com/v1/models failed: 401'), 'en')).toMatchObject({
+      connected: false, problem: 'GET https://api.openai.com/v1/models failed: 401',
     });
     expect(firstRunProviderFacts(provider([]), 'en')).toMatchObject({
-      connected: false, problem: 'The catalog of anthropic has no models. Check the address and the API format.',
+      connected: false, problem: 'The catalog of openai has no models. Check the address and the API format.',
     });
-    expect(firstRunProviderFacts(provider([]), 'zh')).toMatchObject({ connected: false, problem: 'anthropic 的目录里一个模型也没有。检查地址和接口格式。' });
-    expect(firstRunProviderFacts(provider([model('claude-sonnet-5-5')]), 'en')).toMatchObject({ connected: true, modelCount: 1, problem: null });
+    expect(firstRunProviderFacts(provider([]), 'zh')).toMatchObject({ connected: false, problem: 'openai 的目录里一个模型也没有。检查地址和接口格式。' });
+    expect(firstRunProviderFacts(provider([model('gpt-5-5')]), 'en')).toMatchObject({ connected: true, modelCount: 1, problem: null });
   });
 });
 

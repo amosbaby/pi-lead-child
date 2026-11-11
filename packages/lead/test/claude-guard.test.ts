@@ -1,11 +1,15 @@
 // The daemon never sends HTTP to Claude-family models: Lead's own model, the provider catalog and the model-change checks.
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
+import { tempDir } from "@pi-lead-child/core/testing";
 import {
   assertConfiguredLeadModel, DEFAULT_LEAD_MODEL, isClaudeLeadSpec, leadModelCatalog, normalizeLeadModelConfig, refusedLeadModels,
-  selectedLeadModelSpec, usableLeadModels,
+  registerLeadProviders, selectedLeadModelSpec, usableLeadModels,
 } from "../src/model-config.js";
+import { createLeadSmartModel } from "../src/smart-model.js";
 
 const servers: Server[] = [];
 afterEach(() => {
@@ -91,5 +95,77 @@ describe("a Claude provider receives no request", () => {
     const catalog = await leadModelCatalog(normalizeLeadModelConfig({ providers: { proxy: { baseUrl: server.baseUrl, discover: true } }, models: [] }, {}), {});
     expect(catalog.models.map((model) => model.id)).toEqual(["claude-haiku-5-5", "deepseek-chat"]);
     expect(server.requests()).toBeGreaterThan(0);
+  });
+});
+
+// A cycle against a real ModelRuntime and a local HTTP server that stands in for an ordinary proxy provider serving both a
+// Claude model and another one. Every inference request is recorded with the model it names.
+describe("a whole cycle sends no inference request to a Claude model", () => {
+  async function inferenceServer(): Promise<{ baseUrl: string; models: () => string[] }> {
+    const named: string[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (chunk: Buffer) => chunks.push(chunk));
+      req.on("end", () => {
+        if (req.method === "POST") {
+          try {
+            named.push(String((JSON.parse(Buffer.concat(chunks).toString("utf8")) as { model?: unknown }).model));
+          } catch {
+            named.push("(unreadable)");
+          }
+          res.statusCode = 500; // the answer does not matter, only who was asked
+          res.end("{}");
+          return;
+        }
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ data: [{ id: "claude-haiku-5-5" }, { id: "deepseek-chat" }] }));
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    return { baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, models: () => named };
+  }
+
+  async function cycle(input: { models: string[]; env: Record<string, string>; llmFallback?: string; leadSpec?: string }) {
+    const server = await inferenceServer();
+    const config = normalizeLeadModelConfig({
+      providers: { proxy: { api: "openai-completions", baseUrl: server.baseUrl, discover: true, apiKey: { value: "local-test" } } },
+      models: input.models,
+    }, {});
+    const runtime = await ModelRuntime.create({ allowModelNetwork: false, refreshOnCreate: false, authPath: join(tempDir("plc-guard-auth-"), "auth.json") });
+    await registerLeadProviders(runtime, config, input.env);
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config, leadSpec: input.leadSpec ?? selectedLeadModelSpec(config, input.env), dataDir: tempDir("plc-guard-smart-"), env: input.env,
+      ...(input.llmFallback ? { llmFallback: () => input.llmFallback! } : {}),
+    });
+    const outcomes: unknown[] = [];
+    for (const ask of [
+      () => built.smartModel?.decide("state", { ok: { type: "yes_no", prompt: "Is it fine?" } }),
+      () => built.complete?.("summarise", { purpose: "channel_memory" }),
+    ]) {
+      await Promise.resolve(ask()).then((value) => outcomes.push(value), (error) => outcomes.push(error));
+    }
+    return { built, asked: server.models(), outcomes };
+  }
+
+  it("asks only the model that is not Claude when Claude is chosen everywhere else", async () => {
+    const { built, asked } = await cycle({
+      models: ["proxy/claude-haiku-5-5", "proxy/deepseek-chat"],
+      env: { PLC_SMART_MODEL: "proxy/claude-haiku-5-5" }, llmFallback: "proxy/claude-haiku-5-5",
+    });
+    expect(built.llmSpec).toBe("proxy/deepseek-chat");
+    expect(asked.length).toBeGreaterThan(0); // the instrument works: the other model was asked
+    expect(new Set(asked)).toEqual(new Set(["deepseek-chat"]));
+  });
+
+  it("asks nobody when every model Lead and the smart model could use is Claude", async () => {
+    // leadSpec is given outright: Lead itself would not start on this model, but the smart model must not take it either.
+    const { built, asked } = await cycle({
+      models: ["proxy/claude-haiku-5-5"], env: { PLC_SMART_MODEL: "proxy/claude-haiku-5-5" }, llmFallback: "proxy/claude-haiku-5-5",
+      leadSpec: "proxy/claude-haiku-5-5",
+    });
+    expect(built.llmSpec).toBeNull();
+    expect(built.smartModel).toBeNull();
+    expect(asked).toEqual([]);
   });
 });

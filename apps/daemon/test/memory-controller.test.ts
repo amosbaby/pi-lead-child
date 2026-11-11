@@ -626,6 +626,61 @@ describe("MemoryController: connection tests", () => {
   });
 });
 
+// The daemon never sends requests to Claude: a decision (intuition) entry that names the Anthropic host or a Claude model, e.g. one
+// written by hand in config.json, stays in the file but is never called, never given a key and never used as the reranker.
+describe("MemoryController: a decision model that is Claude", () => {
+  function withClaudeEntries(t: ReturnType<typeof setup>) {
+    const file = loadPlcConfig(t.dataDir);
+    writePlcConfig({
+      ...file,
+      decision: {
+        models: [
+          { id: "named", name: "named-claude", baseUrl: "https://decide.example.com", model: "claude-haiku-5-5" },
+          { id: "host", name: "anthropic-host", baseUrl: "https://api.anthropic.com", model: "decision-1" },
+          { id: "fine", name: "fine", baseUrl: "https://decide2.example.com", model: "decision-1" },
+        ],
+        chain: ["named", "host", "fine"],
+      },
+    }, t.dataDir);
+    const secrets = new SealedSecrets<string>(t.db, t.vault);
+    secrets.set("decision.apiKey.named", { value: "claude-key-0123456789", host: "decide.example.com" });
+    secrets.set("decision.apiKey.host", { value: "claude-key-9876543210", host: "api.anthropic.com" });
+    secrets.set("decision.apiKey.fine", { value: "fine-key-0123456789", host: "decide2.example.com" });
+  }
+
+  it("skips Claude entries in the chain SmartModel is given, whatever keys are stored for them", async () => {
+    const t = setup();
+    withClaudeEntries(t);
+    await t.controller.start();
+    expect(t.controller.decisionChainCredentials()).toEqual([
+      { baseUrl: "https://decide2.example.com", model: "decision-1", apiKey: "fine-key-0123456789", keyHost: "decide2.example.com" },
+    ]);
+    // The settings page shows the entries with the reason; the test button sends nothing.
+    await expect(t.controller.testDecisionEntry("named")).rejects.toMatchObject({ code: "invalid_url", message: expect.stringContaining("是 Claude 模型") });
+    await expect(t.controller.testDecisionEntry("host")).rejects.toMatchObject({ code: "invalid_url" });
+    expect(t.harness.requests.filter((request) => /anthropic|decide\.example\.com/.test(request.url))).toEqual([]);
+  });
+
+  it("does not use a Claude primary entry as the memory reranker", async () => {
+    const t = setup();
+    withClaudeEntries(t);
+    writePlcConfig({ ...loadPlcConfig(t.dataDir), decision: { ...loadPlcConfig(t.dataDir).decision, chain: ["host"] } }, t.dataDir);
+    await runningLocal(t);
+    expect(readServiceFile(t.dataDir)?.reranker).toEqual({ provider: "none" });
+    expect(t.sealed().decisionApiKey).toBeUndefined();
+    expect(t.controller.decisionChainCredentials()).toEqual([]);
+  });
+
+  it("refuses the old route's change to a Claude address or model", async () => {
+    const t = setup();
+    await t.controller.start();
+    await expect(t.controller.updateDecisionModel({ baseUrl: "https://api.anthropic.com" }))
+      .rejects.toMatchObject({ code: "invalid_request", message: expect.stringContaining("是 Claude 模型") });
+    await expect(t.controller.updateDecisionModel({ model: "claude-haiku-5-5" })).rejects.toMatchObject({ code: "invalid_request" });
+    expect(loadPlcConfig(t.dataDir).decision?.baseUrl ?? "https://api.typesafe.ai").toBe("https://api.typesafe.ai");
+  });
+});
+
 // 2026-11-06：公司的 LLM 网关要自定义的鉴权头，值是 key 原文。测试连接走同一个头；记忆服务的重排只会用 Authorization: Bearer，
 // 所以主用要自定义头时重排不用它，设置页说明原因。
 describe("MemoryController: a decision model behind a custom auth header", () => {
