@@ -293,12 +293,14 @@ export const AGENT_TOOL_DEFINITIONS: AgentToolDefinition[] = [
   },
   {
     name: "request_decision",
-    description: "Request a Lead or user decision with durable checkpoint context. "
+    // 没有 audience（用户 2026-11-11）：child 只管把问题问清楚，问谁由 Lead 定。
+    description: "Ask how to decide when you are not sure, with durable checkpoint context. "
+      + "You do not choose who answers: Lead answers it, or finds the right person and brings the answer back. "
+      + "Say what is uncertain, which options you see, and what you already checked. "
       + "Also use it when an acceptance criterion of the current ticket looks wrong (cannot be met, contradicts another, "
       + "is unclear, or conflicts with the brief): name the criterion's number and id. You cannot change the criteria yourself.",
     inputSchema: objectSchema({
       kind: { enum: ["decision", "question", "blocker"] },
-      audience: { enum: ["lead", "user", "lead_or_user"] },
       blocking: { type: "boolean" },
       allow_custom: { type: "boolean" },
       prompt: { type: "string" },
@@ -309,7 +311,7 @@ export const AGENT_TOOL_DEFINITIONS: AgentToolDefinition[] = [
         }, ["id", "label"]),
       },
       checkpoint: decisionCheckpointSchema,
-    }, ["kind", "audience", "prompt", "checkpoint"]),
+    }, ["kind", "prompt", "checkpoint"]),
   },
   {
     name: "begin_planning",
@@ -521,7 +523,6 @@ const CHECKPOINT_KINDS = new Set<CheckpointKind>([
   "progress", "milestone", "decision", "delegation", "blocked", "completed",
 ]);
 const DECISION_KINDS = new Set<DecisionRequestKind>(["decision", "question", "blocker"]);
-const DECISION_AUDIENCES = new Set<DecisionRequestAudience>(["lead", "user", "lead_or_user"]);
 const SECRET_PATTERN = /(?:\b(?:[a-z0-9_-]*token|api[_-]?key|secret|password|passwd)\b\s*[:=]\s*\S+|\bBearer\s+[A-Za-z0-9._~+\/-]{8,}|\b(?:sk|ghp|github_pat)_[A-Za-z0-9_-]{8,})/i;
 
 function assertDisplaySafe(value: string): void {
@@ -1379,8 +1380,9 @@ export function createAgentToolHandlers(context: {
           ]);
           const kind = String(args.kind) as DecisionRequestKind;
           if (!DECISION_KINDS.has(kind)) throw new Error("invalid decision kind");
-          const audience = String(args.audience) as DecisionRequestAudience;
-          if (!DECISION_AUDIENCES.has(audience)) throw new Error("invalid decision audience");
+          // child 不选问谁（用户 2026-11-11）：一律存成 Lead 和用户都能回答，由 Lead 决定自己答、去问别人还是摆给用户。
+          // 旧的提示词可能还带 audience：收下，不用。
+          const audience: DecisionRequestAudience = "lead_or_user";
           const blocking = optionalBoolean(args, "blocking") ?? true;
           const allowCustom = optionalBoolean(args, "allow_custom") ?? false;
           const options = args.options === undefined ? undefined : (() => {

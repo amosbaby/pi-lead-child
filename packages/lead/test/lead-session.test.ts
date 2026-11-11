@@ -52,7 +52,11 @@ describe("lead prompt disciplines", () => {
     const anchors: Record<string, string[]> = {
       "ticket-acceptance": ["验收标准", "record_decision"],
       // 审批和决定请求；重试用尽之后要停，并把决定权交回用户——不是换个姿势再试一次。
-      "run-supervision": ["审批你自己判断", "lead_or_user", "perform_action(target_type='decision'", "重试有上限，用尽了就停", "把决定权交回用户"],
+      // 2026-11-11：child 不再选问谁（没有 audience）。决定请求由 Lead 定问谁，回答要有出处，找不到人交给用户、不猜。
+      "run-supervision": [
+        "审批你自己判断", "决定请求由你来定问谁", "写不出出处的不算已有信息", "不要自己推测负责人是谁",
+        "perform_action(target_type='decision'", "重试有上限，用尽了就停", "把决定权交回用户",
+      ],
     };
     for (const [skill, list] of Object.entries(anchors)) {
       expect(LEAD_SYSTEM_PROMPT).toContain(`skill ${skill}`);
