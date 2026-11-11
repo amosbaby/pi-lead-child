@@ -126,12 +126,15 @@ import {
   createOptimisticUserMessage,
   dismissOptimisticMessage,
   markTurnDelivered,
+  optimisticUserMessageId,
   resolveOptimisticUserMessage,
   setOutboxMessageState,
+  turnLacksQuestion,
 } from './control-plane/actions';
 import { reduceGatewayEvent, type StreamMutation } from './control-plane/eventReducer';
 import {
   CONVERSATION_TURN_INVALIDATION,
+  conversationTurnInvalidation,
   createInvalidationCoordinator,
   type InvalidationCoordinator,
 } from './control-plane/invalidation';
@@ -254,7 +257,7 @@ export interface WebBuildSource {
 }
 
 // 发件箱里一条消息在会话里的本地消息 id。
-const outboxMessageId = (clientMessageId: string) => `optimistic:${clientMessageId}:user`;
+const outboxMessageId = optimisticUserMessageId;
 
 function memoryOutboxStorage(): OutboxStorage {
   const values = new Map<string, string>();
@@ -1839,6 +1842,11 @@ export class CompanionStateRuntime {
         applyControlPlaneMutation(this.control, sessionId, mutation);
       }
       for (const mutation of reduction.streams) this.applyStreamMutation(mutation);
+      // 别的设备发起的一轮：这里没有那句提问。单独取这一轮，提问和图片马上出现，不等这一轮答完。
+      const started = adapted.event.type === 'lead.turn.started' ? adapted.event : null;
+      if (started?.turnId && turnLacksQuestion(this.control, started.turnId, started.payload.commandId)) {
+        invalidations.push(conversationTurnInvalidation(started.turnId));
+      }
       this.invalidateForEvent(event.seq, this.expandInvalidations(invalidations));
       this.control.setState({ lastAppliedGatewaySeq: event.seq });
     });
