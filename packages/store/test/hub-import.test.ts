@@ -143,6 +143,32 @@ describe("importLegacyDb", () => {
     copy.close();
   });
 
+  it("rejects a copy that fails integrity_check and leaves no target behind", async () => {
+    const { legacyPath, hubPath, hubDir } = paths("plc-hub-import-corrupt-");
+    legacyDb(legacyPath);
+    // 一张带索引的表只有一行。行数、查询都照常工作，但表和索引不再一致：把值在文件里的两处出现之一改成同长度的别的字节。
+    const raw = new Database(legacyPath);
+    raw.pragma("journal_mode = DELETE");
+    raw.exec("CREATE TABLE corrupt_probe (v TEXT); CREATE INDEX corrupt_probe_v ON corrupt_probe (v); INSERT INTO corrupt_probe VALUES ('zzzz-needle-zzzz')");
+    raw.close();
+    const bytes = readFileSync(legacyPath);
+    const needle = Buffer.from("zzzz-needle-zzzz");
+    const hits: number[] = [];
+    for (let at = bytes.indexOf(needle); at >= 0; at = bytes.indexOf(needle, at + 1)) hits.push(at);
+    expect(hits).toHaveLength(2); // 表页和索引页各一处
+    bytes.write("yyyy", hits[1]!);
+    writeFileSync(legacyPath, bytes);
+    const check = new Database(legacyPath, { readonly: true });
+    expect(check.pragma("integrity_check")).not.toEqual([{ integrity_check: "ok" }]); // 夹具确实是坏的
+    check.close();
+    const legacyHash = sha(legacyPath);
+
+    await expect(importLegacyDb({ from: legacyPath, to: hubPath })).rejects.toThrow(/integrity_check/);
+
+    expect(readdirSync(hubDir)).toEqual([]); // 暂存文件被清掉，目标没出现
+    expect(sha(legacyPath)).toBe(legacyHash);
+  });
+
   it("leaves no target behind when the copy cannot be opened by this build", async () => {
     const { legacyPath, hubPath, hubDir } = paths("plc-hub-import-unknown-");
     legacyDb(legacyPath);
