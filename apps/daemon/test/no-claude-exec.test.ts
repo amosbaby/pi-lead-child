@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { projectRoot } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { createRuntimePreflight, refreshModelCatalog, setModelCatalogForTesting } from "@pi-lead-child/engine";
+import { createDispatcher, createRuntimePreflight, refreshModelCatalog, setModelCatalogForTesting } from "@pi-lead-child/engine";
 import { createDefaultRuntimeRegistry, defaultRuntimeProfile } from "@pi-lead-child/runtime";
 import { typedFailure } from "@pi-lead-child/runtime";
 import { createItem, createRun, openDb, recordRuntimeHealthFailure, updateRun, type Db } from "@pi-lead-child/store";
@@ -76,6 +76,12 @@ describe("a disabled Claude Code", () => {
   it("is never executed in a full daemon cycle: preflight, model discovery, recheck and scheduling", async () => {
     vi.stubEnv("PLC_DISABLED_RUNTIMES", "claude");
     openClaudeIncident();
+    // 点名 claude 的派发请求：派发 gate 要它的 profile，registry 又不给停用的 runtime 的实例，这条路不能崩。
+    const itemId = createItem(db, { title: "pinned to claude", brief: "b", createdBy: "user" });
+    const requestId = createDispatcher(db).request({
+      itemId, role: "executor", purpose: "execution", runtime: "claude", model: "claude-sonnet",
+      trigger: "test", idempotencyKey: "no-claude-exec",
+    });
     const daemon = await startDaemon({
       dataDir: dir, dbPath, sessionFactory: sessionFactory as never, modelDiscovery: true, log: () => {},
     });
@@ -87,6 +93,8 @@ describe("a disabled Claude Code", () => {
       await refreshModelCatalog({ db, cwd: projectRoot() });
       await new Promise((resolve) => setTimeout(resolve, 300));
       expect(claudeCalls()).toEqual([]);
+      expect(db.prepare("SELECT state, suspended_reason FROM dispatch_requests WHERE id=?").get(requestId))
+        .toMatchObject({ state: "pending", suspended_reason: expect.stringContaining("停用") });
       expect(results).toHaveLength(1);
       expect(results[0]).toMatchObject({ runtime: "claude", outcome: "disabled" });
     } finally {

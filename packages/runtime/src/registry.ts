@@ -127,22 +127,33 @@ export function createLocalRuntime(options: PiRuntimeOptions = {}): AgentRuntime
   return piAdapter.create(options);
 }
 
+// daemon 里执行 runtime 的实例表。用户停用的 runtime 不从这里取出：list() 不含它，find() 返回 undefined，get() 抛出停用的原因
+// （和派发 gate 的话一样）。每次调用都重新读停用名单（daemon 把它写在进程环境里），所以用户重新启用以后马上又取得到，不用重建。
+// 这样即使以后有人写 registry.list().map(probe)，也碰不到停用的 runtime。
+// 只要 runtime 的 profile 或展示名而不要实例的地方，用 defaultRuntimeProfile、findRuntimeAdapter：它们不起进程。
 export class RuntimeRegistry {
   private readonly runtimes = new Map<RuntimeId, AgentRuntime>();
 
-  constructor(runtimes: AgentRuntime[] = []) {
+  constructor(runtimes: AgentRuntime[] = [], private readonly env: RuntimeEnv = process.env) {
     for (const runtime of runtimes) this.register(runtime);
   }
 
   register(runtime: AgentRuntime): void { this.runtimes.set(runtime.id, runtime); }
 
-  get(id: RuntimeId): AgentRuntime {
-    const runtime = this.runtimes.get(id);
-    if (!runtime) throw new Error(`child runtime '${id}' is not configured`);
-    return runtime;
+  find(id: RuntimeId): AgentRuntime | undefined {
+    return isRuntimeDisabled(id, this.env) ? undefined : this.runtimes.get(id);
   }
 
-  list(): AgentRuntime[] { return [...this.runtimes.values()]; }
+  get(id: RuntimeId): AgentRuntime {
+    const runtime = this.find(id);
+    if (runtime) return runtime;
+    if (isRuntimeDisabled(id, this.env) && this.runtimes.has(id)) throw new Error(runtimeDisabledReason(id));
+    throw new Error(`child runtime '${id}' is not configured`);
+  }
+
+  list(): AgentRuntime[] {
+    return [...this.runtimes.values()].filter((runtime) => !isRuntimeDisabled(runtime.id, this.env));
+  }
 }
 
 // daemon 的默认 registry：每个登记的 adapter 按默认配置创建一个实例。options 覆盖内置 adapter 的配置。
@@ -152,7 +163,7 @@ export function createDefaultRuntimeRegistry(options?: {
   claude?: ClaudeRuntimeOptions;
 }): RuntimeRegistry {
   const configured: Partial<Record<string, unknown>> = { ...options };
-  // 停用的 runtime 也有实例：创建实例不起进程，停用靠派发 gate 挡住启动，用户在设置里重新启用后不用重启 daemon。
+  // 停用的 runtime 也建实例（建实例不起进程），由 RuntimeRegistry 在取的时候挡住：用户重新启用后不用重启 daemon。
   return new RuntimeRegistry(allRuntimeAdapters().map((adapter) => adapter.create(configured[adapter.id])));
 }
 

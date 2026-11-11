@@ -12,7 +12,7 @@ import { createOrchestrator } from "@pi-lead-child/engine";
 import { buildOutcomeRepairPrompt } from "@pi-lead-child/engine";
 import { createRuntimePreflight } from "@pi-lead-child/engine";
 import { CHILD_RUNTIME_ORDER } from "@pi-lead-child/engine";
-import { createDefaultRuntimeRegistry } from "@pi-lead-child/runtime";
+import { runtimeAdapter } from "@pi-lead-child/runtime";
 import { typedFailure, type FailureCode } from "@pi-lead-child/runtime";
 import type { AgentRuntime } from "@pi-lead-child/runtime";
 import { TRANSIENT_RETRY_TRIGGER } from "@pi-lead-child/engine";
@@ -115,7 +115,7 @@ const HISTORICAL_INSTALL_FAILURES: Partial<Record<number, { check: string; code:
 function replayInstallAdapter(id: RuntimeId, current: () => FixtureRun | null): AgentRuntime {
   return {
     id,
-    capabilities: createDefaultRuntimeRegistry().get(id).capabilities,
+    capabilities: runtimeAdapter(id).capabilities,
     start: () => Promise.reject(new Error("the replay install adapter never starts a child")),
     preflight: async () => {
       const recording = current();

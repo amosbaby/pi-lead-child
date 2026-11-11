@@ -62,7 +62,7 @@ import { localIso, projectRoot, readTailLines, tildeHome } from "@pi-lead-child/
 import type { RuntimeId, Item, ItemPriority, ItemStage, Run, RunPurpose, VerificationPolicy, Workspace } from "@pi-lead-child/core";
 import type { AttachableLaunch } from "@pi-lead-child/runtime";
 import {
-  createDefaultRuntimeRegistry, createLocalRuntime, disabledRuntimes, findRuntimeAdapter, isRuntimeDisabled,
+  createDefaultRuntimeRegistry, createLocalRuntime, defaultRuntimeProfile, disabledRuntimes, findRuntimeAdapter, isRuntimeDisabled,
   LOCAL_RUNTIME_ID, runtimeAdapter, runtimeDisabledReason, runtimeProfileOf, type RuntimeRegistry,
 } from "@pi-lead-child/runtime";
 import type { RuntimeProfile } from "@pi-lead-child/runtime";
@@ -569,8 +569,10 @@ function resolveLeadChildRuntime(
 // 一个 runtime 在这个 daemon 里执行时用的 profile（工单 03）。
 // 派发 gate 和失败记账必须看到同一个 profile。所以这里选 adapter 的方式与 runItem 一致。
 // 例如，测试注入的 childPi 会替换 pi 的可执行文件。
+// 停用的 runtime 没有实例可取：派发 gate 还要它的 profile 来查账本、写挂起原因，所以退回默认 profile（只读登记项，不起进程）。
 export function childRuntimeProfile(deps: LeadDeps, runtime: RuntimeId): RuntimeProfile {
-  return runtimeProfileOf(childRuntimeAdapter(deps, runtime));
+  const adapter = findChildRuntimeAdapter(deps, runtime);
+  return adapter ? runtimeProfileOf(adapter) : defaultRuntimeProfile(runtime);
 }
 
 // suggest_route 的硬规则（2026-10-19）：整个 profile 不可用，或者正在冷却时，返回给 Lead 看的原因。
@@ -584,13 +586,22 @@ export function routeRuntimeExclusion(db: LeadDeps["db"], profile: RuntimeProfil
 
 // 这个 daemon 里执行这个 runtime 的 adapter。registry 没有配置它时，用默认 registry 里的那一个。
 // profile 由它推出（childRuntimeProfile），工单 04 的探针也用它，所以两边检查的是同一个 profile。
+// 用户停用的 runtime 取不到（registry 不给）：抛出停用的原因。只要 profile 用 childRuntimeProfile，只想知道有没有用
+// findChildRuntimeAdapter。
 export function childRuntimeAdapter(deps: LeadDeps, runtime: RuntimeId): AgentRuntime {
   if (deps.childPi && runtime === LOCAL_RUNTIME_ID) {
     return createLocalRuntime({ bin: deps.childPi.piBin, env: deps.env });
   }
-  const configured = (deps.runtimeRegistry ?? createDefaultRuntimeRegistry()).list()
-    .find((candidate) => candidate.id === runtime);
-  return configured ?? createDefaultRuntimeRegistry().get(runtime);
+  return (deps.runtimeRegistry ?? createDefaultRuntimeRegistry()).find(runtime) ?? createDefaultRuntimeRegistry().get(runtime);
+}
+
+// childRuntimeAdapter 的不抛错版：取不到（被用户停用，或没有登记）时返回 null。
+export function findChildRuntimeAdapter(deps: LeadDeps, runtime: RuntimeId): AgentRuntime | null {
+  try {
+    return childRuntimeAdapter(deps, runtime);
+  } catch {
+    return null;
+  }
 }
 
 // plc 工具通道怎样交给 child。支持 MCP 的 runtime 收到一个 MCP 服务器。

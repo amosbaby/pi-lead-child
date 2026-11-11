@@ -48,6 +48,8 @@ export function createRuntimePreflight(
   options: {
     // 这个 daemon 里执行这个 runtime 的 adapter。检查的必须是执行时用的同一个 profile。
     runtime: (id: RuntimeId) => AgentRuntime;
+    // 一个 runtime 的 profile，不要实例时用。停用的 runtime 取不到实例，但派发 gate 还是要它的 profile（缺省从实例推出）。
+    profile?: (id: RuntimeId) => RuntimeProfile;
     runtimes?: readonly RuntimeId[];
     now?: () => Date;
     ttlMs?: number;
@@ -64,7 +66,7 @@ export function createRuntimePreflight(
   const abort = new AbortController();
   let stopped = false;
 
-  const profile = (runtime: RuntimeId): RuntimeProfile => runtimeProfileOf(options.runtime(runtime));
+  const profile = (runtime: RuntimeId): RuntimeProfile => options.profile?.(runtime) ?? runtimeProfileOf(options.runtime(runtime));
   const cachedResult = (hash: string): RuntimeProbeResult | null => {
     const entry = cache.get(hash);
     return entry && entry.expiresAt > now().getTime() ? entry.result : null;

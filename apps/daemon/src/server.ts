@@ -237,7 +237,7 @@ import {
   type VaultKeySource,
 } from "@pi-lead-child/connections";
 import { DAEMON_ONLY_ENV_NAMES } from "@pi-lead-child/core";
-import { childRuntimeAdapter } from "@pi-lead-child/lead";
+import { childRuntimeAdapter, findChildRuntimeAdapter } from "@pi-lead-child/lead";
 import { RuntimeSettings } from "./runtime-settings.js";
 import {
   createHealthRecovery, parseRecheckRuntime, recoveryIntervalMs, startHealthRecoveryLoop, type RecheckResult,
@@ -2639,7 +2639,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const restart = applyRestartRecovery(db, restartCandidates, {
     budget,
     now: restartAt,
-    canAdopt: (runtime) => childRuntimeAdapter(schedDeps, runtime).attach !== undefined,
+    canAdopt: (runtime) => findChildRuntimeAdapter(schedDeps, runtime)?.attach !== undefined,
     adopt: (run, launch) => adoptRunChild(schedDeps, { run, launch }),
     log,
   });
@@ -5974,7 +5974,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // preflight（工单 05）：检查的 adapter 就是 spawnClaimedItem 执行时用的 adapter，所以检查的是同一个 profile。
   // spawnItemChild 也读它的缓存：已知会失败的目标改为排一个派发请求。
-  const preflight = createRuntimePreflight(db, { runtime: (id) => childRuntimeAdapter(schedDeps, id), log });
+  const preflight = createRuntimePreflight(db, {
+    runtime: (id) => childRuntimeAdapter(schedDeps, id), profile: (id) => childRuntimeProfile(schedDeps, id), log,
+  });
   schedDeps.preflight = preflight;
   // 没预热、只好同步跑 git 的路径记在日志里（engine 的 git-facts.ts），好把它们找出来改掉。
   setGitFactsLog(log);
@@ -6896,7 +6898,7 @@ function startDaemonHealthRecovery(
   deps: LeadDeps,
   options: { log: (line: string) => void; onRelease: () => void },
 ): { recheck(cmd: { runtime?: unknown }): Promise<RecheckResult[]>; stop(): void } {
-  const recovery = createHealthRecovery(db, { runtime: (id) => childRuntimeAdapter(deps, id), log: options.log });
+  const recovery = createHealthRecovery(db, { runtime: (id) => findChildRuntimeAdapter(deps, id), log: options.log });
   const loop = startHealthRecoveryLoop(recovery, {
     intervalMs: recoveryIntervalMs(),
     onRelease: options.onRelease,
