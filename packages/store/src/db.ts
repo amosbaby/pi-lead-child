@@ -777,7 +777,8 @@ function migrateChannelOwnerDm(db: Db): void {
 // 生命周期字段一个都不动，旧工单的判断是 NULL、external_origin 是 0。
 // 回填来源：用户私信里建的工单（channel_ticket_origins，只有对话，没有消息位置）和代查卡关联的工单（channel_lookups.item_id，
 // 对话是卡的 object_key，消息位置是卡的 reply_target.thread_ts）都记成 kind='slack'；url 留空：不知道工作区域名，拼不出链接。
-// 同一张工单同一个位置只记一次，所以迁移行被删掉重跑也不会重复。新库没有这些行，回填什么都不做。
+// 同一张工单同一个位置只记一次：一张卡的几次代查关联同一张工单时按 (工单, 对话, 消息位置) 合成一行（取最早的创建时间），
+// 已有的行也不重复，所以迁移行被删掉重跑也不会重复。新库没有这些行，回填什么都不做。
 function migrateWorkerHub(db: Db): void {
   if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(WORKER_HUB_MIGRATION_VERSION)) return;
   db.transaction(() => {
@@ -796,18 +797,21 @@ function migrateWorkerHub(db: Db): void {
        )
        ORDER BY o.item_id;
       INSERT INTO ticket_sources (item_id, kind, conversation, message_ts, created_at)
-      SELECT l.item_id, 'slack', c.object_key,
-             CASE WHEN json_valid(c.reply_target) THEN json_extract(c.reply_target, '$.thread_ts') END,
-             l.created_at
-        FROM channel_lookups l
-        JOIN channel_cards c ON c.id = l.card_id
-       WHERE l.item_id IS NOT NULL
-         AND NOT EXISTS (
-           SELECT 1 FROM ticket_sources t
-            WHERE t.item_id = l.item_id AND t.kind = 'slack' AND t.conversation = c.object_key
-              AND t.message_ts IS CASE WHEN json_valid(c.reply_target) THEN json_extract(c.reply_target, '$.thread_ts') END
-         )
-       ORDER BY l.id;
+      SELECT p.item_id, 'slack', p.conversation, p.message_ts, p.created_at
+        FROM (
+          SELECT l.item_id AS item_id, c.object_key AS conversation,
+                 CASE WHEN json_valid(c.reply_target) THEN json_extract(c.reply_target, '$.thread_ts') END AS message_ts,
+                 MIN(l.created_at) AS created_at, MIN(l.id) AS first_lookup
+            FROM channel_lookups l
+            JOIN channel_cards c ON c.id = l.card_id
+           WHERE l.item_id IS NOT NULL
+           GROUP BY l.item_id, c.object_key, message_ts
+        ) p
+       WHERE NOT EXISTS (
+         SELECT 1 FROM ticket_sources t
+          WHERE t.item_id = p.item_id AND t.kind = 'slack' AND t.conversation = p.conversation AND t.message_ts IS p.message_ts
+       )
+       ORDER BY p.first_lookup;
     `);
     db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)")
       .run(WORKER_HUB_MIGRATION_VERSION, "worker-hub-v1");

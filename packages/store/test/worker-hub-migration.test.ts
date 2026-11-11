@@ -132,6 +132,27 @@ describe("the v68 worker hub migration", () => {
     reopened.close();
   });
 
+  it("backfills one source when several lookups of one card link the same ticket", () => {
+    const path = join(tempDir("plc-v68-twolookups-"), "plc.db");
+    const legacy = openDb(path);
+    const item = createItem(legacy, { title: "t", brief: "b", createdBy: "lead" });
+    const key = "slack:C0TEAM:1730790000.000100";
+    const cardId = cardIn(legacy, key, { channel: "C0TEAM", thread_ts: "1730790000.000100" });
+    const first = lookupFor(legacy, cardId, key, item);
+    updateChannelLookup(legacy, first, { state: "finished" });
+    lookupFor(legacy, cardId, key, item);
+    expect(legacy.prepare("SELECT COUNT(*) AS n FROM channel_lookups WHERE item_id = ?").get(item)).toEqual({ n: 2 });
+    legacy.exec("DROP TABLE ticket_sources; DROP TABLE ticket_pushes; DROP TABLE ticket_misses;");
+    for (const column of NEW_ITEM_COLUMNS) legacy.exec(`ALTER TABLE items DROP COLUMN ${column}`);
+    legacy.prepare("DELETE FROM schema_migrations WHERE version = 68").run();
+    legacy.close();
+    const upgraded = openDb(path);
+    expect(ticketSources(upgraded, item)).toEqual([expect.objectContaining({
+      kind: "slack", conversation: key, messageTs: "1730790000.000100", createdAt: "2026-11-05T07:00:00.000Z",
+    })]);
+    upgraded.close();
+  });
+
   it("does not duplicate a backfilled source when the migration runs again over the same rows", () => {
     const path = join(tempDir("plc-v68-rerun-"), "plc.db");
     const db = openDb(path);
