@@ -246,6 +246,8 @@ export interface SmokeOptions {
   // 临时目录建在这里，缺省是系统的临时目录。
   workDir?: string;
   timeoutMs?: number;
+  // supervisor 和 daemon 停下以后，等它们留下的别的进程退出最多多久（毫秒）。缺省 DRAIN_TIMEOUT_MS。测试用短的。
+  drainMs?: number;
   log?: (line: string) => void;
 }
 
@@ -261,6 +263,66 @@ export interface SmokeResult {
   piLoad: PiLoadResult;
   statusAfterMs: number;
   stubCalls: string[];
+  /** supervisor 和 daemon 停下以后还在跑、等不到它退出、被冒烟杀掉的进程（pid 和命令）。通常是空的。 */
+  stragglers: string[];
+}
+
+// supervisor 和 daemon 停下以后还在跑的进程（2026-11-11，v1.3.0 的发版）：冒烟的每一项都过了，最后删临时目录时报
+// ENOTEMPTY，打包失败、什么都没上传。daemon 被停下的那一刻，它起的子进程（例如探测执行器版本的命令）可能还没跑完，
+// 接着往临时的 HOME 或数据目录里写文件，和删目录撞在一起。
+// supervisor 是 detached 起的，自己是进程组的组长；daemon 要么在它的组里，要么自己是组长。所以看这两个进程组：
+// 先等组里的进程自己退出，等不到就记下它们是谁、整组杀掉。跑到别的进程组里的进程这里看不到，靠下面删目录时的重试。
+export const DRAIN_TIMEOUT_MS = 10_000;
+
+/** 这个进程组里还有没有活着的进程。 */
+function groupAlive(pgid: number): boolean {
+  try {
+    process.kill(-pgid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/** 这些进程组里现在的进程，每个一行：pid 和命令（可执行文件的路径）。 */
+async function groupProcesses(pgids: readonly number[]): Promise<string[]> {
+  try {
+    const { stdout } = await execFileAsync("/bin/ps", ["-axo", "pid=,pgid=,comm="], { timeout: 10_000 });
+    return stdout.split("\n").map((line) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line))
+      .filter((match): match is RegExpExecArray => match !== null && pgids.includes(Number(match[2])))
+      .map((match) => `${match[1]} ${match[3]!.trim()}`);
+  } catch {
+    return [];
+  }
+}
+
+/** 等这些进程组里的进程都退出。到时限还有的：整组杀掉，返回它们是谁。 */
+async function drainGroups(pgids: readonly number[], timeoutMs: number, log: (line: string) => void): Promise<string[]> {
+  const deadline = Date.now() + timeoutMs;
+  while (pgids.some(groupAlive) && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 100));
+  if (!pgids.some(groupAlive)) return [];
+  const left = await groupProcesses(pgids);
+  log(`supervisor 和 daemon 停下以后还有 ${left.length} 个进程在跑，${Math.round(timeoutMs / 1000)} 秒没有退出，杀掉了：${left.join("；") || "（查不到是谁）"}`);
+  for (const pgid of pgids) {
+    try { process.kill(-pgid, "SIGKILL"); } catch { /* 已经没有了 */ }
+  }
+  const killedBy = Date.now() + 5_000;
+  while (pgids.some(groupAlive) && Date.now() < killedBy) await new Promise((resolve) => setTimeout(resolve, 50));
+  return left;
+}
+
+/**
+ * 删掉冒烟的临时目录。删不干净不算冒烟失败，也不能盖住真正的失败原因：记下原因和还剩什么（下一次能看出是谁在写）。
+ * 重试是给刚被杀掉、文件句柄还没放完的进程，和跑到别的进程组里的进程留的。
+ */
+function removeWorkDir(work: string, log: (line: string) => void): void {
+  try {
+    rmSync(work, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
+  } catch (error) {
+    let left: string[] = [];
+    try { left = readdirSync(work, { recursive: true }).map(String).slice(0, 20); } catch { /* 读不了就不列 */ }
+    log(`临时目录 ${work} 没有删干净（${(error as Error).message}）。还剩：${left.join("、") || "（读不出）"}`);
+  }
 }
 
 export async function smokeRuntime(o: SmokeOptions): Promise<SmokeResult> {
@@ -348,6 +410,7 @@ export async function smokeRuntime(o: SmokeOptions): Promise<SmokeResult> {
     const stoppedDaemon = daemonPid;
     await until(15_000, async () => (alive(stoppedDaemon) ? null : true), " daemon 退出");
     log("supervisor 和 daemon 都已停止");
+    const stragglers = await drainGroups([supervisorPid, stoppedDaemon], o.drainMs ?? DRAIN_TIMEOUT_MS, log);
 
     const stubCalls = readFileSync(dirs.stubLog, "utf8").split("\n").filter(Boolean);
     const writes = keychainWrites(stubCalls);
@@ -355,6 +418,7 @@ export async function smokeRuntime(o: SmokeOptions): Promise<SmokeResult> {
     succeeded = true;
     return {
       ok: true, version: release.version ?? "", supervisorPid, daemonPid, processNames, piVersion, runtimeAssets, piLoad, statusAfterMs, stubCalls,
+      stragglers,
     };
   } catch (error) {
     const logs = [`--- supervisor 输出（${supervisorLog}）---`, tail(supervisorLog)];
@@ -375,6 +439,12 @@ export async function smokeRuntime(o: SmokeOptions): Promise<SmokeResult> {
     if (!succeeded && leftover && alive(leftover)) {
       try { process.kill(leftover, "SIGKILL"); } catch { /* 已经退出 */ }
     }
-    rmSync(work, { recursive: true, force: true });
+    // 失败的冒烟里它们留下的别的进程：整组杀掉（成功的冒烟上面已经等过、杀过了）。
+    for (const pgid of [supervisor?.pid, leftover]) {
+      if (!succeeded && pgid && groupAlive(pgid)) {
+        try { process.kill(-pgid, "SIGKILL"); } catch { /* 已经没有了 */ }
+      }
+    }
+    removeWorkDir(work, log);
   }
 }

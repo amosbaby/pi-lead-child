@@ -37,7 +37,7 @@ setInterval(() => {}, 1_000);
 `;
 
 const FAKE_DAEMON = `
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -47,6 +47,23 @@ const mode = readFileSync(join(runtime, "mode"), "utf8").trim();
 // 按名字往钥匙串里写一个密钥，和以前的保险库一样走 security -i 的标准输入：冒烟环境里拿到的是假命令，冒烟要判失败。
 if (mode === "keychain-write") {
   try { execFileSync("security", ["-i"], { input: "add-generic-password -a alice -s plc:test -w 00\\n", stdio: ["pipe", "ignore", "ignore"] }); } catch {}
+}
+// daemon 停下以后还在跑的子进程（2026-11-11，v1.3.0 的发版）：它不理 SIGTERM，一直往 HOME 里写文件。
+// straggler 写 1.5 秒后自己退出；straggler-stuck 不退出，要冒烟来杀。它和 daemon 在同一个进程组里。
+if (mode === "straggler" || mode === "straggler-stuck") {
+  const ms = mode === "straggler" ? 1500 : 120000;
+  spawn(process.execPath, ["-e", \`
+    const fs = require("node:fs"); const path = require("node:path");
+    process.on("SIGTERM", () => {});
+    const dir = path.join(process.env.HOME, "late");
+    const end = Date.now() + \${ms};
+    let n = 0;
+    const tick = () => {
+      for (let i = 0; i < 200; i += 1) { fs.mkdirSync(dir, { recursive: true }); fs.writeFileSync(path.join(dir, "f-" + (n++ % 500)), "x"); }
+      if (Date.now() < end) setImmediate(tick);
+    };
+    tick();
+  \`], { stdio: "ignore" });
 }
 const server = createServer((socket) => {
   socket.setEncoding("utf8");
@@ -256,6 +273,30 @@ describe("smokeRuntime", () => {
     expect(seen.NODE_USE_SYSTEM_CA).toBeNull();
     expect(existsSync(dirname(seen.HOME))).toBe(false);
   });
+
+  // 回归（2026-11-11，v1.3.0 的发版）：冒烟的每一项都过了，最后删临时目录时报 ENOTEMPTY，整个打包失败。
+  // supervisor 和 daemon 停下以后，还有一个子进程在往临时目录里写文件。
+  it.skipIf(!processNames)("waits for a process that outlives the daemon, then removes the temporary directory", async () => {
+    write(join(runtime, "mode"), "straggler");
+    const lines: string[] = [];
+    const result = await smokeRuntime({ runtimeDir: runtime, workDir: tempDir("plc-dsm-"), log: (line) => lines.push(line) });
+    expect(result).toMatchObject({ ok: true, stragglers: [] });
+    const seen = JSON.parse(readFileSync(join(runtime, "seen-env.json"), "utf8"));
+    expect(existsSync(dirname(seen.HOME))).toBe(false);
+    expect(lines.join("\n")).not.toContain("没有删干净");
+  }, 30_000);
+
+  it.skipIf(!processNames)("kills a process that never exits, names it, and still passes", async () => {
+    write(join(runtime, "mode"), "straggler-stuck");
+    const lines: string[] = [];
+    const result = await smokeRuntime({ runtimeDir: runtime, workDir: tempDir("plc-dsm-"), drainMs: 500, log: (line) => lines.push(line) });
+    expect(result.ok).toBe(true);
+    expect(result.stragglers).toHaveLength(1);
+    expect(result.stragglers[0]).toMatch(/lead-agent/);
+    expect(lines.join("\n")).toMatch(/停下以后还有 1 个进程在跑/);
+    const seen = JSON.parse(readFileSync(join(runtime, "seen-env.json"), "utf8"));
+    await expect.poll(() => existsSync(dirname(seen.HOME)), { timeout: 5_000 }).toBe(false);
+  }, 30_000);
 
   it.skipIf(!processNames)("fails when a smoke process writes a key to the Keychain, and stops both anyway", async () => {
     write(join(runtime, "mode"), "keychain-write");
