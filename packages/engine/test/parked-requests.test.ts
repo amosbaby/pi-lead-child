@@ -97,7 +97,10 @@ describe("the answer to a parked run", () => {
   it("resumes the executor's session with the answer, once", () => {
     const decisionId = askDecision();
     finishRun();
-    coordinator().resolveDecision({ requestId: decisionId, decision: "select", optionId: "build", actor: { kind: "lead", resolvedBy: "lead" } });
+    coordinator().resolveDecision({
+      requestId: decisionId, decision: "select", optionId: "build", actor: { kind: "lead", resolvedBy: "lead" },
+      reason: "The design owner said to build it\nlead_evidence: read docs/design/export.md",
+    });
 
     expect(getItem(db, itemId)!.stage).toBe("active");
     const [dispatch, ...rest] = dispatches();
@@ -107,6 +110,8 @@ describe("the answer to a parked run", () => {
     expect(dispatch!.instruction).toContain("Replace the missing component or build it?");
     expect(dispatch!.instruction).toContain("Build it");
     expect(dispatch!.instruction).toContain("lead");
+    // 出处（用户 2026-11-11）：是谁定的、凭什么，一起交回去。
+    expect(dispatch!.instruction).toContain("依据：The design owner said to build it；lead_evidence: read docs/design/export.md");
   });
 
   // 贯穿持久化的流程：停靠 → 回答 → 派发队列认领出一个续接会话的新 Run → 新 Run 再问、再停靠、再续接。

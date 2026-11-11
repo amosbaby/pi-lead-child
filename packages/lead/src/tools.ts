@@ -3080,7 +3080,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         // 一轮里成批取消要先请示（LEAD_CANCEL_BATCH_LIMIT）。
         if (params.action === "cancel") chargeCancelBudget();
         // 验收附上这一轮实际读过的依据（decisionBasis）：什么都没读、理由却说自己核验过时拒绝。删掉的 accept_review 以前做这件事。
-        const basis = params.action === "complete" ? await decisionBasis(deps, params.reason) : null;
+        // 改验收标准也附（用户 2026-11-11：出处记进工单）：只记，不拦。
+        const basis = params.action === "complete" || params.action === "edit_acceptance_criteria"
+          ? await decisionBasis(deps, params.reason) : null;
         let outcome;
         try {
           outcome = await runLeadTicketAction(params.ticket_id, params.action, params.input, `${params.reason}${basis?.line ?? ""}`);
@@ -3115,6 +3117,11 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           ...(outcome.by.actor === "lead" && outcome.by.onBehalfOf ? { on_behalf_of_turn: outcome.by.onBehalfOf.sourceTurnId } : {}),
           result: outcome.result,
           ...(basis?.note ? { evidence: basis.note } : {}),
+          // 不是用户在这一轮要求的改动：事后告诉他，不发卡（用户 2026-11-11）。
+          ...(params.action === "edit_acceptance_criteria" && outcome.by.actor === "lead" && !outcome.by.onBehalfOf
+            && (outcome.result as { changed?: boolean } | undefined)?.changed
+            ? { tell_user: `你改了工单 #${outcome.ticketId} 的验收标准，这不是用户在这一轮要求的：在会话里用一两句话告诉用户改了哪一条、凭什么（出处）。` }
+            : {}),
         }, null, 2));
       },
     }),

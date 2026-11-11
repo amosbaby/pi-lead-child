@@ -126,8 +126,9 @@ export type ResolveDecisionInput = {
   requestId: number;
   actor: InterventionActor;
 } & (
-  | { decision: "select"; optionId: string }
-  | { decision: "respond"; resolution: string }
+  // reason：凭什么这样回答（出处）。记进工单的活动，交回给 child 的结果里也带上（parked-requests.ts 的 answerBasis）。
+  | { decision: "select"; optionId: string; reason?: string }
+  | { decision: "respond"; resolution: string; reason?: string }
   | { decision: "dismiss"; reason?: string }
 );
 
@@ -821,6 +822,7 @@ export function createInterventionDomainService(args: {
         kind: "decision",
         payload: {
           decisionRequestId: request.id, decision: input.decision, resolvedBy: input.actor.resolvedBy,
+          ...(input.reason?.trim() ? { reason: input.reason.trim() } : {}),
           ...behalfPayload(input.actor),
         },
       });

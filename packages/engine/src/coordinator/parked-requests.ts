@@ -95,6 +95,26 @@ function alreadySettled(db: Db, itemId: number, runId: number): boolean {
 
 const clip = (text: string, max: number): string => (text.length > max ? `${text.slice(0, max)}…` : text);
 
+/**
+ * 一个决定或审批的结果是凭什么定的（出处）：处理它的那条活动里的 reason。Lead 处理时写的理由后面带着它这一轮读过什么
+ * （lead 的 lead_evidence 一行）。用户在页面上点的没有理由，返回 null。
+ */
+export function answerBasis(db: Db, type: "decision_request" | "approval", id: number): string | null {
+  const key = type === "approval" ? "$.approvalId" : "$.decisionRequestId";
+  const row = db.prepare(
+    `SELECT json_extract(payload, '$.reason') AS reason FROM activities
+     WHERE kind = 'decision' AND json_valid(payload) AND json_extract(payload, ?) = ?
+       AND json_extract(payload, '$.decision') IN ('select', 'respond', 'dismiss', 'approve', 'reject', 'approve_session')
+     ORDER BY id DESC LIMIT 1`,
+  ).get(key, id) as { reason: unknown } | undefined;
+  return typeof row?.reason === "string" && row.reason.trim() ? row.reason.trim() : null;
+}
+
+function basisText(db: Db, type: "decision_request" | "approval", id: number): string {
+  const basis = answerBasis(db, type, id);
+  return basis ? `依据：${clip(basis.replace(/\s*\n\s*/gu, "；"), 800)}` : "";
+}
+
 function decisionLine(db: Db, id: number): string {
   const request = getDecisionRequest(db, id);
   if (!request) return `- 决定请求 #${id}：找不到了。`;
@@ -102,9 +122,11 @@ function decisionLine(db: Db, id: number): string {
   const by = request.resolvedBy ? `（${request.resolvedBy} 定的）` : "";
   if (request.state === "resolved" && request.resolutionKind === "option") {
     const option = request.options.find((entry) => entry.id === request.selectedOptionId);
-    return `${head}：选了「${option?.label ?? request.selectedOptionId}」（${request.selectedOptionId}）${by}。`;
+    return `${head}：选了「${option?.label ?? request.selectedOptionId}」（${request.selectedOptionId}）${by}。${basisText(db, "decision_request", id)}`;
   }
-  if (request.state === "resolved") return `${head}：答复是「${clip(request.resolutionText ?? "", 2_000)}」${by}。`;
+  if (request.state === "resolved") {
+    return `${head}：答复是「${clip(request.resolutionText ?? "", 2_000)}」${by}。${basisText(db, "decision_request", id)}`;
+  }
   if (request.state === "dismissed") {
     return `${head}：被忽略了${request.dismissalReason ? `，原因：${clip(request.dismissalReason, 500)}` : ""}${by}。它没有答案：按工单已有的要求做。`;
   }
@@ -117,8 +139,8 @@ function approvalLine(db: Db, id: number): string {
   if (!approval) return `- 审批 #${id}：找不到了。不要执行这个动作。`;
   const head = `- 审批 #${id}「${clip(approval.action, 400)}」`;
   const by = approval.resolved_by ? `（${approval.resolved_by} 定的）` : "";
-  if (approval.status === "approved") return `${head}：批准了${by}。可以执行这个动作。`;
-  if (approval.status === "rejected") return `${head}：被拒绝了${by}。不要执行这个动作。`;
+  if (approval.status === "approved") return `${head}：批准了${by}。可以执行这个动作。${basisText(db, "approval", id)}`;
+  if (approval.status === "rejected") return `${head}：被拒绝了${by}。不要执行这个动作。${basisText(db, "approval", id)}`;
   if (approval.status === "expired") return `${head}：过期了，没有人处理。不要执行这个动作；还需要时重新请求审批。`;
   return `${head}：还没有结果。不要执行这个动作。`;
 }

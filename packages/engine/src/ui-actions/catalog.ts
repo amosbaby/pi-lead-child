@@ -307,11 +307,13 @@ const DECISION_ACTIONS = {
       const coordinator = createCoordinator({ db: run.db, now: () => run.env.now });
       const actor = interventionActor(run);
       const input = run.input;
+      // 凭什么这样回答（出处）：记进工单，交回给 child 时也带上。页面上点的没有理由（defaultReason 不算）。
+      const why = run.reasonGiven ? { reason: run.reason } : {};
       if (input.decision === "select") {
-        return coordinator.resolveDecision({ requestId: run.target.id, decision: "select", optionId: input.optionId, actor });
+        return coordinator.resolveDecision({ requestId: run.target.id, decision: "select", optionId: input.optionId, actor, ...why });
       }
       if (input.decision === "respond") {
-        return coordinator.resolveDecision({ requestId: run.target.id, decision: "respond", resolution: input.resolution, actor });
+        return coordinator.resolveDecision({ requestId: run.target.id, decision: "respond", resolution: input.resolution, actor, ...why });
       }
       return coordinator.resolveDecision({
         requestId: run.target.id, decision: "dismiss", actor, ...(run.reasonGiven ? { reason: run.reason } : {}),

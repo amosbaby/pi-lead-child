@@ -6,6 +6,7 @@
 //     记成代用户做。只有用户本人能做的（user_direct）和标了只认用户这一轮的（审批）返回结构化的拒绝，写明用户去哪里点。
 //     改规则的操作在带着外部内容的一轮里也返回结构化的拒绝（external_turn），带着确认卡要的数据。
 // 操作清单从定义生成（uiActionCatalogText），不在这里手写。
+import { describeEvidence, type EvidenceItem } from "./credibility/evidence.js";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
@@ -26,6 +27,8 @@ function text(t: string, details?: Record<string, unknown>) {
 
 export interface UiActionToolDeps {
   db: Db;
+  // 这一轮 Lead 实际读过什么（credibility 的 TurnEvidence）。回答 child 的决定、处理审批时附在理由后面（出处）。
+  turnEvidence?: () => EvidenceItem[];
   // 操作层用的服务：daemon 建的那一个对象，网关的页面入口用的也是它。
   uiActionServices?: UiActionServices;
   currentTurnId?: () => string | null;
@@ -173,7 +176,11 @@ export function createUiActionTools(deps: UiActionToolDeps): ToolDefinition<any>
         target: { type: params.target_type, id: params.target_id },
         action: params.action,
         ...(params.input === undefined ? {} : { input: params.input }),
-        reason: params.reason,
+        // 回答 child 的决定、处理审批：理由后面附上这一轮实际读过什么（用户 2026-11-11：出处记进工单）。
+        // 和验收时附的是同一行（tools.ts 的 decisionBasis）。只记，不拦。
+        reason: (params.target_type === "decision" || params.target_type === "approval") && params.action === "resolve" && deps.turnEvidence
+          ? `${params.reason}\nlead_evidence: ${describeEvidence(deps.turnEvidence())}`
+          : params.reason,
       }),
     }),
   ];

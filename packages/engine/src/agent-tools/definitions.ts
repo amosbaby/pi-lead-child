@@ -1,3 +1,4 @@
+import { answerBasis } from "../coordinator/parked-requests.js";
 import { latestCheckpointIdForAction } from "@pi-lead-child/store";
 import { createHash } from "node:crypto";
 import type { Db } from "@pi-lead-child/store";
@@ -1387,9 +1388,13 @@ export function createAgentToolHandlers(context: {
             }
             const approval = getApproval(db, approvalId);
             if (approval && approval.status !== "pending") {
+              const basis = answerBasis(db, "approval", approvalId);
               return {
                 approval_id: approvalId,
                 status: approval.status,
+                // 谁定的、凭什么（出处）。
+                resolved_by: approval.resolved_by,
+                ...(basis ? { basis } : {}),
                 checkpoint_id: requested.checkpoint.id,
               };
             }
@@ -1475,6 +1480,9 @@ export function createAgentToolHandlers(context: {
                 selected_option_id: decision.selectedOptionId,
                 resolution_text: decision.resolutionText,
                 dismissal_reason: decision.dismissalReason,
+                // 谁定的、凭什么（出处）。
+                resolved_by: decision.resolvedBy,
+                ...(answerBasis(db, "decision_request", decision.id) ? { basis: answerBasis(db, "decision_request", decision.id) } : {}),
                 checkpoint_id: requested.checkpoint.id,
               };
             }
