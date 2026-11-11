@@ -47,6 +47,24 @@ export const serverMessages = defineMessages({
       idle: (name: string) => `${name} is not running a turn now. There is nothing to stop.`,
       note: "Stopped with /stop.",
     },
+    // 一步中止以后还停不下，daemon 换掉了 Lead 的会话（.scratch/tool-occupancy/spec.md L3）：停下的那一轮末尾加的一句，
+    // 或者没有那一轮时的系统通知。stage 是 stageName 的结果。
+    release: {
+      stageName: (stage: string, tool: string | null) =>
+        stage === "tool" ? (tool ? `while it ran the tool ${tool}` : "while it ran a tool")
+        : stage === "A" ? "while it prepared a request to the model"
+        : stage === "B1" || stage === "B2" ? "while it waited for the model"
+        : stage === "C" ? "while it received the reply of the model"
+        : "",
+      replaced: (name: string, stage: string) =>
+        `${name} stopped ${stage ? `${stage} ` : ""}and did not continue after an abort. The system started a new session for ${name}. Messages that waited get their answer next.`,
+      replacedAfterStop: (name: string) =>
+        `The turn did not stop after /stop. The system started a new session for ${name}.`,
+      restartRequested: (name: string) =>
+        `${name} did not continue after an abort, and the system could not start a new session. The system asked the background service to restart.`,
+      restartUnavailable: (name: string) =>
+        `${name} did not continue after an abort, and the system could not start a new session or restart the background service. Quit the app and open it again.`,
+    },
     // 被迫交接（lead-scheduler spec H6）：系统停下这一轮、Lead 交出去了却没说话时，系统写这一句；没交出去、单元挂起时写另一句。
     handoff: {
       handedOff: (ticketId: number) =>
@@ -92,6 +110,19 @@ export const serverMessages = defineMessages({
       stopped: (name) => `已停下 ${name} 正在进行的一轮。`,
       idle: (name) => `${name} 现在没有在进行的一轮，不需要停。`,
       note: "已用 /stop 停下。",
+    },
+    release: {
+      stageName: (stage, tool) =>
+        stage === "tool" ? (tool ? `在跑工具 ${tool} 时` : "在跑工具时")
+        : stage === "A" ? "在准备模型请求时"
+        : stage === "B1" || stage === "B2" ? "在等模型时"
+        : stage === "C" ? "在接收模型的回答时"
+        : "",
+      replaced: (name, stage) =>
+        `${name} ${stage}卡住了，中止以后也没有停下。系统给 ${name} 换了一个新会话。排着的消息接下来回答。`,
+      replacedAfterStop: (name) => `用 /stop 以后这一轮没有停下。系统给 ${name} 换了一个新会话。`,
+      restartRequested: (name) => `${name} 中止以后没有停下，系统也没能换一个新会话。系统已经请后台服务重启。`,
+      restartUnavailable: (name) => `${name} 中止以后没有停下，系统没能换一个新会话，也没能重启后台服务。请退出 App 再打开。`,
     },
     handoff: {
       handedOff: (ticketId) => `这件事交给了后台 agent #${ticketId}，大约 3–5 分钟有结果。你可以接着说别的。`,

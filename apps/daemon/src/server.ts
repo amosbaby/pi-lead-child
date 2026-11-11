@@ -11,6 +11,9 @@ import {
 } from "node:timers";
 import { getChannelCard, getChannelLookup, openDb, recordLeadCompactionFailed, recordLeadModelSwitched, recordSchedulerEvent, type Db } from "@pi-lead-child/store";
 import {
+  isLeadSessionReleased, LeadSessionSlot, releaseWaitMsFromEnv, type LeadReleaseRequest,
+} from "@pi-lead-child/lead";
+import {
   createLeadSession, DEFAULT_LOOKUP_ROOTS, findPullRequestRef, isExternalTextTool, LEAD_QUIET_TOOLS, leadSystemEvent, leadUserMessage,
   listLookupCandidates, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
 } from "@pi-lead-child/lead";
@@ -779,6 +782,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     },
     execute: (effect) => executeSchedulerEffect(effect),
     stopExecution: () => session.abort?.(),
+    // 一步中止以后还停不下：abort.stuck 以后再等这么久，就换掉 Lead 的会话（releaseLead，.scratch/tool-occupancy/spec.md L3）。
+    releaseWaitMs: releaseWaitMsFromEnv(),
+    release: (request) => releaseLead(request),
   });
   // 空闲车道 L4（lead 的 scheduler/idle-lane.ts、idle-runtime.ts，lead-scheduler spec D8，P4）：压缩、整理笔记、回收区的删除和
   // 清理扫描改到 Lead 空闲时做。压缩的摘要在子进程里写，接上只在 Lead 空闲时（几毫秒）；整理笔记的 L4 单元给新输入让路；
@@ -870,13 +876,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 长的只读命令转后台（lead 的 background-jobs.ts，lead-scheduler spec D6，P3）：作业起止各记一行 [sched]（D12 第 11 条）；
   // 结束时把输出作为一件事交给 Lead（inbox，叫醒 Lead），车道是作业开始时那个单元的车道（D1：结果走原请求者的车道）。
   // 输出是本机命令的结果，不算外部内容（turn-origin.ts）。
-  const backgroundJobOwners = new Map<string, { unitId: string | null; lane: Lane; turnId: string | null }>();
+  // 还在跑的作业也要列给 Lead：Lead 被释放时，给它的事件写着留下了哪些作业（releaseLead）。
+  const backgroundJobOwners = new Map<string, {
+    unitId: string | null; lane: Lane; turnId: string | null; tool: string; command: string; startedAt: number;
+  }>();
   // 这一步里正在等、能转后台的工具调用：用户插话时 interruptForSteer 让它们马上转后台（.scratch/tool-occupancy/spec.md）。
   const foregroundWaits = new ForegroundWaits();
   const backgroundJobs: LeadBackgroundJobs = {
     started: (job) => {
       const unit = sched.unit;
-      backgroundJobOwners.set(job.id, { unitId: unit?.id ?? null, lane: unit?.lane ?? 2, turnId: unit?.turnId ?? null });
+      backgroundJobOwners.set(job.id, {
+        unitId: unit?.id ?? null, lane: unit?.lane ?? 2, turnId: unit?.turnId ?? null, tool: job.tool, command: job.command,
+        startedAt: Date.now() - job.softMs,
+      });
       log(schedulerLine("job.bg_start", {
         id: job.id, unit: unit?.id ?? "-", turn: unit?.turnId ?? "-", lane: `L${unit?.lane ?? 2}`, tool: job.tool, softMs: job.softMs,
         call: job.toolCallId,
@@ -1417,10 +1429,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 中断正在跑的这一轮：经过调度器的控制层，原因 user_stop 先记下，再 session.abort()。
   // Lead 空着（或者会话不能中断）时返回 false。
+  // 这一步已经中止过、还没停下（红线中止过，或者上一次 /stop）：这次 /stop 不再等，马上换掉 Lead 的会话（releaseLead，用户 2026-11-11）。
   function stopLeadTurn(): boolean {
     if (!sched.busy || !currentTurn || !session.abort) return false;
-    log("/stop: aborting the running Lead turn");
+    const stuck = sched.abortPending;
+    log(stuck ? "/stop: the step was aborted before and has not stopped; releasing Lead" : "/stop: aborting the running Lead turn");
     sched.dispatch({ type: "stop.request", canAbort: true });
+    if (stuck) sched.releaseNow("user_stop");
     return true;
   }
 
@@ -2918,10 +2933,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 首次启动引导的设置状态（setup-status.ts）。在通道设置建好以后才建，这之前是 null。
   let setupTracker: SetupTracker | null = null;
   const factory = opts.sessionFactory ?? createLeadSession;
-  const {
-    session, modelName, syncToolAccess, reloadExtensions, models: leadModels, switchModel: switchLeadModel,
-    reportsInputDelivery, interruptStep: interruptLeadStep, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady,
-  } = await factory({
+  // 建 Lead 会话的参数存下来：一步停不下、daemon 换会话时（releaseLead）用同一份再建一个（.scratch/tool-occupancy/spec.md L3）。
+  const leadSessionOptions = {
     memory,
     // 直觉的整条分工（设置 → 模型，2026-10-29）：SmartModel 按顺序问，都失败时问 LLM。
     ...(memoryControl ? { decisionModel: () => memoryControl.decisionChainCredentials() } : {}),
@@ -3048,7 +3061,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       decisionModel: memoryControl?.getDecisionModel() ?? null,
       memory: memoryControl?.get() ?? null,
     }),
-  });
+  } satisfies Parameters<typeof createLeadSession>[0];
+  // 会话槽（lead 的 session-slot.ts）：daemon 拿着它给的转发对象。换会话以后，下面这些名字都调新的会话。
+  const leadSlot = new LeadSessionSlot(await factory(leadSessionOptions));
+  const {
+    session, modelName, syncToolAccess, reloadExtensions, models: leadModels, switchModel: switchLeadModel,
+    reportsInputDelivery, interruptStep: interruptLeadStep, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady,
+  } = leadSlot.result();
   log(`lead ready (model=${modelName}, session=${session.sessionId})`);
   // 部署改了 Lead 能用的工具或操作时，下一轮告诉它一次（lead-capabilities.ts，2026-11-02）。
   let capabilityNotice: string | null = null;
@@ -4097,6 +4116,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     let offline = false;
     // 这一轮被停机前的排空中断了（restartAbort）。
     let interrupted = false;
+    // 这一步停不下，daemon 换掉了会话（releaseLead）：在旧会话上的 prompt 以「已释放」结束。
+    let released = false;
     let outcome: TurnOutcome = { ok: false, voiced: false, systemTurnId: null };
     // 这一轮作为消息交给 Lead 的事件对应的 inbox 行。
     let deliveredInboxIds: number[] = [];
@@ -4201,18 +4222,27 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       } catch (error) {
         // 用户用 /stop 停下时，pi 也可能以错误结束这次调用：一样按停下收尾。
         // 红线中断时也一样：接着在同一轮里交接（2026-11-03 09:33 那一次中断以后整轮报错，没有交接）。
-        if (stoppedByUser(sched.state)) {
+        // 这一步停不下、会话换掉了（releaseLead）：不交接，这一轮按下面的「已释放」收尾，单元挂起。
+        if (isLeadSessionReleased(error)) {
+          released = true;
+        } else if (stoppedByUser(sched.state)) {
           // 按停下收尾。
         } else if (schedRedLinePhase(sched.state) === "aborting" && !abortedForRestart(sched.state)) {
           log(`lead red line: the stopped call ended with an error (${(error as any)?.message ?? String(error)}); handing off`);
-          await continueAfterRedLine();
+          try {
+            await continueAfterRedLine();
+          } catch (handoffError) {
+            // 交接这一段也停不下、会话换掉了：一样按「已释放」收尾。
+            if (!isLeadSessionReleased(handoffError)) throw handoffError;
+            released = true;
+          }
         } else {
           throw error;
         }
       }
       // 排空中断了这一轮：pi 不一定发出 aborted 的 message_end（例如中断时工具正在执行），按被打断收尾。
       if (abortedForRestart(sched.state)) throw new Error(LEAD_RESTART_INTERRUPTED_ERROR);
-      if (activeTurnError && !stoppedByUser(sched.state)) throw new Error(activeTurnError);
+      if (activeTurnError && !stoppedByUser(sched.state) && !released) throw new Error(activeTurnError);
       // 这次运行结束时还在 pi 队列里的输入：交出去时 pi 已经过了最后一次取队列。用户的消息转为下一轮的输入，
       // 插进来的系统事件不算交给了 Lead（工单 04）。
       takeLeftoverInputs();
@@ -4221,10 +4251,22 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (stoppedByUser(sched.state)) {
         // 用户用 /stop 停下了这一轮：回答停在哪里，就在那里加一句「已用 /stop 停下」，这一轮按完成收尾。
         // 交给这一轮的事件算处理过了（游标前进）：用户叫停了，不再自动做一遍。下一轮开头告诉 Lead 一次。
+        // 停不下、换了会话时，下面写换会话的那一句。
         const stopped = activeChannelTurn ?? channelTurn;
-        if (stopped) publishTurnText(stopped, `${stopped.assistantText.trim() ? "\n\n" : ""}${serverMessages(getLocale(db)).stop.note}`);
+        if (stopped && !released) publishTurnText(stopped, `${stopped.assistantText.trim() ? "\n\n" : ""}${serverMessages(getLocale(db)).stop.note}`);
         stopNotice = "用户用 /stop 停下了你的上一轮：那一轮里正在跑的模型调用和工具都中断了。"
           + "那一轮没做完的事不要自己接着做；用户要你接着做时再做。";
+      }
+      // 换掉了会话：告诉用户，还排着的用户消息转成下一轮，由新会话回答。交给这一轮的事件算处理过了（游标前进）：
+      // 新会话的历史里有它们，给 Lead 的事件说明了卡在哪里，由 Lead 决定（不再原样重送一遍，免得又卡在同一个地方）。
+      if (released) {
+        noteLeadReleased(activeChannelTurn ?? channelTurn ?? null);
+        const kept = activeChannelTurn ?? channelTurn;
+        for (const input of queuedInputs.splice(0)) {
+          if (input.entry === kept) continue;
+          if (input.kind === "steer" && !input.nextTurn) publishTurnStarted(input.entry, "steered", { placement: "next_turn" });
+          carryOverTurns.push({ prompt: input.userPrompt ?? input.prompt, entry: input.entry });
+        }
       }
       // 收口的是**当前**出水口，未必是本回合开的那条：插话把出水口改接走之后，原来那条
       // 在交接当场就已经收口过了，这里结算的是最后接水的那一条。
@@ -4250,8 +4292,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         }
       }
       if (!emptyUserTurn) {
-        // 用户停下的一轮说明不了模型好不好。
-        if (!stoppedByUser(sched.state)) modelFailover?.turnSucceeded();
+        // 用户停下的一轮、换了会话的一轮说明不了模型好不好。
+        if (!stoppedByUser(sched.state) && !released) modelFailover?.turnSucceeded();
         succeeded = true;
       }
     } catch (err: any) {
@@ -4348,7 +4390,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 必须告诉用户的事（2026-10-19，例如 Lead 请求的重启完成了）：这一轮成功了，Lead 却一言不发（回了 NO_REPLY）。
       // 不允许静默：系统直接在会话里说。失败的一轮不在这里：事件还在游标后面，下一轮再交给 Lead。
       // 被用户的消息抢占、挂起的单元不算：那些事在交接包里，Lead 恢复或交出去以后再说。
-      if (succeeded && options.system && !outcome.voiced && !abortedForPreempt(sched.state)) {
+      if (succeeded && options.system && !outcome.voiced && !abortedForPreempt(sched.state) && !released) {
         for (const event of mustTell) tellUserDirectly(event);
       }
       if (digested) log(`digest: ${digested} event(s) digested`);
@@ -4363,7 +4405,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
       // 单元结束（lead-scheduler spec D12）：关联编号用这一轮最后接文字的那一轮，结果按停下、被重启打断、断网、成败分。
       if (runTurnId) sched.dispatch({ type: "unit.turn", turnId: runTurnId });
+      // 换掉了会话（用户没有 /stop）：单元挂起（H10），交接包存下来，Lead 在新会话里决定接着做、交出去还是丢下。
+      if (released && !stoppedByUser(sched.state)) handoffs.suspend("released");
       const unitOutcome: UnitOutcome = stoppedByUser(sched.state) ? "stopped" : interrupted ? "interrupted"
+        : released ? "suspended"
         : yieldedToInput(sched.state) ? "yielded" : abortedForPreempt(sched.state) ? "suspended"
         : offline ? "offline" : succeeded ? "answered" : "failed";
       lastUnitOutcome = unitOutcome;
@@ -5429,6 +5474,98 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       confirmForcedHandoff(spokenBefore);
       return;
     }
+  }
+
+  // 最近一次释放 Lead（releaseLead）：这一轮收尾时（noteLeadReleased）据此告诉用户。
+  let leadRelease: { request: LeadReleaseRequest; outcome: "pending" | "replaced" | "failed"; at: number } | null = null;
+
+  // 一步中止以后还停不下（.scratch/tool-occupancy/spec.md L3，用户 2026-11-11）：调度器按固定规则叫这里，不问模型。
+  //   1. 先在进程里换掉 Lead 的会话（lead 的 session-slot.ts）：切断旧会话的写入，从会话文件建一个新会话，在旧会话上的
+  //      prompt 以「已释放」结束。这一轮照常收尾（runTurnNow 的 released），单元挂起，排着的用户消息转成下一轮。
+  //   2. 换不成：请 supervisor 重启 daemon（和换模型以后的重启一样，request_maintenance）。没有 supervisor 时记日志、告诉用户。
+  // 都给 Lead 写一条叫醒它的事件：卡在哪个阶段、什么时候释放的、留下了哪些后台作业。怎么收拾由 Lead 决定。
+  async function releaseLead(request: LeadReleaseRequest): Promise<void> {
+    const release: NonNullable<typeof leadRelease> = { request, outcome: "pending", at: Date.now() };
+    leadRelease = release;
+    const jobs = [...backgroundJobOwners.entries()].map(([id, job]) => ({ id, ...job }));
+    const lane = sched.unit?.lane ?? 2;
+    let failure: Error | null = null;
+    try {
+      const replaced = await leadSlot.replace(() => factory(leadSessionOptions), {
+        settled: (ok) => { release.outcome = ok ? "replaced" : "failed"; },
+      });
+      // 新会话用配置里的第一个模型：下一轮开始前（syncLeadModel）换回模型切换要的那一个。
+      appliedLeadModel = replaced.modelName;
+      log(schedulerLine("release.replaced", {
+        unit: request.unitId ?? "-", trigger: request.trigger, held: replaced.held, calls: replaced.released,
+        buildMs: replaced.buildMs, generation: leadSlot.generation, session: session.sessionId,
+      }));
+    } catch (error) {
+      failure = error instanceof Error ? error : new Error(String(error));
+      release.outcome = "failed";
+      log(schedulerLine("release.rebuild_failed", { unit: request.unitId ?? "-", error: failure.message }));
+    }
+    try {
+      addInbox(db, {
+        dedupScope: `lead-release:${release.at}`, severity: "attention", source: "structural",
+        summary: leadReleasedSummary(request, jobs, failure),
+        payload: {
+          kind: "lead_released", trigger: request.trigger, stage: request.stage?.stage ?? null, tool: request.stage?.tool ?? null,
+          reason: request.reason, stuckMs: request.stuckMs, releasedAt: new Date(release.at).toISOString(),
+          replaced: failure === null, jobs: jobs.map((job) => job.id),
+          wakeLead: true, needsUser: false, routine: true, resultLane: lane, ...(request.unitId ? { unitId: request.unitId } : {}),
+        },
+        lossless: true,
+      });
+    } catch (error) {
+      log(schedulerLine("release.record_failed", { unit: request.unitId ?? "-", error: error instanceof Error ? error.message : String(error) }));
+    }
+    if (!failure) return;
+    void supervisorRequest<MaintenanceRequest>({
+      type: "request_maintenance", action: "restart",
+      reason: `Lead's step did not stop after an abort (stage ${request.stage?.stage ?? "-"}), and a new session could not be built`,
+    }).catch((error: any) => {
+      log(`lead release: the daemon restart request failed: ${error?.message ?? String(error)}`);
+      if (closing) return;
+      publishSystemNotice(SYSTEM_TURN_ORIGINS.fallbackNotice, serverMessages(getLocale(db)).release.restartUnavailable(leadDisplayName(db)));
+    });
+    throw failure;
+  }
+
+  // 给 Lead 的事件（中文，只给模型看）：卡在哪里、什么时候、换成了没有、留下了什么、该怎么想。
+  function leadReleasedSummary(
+    request: LeadReleaseRequest, jobs: Array<{ id: string; tool: string; command: string; startedAt: number }>, failure: Error | null,
+  ): string {
+    const stage = request.stage
+      ? `阶段 ${request.stage.stage}${request.stage.tool ? `（工具 ${request.stage.tool}）` : ""}` : "阶段不明";
+    const how = request.trigger === "user_stop" ? "用户又按了一次 /stop" : `中止以后又等了 ${Math.round(request.stuckMs / 1_000)} 秒还没停下`;
+    const lines = [
+      `你上一步停不下来，系统按固定规则释放了你（${localIso(new Date())}）。`,
+      `单元 ${request.unitId ?? "-"} 在${stage}被中止（原因 ${request.reason}），${how}。`,
+      failure
+        ? `系统没能换一个新会话（${failure.message}），已经请后台服务重启。`
+        : "系统丢掉了旧会话，从会话文件建了一个新会话。卡住以后旧会话里没写进会话文件的部分没有了，那一步没有结果。",
+      request.trigger === "user_stop"
+        ? "用户用 /stop 停下了那件事：不要自己接着做，用户要你接着做时再做。"
+        : "那个单元挂起了：当前局面里有它。接着做用 resume_unit，交出去用 hand_off，不要了就丢下。",
+      jobs.length
+        ? `还在跑的后台作业：${jobs.map((job) => `${job.id}（${job.tool}：${job.command.slice(0, 120)}）`).join("；")}。它们做完会把结果交给你。`
+        : "没有还在跑的后台作业。",
+      "卡住的那一步可能留下了半截的东西（下了一半的文件、没跑完的命令）。需要时用 list_processes 看本机的进程，自己决定怎么收拾。",
+    ];
+    return lines.join("\n");
+  }
+
+  // 换掉了会话的这一轮收尾时告诉用户：写在这一轮的回答后面；没有用户在看的那一轮（系统回合）时发一条系统通知。
+  function noteLeadReleased(tail: ActiveChannelTurn | null): void {
+    const info = leadRelease;
+    const m = serverMessages(getLocale(db)).release;
+    const name = leadDisplayName(db);
+    const text = info?.outcome === "failed" ? m.restartRequested(name)
+      : info?.request.trigger === "user_stop" ? m.replacedAfterStop(name)
+      : m.replaced(name, m.stageName(info?.request.stage?.stage ?? "", info?.request.stage?.tool ?? null));
+    if (tail) publishTurnText(tail, `${tail.assistantText.trim() ? "\n\n" : ""}${text}`);
+    else publishSystemNotice(SYSTEM_TURN_ORIGINS.fallbackNotice, text);
   }
 
   // 被迫交（lead-scheduler spec H6）：用户在等的这一轮，交接这一段 Lead 一句话都没说时，系统用模板写：交出去了，或者挂起了。

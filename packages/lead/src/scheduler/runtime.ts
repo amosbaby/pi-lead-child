@@ -5,6 +5,9 @@
 //     daemon 才做得了的事（插提醒、送交接消息）交给 execute。返回这次给出的全部事，调用方据此决定接下来做什么。
 //   · 中止：先把原因写进状态和 controller，再调用执行层的 stop（session.abort()），最多等 abortGraceMs，
 //     不等到也照样往下走，并写日志（D10 局限 3）。中止花了多久也写日志（D12 第 5 条）。
+//   · 释放（.scratch/tool-occupancy/spec.md L3，用户 2026-11-11）：abort.stuck 以后再等 releaseWaitMs，这一步还没停下，
+//     就叫 daemon 释放 Lead（换掉会话，session-slot.ts）。规则是固定的，不问模型。中止已经发出、还没停下时用户再 /stop，
+//     daemon 调 releaseNow，马上释放。中止晚到了（释放以前停下了）就取消释放，写 abort.late。
 //   · 记录：每个单元的开始和结束、值得记的决定、中止，写进 events 表（record）和会话文件（extension 绑定的 recorder）。
 import { abortExecution, abortReasonText, LeadTaskController, type AbortExecutionResult, type LeadAbortReason } from "./controller.js";
 import {
@@ -18,6 +21,30 @@ import { inputLane, laneClockMs, LANES, laneName, type InputKind, type Lane, typ
 export type { SchedulerSnapshot };
 
 export const DEFAULT_ABORT_GRACE_MS = 5_000;
+// abort.stuck 以后再等多久就释放 Lead（用户 2026-11-11：约 10 秒）。daemon 读 PLC_LEAD_RELEASE_WAIT_MS。
+export const DEFAULT_RELEASE_WAIT_MS = 10_000;
+export const LEAD_RELEASE_WAIT_MS_ENV = "PLC_LEAD_RELEASE_WAIT_MS";
+
+/** daemon 读环境变量里的等待时间；没设或者不是正数时用缺省值。 */
+export function releaseWaitMsFromEnv(env: Record<string, string | undefined> = process.env): number {
+  const value = Number(env[LEAD_RELEASE_WAIT_MS_ENV]);
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_RELEASE_WAIT_MS;
+}
+
+/** 释放 Lead 的请求：哪个单元的哪一步、卡在哪个阶段、什么时候中止的。 */
+export interface LeadReleaseRequest {
+  // auto：abort.stuck 以后等过了 releaseWaitMs；user_stop：中止还没停下时用户又 /stop。
+  trigger: "auto" | "user_stop";
+  unitId: string | null;
+  segment: number | null;
+  // 第一次中止的原因（abortReasonText）。
+  reason: string;
+  // 中止时这一步在哪个阶段（extension 报的，D7）。
+  stage: LeadStageInfo | null;
+  // 第一次中止的时刻（毫秒）和到现在过了多久。
+  abortedAt: number;
+  stuckMs: number;
+}
 
 /** 一步现在在哪个阶段（extension 报来的，D7）。 */
 export interface LeadStageInfo {
@@ -40,7 +67,24 @@ export interface LeadSchedulerRuntimeOptions {
   // 让执行层停下（session.abort()）。不给时中止只记原因。
   stopExecution?: () => unknown;
   abortGraceMs?: number;
+  // abort.stuck 以后再等多久就释放（缺省 DEFAULT_RELEASE_WAIT_MS）。
+  releaseWaitMs?: number;
+  // 释放 Lead（daemon 换掉会话）。不给时中止停不下只写 abort.stuck（以前的样子）。
+  release?: (request: LeadReleaseRequest) => Promise<unknown>;
   newUnitId?: () => string;
+}
+
+// 一次还没停下的中止（同一步里第二次中止，例如红线以后用户 /stop，算同一次）。
+interface PendingStop {
+  unitId: string | null;
+  segment: number | null;
+  reason: LeadAbortReason;
+  stage: LeadStageInfo | null;
+  startedAt: number;
+  settled: boolean;
+  stuck: boolean;
+  released: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
 }
 
 let unitCounter = 0;
@@ -57,6 +101,8 @@ export class LeadSchedulerRuntime {
   #aborting: Promise<AbortExecutionResult> | null = null;
   #sessionRecorder: ((data: Record<string, unknown>) => void) | null = null;
   #stage: LeadStageInfo | null = null;
+  #pendingStop: PendingStop | null = null;
+  #releasing: Promise<void> | null = null;
   readonly #options: LeadSchedulerRuntimeOptions;
   readonly #now: () => number;
 
@@ -107,6 +153,28 @@ export class LeadSchedulerRuntime {
   /** 最近一次中止的执行（drain 据此等它）。 */
   get aborting(): Promise<AbortExecutionResult> | null {
     return this.#aborting;
+  }
+
+  /** 已经发出了中止，这一步还没停下（也还没释放）。 */
+  get abortPending(): boolean {
+    const pending = this.#pendingStop;
+    return pending !== null && !pending.settled && !pending.released;
+  }
+
+  /** 正在释放 Lead（daemon 在换会话）。 */
+  get releasing(): Promise<void> | null {
+    return this.#releasing;
+  }
+
+  /**
+   * 用户又按了 /stop（用户 2026-11-11）：中止已经发出、这一步还没停下时，不再等，马上释放。返回有没有开始释放。
+   * 没有在等的中止、正在释放、正在排空（停机）、daemon 没给 release 时返回 false。
+   */
+  releaseNow(trigger: LeadReleaseRequest["trigger"] = "user_stop"): boolean {
+    const pending = this.#pendingStop;
+    if (!pending || pending.settled || pending.released || this.#releasing || this.#state.draining || !this.#options.release) return false;
+    this.#release(pending, trigger);
+    return true;
   }
 
   /** extension 绑定会话文件的写入口（pi 的 appendEntry，同步写）。重新加载扩展时新的一份替换旧的。 */
@@ -199,6 +267,10 @@ export class LeadSchedulerRuntime {
 
   closeUnit(outcome: UnitOutcome): void {
     if (this.#state.unit?.lane === 0) this.#userUnitEndedAt = this.#now();
+    // 单元结束了：还在等的释放不再做（它是这个单元的）。
+    const pending = this.#pendingStop;
+    if (pending?.timer) clearTimeout(pending.timer);
+    this.#pendingStop = null;
     this.dispatch({ type: "unit.close", outcome });
     this.#controller = null;
     this.#stage = null;
@@ -299,15 +371,91 @@ export class LeadSchedulerRuntime {
     const graceMs = this.#options.abortGraceMs ?? DEFAULT_ABORT_GRACE_MS;
     const where = controller ? { unit: controller.unitId, seg: controller.segment } : { unit: "-" };
     const running = this.#stage;
-    this.#aborting = abortExecution(stop, { graceMs, now: this.#now }).then((result) => {
+    // 同一步里还没停下的中止（例如红线中止以后用户又 /stop）：算同一次，从第一次中止算起。
+    const earlier = this.#pendingStop;
+    const pending: PendingStop = earlier && !earlier.settled && !earlier.released ? earlier : {
+      unitId: controller?.unitId ?? this.#state.unit?.id ?? null, segment: controller?.segment ?? null, reason, stage: running,
+      startedAt: this.#now(), settled: false, stuck: false, released: false, timer: null,
+    };
+    this.#pendingStop = pending;
+    this.#aborting = abortExecution(stop, { graceMs, now: this.#now, onSettled: () => this.#stopSettled(pending) }).then((result) => {
       const fields = {
         ...where, reason: abortReasonText(reason), settled: result.settled, ms: result.ms,
         ...(running ? { stage: running.stage, step: running.step } : {}),
         ...(result.error ? { error: result.error } : {}),
       };
-      // 过了宽限时间还没停下：中止本身挂住了（有东西不听 signal）。照样往下走，留一条日志。
+      // 过了宽限时间还没停下：中止本身挂住了（有东西不听 signal）。照样往下走，留一条日志，再等 releaseWaitMs 就释放。
       this.#options.log(schedulerLine(result.settled ? "abort.done" : "abort.stuck", { ...fields, graceMs }));
+      if (!result.settled && !pending.settled) this.#stuck(pending);
       return result;
+    });
+  }
+
+  // abort.stuck：再等 releaseWaitMs，这一步还没停下就释放。停机前的排空不释放（排空有自己的时限，到了 daemon 就退出）。
+  #stuck(pending: PendingStop): void {
+    pending.stuck = true;
+    if (!this.#options.release || pending.timer || pending.released || this.#state.draining) return;
+    const waitMs = this.#options.releaseWaitMs ?? DEFAULT_RELEASE_WAIT_MS;
+    pending.timer = setTimeout(() => {
+      pending.timer = null;
+      if (pending.settled || pending.released || this.#pendingStop !== pending || this.#state.draining) return;
+      this.#release(pending, "auto");
+    }, waitMs);
+    pending.timer.unref?.();
+  }
+
+  #stopSettled(pending: PendingStop): void {
+    if (pending.settled) return;
+    pending.settled = true;
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = null;
+    // 宽限过了以后才停下：不用释放了。已经释放过的，旧会话这时才停下，只记一笔。
+    if (pending.stuck || pending.released) {
+      this.#options.log(schedulerLine("abort.late", {
+        unit: pending.unitId ?? "-", reason: abortReasonText(pending.reason), ms: this.#now() - pending.startedAt, released: pending.released,
+      }));
+    }
+    if (this.#pendingStop === pending) this.#pendingStop = null;
+  }
+
+  #release(pending: PendingStop, trigger: LeadReleaseRequest["trigger"]): void {
+    const release = this.#options.release;
+    if (!release || this.#releasing) return;
+    pending.released = true;
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = null;
+    const request: LeadReleaseRequest = {
+      trigger, unitId: pending.unitId, segment: pending.segment, reason: abortReasonText(pending.reason), stage: pending.stage,
+      abortedAt: pending.startedAt, stuckMs: this.#now() - pending.startedAt,
+    };
+    const fields = {
+      unit: request.unitId ?? "-", trigger, reason: request.reason, stuckMs: request.stuckMs,
+      stage: request.stage?.stage ?? "-", ...(request.stage?.tool ? { tool: request.stage.tool } : {}),
+    };
+    this.#options.log(schedulerLine("release.start", fields));
+    if (request.unitId) {
+      this.#record("decided", {
+        unitId: request.unitId, decision: "release", trigger, reason: request.reason, stage: request.stage?.stage ?? null,
+        tool: request.stage?.tool ?? null, stuckMs: request.stuckMs,
+      });
+    }
+    const started = this.#now();
+    let running: Promise<unknown>;
+    try {
+      running = Promise.resolve(release(request));
+    } catch (error) {
+      running = Promise.reject(error);
+    }
+    this.#releasing = running.then(
+      () => { this.#options.log(schedulerLine("release.done", { unit: request.unitId ?? "-", trigger, ms: this.#now() - started })); },
+      (error: unknown) => {
+        this.#options.log(schedulerLine("release.failed", {
+          unit: request.unitId ?? "-", trigger, ms: this.#now() - started, error: error instanceof Error ? error.message : String(error),
+        }));
+      },
+    ).finally(() => {
+      this.#releasing = null;
+      if (this.#pendingStop === pending) this.#pendingStop = null;
     });
   }
 }

@@ -98,10 +98,10 @@ export interface AbortExecutionResult {
 
 /**
  * 让执行层停下（调用 stop，通常是 session.abort()），最多等 graceMs。stop 挂住时照样返回 settled=false，
- * 不让调用方跟着挂住。stop 抛错时 settled=true，带上错误。
+ * 不让调用方跟着挂住。stop 抛错时 settled=true，带上错误。onSettled：stop 结束时调用，宽限过了以后结束也调。
  */
 export async function abortExecution(
-  stop: () => unknown, options: { graceMs: number; now?: () => number },
+  stop: () => unknown, options: { graceMs: number; now?: () => number; onSettled?: () => void },
 ): Promise<AbortExecutionResult> {
   const now = options.now ?? Date.now;
   const started = now();
@@ -112,6 +112,11 @@ export async function abortExecution(
     stopped = Promise.resolve(stop());
   } catch (error) {
     stopped = Promise.reject(error);
+  }
+  // 宽限过了以后才停下，调用方也要知道（runtime 据此取消释放，.scratch/tool-occupancy/spec.md L3）。
+  if (options.onSettled) {
+    const onSettled = options.onSettled;
+    stopped.then(onSettled, onSettled);
   }
   const outcome = await Promise.race([
     stopped.then(

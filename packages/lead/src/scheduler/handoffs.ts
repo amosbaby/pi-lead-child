@@ -23,7 +23,8 @@ import {
 import { laneName, LANES, type Lane } from "./lanes.js";
 import type { LeadSchedulerRuntime } from "./runtime.js";
 
-export type SuspendReason = "handoff_timeout" | "handoff_skipped" | "preempt" | "stage_timeout";
+// released：这一步中止以后停不下，daemon 换掉了 Lead 的会话（.scratch/tool-occupancy/spec.md L3）。
+export type SuspendReason = "handoff_timeout" | "handoff_skipped" | "preempt" | "stage_timeout" | "released";
 export type HandoffState = "suspended" | "handed_off" | "resumed" | "dropped";
 
 export interface HandoffRecordState {

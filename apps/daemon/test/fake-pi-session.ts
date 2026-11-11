@@ -44,6 +44,9 @@ export interface FakeReply {
   tools?: Array<string | FakeTool>;
   // 这次调模型以这个错误结束（stopReason=error），这次运行也结束。
   error?: string;
+  // 这一步卡在一个不听中止的 await 上（扩展钩子、transformContext、不理 signal 的模型流；.scratch/tool-occupancy/spec.md L3）：
+  // 回答到了以后先等它，abort() 不打断，这次运行一直结束不了，abort() 也一直不返回。
+  stuck?: Promise<unknown>;
   // 上下文满了（pi 的溢出恢复）：回答被截成空的（stopReason=length，没有内容），pi 接着做一次溢出压缩，
   // 压缩以这个 errorMessage 失败，这次运行结束（2026-10-28 的停摆）。
   cutOff?: string;
@@ -174,6 +177,7 @@ export function fakePiLead(script: FakeScript, options: FakePiLeadOptions = {}) 
         continue;
       }
       const reply = await answer;
+      if (reply.stuck) await reply.stuck;
       if (reply.error) { end("error", reply.error); return; }
       if (reply.cutOff !== undefined) {
         emit({ type: "message_end", message: { role: "assistant", stopReason: "length", content: [], usage: { input: 4, output: 1 } } });
