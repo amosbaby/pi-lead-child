@@ -27,6 +27,7 @@ import { latestDeliveryRunId } from "../pipeline/delivery-run.js";
 import { deferIfExternal, executionDeferredNote, getExecutionMode } from "../execution-mode.js";
 import { BY_USER, behalfCursor, behalfFields, transitionBy, type ActionAttribution } from "./attribution.js";
 import { restoreItemTree, type ItemRestoreMode, type ItemRestoreResult } from "./restore.js";
+import { settleDeferredLookups } from "../worker-queue/closeout.js";
 
 export interface ResumeRunRequest {
   itemId: number;
@@ -199,6 +200,8 @@ export function completeItem(db: Db, itemId: number, by: ActionAttribution, reas
 /** 取消。工单上还没结束的 Run 一并停掉（spec §8），否则会留下一个跑着的 child 在为一件已经取消的事花钱。 */
 export async function cancelItem(db: Db, itemId: number, reason: string, by: ActionAttribution): Promise<number> {
   transition(db, { itemId, to: "cancelled", ...transitionBy(by), reason });
+  // 外部 / 暂停模式下派的子 agent 工单在卡上排着的记录结束，卡又能派活（worker-queue/closeout.ts）。
+  settleDeferredLookups(db, { itemId, reason: "工单取消了" });
   return stopItemRuns(db, itemId, `item cancelled: ${reason}`, by);
 }
 

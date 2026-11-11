@@ -47,6 +47,14 @@ describe("task stage machine", () => {
     expect(canTransition("task", "done", "review", "lead")).toBe(false);
   });
 
+  // 不记两遍账（external-worker-hub P1-6，Task 11）：你在来源里已经回了，只有 system 把没做完、交回给你的单推到 review。
+  it("gives ready -> review and blocked -> review to system only", () => {
+    for (const from of ["ready", "blocked"] as const) {
+      expect(canTransition("task", from, "review", "system")).toBe(true);
+      for (const actor of ["user", "lead", "child"] as const) expect(canTransition("task", from, "review", actor)).toBe(false);
+    }
+  });
+
   it("rejects edges absent from the machine", () => {
     expect(canTransition("task", "draft", "active", "user")).toBe(false);
     expect(canTransition("task", "done", "review", "user")).toBe(false);

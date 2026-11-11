@@ -11,20 +11,20 @@ import {
 import { TicketActionError } from "./ticket-actions/types.js";
 
 // 卡的锚点：卡回复的位置里的线程根（开卡的那条消息或者它所在线程的根）。
-export function cardAnchor(card: ChannelCard): string | null {
+function cardAnchor(card: ChannelCard): string | null {
   const ts = card.replyTarget.thread_ts;
   return typeof ts === "string" && ts !== "" ? ts : null;
 }
 
 /**
- * 记下这张工单来自这张通道卡。同一张工单同一个位置只记一次。卡不存在时什么都不记，返回 false。
+ * 记下这张工单来自这张通道卡（card_id 是卡本身：卡和工单按它关联，ruling R19）。同一张工单同一张卡只记一次。卡不存在时什么都不记，返回 false。
  * url：在来源里打开那条消息的地址（来源插件的 link()，经 protocol 的 sourceLink 只收 https）。插件拼不出时为 null。
  */
 export function recordCardTicketSource(db: Db, input: { itemId: number; cardId: number; url?: string | null; now?: Date }): boolean {
   const card = getChannelCard(db, input.cardId);
   if (!card) return false;
   return addConversationSource(db, {
-    itemId: input.itemId, kind: ticketSourceKindOf(card.source), conversation: card.objectKey, messageTs: cardAnchor(card),
+    itemId: input.itemId, kind: ticketSourceKindOf(card.source), conversation: card.objectKey, messageTs: cardAnchor(card), cardId: card.id,
     url: sourceLink(input.url ?? null), ...(input.now ? { now: input.now } : {}),
   });
 }

@@ -41,7 +41,7 @@ describe("the v68 worker hub migration", () => {
   it("has the tables and columns in a new database and records the version", () => {
     const db = openDb(join(tempDir("plc-v68-fresh-"), "plc.db"));
     expect(tables(db)).toEqual(expect.arrayContaining(["ticket_sources", "ticket_pushes", "ticket_misses"]));
-    expect(columns(db, "ticket_sources")).toEqual(["id", "item_id", "kind", "url", "external_key", "conversation", "message_ts", "created_at"]);
+    expect(columns(db, "ticket_sources")).toEqual(["id", "item_id", "kind", "url", "external_key", "conversation", "message_ts", "card_id", "created_at"]);
     expect(columns(db, "ticket_pushes")).toEqual(["item_id", "reason", "conversation", "message_ref", "shown_state", "created_at", "updated_at"]);
     expect(columns(db, "ticket_misses")).toEqual(["id", "text", "created_at"]);
     for (const column of NEW_ITEM_COLUMNS) expect(columns(db, "items")).toContain(column);
@@ -122,6 +122,9 @@ describe("the v68 worker hub migration", () => {
       itemId: fromLookup, kind: "slack", url: null, externalKey: null, conversation: "slack:C0TEAM:1730790000.000100", messageTs: "1730790000.000100",
     })]);
     expect(upgraded.prepare("SELECT COUNT(*) AS n FROM ticket_sources").get()).toEqual({ n: 2 });
+    // 卡和工单按卡本身关联（ruling R19）：代查卡的来源记着那张卡，私信里建的单没有卡。
+    expect(upgraded.prepare("SELECT item_id, card_id FROM ticket_sources ORDER BY item_id").all())
+      .toEqual([{ item_id: fromDm, card_id: null }, { item_id: fromLookup, card_id: cardId }].sort((a, b) => a.item_id - b.item_id));
     upgraded.close();
 
     const reopened = openDb(path);
@@ -150,6 +153,28 @@ describe("the v68 worker hub migration", () => {
     expect(ticketSources(upgraded, item)).toEqual([expect.objectContaining({
       kind: "slack", conversation: key, messageTs: "1730790000.000100", createdAt: "2026-11-05T07:00:00.000Z",
     })]);
+    expect(upgraded.prepare("SELECT card_id FROM ticket_sources WHERE item_id = ?").all(item)).toEqual([{ card_id: cardId }]);
+    upgraded.close();
+  });
+
+  // ruling R19：同一个线程里的两张卡锚点相同，关联同一张工单时各记一行（卡不同），不按位置合并。
+  it("backfills one source per card when two cards of one thread link the same ticket", () => {
+    const path = join(tempDir("plc-v68-twocards-"), "plc.db");
+    const legacy = openDb(path);
+    const item = createItem(legacy, { title: "t", brief: "b", createdBy: "lead" });
+    const key = "slack:C0TEAM:1730790000.000100";
+    const first = cardIn(legacy, key, { channel: "C0TEAM", thread_ts: "1730790000.000100" });
+    updateChannelLookup(legacy, lookupFor(legacy, first, key, item), { state: "finished" });
+    legacy.prepare("UPDATE channel_cards SET state = 'dismissed' WHERE id = ?").run(first);
+    const second = cardIn(legacy, key, { channel: "C0TEAM", thread_ts: "1730790000.000100" });
+    lookupFor(legacy, second, key, item);
+    legacy.exec("DROP TABLE ticket_sources; DROP TABLE ticket_pushes; DROP TABLE ticket_misses;");
+    for (const column of NEW_ITEM_COLUMNS) legacy.exec(`ALTER TABLE items DROP COLUMN ${column}`);
+    legacy.prepare("DELETE FROM schema_migrations WHERE version = 68").run();
+    legacy.close();
+    const upgraded = openDb(path);
+    expect(upgraded.prepare("SELECT card_id FROM ticket_sources WHERE item_id = ? ORDER BY card_id").all(item))
+      .toEqual([{ card_id: first }, { card_id: second }]);
     upgraded.close();
   });
 

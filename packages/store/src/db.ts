@@ -775,10 +775,11 @@ function migrateChannelOwnerDm(db: Db): void {
 // v68：外部工人 hub。items 加四列（handling、handling_reason、complexity、external_origin），新表 ticket_sources、ticket_pushes、
 // ticket_misses 由 SCHEMA 建（schema.ts 的 WORKER_HUB_SCHEMA）。只加列、只插新表的行，不重建 items，不改任何已有的行：
 // 生命周期字段一个都不动，旧工单的判断是 NULL、external_origin 是 0。
-// 回填来源：用户私信里建的工单（channel_ticket_origins，只有对话，没有消息位置）和代查卡关联的工单（channel_lookups.item_id，
-// 对话是卡的 object_key，消息位置是卡的 reply_target.thread_ts）都记成 kind='slack'；url 留空：不知道工作区域名，拼不出链接。
-// 同一张工单同一个位置只记一次：一张卡的几次代查关联同一张工单时按 (工单, 对话, 消息位置) 合成一行（取最早的创建时间），
+// 回填来源：用户私信里建的工单（channel_ticket_origins，只有对话，没有消息位置，没有卡）和代查卡关联的工单（channel_lookups.item_id，
+// 卡是 card_id，对话是卡的 object_key，消息位置是卡的 reply_target.thread_ts）都记成 kind='slack'；url 留空：不知道工作区域名，拼不出链接。
+// 同一张工单同一张卡只记一次：一张卡的几次代查关联同一张工单时按 (工单, 卡) 合成一行（取最早的创建时间），
 // 已有的行也不重复，所以迁移行被删掉重跑也不会重复。新库没有这些行，回填什么都不做。
+// ticket_sources.card_id 是 v68 里的列（ruling R19，v68 还没有发布过，原地加在表定义里，没有给旧的 v68 库补列的路径）。
 function migrateWorkerHub(db: Db): void {
   if (db.prepare("SELECT 1 FROM schema_migrations WHERE version=?").get(WORKER_HUB_MIGRATION_VERSION)) return;
   db.transaction(() => {
@@ -796,20 +797,20 @@ function migrateWorkerHub(db: Db): void {
           WHERE t.item_id = o.item_id AND t.kind = 'slack' AND t.conversation = o.conversation AND t.message_ts IS NULL
        )
        ORDER BY o.item_id;
-      INSERT INTO ticket_sources (item_id, kind, conversation, message_ts, created_at)
-      SELECT p.item_id, 'slack', p.conversation, p.message_ts, p.created_at
+      INSERT INTO ticket_sources (item_id, kind, conversation, message_ts, card_id, created_at)
+      SELECT p.item_id, 'slack', p.conversation, p.message_ts, p.card_id, p.created_at
         FROM (
-          SELECT l.item_id AS item_id, c.object_key AS conversation,
+          SELECT l.item_id AS item_id, c.id AS card_id, c.object_key AS conversation,
                  CASE WHEN json_valid(c.reply_target) THEN json_extract(c.reply_target, '$.thread_ts') END AS message_ts,
                  MIN(l.created_at) AS created_at, MIN(l.id) AS first_lookup
             FROM channel_lookups l
             JOIN channel_cards c ON c.id = l.card_id
            WHERE l.item_id IS NOT NULL
-           GROUP BY l.item_id, c.object_key, message_ts
+           GROUP BY l.item_id, c.id
         ) p
        WHERE NOT EXISTS (
          SELECT 1 FROM ticket_sources t
-          WHERE t.item_id = p.item_id AND t.kind = 'slack' AND t.conversation = p.conversation AND t.message_ts IS p.message_ts
+          WHERE t.item_id = p.item_id AND t.kind = 'slack' AND t.card_id = p.card_id
        )
        ORDER BY p.first_lookup;
     `);

@@ -29,7 +29,7 @@ export const TASK_STAGE_EDGES: StageEdgeTable = {
   // system 只在代查（purpose=lookup，slack-takeover spec D5）失败或被取消时走这两条边：代查工单跟着代查进终态
   // （D14 的不变量 3）。代查工单不等人验收，也没有用户可以否决的成果。store 的 transition 拒绝 system 取消别的工单。
   "ready->cancelled": ["user", "lead", "system"],
-  // 只有 system，而且只有一种触发方式（不记两遍账，external-worker-hub spec P1-6）：这张还没人做完的单关联的会话卡，
+  // 只有 system，而且只有一种触发方式（不记两遍账，external-worker-hub spec P1-6，blocked->review 同一个）：这张还没人做完的单关联的会话卡，
   // 你在来源里已经回了（卡进入 replied / resolved_elsewhere，engine 的 worker-queue/closeout.ts）。工单到 review 等你一键完成，
   // 不先假装开始过（ready→active 的 system 边只在建 Run 时走）。不给 user、lead：他们要结束一张单用 cancel 或者先开始。
   "ready->review": ["system"],
@@ -42,10 +42,14 @@ export const TASK_STAGE_EDGES: StageEdgeTable = {
   "blocked->active": ["user", "system", "child"],
   "blocked->ready": ["user", "lead"],  // 同上：停下
   "blocked->cancelled": ["user", "lead"],
+  // 只有 system，而且只有一种触发方式，和 ready->review 同一个（ruling R20）：交回给你（blocked）的单关联的会话卡，你在来源里
+  // 已经回了（卡进入 replied / resolved_elsewhere，engine 的 worker-queue/closeout.ts）。工单到 review 等你一键完成。不给 user、lead。
+  "blocked->review": ["system"],
   // system 只在两种情况下走，由调用方额外校验：
   //   - 工单托管给 Lead 验收、独立核查 PASS（engine 的 delegated-review.ts）；
-  //   - 只读类工单（代查，purpose=lookup）关联的会话卡你已经回了（replied / resolved_elsewhere）：回复已经发出，没有交付物要验
-  //     （external-worker-hub spec P1-6，engine 的 worker-queue/closeout.ts）。交付类的单不走这条，停在 review 等你验收。
+  //   - 只读类工单（卡上代查记录的剧本是 lookup：咨询、进度）关联的会话卡你已经回了（replied / resolved_elsewhere）：回复已经发出，
+  //     没有交付物要验（external-worker-hub spec P1-6，engine 的 worker-queue/closeout.ts）。交付类的单、review 剧本（PR 评论、批准）
+  //     的单不走这条，停在 review 等你验收。
   "review->done": ["user", "lead", "system"],
   "review->active": ["user", "lead", "system"],
   // 只有 system，而且只有一种触发方式：一次交付 Run 结束了，但它交不出任何可登记的成果。

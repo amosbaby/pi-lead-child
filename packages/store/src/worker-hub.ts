@@ -72,24 +72,35 @@ export function ticketSourceKindOf(channel: string): TicketSourceKind {
 }
 
 /**
- * 记一条对话里的来源（通道卡、用户私信），同一张工单同一个位置 (kind, conversation, message_ts) 只记一次，和 v68 回填同一条规则。
+ * 记一条对话里的来源（通道卡、用户私信）。来自通道卡的（cardId）同一张工单同一张卡只记一次，和 v68 回填同一条规则；
+ * 没有卡的（用户私信）同一张工单同一个位置 (kind, conversation, message_ts) 只记一次。
  * 没有 externalKey，不去重到别的工单。记下了返回 true，已经有了返回 false。
  */
 export function addConversationSource(
-  db: Db, source: { itemId: number; kind: TicketSourceKind; conversation: string; messageTs?: string | null; url?: string | null; now?: Date },
+  db: Db, source: {
+    itemId: number; kind: TicketSourceKind; conversation: string; messageTs?: string | null; cardId?: number | null; url?: string | null; now?: Date;
+  },
 ): boolean {
   return db.transaction((): boolean => {
     const messageTs = source.messageTs ?? null;
-    const existing = db.prepare(
-      "SELECT 1 FROM ticket_sources WHERE item_id = ? AND kind = ? AND conversation = ? AND message_ts IS ? LIMIT 1",
-    ).get(source.itemId, source.kind, source.conversation, messageTs);
+    const cardId = source.cardId ?? null;
+    const existing = cardId === null
+      ? db.prepare(
+        "SELECT 1 FROM ticket_sources WHERE item_id = ? AND kind = ? AND conversation = ? AND message_ts IS ? AND card_id IS NULL LIMIT 1",
+      ).get(source.itemId, source.kind, source.conversation, messageTs)
+      : db.prepare("SELECT 1 FROM ticket_sources WHERE item_id = ? AND kind = ? AND card_id = ? LIMIT 1").get(source.itemId, source.kind, cardId);
     if (existing) return false;
-    addTicketSource(db, {
-      itemId: source.itemId, kind: source.kind, conversation: source.conversation, messageTs, url: source.url ?? null,
-      ...(source.now ? { now: source.now } : {}),
-    });
+    db.prepare(
+      "INSERT INTO ticket_sources (item_id, kind, url, conversation, message_ts, card_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(source.itemId, source.kind, source.url ?? null, source.conversation, messageTs, cardId, (source.now ?? new Date()).toISOString());
     return true;
   })();
+}
+
+/** 撤掉一张工单的处理方式判断（handling、handling_reason 改回 NULL），复杂度留着。工单不存在时抛错。 */
+export function clearHandling(db: Db, itemId: number): void {
+  const result = db.prepare("UPDATE items SET handling = NULL, handling_reason = NULL, updated_at = datetime('now') WHERE id = ?").run(itemId);
+  if (result.changes !== 1) throw new Error(`clearHandling: item ${itemId} does not exist`);
 }
 
 /** 改一张工单是不是来自外部来源（external_origin）。只改这一列，不碰 stage 和别的生命周期字段。工单不存在时抛错。 */

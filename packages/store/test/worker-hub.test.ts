@@ -5,6 +5,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import {
   addConversationSource, addTicketSource, createItem, findItemByExternalKey, isExternalOrigin, missesSince, openDb, recordMiss,
   recordTicketOrigin, setExternalOrigin, setHandling, ticketSourceKindOf, ticketSources, type Db,
+  openChannelCard, recordChannelLaneMessage,
 } from "../src/index.js";
 
 function db(): Db {
@@ -96,6 +97,26 @@ describe("sources written by the creation paths", () => {
     expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: "1762934400.000100" })).toBe(false);
     expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: null })).toBe(true);
     expect(ticketSources(d, id)).toHaveLength(2);
+    // 来自通道卡的按卡记（ruling R19）：同一个位置、不同的卡各记一行；同一张卡只记一次。
+    const card = (state: string) => {
+      const lane = recordChannelLaneMessage(d, {
+        source: "slack", objectKey: "slack:C0TEAM:main", label: "对话",
+        message: { at: new Date().toISOString(), seq: null, role: "them", sender: "Nina", text: "hi" },
+      });
+      const opened = openChannelCard(d, {
+        laneId: lane.id, source: "slack", objectKey: "slack:C0TEAM:main", delivery: "card", seq: 1,
+        sender: { id: "u1", name: "Nina", trust: "colleague" }, excerpt: "hi", replyTarget: { channel: "C0TEAM", thread_ts: "1762934400.000100" },
+      }).id;
+      d.prepare("UPDATE channel_cards SET state = ? WHERE id = ?").run(state, opened);
+      return opened;
+    };
+    const first = card("dismissed");
+    const second = card("open");
+    expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: "1762934400.000100", cardId: first })).toBe(true);
+    expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: "1762934500.000100", cardId: first })).toBe(false);
+    expect(addConversationSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:main", messageTs: "1762934400.000100", cardId: second })).toBe(true);
+    expect(d.prepare("SELECT card_id FROM ticket_sources WHERE item_id = ? ORDER BY id").all(id))
+      .toEqual([{ card_id: null }, { card_id: null }, { card_id: first }, { card_id: second }]);
     d.close();
   });
 

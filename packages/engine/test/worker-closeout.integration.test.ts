@@ -1,6 +1,7 @@
 // 不记两遍账（.scratch/external-worker-hub/spec.md P1-6，Task 11）：工单关联的会话卡结束成「你用草稿回了」（replied）或
 // 「你在来源里自己回了」（resolved_elsewhere）时，工单收尾：关掉外部工人的 Run，system 推到 review，记一条 replied_in_source；
-// 只读类（代查 purpose=lookup）回复已经发出，接着 review → done；交付类停在 review 等你验收。「你在来源里说了一句但没回答」
+// 只读类（卡上代查记录的剧本是 lookup）回复已经发出，接着 review → done；交付类和 PR review 的单停在 review 等你验收。
+// 交回给你（blocked）的单也收尾，不再「待你处理」。卡和工单按卡本身关联（ruling R19）。「你在来源里说了一句但没回答」
 // （replying_self）不算。已经 done 的工单什么也不做（核心不变量：终态是权威）。
 // 也包括 CARRY→Task 11：外部 / 暂停模式下派的子 agent 工单在卡上留的排队记录（channel_lookups queued，run_id null）
 // 什么时候结束：只要工单还能由外部工人接着做（ready / active / blocked，并且不是 self 模式或者有人领着）就留着，否则结束。
@@ -11,11 +12,11 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { EXTERNAL_RUNTIME_ID, MESSAGE_EVENT_KIND, type Scope } from "@pi-lead-child/protocol";
 import {
   createItem, createLoopbackBinding, getActiveLookupForCard, getChannelCard, getItem, getLatestLookupForCard, listActivities, listEvents,
-  listRuns, openDb, transition, type Db,
+  listRuns, markRunStopped, openDb, createRun, transition, type Db,
 } from "@pi-lead-child/store";
 import {
   ChannelHub, ChannelRegistry, createSlackChannelAdapter, onCardDisposed, recordCardTicketSource, runTicketAction, runUiAction, setExecutionMode,
-  TicketActionError, type TicketActionCaller,
+  TicketActionError, ticketNeedsMe, type TicketActionCaller,
 } from "../src/index.js";
 import { cardIdOf, FakeAgentTaskDispatcher, FakeSlack, scriptedSmartModel } from "../testing/index.js";
 
@@ -42,7 +43,8 @@ afterEach(async () => {
 function hub(): ChannelHub {
   const model = scriptedSmartModel({
     answers: {
-      ask_kind: "other", handling_verb: "looking", needs_user_now: 0.05, target_repo: "acme/x",
+      ask_kind: (state) => (state.split("\n\n")[0]!.includes("review") ? "code_review" : "other"),
+      handling_verb: "looking", needs_user_now: 0.05, target_repo: "acme/x",
       answers_request: (state) => (state.includes("看了") ? 0.9 : 0.1),
     },
   });
@@ -52,6 +54,7 @@ function hub(): ChannelHub {
     credentials: { credential: async () => slack.credential },
     now: () => clock, push: () => undefined, classifyTimeoutMs: 60_000, outboundRetryBaseMs: 1_000,
     smartModel: () => model,
+    pullRequestOf: (text) => (text.includes("acme/x#3") ? { owner: "acme", repo: "x", number: 3 } : null),
     lookupCandidates: () => [{ repo: "acme/x", root: "/Users/alice/x", github: { owner: "acme", repo: "x" } }],
     lead: { dispatcher, available: () => true },
     audit: { rate: 0 },
@@ -69,23 +72,25 @@ function worker(name = "Ethan's Claude Code", scopes: Scope[] = ["worker"]): Wor
 const act = (caller: TicketActionCaller, itemId: number, action: string, input: unknown = {}) =>
   runTicketAction(db, { itemId, action, input, caller });
 
-async function question(channels: ChannelHub, text = "订单服务的重试上限是多少？") {
-  const item = (await channels.receive("slack", slack.dm("U0NINA", text))).items[0]!;
+async function question(channels: ChannelHub, text = "订单服务的重试上限是多少？", delivery = slack.dm("U0NINA", text)) {
+  const item = (await channels.receive("slack", delivery)).items[0]!;
   await channels.idle();
   return cardIdOf(db, item)!;
 }
 const eventOf = (cardId: number) => listEvents(db, { kind: MESSAGE_EVENT_KIND }).filter((event) => event.payload.cardId === cardId).at(-1)!.seq;
 
 // Lead 在外部模式下派的子 agent 工单（ruling R12）：只读类（purpose=lookup），ready，没有 Run，卡上一条排着的记录。
-async function deferredTicket(channels: ChannelHub, cardId: number): Promise<number> {
+async function deferredTicket(channels: ChannelHub, cardId: number, intent: "knowledge" | "code_review" = "knowledge"): Promise<number> {
   dispatcher.deferNext = true;
-  const dispatched = await channels.leadDispatch(eventOf(cardId), { summary: "查订单服务的重试上限", intent: "knowledge" });
+  const dispatched = await channels.leadDispatch(eventOf(cardId), {
+    summary: intent === "knowledge" ? "查订单服务的重试上限" : "review acme/x#3", ...(intent === "knowledge" ? { intent } : {}),
+  });
   await channels.idle();
   return dispatched.itemId;
 }
 
-async function userReplies(channels: ChannelHub, text: string) {
-  await channels.receive("slack", slack.selfReply("D0NINA", text));
+async function userReplies(channels: ChannelHub, text: string, delivery = slack.selfReply("D0NINA", text)) {
+  await channels.receive("slack", delivery);
   await channels.idle();
 }
 
@@ -244,16 +249,17 @@ describe("a worker's complete on a read-only ticket and the reply", () => {
     const channels = hub();
     const cardId = await question(channels);
     const itemId = await deferredTicket(channels, cardId);
+    // 你回的时候这张单有自己在跑的 Run：收尾不动它（那条流水线自己收尾）。
+    const own = createRun(db, { itemId, purpose: "lookup" });
+    await userReplies(channels, "看了，上限是 5 次");
+    expect(getItem(db, itemId)!.stage).toBe("ready");
+    markRunStopped(db, own);
     const ethan = worker();
     await act(ethan, itemId, "worker.claim");
-    await act(ethan, itemId, "worker.hand_back", { reason: "需要你确认用哪个环境" });
-    // 交回给你的单（blocked）不收尾：等你决定。
-    await userReplies(channels, "看了，上限是 5 次");
-    expect(getItem(db, itemId)!.stage).toBe("blocked");
 
-    await act(ethan, itemId, "worker.claim");
-    await act(ethan, itemId, "worker.complete", { summary: "上限 5 次", evidence: "config/retry.ts" });
+    const outcome = await act(ethan, itemId, "worker.complete", { summary: "上限 5 次", evidence: "config/retry.ts" });
 
+    expect(outcome.result).toMatchObject({ stage: "done" });
     expect(getItem(db, itemId)!.stage).toBe("done");
     expect(transitions(itemId).slice(-2)).toEqual(["active->review system", "review->done system"]);
     expect(decisions(itemId, "replied_in_source")).toMatchObject([{ payload: { cardId, from: "review", to: "done" } }]);
@@ -322,5 +328,141 @@ describe("the queued record a deferred dispatch leaves on the card (CARRY→Task
     setExecutionMode(db, "self");
     await act(user, itemId, "ticket.release");
     expect(getActiveLookupForCard(db, cardId)).toBeUndefined();
+  });
+});
+
+describe("fix round 1: linked by the card itself, handed-back tickets, PR reviews, cancel", () => {
+  // Lead 在这张卡叫醒的一轮里建的交付类单（来源记着这张卡）。
+  function deliveryTicket(cardId: number, title = "把重试上限改成 5"): number {
+    const itemId = createItem(db, { title, brief: "acme/x 的重试上限", createdBy: "lead" });
+    recordCardTicketSource(db, { itemId, cardId });
+    return itemId;
+  }
+
+  // ruling R19：一个频道线程里的几张卡锚点相同。回了后一张卡，不收前一张卡的单。
+  it("does not touch the ticket of an earlier card in the same channel thread when you answer a later one", async () => {
+    const channels = hub();
+    const root = slack.mention("U0NINA", "能帮忙把重试上限改成 5 吗？", { channel: "C0PROJ" });
+    const thread = (JSON.parse(root.body) as { event: { ts: string } }).event.ts;
+    const first = await question(channels, "", root);
+    const t1 = deliveryTicket(first);
+    const ethan = worker();
+    await act(ethan, t1, "worker.claim");
+    // 第一张卡你没回就结束了（不回）；Nina 在同一个线程里又问了一件别的事，开了第二张卡。
+    await channels.act(first, "dismiss", { by: "user via test" });
+    const second = await question(channels, "", slack.mention("U0NINA", "顺便问下周五的评审你来吗？", { channel: "C0PROJ", thread }));
+    expect(second).not.toBe(first);
+    expect(getChannelCard(db, second)!.replyTarget.thread_ts).toBe(getChannelCard(db, first)!.replyTarget.thread_ts);
+
+    await userReplies(channels, "看了，周五我来", slack.selfReply("C0PROJ", "看了，周五我来", { thread }));
+
+    expect(getChannelCard(db, second)!.state).toBe("resolved_elsewhere");
+    expect(getItem(db, t1)!.stage).toBe("active");
+    expect(externalRuns(t1).map((run) => run.state)).toEqual(["running"]);
+    expect(decisions(t1, "replied_in_source")).toEqual([]);
+    // 工人照常交：成果不丢。
+    await act(ethan, t1, "worker.complete", { summary: "改好了", evidence: "PR acme/x#7" });
+    expect(getItem(db, t1)!.stage).toBe("review");
+  });
+
+  // ruling R19：私信里卡的锚点随新消息移动。建单以后对方又发了一条，你回了，单照样收尾。
+  it("still closes out a ticket after a follow-up message moved the DM card's anchor", async () => {
+    const channels = hub();
+    const cardId = await question(channels, "能帮忙把重试上限改成 5 吗？");
+    const anchor = getChannelCard(db, cardId)!.replyTarget.thread_ts;
+    const itemId = deliveryTicket(cardId);
+    await act(worker(), itemId, "worker.claim");
+    expect(await question(channels, "", slack.dm("U0NINA", "最好今天能改完"))).toBe(cardId);
+    expect(getChannelCard(db, cardId)!.replyTarget.thread_ts).not.toBe(anchor);
+
+    await userReplies(channels, "看了，今天改");
+
+    expect(getChannelCard(db, cardId)!.state).toBe("resolved_elsewhere");
+    expect(getItem(db, itemId)!.stage).toBe("review");
+    expect(decisions(itemId, "replied_in_source")).toMatchObject([{ payload: { cardId, from: "active", to: "review" } }]);
+  });
+
+  // ruling R20：交回给你（blocked、needs_user）的单，你在来源里回了就是处理了。
+  it("closes out a handed-back read-only ticket to done and it no longer needs you", async () => {
+    const channels = hub();
+    const cardId = await question(channels);
+    const itemId = await deferredTicket(channels, cardId);
+    const ethan = worker();
+    await act(ethan, itemId, "worker.claim");
+    await act(ethan, itemId, "worker.hand_back", { reason: "需要你确认用哪个环境" });
+    expect(getItem(db, itemId)!.stage).toBe("blocked");
+    expect(ticketNeedsMe(db, itemId)).toBe(true);
+
+    await userReplies(channels, "看了，上限是 5 次");
+
+    expect(getItem(db, itemId)!.stage).toBe("done");
+    expect(transitions(itemId).slice(-2)).toEqual(["blocked->review system", "review->done system"]);
+    expect(ticketNeedsMe(db, itemId)).toBe(false);
+    expect(db.prepare("SELECT handling, handling_reason FROM items WHERE id = ?").get(itemId)).toEqual({ handling: null, handling_reason: null });
+    expect(decisions(itemId, "replied_in_source")).toMatchObject([{ payload: { from: "blocked", to: "done", closedRunId: null } }]);
+  });
+
+  it("closes out a handed-back delivery ticket to review and it no longer needs you", async () => {
+    const channels = hub();
+    const cardId = await question(channels, "能帮忙把重试上限改成 5 吗？");
+    const itemId = deliveryTicket(cardId);
+    const ethan = worker();
+    await act(ethan, itemId, "worker.claim");
+    await act(ethan, itemId, "worker.hand_back", { reason: "需要你确认改哪个服务" });
+
+    await userReplies(channels, "看了，我自己改了");
+
+    expect(getItem(db, itemId)!.stage).toBe("review");
+    expect(ticketNeedsMe(db, itemId)).toBe(false);
+    expect(transitions(itemId).at(-1)).toBe("blocked->review system");
+  });
+
+  // ruling R21：只有剧本是 lookup（咨询、进度）的单自己走到 done；PR review 的单停在 review 等你看。
+  it("keeps a PR review ticket in review when you replied, and marks a knowledge one done", async () => {
+    const channels = hub();
+    const reviewCard = await question(channels, "帮忙 review 一下 acme/x#3");
+    const reviewTicket = await deferredTicket(channels, reviewCard, "code_review");
+    expect(getLatestLookupForCard(db, reviewCard)).toMatchObject({ playbook: "review", itemId: reviewTicket });
+    await act(worker(), reviewTicket, "worker.claim");
+
+    await userReplies(channels, "看了，我在 PR 上回了");
+
+    expect(getChannelCard(db, reviewCard)!.state).toBe("resolved_elsewhere");
+    expect(getItem(db, reviewTicket)!.stage).toBe("review");
+    expect(decisions(reviewTicket, "replied_in_source")).toMatchObject([{ payload: { from: "active", to: "review" } }]);
+    // 剧本是 lookup 的走到 done（第一组用例里也有），这里对照一张。
+    const knowledgeCard = await question(channels, "订单服务的重试上限是多少？", slack.dm("U0NINA", "订单服务的重试上限是多少？", { thread: "1762941600.000100" }));
+    const knowledge = await deferredTicket(channels, knowledgeCard);
+    expect(getLatestLookupForCard(db, knowledgeCard)).toMatchObject({ playbook: "lookup" });
+    await userReplies(channels, "看了，上限是 5 次", slack.selfReply("D0NINA", "看了，上限是 5 次", { thread: "1762941600.000100" }));
+    expect(getItem(db, knowledge)!.stage).toBe("done");
+  });
+
+  it("ends the card's queued record when the deferred ticket is cancelled in external mode", async () => {
+    const channels = hub();
+    const cardId = await question(channels);
+    const itemId = await deferredTicket(channels, cardId);
+    expect(getActiveLookupForCard(db, cardId)).toMatchObject({ state: "queued" });
+
+    await act({ kind: "user" }, itemId, "cancel", {});
+
+    expect(getItem(db, itemId)!.stage).toBe("cancelled");
+    expect(getActiveLookupForCard(db, cardId)).toBeUndefined();
+    expect(getLatestLookupForCard(db, cardId)).toMatchObject({ state: "cancelled" });
+  });
+
+  it("ends the queued record of an already cancelled ticket when its card is answered", async () => {
+    const channels = hub();
+    const cardId = await question(channels);
+    const itemId = await deferredTicket(channels, cardId);
+    // 旧的取消路径没有结掉记录（例如直接改的 stage）：卡结束时按规则再看一遍。
+    transition(db, { itemId, to: "cancelled", actor: "user", reason: "不用查了" });
+    expect(getActiveLookupForCard(db, cardId)).toMatchObject({ state: "queued" });
+
+    await userReplies(channels, "看了，上限是 5 次");
+
+    expect(getItem(db, itemId)!.stage).toBe("cancelled");
+    expect(getActiveLookupForCard(db, cardId)).toBeUndefined();
+    expect(decisions(itemId, "replied_in_source")).toEqual([]);
   });
 });

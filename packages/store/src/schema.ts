@@ -1414,6 +1414,9 @@ CREATE TABLE IF NOT EXISTS channel_ticket_origins (
 // 通道卡来的来源（Lead 派活、Lead 在外部消息叫醒的一轮里建单，以及 v68 从代查回填的），message_ts 是卡的锚点
 // （卡的 reply_target.thread_ts：线程的根或者开卡的那条消息），不一定是叫醒那一轮、触发派活的那条消息。
 // 用户私信里建的单（channel_ticket_origins）只有对话，message_ts 为空。
+// card_id 是来源那张通道卡（Lead 派活、Lead 在外部消息叫醒的一轮里建单、v68 从代查回填的）：卡和工单按它关联（不记两遍账，
+// engine 的 worker-queue/closeout.ts，ruling R19）。不按 conversation + message_ts 关联：一个线程里的几张卡锚点相同，私信里卡的锚点
+// 随新消息移动。用户私信里建的单、worker.track 的来源没有卡，是 NULL。
 // 同一个 (kind, external_key) 只能属于一张工单（部分唯一索引）：同一个 Jira 单第二次进来时归到已有的工单。没有 external_key 的来源不去重。
 // ticket_pushes：每张工单最多一条推给用户私信的消息（item_id 是主键），状态变了就改写那条消息（shown_state 是消息上现在显示的状态，
 // message_ref 是那条消息在来源里的位置，发出去以后才有）。
@@ -1427,6 +1430,7 @@ CREATE TABLE IF NOT EXISTS ticket_sources (
   external_key  TEXT,
   conversation  TEXT,
   message_ts    TEXT,
+  card_id       INTEGER REFERENCES channel_cards(id),
   created_at    TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS ticket_sources_external_key ON ticket_sources(kind, external_key) WHERE external_key IS NOT NULL;
