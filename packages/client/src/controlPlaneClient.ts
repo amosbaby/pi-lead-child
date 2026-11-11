@@ -226,6 +226,9 @@ import {
   TicketReviewRequestResultSchema,
   TicketReviewerInfoSchema,
   TicketSandboxInfoSchema,
+  TicketLinksSchema,
+  TicketMetaListSchema,
+  TICKET_META_MAX_IDS,
   TicketUsageSchema,
   TicketSummarySchema,
   TicketDeliveryResponseSchema,
@@ -335,6 +338,8 @@ import {
   type TicketReviewRequest,
   type TicketReviewerInfo,
   type TicketSandboxInfo,
+  type TicketLinks,
+  type TicketMeta,
   type TicketUsage,
   type TicketSummary,
   type WorkspaceActionResult,
@@ -953,6 +958,23 @@ export class ControlPlaneClient {
   // 「沙箱外执行」授权现在开没开（工单 #62）。开关是工单操作 set_unsandboxed（runTicketAction）。
   async getTicketSandbox(ticketId: number, signal?: AbortSignal): Promise<TicketSandboxInfo> {
     return this.request(`/v1/tickets/${ticketId}/sandbox`, TicketSandboxInfoSchema, { signal });
+  }
+
+  // 列表上的来源、处理方式、复杂度、领取人（external-worker-hub P1-7）。不进 TicketSummary，理由同上。
+  // 一批最多 TICKET_META_MAX_IDS 张，多了分几次取；没有编号时不发请求。旧 daemon 没有这个接口时报错。
+  async getTicketsMeta(ticketIds: readonly number[], signal?: AbortSignal): Promise<TicketMeta[]> {
+    const ids = [...new Set(ticketIds)];
+    const rows: TicketMeta[] = [];
+    for (let start = 0; start < ids.length; start += TICKET_META_MAX_IDS) {
+      const batch = ids.slice(start, start + TICKET_META_MAX_IDS);
+      rows.push(...await this.request<TicketMeta[]>(`/v1/tickets/meta?ids=${batch.join(',')}`, TicketMetaListSchema, { signal }));
+    }
+    return rows;
+  }
+
+  // 工单详情里的来源、会话链接和判断理由（external-worker-hub P1-7）。
+  async getTicketLinks(ticketId: number, signal?: AbortSignal): Promise<TicketLinks> {
+    return this.request(`/v1/tickets/${ticketId}/links`, TicketLinksSchema, { signal });
   }
 
   async getActivities(ticketId: number, signal?: AbortSignal): Promise<ActivityDto[]> {

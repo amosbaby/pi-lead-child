@@ -1760,3 +1760,40 @@ describe('queued follow-up actions', () => {
     ]);
   });
 });
+
+// 网页看台账（external-worker-hub Task 10）：列表的事实按批取，一批最多 TICKET_META_MAX_IDS 张；详情的来源和会话按张取。
+describe('ticket meta and links', () => {
+  async function clientWith(reply: (url: URL) => unknown) {
+    const credentials = createJsonCredentialStore(new MemoryKeyValueStorage());
+    await credentials.save({ baseUrl: 'http://daemon.test', accessToken: 'secret', binding, lastSeq: 0 });
+    const asked: URL[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      asked.push(url);
+      return response(reply(url));
+    });
+    return { client: new ControlPlaneClient({ fetch: fetcher, credentials }), asked };
+  }
+  const meta = (id: number) => ({ id, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: null });
+
+  it('asks in batches of at most 200 ids, and asks nothing for no ids', async () => {
+    const { client, asked } = await clientWith((url) => url.searchParams.get('ids')!.split(',').map((id) => meta(Number(id))));
+    expect(await client.getTicketsMeta([])).toEqual([]);
+    expect(asked).toEqual([]);
+    const ids = Array.from({ length: 201 }, (_, index) => index + 1);
+    const result = await client.getTicketsMeta(ids);
+    expect(result.map((row) => row.id)).toEqual(ids);
+    expect(asked.map((url) => [url.pathname, url.searchParams.get('ids')!.split(',').length])).toEqual([
+      ['/v1/tickets/meta', 200], ['/v1/tickets/meta', 1],
+    ]);
+  });
+
+  it('refuses a meta row with an unknown field, and reads the links of one ticket', async () => {
+    const bad = await clientWith(() => [{ ...meta(1), extra: true }]);
+    await expect(bad.client.getTicketsMeta([1])).rejects.toThrow(/shared protocol/);
+    const links = { sources: [], sessions: [{ url: null, sessionId: 'abc' }], handlingReason: null };
+    const good = await clientWith(() => links);
+    await expect(good.client.getTicketLinks(9)).resolves.toEqual(links);
+    expect(good.asked[0]!.pathname).toBe('/v1/tickets/9/links');
+  });
+});

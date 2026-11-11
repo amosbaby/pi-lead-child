@@ -135,6 +135,7 @@ import { handleHandbookRoute } from "./handbook-routes.js";
 import { handleReplyStyleRoute } from "./reply-style-routes.js";
 import { handleHostBypassRoute } from "./host-bypass-routes.js";
 import { handleExecutionModeRoute } from "./execution-mode-routes.js";
+import { handleTicketLinksRoute } from "./ticket-links-routes.js";
 import { handleRuleChangeRoute } from "./rule-change-routes.js";
 import { handleTimerRoute } from "./timer-routes.js";
 import type { LeadCapability, LeadGrant, LeadGrantChannel } from "@pi-lead-child/store";
@@ -2106,6 +2107,14 @@ export async function startPairedServer(
         perform: async (action, input, scope) => (await performUiActionAsUser(req, requireAuth(req, scope), {
           target: { type: "host_bypass", id: "lead" }, action, input,
         })).result,
+      })) return;
+
+      // 网页看台账（external-worker-hub P1-7）：列表的处理方式、领取人、来源标签，详情的来源和会话链接。只读，tickets:view。
+      if (await handleTicketLinksRoute({
+        req, url, db: bridge.db,
+        json: (status, value) => json(req, res, status, value),
+        requireAuth: (scope) => { requireAuth(req, scope); },
+        mapError: (error) => mapTicketActionError(error),
       })) return;
 
       // 执行模式（self、external、paused，spec P1-1）：切换是操作层的 execution_mode.set（user_direct），Lead 调它总是被拒绝。

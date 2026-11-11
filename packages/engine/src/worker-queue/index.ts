@@ -12,3 +12,4 @@ export {
 export { releaseBindingClaims, revokeBindingReleasingClaims, type ReleasedClaim } from "./revoke.js";
 export { trackTicket, WORKER_TRACKED_DECISION, type TrackTicketInput, type TrackTicketResult } from "./track.js";
 export { listTickets, workerTicket, type WorkerNote, type WorkerTicketGrant, type WorkerTicketRow, type WorkerTicketView } from "./read.js";
+export { effectiveTicketSources, ticketLinks, ticketMeta } from "./links.js";

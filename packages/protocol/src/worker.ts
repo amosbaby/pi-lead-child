@@ -119,3 +119,82 @@ export const WORKER_MCP_TOOL_INPUT_SCHEMAS = {
 export function isWorkerMcpToolName(value: unknown): value is WorkerMcpToolName {
   return typeof value === "string" && (WORKER_MCP_TOOL_NAMES as readonly string[]).includes(value);
 }
+
+// 网页看台账的两个只读接口（spec P1-2、P1-7；gateway 的 ticket-links-routes.ts）。不进 TicketSummary：TicketSummary 是严格校验的，
+// 加字段会让旧页面整张列表加载失败。
+//   GET /v1/tickets/meta?ids=1,2,3  列表上的来源、处理方式、复杂度、领取人。一次最多 TICKET_META_MAX_IDS 张。
+//   GET /v1/tickets/:id/links       详情里的来源链接、会话链接、判断理由。
+export const TICKET_META_MAX_IDS = 200;
+
+const NullableString = Type.Union([Type.String(), Type.Null()]);
+
+export const TicketMetaSchema = StrictObject({
+  id: Type.Integer({ minimum: 1 }),
+  handling: Type.Union([Type.Literal("auto"), Type.Literal("needs_user"), Type.Null()]),
+  complexity: Type.Union([Type.Literal("simple"), Type.Literal("medium"), Type.Literal("complex"), Type.Null()]),
+  // 现在领着它的工人（配对时的名字）。没人领着时 null。
+  claimedBy: NullableString,
+  claimMode: Type.Union([Type.Literal("manual"), Type.Literal("auto"), Type.Null()]),
+  // 领着它的工人多少个整小时没有动静（领取、挂会话、进展笔记里最晚的一次以后）。没人领着时 null。
+  idleHours: Type.Union([Type.Integer({ minimum: 0 }), Type.Null()]),
+  // 第一条来源的标签（ticketSourceLabel）。没有来源时 null。
+  sourceLabel: NullableString,
+});
+export type TicketMeta = Static<typeof TicketMetaSchema>;
+export const TicketMetaListSchema = Type.Array(TicketMetaSchema);
+
+export const TICKET_SOURCE_KIND_IDS = ["slack", "jira", "notion", "manual"] as const;
+export type TicketSourceKindId = typeof TICKET_SOURCE_KIND_IDS[number];
+
+export const TicketSourceSchema = StrictObject({
+  id: Type.Integer(),
+  itemId: Type.Integer(),
+  kind: Type.Union([Type.Literal("slack"), Type.Literal("jira"), Type.Literal("notion"), Type.Literal("manual")]),
+  // 来源的地址。用户私信里建的单等没有地址的来源为 null。
+  url: NullableString,
+  externalKey: NullableString,
+  conversation: NullableString,
+  messageTs: NullableString,
+  createdAt: Type.String(),
+});
+export type TicketSourceDto = Static<typeof TicketSourceSchema>;
+
+export const TicketLinksSchema = StrictObject({
+  // 子工单自己没有来源时，是根工单的来源。
+  sources: Type.Array(TicketSourceSchema),
+  // 工人挂过的会话，最近一次领取的在前，去重。
+  sessions: Type.Array(StrictObject({ url: NullableString, sessionId: NullableString })),
+  handlingReason: NullableString,
+});
+export type TicketLinks = Static<typeof TicketLinksSchema>;
+
+const SOURCE_BRANDS: Record<TicketSourceKindId, string | null> = { slack: "Slack", jira: "Jira", notion: "Notion", manual: null };
+
+/**
+ * 来源给人看的标签：外部编号（PROJ-123）> 产品名（Slack、Jira、Notion）> 地址的主机名 > null。都是专有名词，不翻译。
+ * 网关算列表的 sourceLabel 和网页画详情用同一个函数。
+ */
+export function ticketSourceLabel(source: { kind: string; url: string | null; externalKey: string | null }): string | null {
+  if (source.externalKey) return source.externalKey;
+  const brand = SOURCE_BRANDS[source.kind as TicketSourceKindId];
+  if (brand) return brand;
+  if (!source.url) return null;
+  try {
+    return new URL(source.url).hostname || null;
+  } catch {
+    return null;
+  }
+}
+
+/** 会话链接能不能画成链接：只认 WORKER_SESSION_URL_SCHEMES（https、claude）。别的（javascript:、file:、http:、坏的）返回 null。 */
+export function sessionLinkScheme(url: string | null | undefined): typeof WORKER_SESSION_URL_SCHEMES[number] | null {
+  if (!url) return null;
+  try {
+    const protocol = new URL(url).protocol;
+    return (WORKER_SESSION_URL_SCHEMES as readonly string[]).includes(protocol)
+      ? protocol as typeof WORKER_SESSION_URL_SCHEMES[number]
+      : null;
+  } catch {
+    return null;
+  }
+}
