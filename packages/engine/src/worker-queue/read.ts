@@ -1,8 +1,9 @@
 // 外部工人读工单（.scratch/external-worker-hub/spec.md P1-5 的 get_ticket、list_tickets）。只读。
 //   - workerTicket：只给领走它的工人看（最近一次领取是它的）。来源、Lead 的判断和理由、全部进展笔记、领取以后用户在工单对话里
 //     说的话（外部模式下用户的工单消息记成 comment，不路由到任何进程）。
-//   - listTickets：mine 我领着的；needs_me 等人领的（能领的单，排序 priority → complexity → 建单时间）；active 执行中的；
-//     recent 最近交付或完成的。每行有标题、来源、状态、处理方式、领取人和会话链接。
+//   - listTickets（ruling R15）：mine 我领着的；needs_me 要用户拿主意的（needs_user，没有活着的外部 Run）；claimable 现在能领的；
+//     active 执行中的；recent 最近交付或完成的。needs_me 和 claimable 排序 priority → complexity → 建单时间。
+//     每行有标题、来源、状态、处理方式、领取人和会话链接。
 import type { Item } from "@pi-lead-child/core";
 import { EXTERNAL_RUNTIME_ID, type WorkerSession, type WorkerTicketFilter } from "@pi-lead-child/protocol";
 import {
@@ -114,6 +115,15 @@ function idsFor(db: Db, filter: WorkerTicketFilter, bindingId: number): number[]
         EXTERNAL_RUNTIME_ID, bindingId, LIST_LIMIT,
       );
     case "needs_me":
+      return rows(
+        `SELECT i.id FROM items i
+         WHERE i.kind='task' AND i.handling='needs_user' AND i.stage NOT IN ('done','cancelled')
+           AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.runtime=? AND r.state IN ('starting','running'))
+         ORDER BY ${PRIORITY_RANK}, ${COMPLEXITY_RANK}, i.created_at, i.id LIMIT ?`,
+        EXTERNAL_RUNTIME_ID, LIST_LIMIT,
+      );
+    case "claimable":
+      // 和 claim.ts 的 claimBlocker 同一个集合（执行模式 paused 时领取照样被拒，这里不看模式）。
       return rows(
         `SELECT i.id FROM items i
          WHERE i.kind='task' AND i.stage IN ('ready','blocked','active') AND ${NO_LIVE_RUN}

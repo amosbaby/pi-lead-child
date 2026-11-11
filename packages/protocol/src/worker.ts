@@ -72,7 +72,11 @@ export interface WorkerSession {
   attachedAt: string;
 }
 
-// list_tickets 的筛选：mine 我领着的；needs_me 等人领的（ready 或 blocked、没有活着的 Run）；active 执行中的；
-// recent 最近交付或完成的。
-export const WORKER_TICKET_FILTERS = ["mine", "needs_me", "active", "recent"] as const;
+// list_tickets 的筛选（ruling R15）：
+//   mine       我领着的（活着的外部 Run 是我的）；
+//   needs_me   要用户拿主意的：handling=needs_user（Lead 的判断，或者工人交回的），没有活着的外部 Run，没结束（done、cancelled 不算）；
+//   claimable  现在能领的：ready、blocked，和没有在跑的 active（例如暂停的 Run 留下的），没有活着的 Run；
+//   active     执行中的；
+//   recent     最近交付或完成的（review、done）。
+export const WORKER_TICKET_FILTERS = ["mine", "needs_me", "claimable", "active", "recent"] as const;
 export type WorkerTicketFilter = typeof WORKER_TICKET_FILTERS[number];

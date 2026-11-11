@@ -3,22 +3,25 @@
 //   complete → 工单进 review。每一步 TicketSummary（列表和详情同一份）、内核的工单视图都按 protocol 的 schema 校验，
 //   stage、hasRun、runtime 跟着变。工人的外部 Run 不起进程，daemon 重启的孤儿回收也不碰它。
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import WebSocket from "ws";
 import { Value } from "typebox/value";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { EXTERNAL_RUNTIME_ID, KernelTicketSchema, TicketSummarySchema } from "@pi-lead-child/protocol";
 import {
-  ChannelHub, ChannelRegistry, createSlackChannelAdapter, runTicketAction, setExecutionMode, workerTicket,
-  type TicketActionCaller,
+  ChannelHub, ChannelRegistry, createCoordinator, createSlackChannelAdapter, executionModeMessages, runTicketAction, setExecutionMode,
+  workerTicket, type TicketActionCaller,
 } from "@pi-lead-child/engine";
 import { cardIdOf, FakeSlack, scriptedSmartModel } from "@pi-lead-child/engine/testing";
 import { createControlPlaneService } from "@pi-lead-child/gateway";
 import {
-  createLoopbackBinding, getItem, getLatestOutcomeSnapshot, listActivities, listEvents, listRuns, openDb, type Db,
+  createLoopbackBinding, createPairing, getItem, getLatestOutcomeSnapshot, listActivities, listEvents, listInbox, listRuns, openDb,
+  redeemPairing, type Db,
 } from "@pi-lead-child/store";
+import { RuntimeRegistry } from "@pi-lead-child/runtime";
 import { MESSAGE_EVENT_KIND } from "@pi-lead-child/protocol";
 import { createAgentTaskDispatcher } from "../src/agent-tasks.js";
-import { recoverOrphans } from "../src/server.js";
+import { recoverOrphans, startDaemon } from "../src/server.js";
 
 let dir: string;
 let db: Db;
@@ -127,4 +130,50 @@ describe("a Slack request handled by an external worker", () => {
       { actor: "system", runId, from: "active", to: "review" },
     ]);
   });
+});
+
+// daemon 收到一条工单消息（chat.send），工单被外部工人领着：self 模式下也不开对话 Run、不交给 Lead；这一轮写明原因收口，
+// 消息记在工单上，工人读工单时看得到。
+describe("a ticket message on a claimed ticket in the daemon", () => {
+  it("is saved for the worker, starts nothing and is not handed to Lead (self mode)", async () => {
+    const dataDir = tempDir("plc-worker-chat-");
+    const dbPath = join(dataDir, "plc.db");
+    const store = openDb(dbPath);
+    const itemId = createCoordinator({ db: store }).createRootItem({ title: "fix the retry", brief: "b", createdBy: "lead", project: "x" });
+    const { binding } = createLoopbackBinding(store, { name: "Ethan's Claude Code", scopes: ["worker"] });
+    const claim = await runTicketAction(store, {
+      itemId, action: "worker.claim", caller: { kind: "worker", bindingId: binding.id, workerName: binding.display_name },
+    });
+    const runId = (claim.result as { runId: number }).runId;
+    const daemon = await startDaemon({
+      dataDir, dbPath, runtimeRegistry: new RuntimeRegistry([]),
+      sessionFactory: (async () => ({
+        modelName: "stub/lead",
+        session: { sessionId: "lead", subscribe: () => () => {}, prompt: async () => {}, steer: async () => {}, followUp: async () => {}, dispose: () => {} },
+      })) as never,
+      gatewayPort: 0, log: () => {},
+    });
+    const issued = redeemPairing(store, createPairing(store, { name: "web", kind: "companion", scopes: ["chat", "tickets:view"] }).code);
+    const socket = new WebSocket(`ws://127.0.0.1:${daemon.pairedPort}/v1/paired/events?token=${issued.accessToken}&protocol=2`);
+    const messages: any[] = [];
+    socket.on("message", (raw) => messages.push(JSON.parse(String(raw))));
+    try {
+      await vi.waitFor(() => expect(messages.some((message) => message.type === "hello.v2")).toBe(true));
+      socket.send(JSON.stringify({ type: "chat.send", id: "ask", protocolVersion: 2, message: "also update the docs", context: { ticketId: itemId } }));
+      await vi.waitFor(() => expect(messages.find((message) => message.type === "command.result" && message.id === "ask"))
+        .toMatchObject({ success: true }));
+      await vi.waitFor(() => expect(store.prepare(
+        "SELECT state, user_text, error FROM channel_turns WHERE item_id=? AND origin_kind LIKE '%:ticket-agent'",
+      ).all(itemId)).toEqual([
+        { state: "failed", user_text: "also update the docs", error: executionModeMessages("en").chatDeferred("external") },
+      ]));
+      expect(listRuns(store, itemId).map((run) => run.id)).toEqual([runId]);
+      expect(listInbox(store, {}).filter((row) => JSON.parse(row.payload).kind === "ticket_message_undelivered")).toEqual([]);
+      expect(workerTicket(store, itemId, binding.id).userMessages.map((note) => note.text)).toEqual(["also update the docs"]);
+    } finally {
+      socket.close();
+      await daemon.close();
+      store.close();
+    }
+  }, 30_000);
 });

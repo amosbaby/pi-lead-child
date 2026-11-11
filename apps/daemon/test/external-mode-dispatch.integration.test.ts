@@ -11,7 +11,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { EXTERNAL_RUNTIME_ID } from "@pi-lead-child/protocol";
 import {
   createDispatcher, createOrchestrator, createScheduler, deferIfExternal, EXECUTION_DEFERRED_DECISION, ExecutionDeferredError,
-  runTicketAction, setExecutionMode, startItem,
+  runTicketAction, setExecutionMode, startItem, WorkerClaimedError, workerTicket,
 } from "@pi-lead-child/engine";
 import { createUserActionService } from "@pi-lead-child/gateway";
 import {
@@ -350,20 +350,29 @@ describe("switching the mode", () => {
     expect(listRuns(db, itemId).map((run) => run.runtime)).toEqual([EXTERNAL_RUNTIME_ID]);
   });
 
-  it("ticket chat on a claimed ticket does not spawn", () => {
-    setExecutionMode(db, "external");
+  // 已被外部工人领走的单（worker.claim）：不管执行模式是什么，用户的工单消息都不起进程，只记进工单活动，工人读工单时看得到。
+  it.each(["self", "external"] as const)("ticket chat on a claimed ticket does not spawn (%s mode)", async (mode) => {
+    setExecutionMode(db, mode);
     const itemId = ticket();
-    // 外部工人领走了这张单：领取就是建一个 runtime=external 的 Run（Task 7 的 worker.claim 用同一个 createRun）。
-    const claimed = createRun(db, { itemId, runtime: EXTERNAL_RUNTIME_ID });
-    transition(db, { itemId, to: "active", actor: "system", reason: "claimed by an external worker", runId: claimed });
-    updateRun(db, claimed, { state: "running" });
-    expect(() => routeTicketMessageToAgentRun(deps, { itemId, message: "please also update the docs" }))
-      .toThrow(ExecutionDeferredError);
+    const { binding } = createLoopbackBinding(db, { name: "Ethan's Claude Code", scopes: ["worker"] });
+    const claim = await runTicketAction(db, {
+      itemId, action: "worker.claim", caller: { kind: "worker", bindingId: binding.id, workerName: binding.display_name },
+    });
+    const claimed = (claim.result as { runId: number }).runId;
+    let thrown: unknown;
+    try {
+      routeTicketMessageToAgentRun(deps, { itemId, message: "please also update the docs" });
+    } catch (error) {
+      thrown = error;
+    }
+    // daemon 按 ExecutionDeferredError 收口这一轮（消息已存，不交给 Lead）：被领走的单抛的是它的子类。
+    expect(thrown).toBeInstanceOf(WorkerClaimedError);
+    expect(thrown).toBeInstanceOf(ExecutionDeferredError);
+    await new Promise((resolve) => setTimeout(resolve, 50));
     expect(starts).not.toHaveBeenCalled();
     expect(listRuns(db, itemId).map((run) => run.id)).toEqual([claimed]);
-    // 消息进了工单的活动：工人下次 get_ticket 时看得到。
-    expect(listActivities(db, itemId, 1000).map((activity) => ({ kind: activity.kind, payload: JSON.parse(activity.payload) })))
-      .toContainEqual({ kind: "comment", payload: expect.objectContaining({ content: "please also update the docs" }) });
-    updateRun(db, claimed, { state: "finished", endedAt: true });
+    expect(workerTicket(db, itemId, binding.id).userMessages).toEqual([
+      { at: expect.any(String), text: "please also update the docs" },
+    ]);
   });
 });

@@ -52,7 +52,7 @@ import { listRunEventSteps, type RunEventStep } from "@pi-lead-child/store";
 import { getNote, NOTE_KINDS, type NoteKind } from "@pi-lead-child/store";
 import { NotesMemory, saveNoteRecorded, updateNoteRecorded, type CoreMemoryWriteOutcome, type NoteSearchResult } from "@pi-lead-child/engine";
 import {
-  assertNotDeferred, deferIfExternal, executionDeferredNote, ExecutionDeferredError, getExecutionMode,
+  assertNotDeferred, deferIfExternal, executionDeferredNote, ExecutionDeferredError, getExecutionMode, holdMessageForWorker,
 } from "@pi-lead-child/engine";
 import { updateRun } from "@pi-lead-child/store";
 import { agentMcpServer, buildChildPrompt, buildReviewerPrompt, sessionDir } from "@pi-lead-child/core";
@@ -885,6 +885,10 @@ export function routeTicketMessageToAgentRun(
   const item = getItem(deps.db, args.itemId);
   if (!item) throw new Error(`item #${args.itemId} not found`);
   if (running.has(item.id)) throw new Error(`item #${item.id} 已有 child 在运行`);
+  // 被外部工人领着的单（engine 的 worker-queue/）：不管执行模式，都不开对话 Run。消息记进工单活动，工人读工单时看得到；
+  // 抛的 WorkerClaimedError 是 ExecutionDeferredError，daemon 照推迟的工单对话收口这一轮，不交给 Lead。
+  const claimed = holdMessageForWorker(deps.db, { itemId: item.id, message: args.message, actor: args.actor ?? "user" });
+  if (claimed) throw claimed;
   // 执行模式不是 self（engine 的 execution-mode.ts）：不开对话 Run、不起进程。消息记在工单的活动里，外部工人下次读
   // 工单时看得到（spec P1-2：已被外部工人领走的单上，用户发的消息进工单活动，不路由到任何进程）。抛 ExecutionDeferredError：
   // daemon 按它收口这一轮，不交给 Lead；Lead 的工具把原因交给 Lead。

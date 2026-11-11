@@ -14,7 +14,7 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { EXTERNAL_RUNTIME_ID, type Scope } from "@pi-lead-child/protocol";
+import { EXTERNAL_RUNTIME_ID, type Scope, type WorkerTicketFilter } from "@pi-lead-child/protocol";
 import {
   addActivity, addTicketSource, createItem, createLoopbackBinding, createRun, getItem, getLatestOutcomeSnapshot, listActivities,
   listRuns, openDb, revokeBinding, runUsageBreakdown, setHandling, transition, updateRun, type Db,
@@ -328,7 +328,8 @@ describe("reading", () => {
     expect(() => workerTicket(db, ticket("not claimed"), ethan.bindingId)).toThrow(TicketActionError);
   });
 
-  it("listTickets filters mine, needs_me, active and recent", async () => {
+  // 筛选（ruling R15）：needs_me 是要用户拿主意的单（handling=needs_user，包括工人交回的），claimable 是现在能领的单。
+  it("listTickets filters mine, needs_me, claimable, active and recent", async () => {
     const ethan = worker("Ethan's Claude Code");
     const nina = worker("Nina's Codex");
     const waiting = ticket("waiting");
@@ -336,13 +337,24 @@ describe("reading", () => {
     const theirs = (await claimed(nina, ticket("theirs"))).itemId;
     const finished = (await claimed(ethan, ticket("finished"))).itemId;
     await act(ethan, finished, "worker.complete", { summary: "done", evidence: "checked" });
-    const ids = (filter: "mine" | "needs_me" | "active" | "recent") => listTickets(db, filter, ethan.bindingId).map((row) => row.ticketId);
+    const handedBack = (await claimed(nina, ticket("handed back"))).itemId;
+    await act(nina, handedBack, "worker.hand_back", { reason: "needs a product decision" });
+    // Lead 判断要用户拿主意、还没人领的单也在 needs_me；被领着的不在。
+    const judged = ticket("judged needs_user");
+    setHandling(db, judged, { handling: "needs_user", reason: "touches billing" });
+    setHandling(db, mine, { handling: "needs_user", reason: "touches billing" });
+    const ids = (filter: WorkerTicketFilter) => listTickets(db, filter, ethan.bindingId).map((row) => row.ticketId);
     expect(ids("mine")).toEqual([mine]);
-    expect(ids("needs_me")).toEqual([waiting]);
+    expect(ids("needs_me").sort()).toEqual([handedBack, judged].sort());
+    expect(ids("claimable").sort()).toEqual([waiting, handedBack, judged].sort());
+    expect(ids("needs_me")).not.toContain(waiting);
     expect(ids("active").sort()).toEqual([mine, theirs].sort());
     expect(ids("recent")).toEqual([finished]);
     expect(listTickets(db, "active", ethan.bindingId).find((row) => row.ticketId === theirs)).toMatchObject({
       title: "theirs", stage: "active", claimedBy: "Nina's Codex", sessions: [],
+    });
+    expect(listTickets(db, "needs_me", ethan.bindingId).find((row) => row.ticketId === handedBack)).toMatchObject({
+      stage: "blocked", handling: "needs_user", claimedBy: null,
     });
   });
 });

@@ -12,7 +12,7 @@ import {
 import {
   addActivity, createRun, createRunUsageLedger, getBinding, getItem, getRun, markRunStopped, transition, updateRun, type Db,
 } from "@pi-lead-child/store";
-import { getExecutionMode } from "../execution-mode.js";
+import { ExecutionDeferredError, getExecutionMode } from "../execution-mode.js";
 import { parseMetadata } from "../pipeline/run-registration.js";
 import { TicketActionError } from "../ticket-actions/types.js";
 
@@ -162,6 +162,43 @@ export function claimTicket(db: Db, input: ClaimTicketInput): ClaimTicketResult 
 
 export function touchItem(db: Db, itemId: number): void {
   db.prepare("UPDATE items SET last_activity_at=datetime('now'), updated_at=datetime('now') WHERE id=?").run(itemId);
+}
+
+// 被外部工人领着的单上，用户（或 Lead 转交）的工单消息记成 comment，route 是它：不路由到任何进程，工人读工单时看得到
+// （spec P1-2）。不管执行模式是什么（self 下也一样）。
+export const WORKER_CLAIMED_ROUTE = "worker_claimed";
+
+/**
+ * 工单对话撞上了外部工人领着的单（lead 的 routeTicketMessageToAgentRun 抛它）。它是 ExecutionDeferredError 的子类：
+ * daemon 按推迟的工单对话收口这一轮（消息已经存了，写明原因，不交给 Lead）。用户看到的话按 external 写
+ * （「这张工单由外部工人处理」），所以 mode 记成 external，和现在的执行模式无关；给 Lead 的话（message）写明是谁领着。
+ */
+export class WorkerClaimedError extends ExecutionDeferredError {
+  constructor(itemId: number, readonly workerName: string) {
+    super(itemId, "external", "worker_claimed");
+    this.name = "WorkerClaimedError";
+    this.message = `工单 #${itemId} 被外部工人 ${workerName} 领着：没有启动 agent。消息记在工单上，工人下次读工单时看得到。`
+      + "要收回这张单用 ticket_action 的 ticket.release。";
+  }
+}
+
+/**
+ * 工单对话的一条消息：这张单被外部工人领着时，把消息记进工单活动，返回要抛的 WorkerClaimedError；没被领着时什么也不写，
+ * 返回 null（照常开对话 Run）。
+ */
+export function holdMessageForWorker(
+  db: Db, input: { itemId: number; message: string; actor: "user" | "lead" },
+): WorkerClaimedError | null {
+  return db.transaction((): WorkerClaimedError | null => {
+    const claim = openWorkerClaim(db, input.itemId);
+    if (!claim) return null;
+    addActivity(db, {
+      itemId: input.itemId, actor: input.actor, kind: "comment",
+      payload: { content: input.message, route: WORKER_CLAIMED_ROUTE, workerName: claim.workerName },
+    });
+    touchItem(db, input.itemId);
+    return new WorkerClaimedError(input.itemId, claim.workerName);
+  }).immediate();
 }
 
 /** 只有领走它的工人才能做的操作：这个工人现在为什么不能做。能做时为 null。 */
