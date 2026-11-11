@@ -90,6 +90,7 @@ import {
   SlackEmojiPreviewSchema,
   DesignPreferencesResponseSchema,
   RuntimeSettingsResponseSchema,
+  ExecutionModeResponseSchema,
   MemoryResponseSchema,
   MemorySwitchConfirmResponseSchema,
   MemorySwitchResponseSchema,
@@ -111,6 +112,9 @@ import {
   type DesignPreferencesDto,
   type DesignPreferencesRequest,
   type RuntimeSettingsDto,
+  type ExecutionMode,
+  type ExecutionModeDto,
+  type ExecutionModeResponse,
   type RuntimeSettingsRequest,
   type DecisionModelSettingsRequest,
   type MemorySettingsDto,
@@ -1982,6 +1986,18 @@ export class ControlPlaneClient {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request), ...(signal ? { signal } : {}),
     });
     return payload.runtimeSettings;
+  }
+
+  // 执行模式（self / external / paused，spec P1-1）。切换是 user_direct：只有你本人（页面、plc）能切，Lead 调同一个操作总是被拒绝。
+  async getExecutionMode(signal?: AbortSignal): Promise<ExecutionModeDto> {
+    return (await this.request<ExecutionModeResponse>('/v1/execution-mode', ExecutionModeResponseSchema, { signal })).executionMode;
+  }
+
+  async setExecutionMode(mode: ExecutionMode, signal?: AbortSignal): Promise<ExecutionModeDto> {
+    const payload = await this.request<ExecutionModeResponse>('/v1/execution-mode', ExecutionModeResponseSchema, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode }), ...(signal ? { signal } : {}),
+    });
+    return payload.executionMode;
   }
 
   // 首次启动引导（.scratch/onboarding）：7 项关键设置配没配好。daemon 还没算过时 setup 是 null。

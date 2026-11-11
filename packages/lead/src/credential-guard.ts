@@ -5,7 +5,7 @@
 // tool_result 钩子）补上三件事：
 //   1. 读凭证文件：直接拦住（tool_call 返回 block）。清单见 credentialPathReason。
 //      数据目录（~/Library/Application Support/Bytezard Lead/）照常可以读：logs/、runtime-events/、sessions/、plc.db 都要用来排查问题。
-//      只拦里面的凭证：cli-credential.json、保险库的密钥文件（*.key）、Lead 自己的 agent/auth.json。
+//      只拦里面的凭证：cli-credential.json、保险库的密钥文件（*.key）、外部工人的 token 文件（*.token）、Lead 自己的 agent/auth.json。
 //   2. 搜索和列目录：起点在凭证目录里的拦住；起点在上层（例如 ~）时照常执行，结果里指向凭证的行去掉。
 //   3. 所有结果脱敏：协议里的那套规则（redactSecretText）、已知密钥变量的值（daemon 环境里的、config.json
 //      env 段里的），以及像 token 的长串（redactTokenLikeRuns）。config.json 里的密钥字段就是这样盖掉的。
@@ -34,7 +34,8 @@ const CREDENTIAL_NAMES = new Set([
   ".env", ".netrc", ".git-credentials", "auth.json", "oauth_creds.json", ".credentials.json", "cli-credential.json",
   "application_default_credentials.json",
 ]);
-const CREDENTIAL_EXTENSIONS = [".pem", ".key", ".p12", ".pfx"];
+// .token：外部工人的 token 文件（数据目录的 worker-tokens/<名字>.token，plc worker pair）。
+const CREDENTIAL_EXTENSIONS = [".pem", ".key", ".p12", ".pfx", ".token"];
 const CREDENTIAL_PREFIXES = ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", "secrets."];
 // credentials 开头、后面没有别的或者接着 . - _ 的名字算凭证：credentials、credentials.json、credentials.bak.json、
 // credentials_old 都算（2026-10-19 复审：备份名不能放行）。后面紧跟字母的（credentialStore.ts）和源码、文档

@@ -25,6 +25,8 @@ describe("which paths are credentials", () => {
       "~/.codex/auth.json", "~/.pi/agent/auth.json", "~/.docker/config.json", "~/.netrc",
       // 数据目录里的凭证：CLI 凭证、保险库的密钥文件、Lead 自己的 agent/auth.json（相对路径按数据目录解析）。
       "cli-credential.json", "connections.key", "agent/auth.json",
+      // 外部工人的 token 文件（plc worker pair）。
+      "worker-tokens/ethan-cc.token",
     ]) {
       expect(credentialPathReason(path, context), path).not.toBeNull();
     }

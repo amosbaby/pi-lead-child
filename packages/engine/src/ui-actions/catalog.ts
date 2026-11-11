@@ -11,7 +11,7 @@ import {
 import {
   approvalConsumerLive, approvalOwnerAction, channelPolicy, decisionOwnerAction, getApproval, getBinding, getChannelCard, getDecisionRequest,
   getEvent, getItem, getLocale, getMilestone, getWorkspace, isStandingOrderProposal, itemUpdatedEvent, labelTimer, planStandingOrderChange, proposeStandingOrderChange,
-  publishGatewayEvent, recordReminderTimeSetter, reminderTimeSetter, rescheduleReminder, ReminderRescheduleError, revokeBinding, StandingOrderChangeError,
+  publishGatewayEvent, recordReminderTimeSetter, reminderTimeSetter, rescheduleReminder, ReminderRescheduleError, StandingOrderChangeError,
   updateMilestone, updateStandingOrderByUser, workspaceOwnerAction,
   type Binding, type ChannelCard, type ChannelPolicy, type Db, type ItemMilestone, type MilestoneUpdate,
 } from "@pi-lead-child/store";
@@ -19,6 +19,7 @@ import {
   performWorkspaceAction, workspaceActionBlocker, workspaceActionDone, type WorkspaceActionId, type WorkspaceActionResult,
 } from "../coordinator/workspace-actions.js";
 import { ackReminder } from "../ticket-actions/lifecycle.js";
+import { revokeBindingReleasingClaims } from "../worker-queue/revoke.js";
 import { channelCalibration, confidenceParamsFrom, judgePolicyCase } from "../channels/policy.js";
 import type { ChannelEditedMessage, ChannelReaction, ChannelSentMessage } from "../channels/types.js";
 import { externalApprovalWhy, type InterventionActor } from "../coordinator/interventions.js";
@@ -171,7 +172,8 @@ const DEVICE_ACTIONS = {
     defaultReason: "在设置页作废",
     available: () => AVAILABLE,
     run: (run) => {
-      revokeBinding(run.db, run.target.id);
+      // 外部工人的凭证：它领着的单一起放掉（外部 Run 关掉，工单回 ready），和撤销在同一个事务里。
+      revokeBindingReleasingClaims(run.db, run.target.id, run.by);
       return getBinding(run.db, run.target.id) ?? null;
     },
     // 凭证这一行有 token 的哈希和连接密钥：只给名字、种类和状态。

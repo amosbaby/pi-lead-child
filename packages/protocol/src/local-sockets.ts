@@ -13,6 +13,10 @@ const StrictObject = <T extends TProperties>(properties: T) =>
 
 const RequestId = { id: Type.Optional(Type.String()) };
 
+// 外部工人的名字（plc worker pair <name>）。它也是数据目录里 token 文件的文件名，所以只收字母、数字和 . _ -，
+// 不以符号开头：路径分隔符、".." 和空白都进不来。
+export const WORKER_NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$";
+
 // 一条桌面通知正文的上限（字符）。daemon 推给 App 之前截到这个长度，App 交回失败的那条时也不能超过它。
 export const DESKTOP_NOTIFICATION_BODY_MAX = 4_000;
 
@@ -28,6 +32,9 @@ export const LocalSocketCommandSchema = Type.Union([
   StrictObject({ type: Type.Literal("shutdown"), ...RequestId }),
   // 签发一个 kind=cli 的 binding，带缺省的 5 个 scope。plc 把它存进数据目录。
   StrictObject({ type: Type.Literal("cli_credential"), ...RequestId, name: Type.Optional(Type.String({ minLength: 1, maxLength: 80 })) }),
+  // 给外部工人（Claude Code、Codex）签一张只带 worker 权限的凭证（plc worker pair）。token 由 daemon 写进数据目录里的 0600 文件，
+  // 回答只带文件路径和 binding 编号，从不带 token：它不进终端、不进日志、不进 plc 的输出。
+  StrictObject({ type: Type.Literal("worker_pair"), ...RequestId, name: Type.String({ pattern: WORKER_NAME_PATTERN }) }),
   // 签发一个临时 admin token（ADMIN_TOKEN_TTL_MS 内有效）。它只在 daemon 的内存里，只开管理路由。
   // plc 每次执行管理命令（配对、binding、aish 凭证、重检）时换一个，用完就丢，不落盘。
   StrictObject({ type: Type.Literal("admin_token"), ...RequestId }),
@@ -90,6 +97,18 @@ export const CliCredentialResponseSchema = StrictObject({
   gatewayUrl: Type.String({ minLength: 1 }),
 });
 export type CliCredentialResponse = Static<typeof CliCredentialResponseSchema>;
+
+// 工人的 token 文件放在数据目录的这个子目录里，名字是 <工人名字>.token。
+export const WORKER_TOKEN_DIR = "worker-tokens";
+export const WORKER_TOKEN_EXTENSION = ".token";
+
+export const WorkerPairResponseSchema = StrictObject({
+  bindingId: Type.Integer({ minimum: 1 }),
+  name: Type.String({ minLength: 1 }),
+  // 写着 token 的文件（绝对路径，权限 0600）。
+  path: Type.String({ minLength: 1 }),
+});
+export type WorkerPairResponse = Static<typeof WorkerPairResponseSchema>;
 
 export const ADMIN_TOKEN_TTL_MS = 5 * 60_000;
 

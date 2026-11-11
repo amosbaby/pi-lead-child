@@ -60,6 +60,7 @@ function harness(client: Partial<GatewayClient> = {}, overrides: Partial<CliDeps
       request: async (command) => { calls.push(["supervisor", command]); return { ok: true } as never; },
     },
     daemon: { status: async () => null },
+    workerPair: async () => { throw new Error("workerPair not stubbed"); },
     renderQr: async (text) => { out.push(`[qr ${text}]`); },
     webBuilt: () => true,
     openUrl: () => {},
@@ -321,6 +322,89 @@ describe("admin commands", () => {
     await h.run("pair", "list");
     expect(h.exitCode()).toBe(1);
     expect(h.err).toEqual(["missing scope: admin"]);
+  });
+});
+
+// 外部工人（Claude Code、Codex）的凭证：plc.sock 上的 worker_pair。token 由 daemon 写进数据目录的文件，plc 只打印文件路径。
+describe("plc worker pair", () => {
+  it("pairs through the daemon and prints only where the token was written", async () => {
+    const paired: string[] = [];
+    const h = harness({}, {
+      workerPair: async (name) => {
+        paired.push(name);
+        return { bindingId: 12, name, path: "/data/worker-tokens/ethan-cc.token" };
+      },
+    });
+    await h.run("worker", "pair", "ethan-cc");
+    expect(paired).toEqual(["ethan-cc"]);
+    expect(h.out).toEqual(["token 已写入 /data/worker-tokens/ethan-cc.token"]);
+    expect(h.err).toEqual([]);
+    expect(h.exitCode()).toBe(0);
+    // no gateway session: the pairing goes over plc.sock, not with plc's own credential
+    expect(h.gatewayCalls()).toBe(0);
+  });
+
+  it("refuses a name that is not safe as a file name without contacting the daemon", async () => {
+    for (const name of ["../escape", "a/b", ".hidden", "has space", "x".repeat(65)]) {
+      let called = false;
+      const h = harness({}, { workerPair: async () => { called = true; return { bindingId: 1, name, path: "/x" }; } });
+      await h.run("worker", "pair", name);
+      expect(h.exitCode(), name).toBe(1);
+      expect(h.err.join("\n"), name).toContain("worker name");
+      expect(called, name).toBe(false);
+      expect(h.out, name).toEqual([]);
+    }
+  });
+
+  it("shows the daemon's refusal (a worker with that name is already paired) and exits 1", async () => {
+    const h = harness({}, {
+      workerPair: async () => { throw new Error('a worker named "ethan-cc" is already paired (binding #12); revoke it first: plc pair revoke 12'); },
+    });
+    await h.run("worker", "pair", "ethan-cc");
+    expect(h.exitCode()).toBe(1);
+    expect(h.err).toEqual(['a worker named "ethan-cc" is already paired (binding #12); revoke it first: plc pair revoke 12']);
+    expect(h.out).toEqual([]);
+  });
+});
+
+// 执行模式（spec P1-1，R13）：和 POST /v1/execution-mode 是同一个操作（execution_mode.set，user_direct）。
+// 走 plc 自己的凭证（tickets:create）：和 plc trust、plc sandbox 一样，临时 admin token 只开管理路由。
+describe("plc execution-mode", () => {
+  it("shows the current mode with no argument", async () => {
+    const h = harness({ getExecutionMode: async () => ({ mode: "external" }) });
+    await h.run("execution-mode");
+    expect(h.calls).toEqual([["getExecutionMode"]]);
+    expect(h.out.join("\n")).toContain("external");
+    expect(h.exitCode()).toBe(0);
+  });
+
+  it("sets the mode through the same route, and shows the new one", async () => {
+    for (const mode of ["self", "external", "paused"] as const) {
+      const h = harness({ setExecutionMode: async (value) => ({ mode: value }) });
+      await h.run("execution-mode", mode);
+      expect(h.calls, mode).toEqual([["setExecutionMode", mode]]);
+      expect(h.out.join("\n"), mode).toContain(mode);
+      expect(h.exitCode(), mode).toBe(0);
+    }
+  });
+
+  it("refuses an unknown mode with the usage, exits non-zero, and changes nothing", async () => {
+    const h = harness({ setExecutionMode: async (mode) => ({ mode }) });
+    await h.run("execution-mode", "fast");
+    expect(h.exitCode()).toBe(1);
+    expect(h.err.join("\n")).toContain("unknown mode 'fast'");
+    expect(h.err.join("\n")).toContain("usage: plc execution-mode [self|external|paused]");
+    expect(h.gatewayCalls()).toBe(0);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("shows a refusal from the gateway as an error and exits 1", async () => {
+    const h = harness({
+      setExecutionMode: async () => { throw new ControlPlaneClientError("missing scope: tickets:create", "forbidden", 403); },
+    });
+    await h.run("execution-mode", "paused");
+    expect(h.exitCode()).toBe(1);
+    expect(h.err).toEqual(["missing scope: tickets:create"]);
   });
 });
 

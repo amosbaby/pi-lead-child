@@ -27,6 +27,8 @@ import {
   ScopeSchema,
   SupervisorCommandSchema,
   TICKET_LIST_VIEWS,
+  WORKER_NAME_PATTERN,
+  WorkerPairResponseSchema,
 } from "../src/index.js";
 
 const binding = {
@@ -105,6 +107,20 @@ describe("plc.sock: local bootstrap and ops only", () => {
     // 停机前排空 Lead：supervisor 先发 drain，等回答再发 shutdown。
     expect(Value.Check(LocalSocketCommandSchema, { type: "drain", id: "d1", timeoutMs: 12_000 })).toBe(true);
     expect(Value.Check(LocalSocketCommandSchema, { type: "drain", timeoutMs: 600_000 })).toBe(false);
+  });
+
+  // plc worker pair：daemon 签一张只带 worker 权限的凭证，token 写进数据目录里的 0600 文件，回答里不带 token。
+  it("accepts the worker pairing, with a name that is safe as a file name, and answers without a token", () => {
+    for (const name of ["ethan-cc", "nina.codex_2", "A"]) {
+      expect(Value.Check(LocalSocketCommandSchema, { type: "worker_pair", id: "w", name }), name).toBe(true);
+      expect(new RegExp(WORKER_NAME_PATTERN).test(name), name).toBe(true);
+    }
+    for (const name of ["", "../x", "a/b", ".hidden", "-x", "has space", "x".repeat(65), "tab\tname"]) {
+      expect(Value.Check(LocalSocketCommandSchema, { type: "worker_pair", name }), name).toBe(false);
+    }
+    expect(Value.Check(LocalSocketCommandSchema, { type: "worker_pair" })).toBe(false);
+    expect(Value.Check(WorkerPairResponseSchema, { bindingId: 4, name: "ethan-cc", path: "/data/worker-tokens/ethan-cc.token" })).toBe(true);
+    expect(Value.Check(WorkerPairResponseSchema, { bindingId: 4, name: "ethan-cc", path: "/x", accessToken: "t" })).toBe(false);
   });
 
   // Bytezard Lead 的 App 订阅桌面通知（P0-7 路径 A）：带口令订阅，daemon 推 DesktopNotificationEvent，发失败的那条交回。

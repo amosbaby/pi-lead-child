@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { distDir } from "@pi-lead-child/core";
-import type { AdminTokenResponse, CliCredentialResponse, DaemonLocalStatus } from "@pi-lead-child/protocol";
+import type { AdminTokenResponse, CliCredentialResponse, DaemonLocalStatus, WorkerPairResponse } from "@pi-lead-child/protocol";
 import { chatOutboxPath } from "./chat-outbox-file.js";
 import { runChat } from "./chat.js";
 import { buildProgram, type CliDeps, type GatewaySession } from "./commands.js";
@@ -66,6 +66,10 @@ const deps: CliDeps = {
   },
   daemon: {
     status: () => daemonStatus(localRequest),
+  },
+  async workerPair(name) {
+    await daemonReady();
+    return localRequest<WorkerPairResponse>(plcSockPath(), { type: "worker_pair", name });
   },
   renderQr: async (text) => {
     const qrcode = await import("qrcode-terminal");

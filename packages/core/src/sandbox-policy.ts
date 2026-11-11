@@ -56,8 +56,11 @@ export const SANDBOX_DENY_READ_HOME: readonly string[] = [
 ];
 
 // 数据目录里不能读的：config.json（env 段里可能有密钥）、plc 的 CLI 凭证、保险库的密钥、Lead 自己的 pi 授权文件、
-// 桌面版窗口回环自动配对的口令（读到它就能给自己配一个 binding）。账本（plc.db）能读：Lead 排查问题要用。
-export const DATA_DIR_DENY_READ: readonly string[] = ["config.json", "cli-credential.json", "connections.key", "shell-pairing.key", "agent/auth.json"];
+// 桌面版窗口回环自动配对的口令（读到它就能给自己配一个 binding）、外部工人的 token 目录（plc worker pair：读到就能冒充工人领单）。
+// 账本（plc.db）能读：Lead 排查问题要用。
+export const DATA_DIR_DENY_READ: readonly string[] = [
+  "config.json", "cli-credential.json", "connections.key", "shell-pairing.key", "agent/auth.json", "worker-tokens",
+];
 
 // 能写整个 home（见文件头），挡住写进去就能在沙箱外执行的地方，等于逃出沙箱：shell 的启动文件、git 的全局配置、
 // 编辑器和终端会执行的配置、LaunchAgents、Claude Code / pi / Codex / Gemini 的配置（里面有 hooks 和扩展）、
@@ -115,6 +118,7 @@ export function deniedHomeWritesIn(text: string, home: string = homedir()): stri
 const DATA_DIR_WRITABLE: readonly string[] = ["lead-scratch", "light-tasks"];
 export const DATA_DIR_ALWAYS_DENY_WRITE: readonly string[] = [
   "plc.db", "plc.db-wal", "plc.db-shm", "config.json", "cli-credential.json", "connections.key", "shell-pairing.key", "agent", "backups",
+  "worker-tokens",
 ];
 
 // 数据目录里不能写的：已经有的条目里除了 DATA_DIR_WRITABLE 的都算，再加上一定要挡的（还没建也挡）。

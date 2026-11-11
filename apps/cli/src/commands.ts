@@ -7,9 +7,9 @@
 import { Command } from "commander";
 import { ControlPlaneClientError, type ControlPlaneClient } from "@pi-lead-child/client";
 import {
-  KERNEL_RUNTIME_IDS, TICKET_LIST_VIEWS,
-  type BindingDto, type DaemonLocalStatus, type KernelRuntimeId, type MaintenanceAction, type SupervisorCommand,
-  type TicketListView, type UserItemActionId,
+  EXECUTION_MODES, KERNEL_RUNTIME_IDS, TICKET_LIST_VIEWS, WORKER_NAME_PATTERN,
+  type BindingDto, type DaemonLocalStatus, type ExecutionMode, type KernelRuntimeId, type MaintenanceAction, type SupervisorCommand,
+  type TicketListView, type UserItemActionId, type WorkerPairResponse,
 } from "@pi-lead-child/protocol";
 import { CliError } from "./daemon-link.js";
 import type { StoredCliCredential } from "./credential-file.js";
@@ -20,7 +20,8 @@ import * as render from "./render.js";
 export type GatewayClient = Pick<ControlPlaneClient,
   | "createTicket" | "listTickets" | "getTicket" | "getActivities" | "performTicketAction" | "performAttemptAction" | "runTicketAction"
   | "getLeadTrust" | "setLeadTrust" | "getLeadDelegation" | "setLeadDelegation" | "recheckRuntimes"
-  | "createPairing" | "listBindings" | "revokeBinding" | "getAishStatus" | "forgetAish" | "getOwnBinding">;
+  | "createPairing" | "listBindings" | "revokeBinding" | "getAishStatus" | "forgetAish" | "getOwnBinding"
+  | "getExecutionMode" | "setExecutionMode">;
 
 export interface GatewaySession {
   client: GatewayClient;
@@ -52,6 +53,8 @@ export interface CliDeps {
     // plc.sock 的 status；daemon 没在运行时为 null，不会自动拉起。
     status(): Promise<DaemonLocalStatus | null>;
   };
+  // 在 plc.sock 上给外部工人签一张只带 worker 权限的凭证。token 由 daemon 写进数据目录的文件：回答里只有 binding 编号和文件路径。
+  workerPair(name: string): Promise<WorkerPairResponse>;
   renderQr(text: string): Promise<void>;
   webBuilt(): boolean;
   openUrl(url: string): void;
@@ -308,6 +311,38 @@ export function buildProgram(deps: CliDeps): Command {
     const binding = await admin((client) => client.revokeBinding(bindingId));
     deps.out(`binding #${binding.id} revoked`);
   }));
+
+  // 外部工人（Claude Code、Codex）的凭证（spec P1-5）：只带 worker 权限，走 plc.sock，token 写进数据目录里的 0600 文件。
+  // 永远不打印 token：工人用环境变量引用它（PLC_WORKER_TOKEN=$(cat <文件>)）。撤销它（plc pair revoke）会放掉它领着的单。
+  const workerCmd = program.command("worker").description("外部工人（Claude Code、Codex）的凭证");
+  workerCmd.command("pair <name>")
+    .description("给一个外部工人签只带 worker 权限的凭证，token 写进数据目录里的文件（不打印）")
+    .action(run(async (name: string) => {
+      if (!new RegExp(WORKER_NAME_PATTERN).test(name)) {
+        throw new CliError("worker name：字母或数字开头，只含字母、数字和 . _ -，最长 64 个字符（它也是 token 文件的文件名）");
+      }
+      const paired = await deps.workerPair(name);
+      deps.out(`token 已写入 ${paired.path}`);
+    }));
+
+  // 执行模式（P1-1，R13）：和 POST /v1/execution-mode 是同一个操作（execution_mode.set，user_direct，只有你本人能切）。
+  // 用 plc 自己的凭证（tickets:create）：临时 admin token 只开管理路由，进不了这条路由。正在跑的 Run 不受切换影响。
+  const EXECUTION_MODE_USAGE = `usage: plc execution-mode [${EXECUTION_MODES.join("|")}]`;
+  const modeWords: Record<ExecutionMode, string> = {
+    self: "daemon 自己起执行者跑工单",
+    external: "daemon 不起执行者，工单留在队列里等外部工人领走",
+    paused: "总闸：不派发，外部工人也不能领单",
+  };
+  program.command("execution-mode [mode]")
+    .description(`显示或切换执行模式（${EXECUTION_MODES.join(" | ")}）。不写模式时显示现在的；正在跑的 Run 不受切换影响`)
+    .action(run(async (mode?: string) => {
+      if (mode !== undefined && !(EXECUTION_MODES as readonly string[]).includes(mode)) {
+        throw new CliError(`unknown mode '${mode}'\n${EXECUTION_MODE_USAGE}`);
+      }
+      const { client } = await deps.gateway();
+      const current = mode === undefined ? await client.getExecutionMode() : await client.setExecutionMode(mode as ExecutionMode);
+      deps.out(`${mode === undefined ? "执行模式" : "执行模式已设为"}：${current.mode}（${modeWords[current.mode]}）`);
+    }));
 
   // aish（Slack 网关）的上游凭证，要 admin 权限。token 只从环境变量 PLC_AISH_TOKEN 进 daemon，
   // 这里故意不提供 --token：命令行参数会留在 shell 历史里。

@@ -113,6 +113,18 @@ describe('lead trust and delegation', () => {
   });
 });
 
+describe('execution mode', () => {
+  it('reads the mode and switches it with the body the route expects', async () => {
+    const { calls, client: c } = client((call) => response({ executionMode: { mode: call.method === 'POST' ? (call.body as { mode: string }).mode : 'self' } }));
+    expect(await c.getExecutionMode()).toEqual({ mode: 'self' });
+    expect(await c.setExecutionMode('external')).toEqual({ mode: 'external' });
+    expect(calls.map(({ method, url, body }) => [method, url, body])).toEqual([
+      ['GET', 'http://daemon.test/v1/execution-mode', undefined],
+      ['POST', 'http://daemon.test/v1/execution-mode', { mode: 'external' }],
+    ]);
+  });
+});
+
 describe('runtime recheck', () => {
   it('rechecks one runtime or all of them', async () => {
     const results = [{ incidentId: 4, runtime: 'codex', outcome: 'canary_armed', summary: '重检通过' }];

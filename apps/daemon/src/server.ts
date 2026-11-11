@@ -126,6 +126,7 @@ import {
 import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-child/gateway";
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
+import { pairWorker } from "./worker-pairing.js";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
   getOwnerDmSync, latestItemId, ownerConversationOf, recordTicketOrigin, recordTurnTicketOrigins, rememberOwnerConversation,
@@ -6638,6 +6639,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             binding: { id: binding.id, kind: binding.kind, name: binding.display_name, scopes: bindingScopes(binding) },
             gatewayUrl,
           };
+          sendTo(sock, { type: "response", id: cmd.id, success: true, data });
+          break;
+        }
+        // plc worker pair：给外部工人签一张只带 worker 权限的凭证，token 写进数据目录里的 0600 文件（worker-pairing.ts）。
+        // 回答和日志里都没有 token，日志只记 binding 编号。
+        case "worker_pair": {
+          const data = pairWorker(db, opts.dataDir, cmd.name);
+          log(`[plc.sock] issued a worker credential: binding #${data.bindingId} (${data.name})`);
           sendTo(sock, { type: "response", id: cmd.id, success: true, data });
           break;
         }

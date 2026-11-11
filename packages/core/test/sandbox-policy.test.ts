@@ -71,6 +71,13 @@ describe("sandboxPolicy", () => {
     expect(policy.denyRead).not.toContain("/data/plc.db");
   });
 
+  // 外部工人的 token 文件（plc worker pair）：读到它就能冒充工人领单、回写，写进去能换掉它。
+  it("denies the worker token directory for reading and writing", () => {
+    const policy = sandboxPolicy({ role: "lead", writable: [], home, dataDir: "/data", env: {} });
+    expect(policy.denyRead).toContain("/data/worker-tokens");
+    expect(policy.denyWrite).toContain("/data/worker-tokens");
+  });
+
   it("refuses edit and write on the same boundary", () => {
     const policy = sandboxPolicy({
       role: "lead", writable: [], home, dataDir: `${home}/.pi-lead-child`, env: { PATH: `/usr/bin:${home}/.local/bin` },

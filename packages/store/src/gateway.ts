@@ -224,6 +224,37 @@ export function createCliBinding(
   return { binding, accessToken: token };
 }
 
+// 外部工人（Claude Code、Codex）的凭证（plc worker pair，plc.sock 上的 worker_pair）：只带 worker 权限，别的都没有，
+// 所以它读不了工单、也不能聊天或做用户的决定。bindings.kind 有 CHECK，不能加新的种类，所以和 plc 的凭证一样记成 kind=cli、
+// origin=cli（plc.sock 上换的凭证，originMayDecide 对它是 false）；工人靠 scope 认。同名的工人在撤销之前不再签第二张：
+// 重配会让前一个 token 还活着，却再没有地方记着它。
+export const WORKER_BINDING_SCOPES: Scope[] = ["worker"];
+
+export class WorkerNameTakenError extends Error {
+  constructor(readonly name: string, readonly bindingId: number) {
+    super(`a worker named "${name}" is already paired (binding #${bindingId}); revoke it first: plc pair revoke ${bindingId}`);
+  }
+}
+
+export function createWorkerBinding(
+  db: Db,
+  args: { name: string },
+): { binding: Binding; accessToken: string } {
+  return db.transaction(() => {
+    const live = (db.prepare("SELECT id, scopes FROM bindings WHERE kind = 'cli' AND display_name = ? AND status = 'active'")
+      .all(args.name) as Array<{ id: number; scopes: string }>)
+      .find((row) => row.scopes === JSON.stringify(WORKER_BINDING_SCOPES));
+    if (live) throw new WorkerNameTakenError(args.name, live.id);
+    const token = randomBytes(24).toString("base64url");
+    const result = db.prepare(
+      "INSERT INTO bindings (kind, display_name, token_hash, scopes, origin) VALUES ('cli', ?, ?, ?, 'cli')",
+    ).run(args.name, sha256(token), JSON.stringify(WORKER_BINDING_SCOPES));
+    const binding = db.prepare("SELECT * FROM bindings WHERE id = ?")
+      .get(Number(result.lastInsertRowid)) as Binding;
+    return { binding, accessToken: token };
+  }).immediate();
+}
+
 export function authenticateToken(db: Db, token: string): Binding | null {
   const hash = sha256(token);
   const r = db.prepare(
