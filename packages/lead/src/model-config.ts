@@ -3,13 +3,15 @@ import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 type ProviderConfigInput = Parameters<ModelRuntime["registerProvider"]>[1];
 import {
   envConfigPath,
+  isClaudeTarget,
   loadPlcConfig,
   resolveEnvSpec,
   writePlcConfig,
   type EnvSpec,
   type PlcConfigFile,
 } from "@pi-lead-child/core";
-import { MODEL_MAX_CHAIN } from "@pi-lead-child/protocol";
+import { MODEL_MAX_CHAIN, type Locale } from "@pi-lead-child/protocol";
+import { claudeGuardMessages } from "./claude-guard.messages.js";
 
 export const DEFAULT_LEAD_MODEL = "openai/gpt-5.5";
 
@@ -97,11 +99,38 @@ export function normalizeLeadModelConfig(
   return { providers, models };
 }
 
+/** Does a provider/model spec (reasoning-effort suffix allowed) reach a Claude model? The provider's own address counts. */
+export function isClaudeLeadSpec(spec: string, config?: Pick<LeadModelConfig, "providers">): boolean {
+  const slash = spec.indexOf("/");
+  if (slash <= 0) return isClaudeTarget({ model: spec });
+  const provider = spec.slice(0, slash);
+  return isClaudeTarget({ provider, model: spec.slice(slash + 1), baseUrl: config?.providers[provider]?.baseUrl });
+}
+
+/** The Claude models that lead.models (or PLC_LEAD_MODEL) still names: Lead refuses to use them, and `plc doctor` lists them. */
+export function refusedLeadModels(
+  config: LeadModelConfig,
+  env: Record<string, string | undefined> = process.env,
+): string[] {
+  const named = [...config.models, ...(env.PLC_LEAD_MODEL?.trim() ? [env.PLC_LEAD_MODEL.trim()] : [])];
+  return uniqueStrings(named.filter((spec) => isClaudeLeadSpec(spec, config)));
+}
+
+/** lead.models without the Claude entries: the order the model fail-over walks. */
+export function usableLeadModels(config: LeadModelConfig): string[] {
+  return config.models.filter((spec) => !isClaudeLeadSpec(spec, config));
+}
+
+// The first model in the assignment that is not Claude. A Claude entry is never used (the daemon never sends requests to
+// Claude), even when it is the only one: Lead then starts on the default model, which fails loudly if it is not registered.
 export function selectedLeadModelSpec(
   config: LeadModelConfig,
   env: Record<string, string | undefined> = process.env,
 ): string {
-  return config.models[0] ?? env.PLC_LEAD_MODEL?.trim() ?? DEFAULT_LEAD_MODEL;
+  const usable = usableLeadModels(config)[0];
+  if (usable) return usable;
+  const fromEnv = env.PLC_LEAD_MODEL?.trim();
+  return fromEnv && !isClaudeLeadSpec(fromEnv, config) ? fromEnv : DEFAULT_LEAD_MODEL;
 }
 
 // 设置页存的服务商 key（daemon 的保险库，设置 → 模型，2026-10-29）。daemon 启动时用 setLeadProviderKeySource 接上；
@@ -285,6 +314,8 @@ async function providerCatalog(
   env: Record<string, string | undefined>,
   fetchImpl: typeof fetch,
 ): Promise<{ models: LeadCatalogModel[]; note: string | null; info: LeadCatalogProviderInfo }> {
+  // A provider that is Claude itself (the Anthropic API, a claude provider) is never asked anything, not even for its model list.
+  if (isClaudeTarget({ provider: name, baseUrl: provider.baseUrl })) throw new Error(claudeGuardMessages("en").providerRefused(name));
   const configured = provider.models ?? [];
   const configuredInput = new Map(configured.flatMap((model) => (model.input ? [[model.id, model.input] as const] : [])));
   const entry = (id: string, extra: Partial<LeadCatalogModel> = {}): LeadCatalogModel => ({
@@ -477,8 +508,10 @@ export async function assertConfiguredLeadModel(
   config: LeadModelConfig,
   env: Record<string, string | undefined> = process.env,
   fetchImpl: typeof fetch = fetch,
+  options: { locale?: Locale } = {},
 ): Promise<void> {
   const { provider, id } = parseModelName(spec);
+  if (isClaudeLeadSpec(spec, config)) throw new Error(claudeGuardMessages(options.locale ?? "en").modelRefused(spec));
   const { models } = await leadModelCatalog(config, env, fetchImpl);
   const available = uniqueStrings([...config.models, ...models.map((model) => `${model.provider}/${model.id}`)]);
   if (available.includes(spec)) return;

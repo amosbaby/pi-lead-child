@@ -44,6 +44,25 @@ describe("runDoctor: the daemon and Claude Code", () => {
   });
 });
 
+describe("runDoctor: Claude models over HTTP", () => {
+  const line = (checks: DoctorCheck[]) => checks.find((check) => check.name.includes("Claude models") || check.name.includes("Claude 模型"));
+
+  it("lists every place that still names a Claude model, in the user's language, as a warning rather than a failure", async () => {
+    const targets = [{ where: "lead.models", spec: "proxy/claude-haiku-5-5" }, { where: "memory.llm.default", spec: "claude-code/haiku" }];
+    const en = line(await runDoctor({ ...okProbes, claudeModelTargets: () => targets }, "en"))!;
+    expect(en).toMatchObject({ ok: null, detail: expect.stringContaining("never sends requests to Claude models") });
+    expect(en.detail).toContain("lead.models = proxy/claude-haiku-5-5");
+    expect(en.detail).toContain("memory.llm.default = claude-code/haiku");
+    expect(en.fix).toBeDefined();
+    expect(line(await runDoctor({ ...okProbes, claudeModelTargets: () => targets }, "zh"))!.detail).toContain("不向 Claude 模型发请求");
+  });
+
+  it("says all is well when nothing names Claude, and is not listed without the probe", async () => {
+    expect(line(await runDoctor({ ...okProbes, claudeModelTargets: () => [] }, "en"))).toMatchObject({ ok: true });
+    expect(line(await runDoctor(okProbes, "en"))).toBeUndefined();
+  });
+});
+
 describe("runDoctor: the gateway's exposed address", () => {
   const exposure = (state: "listening" | "retrying", lastError: string | null = null) => ({
     host: "100.64.0.7", port: 5100, state, attempts: 3, lastError, nextRetryAt: state === "retrying" ? "2026-10-13T04:00:00.000Z" : null,

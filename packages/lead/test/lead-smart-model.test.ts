@@ -1,4 +1,4 @@
-// Lead 的 SmartModel：LLM 兜底用哪个模型（Haiku 优先），以及 suggest_route 工具走完整的账本路径：
+// Lead 的 SmartModel：LLM 兜底用哪个模型（不选 Claude 系的，没有别的就没有 LLM 后端），以及 suggest_route 工具走完整的账本路径：
 // 健康账本里不可用的 runtime 不进候选，建议写进决策日志，日志里没有 brief 原文。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -24,7 +24,6 @@ import {
   configuredLeadModelSpecs,
   createLeadSmartModel,
   isValidSmartModelSpec,
-  newestModelSpec,
   selectSmartModelSpec,
 } from "../src/smart-model.js";
 import { childRuntimeProfile, createLeadTools, type LeadDeps } from "../src/tools.js";
@@ -38,36 +37,32 @@ const CONFIG = normalizeLeadModelConfig({
 }, {});
 
 describe("selectSmartModelSpec", () => {
-  const configuredSpecs = configuredLeadModelSpecs(CONFIG);
-
   it("prefers a valid PLC_SMART_MODEL", () => {
-    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "acme/gpt-5.4-mini" }, configuredSpecs, leadSpec: "acme/gpt-5.5" }))
+    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "acme/gpt-5.4-mini" }, leadSpec: "acme/gpt-5.5" }))
       .toEqual({ spec: "acme/gpt-5.4-mini", source: "env", note: null });
   });
 
-  it("ignores a malformed PLC_SMART_MODEL with a note and takes the first configured haiku", () => {
-    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "haiku" }, configuredSpecs, leadSpec: "acme/gpt-5.5" }))
-      .toEqual({ spec: "vibeproxy/claude-haiku-5-5", source: "config", note: expect.stringContaining("provider/model") });
+  it("ignores a malformed PLC_SMART_MODEL with a note and uses the Lead's own model", () => {
+    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "haiku" }, leadSpec: "acme/gpt-5.5" }))
+      .toEqual({ spec: "acme/gpt-5.5", source: "lead", note: expect.stringContaining("provider/model") });
   });
 
-  it("falls back to the Lead's own model without a haiku", () => {
-    expect(selectSmartModelSpec({ env: {}, configuredSpecs: ["acme/gpt-5.5"], leadSpec: "acme/gpt-5.5" }))
-      .toEqual({ spec: "acme/gpt-5.5", source: "lead", note: null });
+  it("falls back to the Lead's own model without PLC_SMART_MODEL", () => {
+    expect(selectSmartModelSpec({ env: {}, leadSpec: "acme/gpt-5.5" })).toEqual({ spec: "acme/gpt-5.5", source: "lead", note: null });
   });
 
-  // 实测 vibeproxy discover 出来的顺序里，claude-haiku-4-5-20251001 排在 claude-haiku-5-5 前面，以前选到了旧的。
-  it("picks the newest haiku, not the first one the provider lists", () => {
-    const discovered = [
-      "vibeproxy/claude-3-5-haiku-20241022", "vibeproxy/claude-haiku-4-5-20251001", "vibeproxy/claude-haiku-5-5",
-      "vibeproxy/claude-haiku-5-5-20260901",
-    ];
-    expect(selectSmartModelSpec({ env: {}, configuredSpecs: discovered, leadSpec: "x/y" }).spec).toBe("vibeproxy/claude-haiku-5-5");
-    expect(newestModelSpec([])).toBeNull();
+  // 以前第 2 步是「配置里最新的 haiku」。daemon 不向 Claude 发请求：删掉了，provider 里有 haiku 也不挑它。
+  it("never prefers a haiku model any more, whatever the providers list", () => {
+    const choice = selectSmartModelSpec({ env: {}, leadSpec: "acme/gpt-5.5" });
+    expect(choice.spec).toBe("acme/gpt-5.5");
+    expect(choice.source).toBe("lead");
   });
 
-  it("matches haiku in the model id, not in the provider name", () => {
-    expect(selectSmartModelSpec({ env: {}, configuredSpecs: ["haiku-proxy/gpt-5.5", "p/Claude-Haiku-4"], leadSpec: "x/y" }).spec)
-      .toBe("p/Claude-Haiku-4");
+  it("skips a Claude PLC_SMART_MODEL with a note that says why", () => {
+    for (const spec of ["vibeproxy/claude-haiku-5-5", "claude-code/haiku", "anthropic/whatever", "vibeproxy/as4/claude-sonnet-5(high)"]) {
+      expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: spec }, leadSpec: "acme/gpt-5.5" }))
+        .toEqual({ spec: "acme/gpt-5.5", source: "lead", note: expect.stringContaining("Claude") });
+    }
   });
 
   it("validates the provider/model format", () => {
@@ -105,20 +100,73 @@ function fakeRuntime(registered: string[], reply: { text?: string; stopReason?: 
 const YES_NO = { ok: { type: "yes_no", prompt: "Is it fine?" } } as const;
 
 describe("createLeadSmartModel", () => {
-  it("uses the configured haiku through the Lead's model runtime when no Jev key is set", async () => {
+  it("uses the Lead's own model through the Lead's model runtime, not a configured haiku, when no Jev key is set", async () => {
     const { runtime, calls } = fakeRuntime(["acme/gpt-5.5", "vibeproxy/claude-haiku-5-5"], { text: '{"ok": {"yes": true}}' });
     const built = createLeadSmartModel({
       modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {},
     });
-    expect(built.llmSpec).toBe("vibeproxy/claude-haiku-5-5");
+    expect(built.llmSpec).toBe("acme/gpt-5.5");
     expect(built.smartModel?.backend).toBe("llm");
     const decision = await built.smartModel!.decide("state", YES_NO);
-    expect(decision).toMatchObject({ backend: "llm", model: "vibeproxy/claude-haiku-5-5" });
-    expect(calls.map((call) => call.model)).toEqual(["vibeproxy/claude-haiku-5-5"]);
+    expect(decision).toMatchObject({ backend: "llm", model: "acme/gpt-5.5" });
+    expect(calls.map((call) => call.model)).toEqual(["acme/gpt-5.5"]);
+  });
+
+  it("never falls back to a Claude model: a Claude PLC_SMART_MODEL is skipped and the Lead model answers", async () => {
+    const { runtime, calls } = fakeRuntime(["acme/gpt-5.5", "vibeproxy/claude-haiku-5-5"], { text: '{"ok": {"yes": true}}' });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"),
+      env: { PLC_SMART_MODEL: "vibeproxy/claude-haiku-5-5" },
+    });
+    expect(built.llmSpec).toBe("acme/gpt-5.5");
+    expect(built.notes).toEqual([expect.stringContaining("Claude")]);
+    await built.smartModel!.decide("state", YES_NO);
+    expect(calls.map((call) => call.model)).toEqual(["acme/gpt-5.5"]);
+  });
+
+  it("skips a Claude model chosen in the settings page (decision.llmFallback) and keeps the Lead model", async () => {
+    const { runtime, calls } = fakeRuntime(["acme/gpt-5.5", "vibeproxy/claude-haiku-5-5"], { text: '{"ok": {"yes": true}}' });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {},
+      llmFallback: () => "vibeproxy/claude-haiku-5-5",
+    });
+    await built.smartModel!.decide("state", YES_NO);
+    expect(calls.map((call) => call.model)).toEqual(["acme/gpt-5.5"]);
+    expect(built.notes).toEqual([expect.stringContaining("vibeproxy/claude-haiku-5-5 is a Claude model")]);
+  });
+
+  it("skips a model whose registered address is the Anthropic API even when its names look harmless", async () => {
+    const calls: string[] = [];
+    const runtime = {
+      getModels: () => [],
+      getModel: (provider: string, id: string) => ({ provider, id, baseUrl: "https://api.anthropic.com" }),
+      completeSimple: async (model: { provider: string; id: string }) => {
+        calls.push(`${model.provider}/${model.id}`);
+        return { stopReason: "stop", content: [{ type: "text", text: "{}" }] };
+      },
+    };
+    const built = createLeadSmartModel({
+      modelRuntime: runtime as never, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {},
+    });
+    expect(built.llmSpec).toBeNull();
+    expect(built.complete).toBeNull();
+    expect(calls).toEqual([]);
+  });
+
+  it("has no LLM backend (none) when the Lead model is Claude and nothing else remains, and sends no request", async () => {
+    const { runtime, calls } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], { text: "{}" });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config: CONFIG, leadSpec: "vibeproxy/claude-haiku-5-5", dataDir: tempDir("plc-lead-smart-"), env: {},
+    });
+    expect(built.llmSpec).toBeNull();
+    expect(built.complete).toBeNull();
+    expect(built.smartModel).toBeNull(); // the "none" backend: callers fall back to hard rules
+    expect(built.notes.join("\n")).toContain("Claude");
+    expect(calls).toEqual([]);
   });
 
   it("puts the decision model in front when it has a key, and ignores TYPESAFE_API_KEY in the environment", () => {
-    const { runtime } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], {});
+    const { runtime } = fakeRuntime(["acme/gpt-5.5"], {});
     const fromEnv = createLeadSmartModel({
       modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"),
       env: { TYPESAFE_API_KEY: "tsk-test" },
@@ -135,16 +183,16 @@ describe("createLeadSmartModel", () => {
     const { runtime } = fakeRuntime(["acme/gpt-5.5"], {});
     const built = createLeadSmartModel({
       modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"),
-      env: { PLC_SMART_MODEL: "vibeproxy/claude-haiku-9" },
+      env: { PLC_SMART_MODEL: "acme/gpt-9" },
     });
     expect(built.llmSpec).toBe("acme/gpt-5.5");
-    expect(built.notes).toEqual([expect.stringContaining("vibeproxy/claude-haiku-9 is not registered")]);
+    expect(built.notes).toEqual([expect.stringContaining("acme/gpt-9 is not registered")]);
   });
 
   // 2026-10-16 发布评审：决策模型不能用的说明，以前在 backend 那一行之后才进 notes，日志里看不到原因。
   // 不能用的配置是 key 绑定的主机和地址对不上。http 地址从 2026-10-26 起可以用（cbb14ce0，公司网关只有 http）。
   it("reports why the decision model is not used before the backend line, and later notes as they happen", () => {
-    const { runtime } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], {});
+    const { runtime } = fakeRuntime(["acme/gpt-5.5"], {});
     let baseUrl = "https://decide.example.com";
     const lines: string[] = [];
     const built = createLeadSmartModel({
@@ -168,7 +216,7 @@ describe("createLeadSmartModel", () => {
     let reply: { text?: string; stopReason?: string; errorMessage?: string } = { text: '{"topic": "发布", "facts": []}' };
     const calls: Array<{ model: string; prompt: string }> = [];
     const runtime = {
-      ...(fakeRuntime(["vibeproxy/claude-haiku-5-5"], {}).runtime as object),
+      ...(fakeRuntime(["acme/gpt-5.5"], {}).runtime as object),
       completeSimple: async (model: { provider: string; id: string }, context: { messages: Array<{ content: string }> }) => {
         calls.push({ model: `${model.provider}/${model.id}`, prompt: context.messages[0]!.content });
         return { stopReason: reply.stopReason ?? "stop", errorMessage: reply.errorMessage, content: [{ type: "text", text: reply.text ?? "" }] };
@@ -179,7 +227,7 @@ describe("createLeadSmartModel", () => {
       onCall: (call) => recordDecisionModelCall(store, call),
     });
     expect(await built.complete!("整理这个线程", { purpose: "channel_memory" })).toBe('{"topic": "发布", "facts": []}');
-    expect(calls).toEqual([{ model: "vibeproxy/claude-haiku-5-5", prompt: "整理这个线程" }]);
+    expect(calls).toEqual([{ model: "acme/gpt-5.5", prompt: "整理这个线程" }]);
     reply = { stopReason: "error", errorMessage: "429 rate limited" };
     await expect(built.complete!("再整理一次", { purpose: "channel_memory" })).rejects.toThrow(/429 rate limited/);
     const usage = summarizeSystemUsage(store, { component: "decision_model" }).components[0]!;
@@ -198,7 +246,7 @@ describe("createLeadSmartModel", () => {
   });
 
   it("turns a model error into a backend failure", async () => {
-    const { runtime } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], { stopReason: "error", errorMessage: "429 rate limited" });
+    const { runtime } = fakeRuntime(["acme/gpt-5.5"], { stopReason: "error", errorMessage: "429 rate limited" });
     const built = createLeadSmartModel({
       modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {},
     });

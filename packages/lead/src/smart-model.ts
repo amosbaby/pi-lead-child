@@ -3,22 +3,24 @@
 // LLM 用哪个模型：
 //   0. 设置页选的（config.json 的 decision.llmFallback，2026-10-29）。每次调用时读，注册得到时用它；
 //   1. PLC_SMART_MODEL（provider/model）；
-//   2. 否则是 Lead 的 provider 配置里第一个名字带 haiku 的模型；
-//   3. 否则是 Lead 自己正在用的模型。
+//   2. 否则是 Lead 自己正在用的模型。
+// daemon 不向 Claude 系的模型发请求（hub 方案：它只分发工单）：以前的第 2 步「配置里最新的 haiku」删掉了，
+// 每一步选到 Claude 模型（claude-code / anthropic 服务商、名字带 claude/haiku/sonnet/opus/fable、地址是 api.anthropic.com）
+// 都跳过并写一条说明；剩下的都不是 Claude 时用它，一个都没有就没有 LLM 后端（backend 为 none）。
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { isClaudeTarget } from "@pi-lead-child/core";
 import {
   createSmartModel, decisionPurpose, LLM_BACKEND, smartModelDecisionLogPath,
   type CreateSmartModelOptions, type SmartModel, type SmartTextComplete,
 } from "@pi-lead-child/engine";
-import type { LeadModelConfig } from "./model-config.js";
+import { isClaudeLeadSpec, type LeadModelConfig } from "./model-config.js";
 
 const SMART_MODEL_SPEC = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[^\s/][^\s]{0,199}$/;
-const FAST_MODEL = /haiku/i;
 const MAX_REPLY_TOKENS = 2_048;
 
 export interface SmartModelSpecChoice {
   spec: string;
-  source: "env" | "config" | "lead";
+  source: "env" | "lead";
   /** 选择时遇到的问题，例如 PLC_SMART_MODEL 格式不对。 */
   note: string | null;
 }
@@ -43,39 +45,23 @@ export function configuredLeadModelSpecs(
   return specs;
 }
 
-/** 选 LLM 后端的模型。顺序见文件开头。 */
+/** 选 LLM 后端的模型。顺序见文件开头。选到的不会是 Claude，除非 Lead 自己的模型是（createLeadSmartModel 再拦一次）。 */
 export function selectSmartModelSpec(input: {
   env?: Record<string, string | undefined>;
-  configuredSpecs: readonly string[];
   leadSpec: string;
+  // 这个 spec 是不是 Claude。不给时只按 spec 里的名字判断；createLeadSmartModel 带上服务商的地址。
+  isClaude?: (spec: string) => boolean;
 }): SmartModelSpecChoice {
   const env = input.env ?? process.env;
+  const isClaude = input.isClaude ?? ((spec: string) => isClaudeLeadSpec(spec));
   const fromEnv = env.PLC_SMART_MODEL?.trim();
   let note: string | null = null;
   if (fromEnv) {
-    if (isValidSmartModelSpec(fromEnv)) return { spec: fromEnv, source: "env", note: null };
-    note = "PLC_SMART_MODEL must be provider/model; ignoring it";
+    if (!isValidSmartModelSpec(fromEnv)) note = "PLC_SMART_MODEL must be provider/model; ignoring it";
+    else if (isClaude(fromEnv)) note = `PLC_SMART_MODEL ${fromEnv} is a Claude model and the daemon never sends requests to Claude; ignoring it`;
+    else return { spec: fromEnv, source: "env", note: null };
   }
-  const fast = newestModelSpec(input.configuredSpecs.filter((spec) => FAST_MODEL.test(spec.slice(spec.indexOf("/") + 1))));
-  if (fast) return { spec: fast, source: "config", note };
   return { spec: input.leadSpec, source: "lead", note };
-}
-
-// 版本最新的那个模型。provider discover 出来的目录不按版本排序（实测 vibeproxy 把 claude-haiku-4-5-20251001
-// 排在 claude-haiku-5-5 前面），所以按模型 id 里的版本号比较：8 位的日期后缀不算版本；版本相同时，没有日期后缀的优先。
-export function newestModelSpec(specs: readonly string[]): string | null {
-  const version = (spec: string) => (spec.slice(spec.indexOf("/") + 1).match(/\d+/g) ?? [])
-    .filter((part) => part.length < 8).map(Number);
-  const dated = (spec: string) => /\d{8}/.test(spec);
-  let best: string | null = null;
-  for (const spec of specs) {
-    if (best === null) { best = spec; continue; }
-    const [a, b] = [version(spec), version(best)];
-    let order = 0;
-    for (let i = 0; i < Math.max(a.length, b.length) && order === 0; i += 1) order = (a[i] ?? -1) - (b[i] ?? -1);
-    if (order > 0 || (order === 0 && dated(best) && !dated(spec))) best = spec;
-  }
-  return best;
 }
 
 function replyText(reply: Awaited<ReturnType<ModelRuntime["completeSimple"]>>): string {
@@ -123,28 +109,38 @@ export function createLeadSmartModel(input: {
     notes.push(text);
     input.onNote?.(text);
   };
-  const choice = selectSmartModelSpec({
-    env,
-    configuredSpecs: configuredLeadModelSpecs(
-      input.config,
-      (provider) => input.modelRuntime.getModels(provider).map((model) => model.id),
-    ),
-    leadSpec: input.leadSpec,
-  });
+  const claude = (spec: string) => isClaudeLeadSpec(spec, input.config);
+  const choice = selectSmartModelSpec({ env, leadSpec: input.leadSpec, isClaude: claude });
   if (choice.note) note(choice.note);
   const resolve = (spec: string) => {
     const slash = spec.indexOf("/");
     return slash > 0 ? input.modelRuntime.getModel(spec.slice(0, slash), spec.slice(slash + 1)) : undefined;
   };
+  // 注册得到的模型也要看它自己的地址：provider 的名字和模型名看不出来时（代理、pi 自己带的服务商），地址说了算。
+  const reachesClaude = (found: { provider: string; id: string }): boolean =>
+    isClaudeTarget({ provider: found.provider, model: found.id, baseUrl: (found as { baseUrl?: string }).baseUrl });
+  const skipClaude = (spec: string): void => note(`smart model ${spec} is a Claude model and the daemon never sends requests to Claude; skipping it`);
+  const usable = (spec: string) => {
+    if (claude(spec)) {
+      skipClaude(spec);
+      return { model: undefined, refused: true };
+    }
+    const found = resolve(spec);
+    if (found && reachesClaude(found)) {
+      skipClaude(spec);
+      return { model: undefined, refused: true };
+    }
+    return { model: found, refused: false };
+  };
   let llmSpec: string | null = choice.spec;
-  let model = resolve(choice.spec);
-  if (!model && choice.spec !== input.leadSpec) {
+  let { model, refused } = usable(choice.spec);
+  if (!model && !refused && choice.spec !== input.leadSpec) {
     note(`smart model ${choice.spec} is not registered; using the Lead model ${input.leadSpec}`);
     llmSpec = input.leadSpec;
-    model = resolve(input.leadSpec);
+    ({ model, refused } = usable(input.leadSpec));
   }
   if (!model) {
-    note(`smart model ${llmSpec} is not registered; no LLM backend`);
+    note(refused ? "no LLM backend: every candidate model is Claude" : `smart model ${llmSpec} is not registered; no LLM backend`);
     llmSpec = null;
   }
   const resolved = model;
@@ -158,7 +154,17 @@ export function createLeadSmartModel(input: {
       spec = null;
     }
     if (!spec) return resolved;
+    if (claude(spec)) {
+      if (missingChoice !== spec) skipClaude(spec);
+      missingChoice = spec;
+      return resolved;
+    }
     const found = resolve(spec) ?? resolve(spec.replace(/\([A-Za-z0-9_-]{1,32}\)$/, ""));
+    if (found && reachesClaude(found)) {
+      if (missingChoice !== spec) skipClaude(spec);
+      missingChoice = spec;
+      return resolved;
+    }
     if (found) {
       missingChoice = null;
       return found;

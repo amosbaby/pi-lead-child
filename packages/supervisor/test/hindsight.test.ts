@@ -65,7 +65,7 @@ const LOCAL: HindsightEmbedding = {
   provider: "local", model: "intfloat/multilingual-e5-large", revision: E5_REVISION,
   path: `/hf/hub/models--intfloat--multilingual-e5-large/snapshots/${E5_REVISION}`,
 };
-const LLM = { provider: "vibeproxy", baseUrl: "http://127.0.0.1:8317/v1", model: "claude-haiku-5-5" };
+const LLM = { provider: "acme", baseUrl: "http://127.0.0.1:8317/v1", model: "deepseek-chat" };
 const SECRETS = { apiKey: "uuid-key", databasePassword: "pg-password-123" };
 const REMOTE: HindsightEmbedding = { provider: "openai", baseUrl: "https://api.openai.com/v1", model: "text-embedding-3-small", dimensions: null };
 
@@ -114,7 +114,7 @@ describe("ensureHindsightService: asks the supervisor to run it, restarted only 
     let spec = readHindsightRun(dataDir)!.spec;
     for (const change of [
       { reranker: { provider: "typesafe" as const, baseUrl: "https://api.typesafe.ai", model: "jev-latest", maxCandidates: 50 } },
-      { llm: { ...LLM, model: "claude-haiku-6" } },
+      { llm: { ...LLM, model: "deepseek-reasoner" } },
       { secretsVersion: 2 },
       // 日志调优项经 service.json 带给 hindsight-main：改了就重启。
       { env: { HINDSIGHT_API_LOG_LEVEL: "debug" } },
@@ -210,7 +210,7 @@ describe("hindsightEnvironment: what hindsight-main gives hindsight-api", () => 
       HINDSIGHT_API_EMBEDDINGS_PROVIDER: "local", HINDSIGHT_API_EMBEDDINGS_LOCAL_MODEL: LOCAL.provider === "local" ? LOCAL.path : "",
       HINDSIGHT_API_RERANKER_PROVIDER: "rrf",
       HINDSIGHT_API_LLM_PROVIDER: "openai", HINDSIGHT_API_LLM_BASE_URL: "http://127.0.0.1:8317/v1",
-      HINDSIGHT_API_LLM_MODEL: "claude-haiku-5-5", HINDSIGHT_API_LLM_API_KEY: "vibe-key",
+      HINDSIGHT_API_LLM_MODEL: "deepseek-chat", HINDSIGHT_API_LLM_API_KEY: "vibe-key",
       // 2026-10-16 发布评审：MCP 有自己的 token，observation 要额外的 LLM 调用。
       HINDSIGHT_API_MCP_ENABLED: "false", HINDSIGHT_API_ENABLE_OBSERVATIONS: "false",
     });
@@ -221,18 +221,18 @@ describe("hindsightEnvironment: what hindsight-main gives hindsight-api", () => 
   // 2026-10-29（spec D13、D16，用户选打开观察整理、缺省加整理观察两个槽）：有 LLM 时打开观察整理；整理观察单独选了模型时
   // 用 Hindsight 的按操作配置（HINDSIGHT_API_CONSOLIDATION_LLM_*），key 是那个服务商的；Python 不攒输出。
   it("turns observations on with an LLM, gives consolidation its own model and key, and keeps Python output unbuffered", () => {
-    const sonnet = { provider: "anthropic", baseUrl: "https://api.anthropic.example/v1", model: "claude-sonnet-5-5" };
+    const sonnet = { provider: "other", baseUrl: "https://llm.example.com/v1", model: "gpt-5.5" };
     const { env, notes } = hindsightEnvironment({
       service: { ...service, observations: true, consolidationLlm: sonnet },
       secrets: { ...SECRETS, llmApiKey: "vibe-key", consolidationLlmApiKey: "anthropic-key" }, env: {},
     });
     expect(env).toMatchObject({
       HINDSIGHT_API_ENABLE_OBSERVATIONS: "true", PYTHONUNBUFFERED: "1",
-      HINDSIGHT_API_LLM_MODEL: "claude-haiku-5-5", HINDSIGHT_API_LLM_API_KEY: "vibe-key",
+      HINDSIGHT_API_LLM_MODEL: "deepseek-chat", HINDSIGHT_API_LLM_API_KEY: "vibe-key",
       HINDSIGHT_API_CONSOLIDATION_LLM_PROVIDER: "openai", HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL: sonnet.baseUrl,
-      HINDSIGHT_API_CONSOLIDATION_LLM_MODEL: "claude-sonnet-5-5", HINDSIGHT_API_CONSOLIDATION_LLM_API_KEY: "anthropic-key",
+      HINDSIGHT_API_CONSOLIDATION_LLM_MODEL: "gpt-5.5", HINDSIGHT_API_CONSOLIDATION_LLM_API_KEY: "anthropic-key",
     });
-    expect(notes).toContain("consolidation LLM anthropic/claude-sonnet-5-5");
+    expect(notes).toContain("consolidation LLM other/gpt-5.5");
     // 整理观察跟缺省一样：不设按操作的变量，Hindsight 用缺省。
     const inherit = hindsightEnvironment({ service: { ...service, observations: true }, secrets: SECRETS, env: {} }).env;
     expect(Object.keys(inherit).filter((name) => name.startsWith("HINDSIGHT_API_CONSOLIDATION_LLM_"))).toEqual([]);

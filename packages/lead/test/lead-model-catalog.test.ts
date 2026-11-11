@@ -185,13 +185,24 @@ describe("the Lead model catalog", () => {
   });
 
   it("accepts an effort the model supports and refuses one it does not, naming the choices", async () => {
-    await expect(assertConfiguredLeadModel("vibeproxy/as4/claude-sonnet-5(max)", config(), {}, vibeproxy as typeof fetch)).resolves.toBeUndefined();
-    await expect(assertConfiguredLeadModel("vibeproxy/claude-sonnet-5(max)", config(), {}, vibeproxy as typeof fetch))
+    // A catalog with a model that is not Claude (the daemon refuses Claude models before it looks at efforts).
+    const sol = async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return new Response(JSON.stringify(url.searchParams.get("client_version") === "pi"
+        ? { models: [{ slug: "gpt-6-sol", supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }], visibility: "list" },
+          { slug: "gemini-3.8-flash-high", supported_reasoning_levels: [] }] }
+        : { data: [{ id: "gpt-6-sol", owned_by: "openai" }, { id: "gemini-3.8-flash-high", owned_by: "antigravity" }] }));
+    };
+    await expect(assertConfiguredLeadModel("vibeproxy/gpt-6-sol(high)", config(), {}, sol as typeof fetch)).resolves.toBeUndefined();
+    await expect(assertConfiguredLeadModel("vibeproxy/gpt-6-sol(max)", config(), {}, sol as typeof fetch))
       .rejects.toThrow("不支持推理强度 max。可选：low、high");
-    await expect(assertConfiguredLeadModel("vibeproxy/gemini-3.8-flash-high(high)", config(), {}, vibeproxy as typeof fetch))
+    await expect(assertConfiguredLeadModel("vibeproxy/gemini-3.8-flash-high(high)", config(), {}, sol as typeof fetch))
       .rejects.toThrow("它不能选推理强度");
-    await expect(assertConfiguredLeadModel("vibeproxy/as9/claude-sonnet-5", config(), {}, vibeproxy as typeof fetch))
+    await expect(assertConfiguredLeadModel("vibeproxy/as9/gpt-6-sol", config(), {}, sol as typeof fetch))
       .rejects.toThrow("不在已配置的 Lead provider 目录中");
+    // Claude is refused first, whatever the catalog says about it.
+    await expect(assertConfiguredLeadModel("vibeproxy/as4/claude-sonnet-5(max)", config(), {}, vibeproxy as typeof fetch))
+      .rejects.toThrow("is a Claude model");
   });
 
   it("splits the effort suffix off a model id", () => {
@@ -327,26 +338,43 @@ describe("the Anthropic catalog", () => {
     has_more: false,
   };
 
-  it("asks /v1/models with x-api-key and anthropic-version, not a Bearer token", async () => {
+  // The first-run Anthropic preset used to read /v1/models with x-api-key. The daemon never sends requests to Claude now:
+  // a provider on the Anthropic API host is not asked anything, not even for its model list.
+  it("sends no request to a provider on the Anthropic API host", async () => {
+    const seen: string[] = [];
+    const fake = async (input: string | URL | Request) => {
+      seen.push(String(input));
+      return new Response(JSON.stringify(anthropicList));
+    };
+    const anthropic = normalizeLeadModelConfig({
+      providers: { gateway: { api: "anthropic-messages", baseUrl: "https://api.anthropic.com", apiKey: { value: "sk-ant-test" } } },
+      models: [],
+    });
+    const { models, notes } = await leadModelCatalog(anthropic, {}, fake as typeof fetch);
+    expect(seen).toEqual([]);
+    expect(models).toEqual([]);
+    expect(notes.join("\n")).toContain("never sends requests to Claude");
+  });
+
+  it("asks a proxy that speaks anthropic-messages with x-api-key and anthropic-version, and lists what it offers", async () => {
     const seen: Array<{ url: string; headers: Record<string, string> }> = [];
     const fake = async (input: string | URL | Request, init?: RequestInit) => {
       seen.push({ url: String(input), headers: { ...(init?.headers as Record<string, string>) } });
       return new Response(JSON.stringify(anthropicList));
     };
-    const anthropic = normalizeLeadModelConfig({
-      providers: { anthropic: { api: "anthropic-messages", baseUrl: "https://api.anthropic.com", apiKey: { value: "sk-ant-test" } } },
+    const gateway = normalizeLeadModelConfig({
+      providers: { gateway: { api: "anthropic-messages", baseUrl: "https://llm.example.com", apiKey: { value: "gw-test" } } },
       models: [],
     });
-    const { models } = await leadModelCatalog(anthropic, {}, fake as typeof fetch);
+    const { models } = await leadModelCatalog(gateway, {}, fake as typeof fetch);
     expect(seen).toHaveLength(1);
-    expect(seen[0]!.url).toBe("https://api.anthropic.com/v1/models?limit=1000");
-    expect(seen[0]!.headers).toMatchObject({ "x-api-key": "sk-ant-test", "anthropic-version": "2023-06-01" });
-    expect(seen[0]!.headers.Authorization).toBeUndefined();
+    expect(seen[0]!.url).toBe("https://llm.example.com/v1/models?limit=1000");
+    expect(seen[0]!.headers).toMatchObject({ "x-api-key": "gw-test", "anthropic-version": "2023-06-01" });
     expect(models.map((model) => [model.id, model.name, model.created])).toEqual([
       ["claude-sonnet-5-5", "Claude Sonnet 5.5", "2026-09-28T00:00:00.000Z"],
       ["claude-haiku-5-5", "Claude Haiku 5.5", "2026-09-20T00:00:00.000Z"],
     ]);
-    // 分组和看图的新规则不影响 Anthropic 原生接口：没有账号，能力和以前一样（目录没写，按只能读文字）。
+    // 分组和看图的新规则不影响这种接口：没有账号，能力和以前一样（目录没写，按只能读文字）。
     expect(models.map((model) => [model.group, model.input])).toEqual([[null, ["text"]], [null, ["text"]]]);
   });
 

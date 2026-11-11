@@ -312,8 +312,8 @@ export interface PlcMemoryConfig {
     // 用决策模型做 reranker 时，每次召回最多发给它多少条候选记忆（1–300，缺省 50）。
     maxCandidates?: number;
   };
-  // Hindsight 的摘要模型（设置 → 记忆，2026-10-29）：每个槽存一个 Lead 的 provider/id。没有时缺省槽自动选
-  // （最新的 haiku），整理观察槽跟缺省一样。key 不在这里：daemon 按服务商解析。
+  // Hindsight 的摘要模型（设置 → 记忆，2026-10-29）：每个槽存一个 Lead 的 provider/id。没有时缺省槽不用摘要模型
+  // （daemon 不向 Claude 系的模型发请求），整理观察槽跟缺省一样。key 不在这里：daemon 按服务商解析。
   llm?: { default?: string | null; consolidation?: string | null };
 }
 

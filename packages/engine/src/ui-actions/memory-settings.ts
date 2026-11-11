@@ -44,7 +44,7 @@ export const MEMORY_SETTINGS_ACTIONS = {
     permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
     where: MEMORY_SETTINGS_WHERE,
     hint: "选 Hindsight 的摘要模型。slot 是 default（提取事实，也是缺省）或 consolidation（整理观察）；"
-      + "model 写 list_lead_models 列出的 provider/id，null 时缺省槽改回自动（最新的 haiku），整理观察槽改回跟缺省一样。"
+      + "model 写 list_lead_models 列出的 provider/id，null 时缺省槽改回自动（不用摘要模型），Claude 系的模型会被拒绝，整理观察槽改回跟缺省一样。"
       + "改了以后记忆服务重启几秒，期间 search_notes 只用全文检索。",
     defaultReason: "在设置页选了摘要模型",
     available: () => AVAILABLE,

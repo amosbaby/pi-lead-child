@@ -36,8 +36,8 @@ async function startVibeproxy(): Promise<string> {
     catalogAuth.push(req.headers.authorization ?? null);
     res.end(JSON.stringify({
       data: [
-        { id: "claude-sonnet-5", owned_by: "anthropic", created: 1_780_000_000 },
-        { id: "as4/claude-sonnet-5-5", owned_by: "anthropic", created: 1_790_553_600 },
+        { id: "gpt-5-sol", owned_by: "openai", created: 1_780_000_000 },
+        { id: "as4/gpt-5-5", owned_by: "openai", created: 1_790_553_600 },
         { id: "gemini-3.8-flash-high", owned_by: "antigravity" },
       ],
     }));
@@ -58,7 +58,7 @@ beforeEach(async () => {
   writeFileSync(join(dir, "config.json"), JSON.stringify({
     lead: {
       providers: { vibeproxy: { baseUrl: vibeproxyUrl, discover: true } },
-      models: ["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"],
+      models: ["vibeproxy/gpt-5-sol", "vibeproxy/gemini-3.8-flash-high"],
     },
   }));
 });
@@ -77,8 +77,8 @@ function stubLead() {
   const switched: string[] = [];
   let refreshes = 0;
   const factory = async () => ({
-    modelName: "vibeproxy/claude-sonnet-5",
-    models: ["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"],
+    modelName: "vibeproxy/gpt-5-sol",
+    models: ["vibeproxy/gpt-5-sol", "vibeproxy/gemini-3.8-flash-high"],
     switchModel: async (spec: string) => { switched.push(spec); },
     refreshProviders: async (): Promise<string[] | void> => { refreshes += 1; },
     smartModelLlm: "vibeproxy/gemini-3.8-flash-high",
@@ -124,20 +124,20 @@ describe("settings → models through the gateway", () => {
     expect(read.status).toBe(200);
     expect(Value.Check(ModelSettingsDtoSchema, read.body.modelSettings)).toBe(true);
     expect(read.body.modelSettings.brain.providers[0].models.map((model: any) => model.id))
-      .toEqual(["as4/claude-sonnet-5-5", "claude-sonnet-5", "gemini-3.8-flash-high"]);
+      .toEqual(["as4/gpt-5-5", "gpt-5-sol", "gemini-3.8-flash-high"]);
     expect(read.body.modelSettings.fast).toMatchObject({ chain: ["jev"], effectiveLlm: "vibeproxy/gemini-3.8-flash-high" });
 
     const set = await http(...act("set_brain_chain", { models: [
-      { model: "vibeproxy/as4/claude-sonnet-5-5", effort: null },
-      { model: "vibeproxy/claude-sonnet-5", effort: null },
+      { model: "vibeproxy/as4/gpt-5-5", effort: null },
+      { model: "vibeproxy/gpt-5-sol", effort: null },
     ] }));
     expect(set.status).toBe(200);
     expect(set.body.result).toMatchObject({ applied: "now" });
-    expect(lead.switched).toEqual(["vibeproxy/as4/claude-sonnet-5-5"]);
-    expect(config().lead.models).toEqual(["vibeproxy/as4/claude-sonnet-5-5", "vibeproxy/claude-sonnet-5"]);
+    expect(lead.switched).toEqual(["vibeproxy/as4/gpt-5-5"]);
+    expect(config().lead.models).toEqual(["vibeproxy/as4/gpt-5-5", "vibeproxy/gpt-5-sol"]);
     await vi.waitFor(() => expect(events.some((event) => event.type === "snapshot.required" && event.payload?.resource === MODEL_SETTINGS_RESOURCE)).toBe(true));
     const after = await http("GET", "/v1/models/settings");
-    expect(after.body.modelSettings.brain.current).toEqual({ model: "vibeproxy/as4/claude-sonnet-5-5", effort: null });
+    expect(after.body.modelSettings.brain.current).toEqual({ model: "vibeproxy/as4/gpt-5-5", effort: null });
   });
 
   it("refuses a chain with four backups at the gateway, before anything changes", async () => {
@@ -147,7 +147,7 @@ describe("settings → models through the gateway", () => {
     const refused = await http(...act("set_brain_chain", { models: five }));
     expect(refused.status).toBe(400);
     expect(lead.switched).toEqual([]);
-    expect(config().lead.models).toEqual(["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"]);
+    expect(config().lead.models).toEqual(["vibeproxy/gpt-5-sol", "vibeproxy/gemini-3.8-flash-high"]);
   });
 
   it("saves a provider with its key sealed, re-registers Lead's providers, and keeps the key out of config.json and the ledger", async () => {
@@ -213,7 +213,7 @@ describe("settings → models through the gateway", () => {
       },
     });
     await start(lead);
-    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/gpt-5-sol"]), { timeout: 10_000 });
     expect(refreshes).toBe(3);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(refreshes).toBe(3);
@@ -235,7 +235,7 @@ describe("settings → models through the gateway", () => {
       },
     });
     await start(lead);
-    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/gpt-5-sol"]), { timeout: 10_000 });
     expect(refreshes).toBe(2);
   });
 
@@ -256,10 +256,10 @@ describe("settings → models through the gateway", () => {
       },
     });
     await start(lead);
-    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]), { timeout: 10_000 });
+    await vi.waitFor(() => expect(lead.switched).toEqual(["vibeproxy/gpt-5-sol"]), { timeout: 10_000 });
     await vi.waitFor(() => expect(asked.length).toBeGreaterThanOrEqual(3), { timeout: 10_000 });
     expect(asked.slice(0, 3)).toEqual([["vibeproxy", "spare"], ["vibeproxy", "spare"], ["spare"]]);
-    expect(lead.switched).toEqual(["vibeproxy/claude-sonnet-5"]);
+    expect(lead.switched).toEqual(["vibeproxy/gpt-5-sol"]);
   });
 
   it("adds a second decision model and sets the fast chain, mirrored into the old decision fields", async () => {
@@ -350,8 +350,8 @@ describe("settings → models through the gateway", () => {
     const provider = () => read.body.modelSettings.brain.providers[0];
     expect(provider()).toMatchObject({ accountPrefix: null, accountPrefixActive: false, capabilities: "auto", catalog: "plain" });
     expect(provider().models.map((model: any) => [model.id, model.group, model.source])).toEqual([
-      ["as4/claude-sonnet-5-5", null, "anthropic"],
-      ["claude-sonnet-5", null, "anthropic"],
+      ["as4/gpt-5-5", null, "openai"],
+      ["gpt-5-sol", null, "openai"],
       ["gemini-3.8-flash-high", null, "antigravity"],
     ]);
 
@@ -362,7 +362,7 @@ describe("settings → models through the gateway", () => {
     expect(config().lead.providers.vibeproxy).toMatchObject({ accountPrefix: true, capabilities: "plain" });
     const after = await http("GET", "/v1/models/settings?grouping=1");
     expect(after.body.modelSettings.brain.providers[0]).toMatchObject({ accountPrefix: true, accountPrefixActive: true, capabilities: "plain" });
-    expect(after.body.modelSettings.brain.providers[0].models.find((model: any) => model.id === "as4/claude-sonnet-5-5").group).toBe("as4");
+    expect(after.body.modelSettings.brain.providers[0].models.find((model: any) => model.id === "as4/gpt-5-5").group).toBe("as4");
 
     // 恢复缺省：从 config 里删掉。
     await http(...act("save_provider", { name: "vibeproxy", baseUrl: vibeproxyUrl, api: "openai-completions", accountPrefix: null, capabilities: "auto" }));

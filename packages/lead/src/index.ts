@@ -9,6 +9,7 @@ export * from "./agent-task/index.js";
 // 认 PR 引用的语法（daemon 把 findPullRequestRef 交给通道 hub，slack-takeover 工单 06）。
 export { findPullRequestRef, parsePullRequestRef, type PullRequestRef } from "./templates/pr-review.js";
 export * from "./environment.js";
+export * from "./claude-guard.messages.js";
 export * from "./model-config.js";
 export * from "./model-failover.js";
 export * from "./model-switch.js";

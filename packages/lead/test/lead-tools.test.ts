@@ -1175,7 +1175,7 @@ describe("lead tools", () => {
             api: "openai-completions",
             baseUrl: "http://127.0.0.1:8317/v1",
             discover: false,
-            models: ["claude-sonnet-5", "gemini-3.7-flash-high"],
+            models: ["gpt-5-sol", "gemini-3.7-flash-high"],
           },
         },
         models: ["vibeproxy/gemini-3.7-flash-high"],
@@ -1197,42 +1197,46 @@ describe("lead tools", () => {
     expect(listed.selected).toBe("vibeproxy/gemini-3.7-flash-high");
     expect(listed.available).toEqual([
       "vibeproxy/gemini-3.7-flash-high",
-      "vibeproxy/claude-sonnet-5",
+      "vibeproxy/gpt-5-sol",
     ]);
 
     const switched = JSON.parse((await tool("switch_lead_model").execute("switch", {
-      model: "vibeproxy/claude-sonnet-5",
-      reason: "user asked for Sonnet 5",
+      model: "vibeproxy/gpt-5-sol",
+      reason: "user asked for gpt-5-sol",
     })).content[0].text);
     expect(switched).toMatchObject({
       switched: true,
       previous: "vibeproxy/gemini-3.7-flash-high",
-      selected: "vibeproxy/claude-sonnet-5",
+      selected: "vibeproxy/gpt-5-sol",
       restart: { scheduled: true, when: "after_turn" },
     });
     expect(switched.status).toContain("【系统】");
     expect(JSON.parse(readFileSync(join(dir, "config.json"), "utf8")).lead.models).toEqual([
-      "vibeproxy/claude-sonnet-5",
+      "vibeproxy/gpt-5-sol",
       "vibeproxy/gemini-3.7-flash-high",
     ]);
     expect(supervisor.request).not.toHaveBeenCalled();
-    expect(announceLeadStatus).toHaveBeenCalledWith(expect.stringContaining("vibeproxy/claude-sonnet-5"));
+    expect(announceLeadStatus).toHaveBeenCalledWith(expect.stringContaining("vibeproxy/gpt-5-sol"));
     expect(scheduleLeadModelRestart).toHaveBeenCalledWith({
       previous: "vibeproxy/gemini-3.7-flash-high",
-      selected: "vibeproxy/claude-sonnet-5",
-      reason: "user asked for Sonnet 5",
+      selected: "vibeproxy/gpt-5-sol",
+      reason: "user asked for gpt-5-sol",
     });
 
     supervisor.request.mockClear();
     const same = JSON.parse((await tool("switch_lead_model").execute("switch", {
-      model: "vibeproxy/claude-sonnet-5", reason: "user asked for Sonnet 5",
+      model: "vibeproxy/gpt-5-sol", reason: "user asked for gpt-5-sol",
     })).content[0].text);
-    expect(same).toMatchObject({ switched: false, selected: "vibeproxy/claude-sonnet-5" });
+    expect(same).toMatchObject({ switched: false, selected: "vibeproxy/gpt-5-sol" });
     expect(supervisor.request).not.toHaveBeenCalled();
 
     await expect(tool("switch_lead_model").execute("switch", {
       model: "vibeproxy/grok-4.6", reason: "user asked for Grok",
     })).rejects.toThrow(/不在已配置/);
+    // The daemon never sends requests to Claude: a Claude model is refused even when the provider's list carries it.
+    await expect(tool("switch_lead_model").execute("switch", {
+      model: "vibeproxy/claude-sonnet-5", reason: "user asked for Sonnet 5",
+    })).rejects.toThrow(/is a Claude model/);
     // 复审 2026-10-27 D：没有操作层服务时（写 config.json 的那条路）也要 reason。
     await expect(tool("switch_lead_model").execute("switch", { model: "vibeproxy/gemini-3.7-flash-high" }))
       .rejects.toThrow(/reason/);

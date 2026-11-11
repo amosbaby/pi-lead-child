@@ -41,14 +41,14 @@ function setup(options: { decision?: Record<string, unknown>; models?: string[] 
   writePlcConfig({
     lead: {
       providers: { vibeproxy: { baseUrl: "http://127.0.0.1:8317/v1", api: "openai-completions", discover: true } },
-      models: options.models ?? ["vibeproxy/as4/claude-sonnet-5-5", "vibeproxy/as4/claude-haiku-5-5"],
+      models: options.models ?? ["vibeproxy/as4/gpt-5-5", "vibeproxy/as4/gpt-5-mini"],
     },
     ...(options.decision ? { decision: options.decision } : {}),
   }, dataDir);
   let catalog = [
-    { id: "claude-sonnet-5", created: 1_780_000_000, owned_by: "anthropic" },
-    { id: "as4/claude-sonnet-5-5", created: 1_790_553_600, owned_by: "anthropic" },
-    { id: "as4/claude-haiku-5-5", created: 1_790_553_600 - DAY, owned_by: "anthropic" },
+    { id: "gpt-5-sol", created: 1_780_000_000, owned_by: "openai" },
+    { id: "as4/gpt-5-5", created: 1_790_553_600, owned_by: "openai" },
+    { id: "as4/gpt-5-mini", created: 1_790_553_600 - DAY, owned_by: "openai" },
     { id: "gemini-3.8-flash-high", owned_by: "antigravity" },
   ];
   const chains: string[][] = [];
@@ -56,10 +56,10 @@ function setup(options: { decision?: Record<string, unknown>; models?: string[] 
   let now = new Date("2026-10-29T06:00:00.000Z");
   const published: number[] = [];
   const settings = new ModelSettings({
-    db, dataDir, vault, log: () => {}, memory: null, externalSecret: () => null, smartModelLlm: () => "vibeproxy/as4/claude-haiku-5-5",
+    db, dataDir, vault, log: () => {}, memory: null, externalSecret: () => null, smartModelLlm: () => "vibeproxy/as4/gpt-5-mini",
     publish: () => published.push(1),
     brain: {
-      current: () => "vibeproxy/as4/claude-sonnet-5-5",
+      current: () => "vibeproxy/as4/gpt-5-5",
       blocked: () => [],
       applyChain: async (specs) => { chains.push(specs); return "now"; },
       providersChanged: async () => { providerRefreshes += 1; },
@@ -94,9 +94,9 @@ describe("ModelSettings: account groups and the advanced settings", () => {
     const provider = before.brain.providers[0]!;
     expect(provider).toMatchObject({ accountPrefix: null, accountPrefixActive: false, capabilities: "auto", catalog: "plain" });
     expect(provider.models.map((model) => [model.id, model.group, model.source])).toEqual([
-      ["as4/claude-sonnet-5-5", null, "anthropic"],
-      ["as4/claude-haiku-5-5", null, "anthropic"],
-      ["claude-sonnet-5", null, "anthropic"],
+      ["as4/gpt-5-5", null, "openai"],
+      ["as4/gpt-5-mini", null, "openai"],
+      ["gpt-5-sol", null, "openai"],
       ["gemini-3.8-flash-high", null, "antigravity"],
     ]);
 
@@ -127,13 +127,13 @@ describe("ModelSettings: the page's data", () => {
     const dto = await t.settings.get();
     expect(Value.Check(ModelSettingsDtoSchema, dto)).toBe(true);
     expect(dto.brain.chain).toEqual([
-      { model: "vibeproxy/as4/claude-sonnet-5-5", effort: null },
-      { model: "vibeproxy/as4/claude-haiku-5-5", effort: null },
+      { model: "vibeproxy/as4/gpt-5-5", effort: null },
+      { model: "vibeproxy/as4/gpt-5-mini", effort: null },
     ]);
     const vibeproxy = dto.brain.providers[0]!;
     expect(vibeproxy).toMatchObject({ name: "vibeproxy", api: "openai-completions", keySet: false, keySource: null, problem: null });
     expect(vibeproxy.models.map((model) => model.id)).toEqual([
-      "as4/claude-sonnet-5-5", "as4/claude-haiku-5-5", "claude-sonnet-5", "gemini-3.8-flash-high",
+      "as4/gpt-5-5", "as4/gpt-5-mini", "gpt-5-sol", "gemini-3.8-flash-high",
     ]);
     expect(vibeproxy.models[0]!.released).toEqual({ at: new Date(1_790_553_600_000).toISOString(), source: "provider" });
     // 服务商第一次拉目录时就有、目录又没给时间的：不知道什么时候出的。
@@ -143,7 +143,7 @@ describe("ModelSettings: the page's data", () => {
         id: "jev", name: "jev", baseUrl: "https://api.typesafe.ai", model: "jev-latest",
         apiKeySet: false, apiKeySource: null, apiKeyHost: null, problem: null, authHeader: null,
       }],
-      chain: ["jev"], llmFallback: null, effectiveLlm: "vibeproxy/as4/claude-haiku-5-5",
+      chain: ["jev"], llmFallback: null, effectiveLlm: "vibeproxy/as4/gpt-5-mini",
     });
     expect(dto.maxBackups).toBe(3);
   });
@@ -152,7 +152,7 @@ describe("ModelSettings: the page's data", () => {
     const t = setup();
     await t.settings.get();
     t.setCatalog([
-      { id: "as4/claude-sonnet-5-5", created: 1_790_553_600, owned_by: "anthropic" },
+      { id: "as4/gpt-5-5", created: 1_790_553_600, owned_by: "openai" },
       { id: "gemini-3.8-flash-high", owned_by: "antigravity" },
       { id: "gemini-4-flash", owned_by: "antigravity" },
     ]);
@@ -170,17 +170,17 @@ describe("ModelSettings: the brain", () => {
   it("checks the chain against the catalog before it changes anything", async () => {
     const t = setup();
     await expectRefused(t.settings.setBrainChain({ models: [
-      { model: "vibeproxy/as4/claude-sonnet-5-5", effort: null }, { model: "vibeproxy/as4/claude-sonnet-5-5", effort: "high" },
+      { model: "vibeproxy/as4/gpt-5-5", effort: null }, { model: "vibeproxy/as4/gpt-5-5", effort: "high" },
     ] }), "invalid_input", /in the list two times/);
     await expectRefused(t.settings.setBrainChain({ models: [{ model: "vibeproxy/gpt-9", effort: null }] }), "invalid_input", /不在已配置/);
     expect(t.chains).toEqual([]);
     const change = await t.settings.setBrainChain({ models: [
-      { model: "vibeproxy/as4/claude-haiku-5-5", effort: null },
+      { model: "vibeproxy/as4/gpt-5-mini", effort: null },
       { model: "vibeproxy/gemini-3.8-flash-high", effort: null },
-      { model: "vibeproxy/as4/claude-sonnet-5-5", effort: null },
+      { model: "vibeproxy/as4/gpt-5-5", effort: null },
     ] });
-    expect(t.chains).toEqual([["vibeproxy/as4/claude-haiku-5-5", "vibeproxy/gemini-3.8-flash-high", "vibeproxy/as4/claude-sonnet-5-5"]]);
-    expect(change).toMatchObject({ applied: "now", summary: "Brain: primary vibeproxy/as4/claude-haiku-5-5, backups vibeproxy/gemini-3.8-flash-high, vibeproxy/as4/claude-sonnet-5-5",
+    expect(t.chains).toEqual([["vibeproxy/as4/gpt-5-mini", "vibeproxy/gemini-3.8-flash-high", "vibeproxy/as4/gpt-5-5"]]);
+    expect(change).toMatchObject({ applied: "now", summary: "Brain: primary vibeproxy/as4/gpt-5-mini, backups vibeproxy/gemini-3.8-flash-high, vibeproxy/as4/gpt-5-5",
     });
   });
 
@@ -218,7 +218,7 @@ describe("ModelSettings: the brain", () => {
 
   it("refuses to remove a provider whose model is in the chain, and removes its sealed key otherwise", async () => {
     const t = setup();
-    await expectRefused(t.settings.removeProvider("vibeproxy"), "invalid_input", /still uses vibeproxy\/as4\/claude-sonnet-5-5/);
+    await expectRefused(t.settings.removeProvider("vibeproxy"), "invalid_input", /still uses vibeproxy\/as4\/gpt-5-5/);
     await t.settings.saveProvider({ name: "openai", baseUrl: "https://api.openai.com/v1", api: "openai-completions", apiKey: "sk-test-1" });
     await t.settings.removeProvider("openai");
     expect(loadPlcConfig(t.dataDir).lead?.providers).not.toHaveProperty("openai");
@@ -278,13 +278,13 @@ describe("ModelSettings: the fast models (decision models)", () => {
     expect(t.secrets().get("decision.apiKey.decision-1")).toEqual({ value: "tsk-new", host: "jev.example.com" });
     expect(readFileSync(envConfigPath(t.dataDir), "utf8")).not.toContain("tsk-new");
 
-    await t.settings.setFastChain({ chain: ["decision-1", "jev"], llmFallback: { model: "vibeproxy/as4/claude-haiku-5-5", effort: null } });
+    await t.settings.setFastChain({ chain: ["decision-1", "jev"], llmFallback: { model: "vibeproxy/as4/gpt-5-mini", effort: null } });
     expect(loadPlcConfig(t.dataDir).decision).toMatchObject({
-      baseUrl: "https://jev.example.com", model: "jev-latest", chain: ["decision-1", "jev"], llmFallback: "vibeproxy/as4/claude-haiku-5-5",
+      baseUrl: "https://jev.example.com", model: "jev-latest", chain: ["decision-1", "jev"], llmFallback: "vibeproxy/as4/gpt-5-mini",
     });
     const dto = await t.settings.get();
     expect(dto.fast.chain).toEqual(["decision-1", "jev"]);
-    expect(dto.fast.effectiveLlm).toBe("vibeproxy/as4/claude-haiku-5-5");
+    expect(dto.fast.effectiveLlm).toBe("vibeproxy/as4/gpt-5-mini");
     expect(dto.fast.models.map((model) => [model.id, model.apiKeySet, model.apiKeySource])).toEqual([
       ["jev", true, "settings"], ["decision-1", true, "settings"],
     ]);
@@ -383,8 +383,8 @@ describe("ModelSettings in Chinese", () => {
   it("writes the summaries, notes and errors in the language the user chose", async () => {
     const t = setup();
     updateDesignPreferences(t.db, { request: { locale: "zh" }, caller: { kind: "user" } });
-    const change = await t.settings.setBrainChain({ models: [{ model: "vibeproxy/as4/claude-haiku-5-5", effort: null }] });
-    expect(change.summary).toBe("大脑：主用 vibeproxy/as4/claude-haiku-5-5，没有备用");
+    const change = await t.settings.setBrainChain({ models: [{ model: "vibeproxy/as4/gpt-5-mini", effort: null }] });
+    expect(change.summary).toBe("大脑：主用 vibeproxy/as4/gpt-5-mini，没有备用");
     await expectRefused(t.settings.setBrainChain({ models: [] }), "invalid_input", /至少要有一个主用/);
     await t.settings.saveProvider({ name: "openai", baseUrl: "https://api.openai.com/v1", api: "openai-completions", apiKey: "sk-test-0123456789" });
     const moved = await t.settings.saveProvider({ name: "openai", baseUrl: "https://gateway.example.com/v1", api: "openai-completions" });
@@ -394,5 +394,65 @@ describe("ModelSettings in Chinese", () => {
     });
     await expectRefused(t.settings.removeFastModel("jev"), "invalid_input", /还在直觉的分工里/);
     await expectRefused(t.settings.saveFastModel({ name: "x", baseUrl: "https://user:pass@x.example.com", model: "m" }), "invalid_input", /用户名或密码/);
+  });
+});
+
+// The daemon never sends requests to Claude models: the settings refuse to enable one, with a message in the user's
+// language, and no provider endpoint is asked anything because of it.
+describe("ModelSettings: Claude targets are refused", () => {
+  it("refuses a Claude model for the brain chain and for the smart-model fallback, and changes nothing", async () => {
+    const t = setup();
+    await expectRefused(t.settings.setBrainChain({ models: [{ model: "vibeproxy/claude-haiku-5-5", effort: null }] }), "invalid_input",
+      /vibeproxy\/claude-haiku-5-5 is a Claude model\. This daemon never sends requests to Claude models/);
+    expect(t.chains).toEqual([]);
+    await expectRefused(
+      t.settings.setFastChain({ chain: [], llmFallback: { model: "vibeproxy/claude-sonnet-5", effort: "high" } }), "invalid_input", /is a Claude model/,
+    );
+    expect(loadDecisionModels(t.dataDir).llmFallback).toBeNull();
+    updateDesignPreferences(t.db, { request: { locale: "zh" }, caller: { kind: "user" } });
+    await expectRefused(t.settings.setBrainChain({ models: [{ model: "vibeproxy/claude-haiku-5-5", effort: null }] }), "invalid_input", /不会向 Claude 模型发请求/);
+  });
+
+  it("refuses to add a provider that is Claude itself, stores nothing for it and asks it nothing", async () => {
+    const t = setup();
+    const before = JSON.stringify(loadLeadModelConfig(t.dataDir).providers);
+    for (const [name, baseUrl] of [["anthropic", "https://llm.example.com/v1"], ["claude-code", "http://127.0.0.1:8317/v1"], ["gateway", "https://api.anthropic.com"]]) {
+      await expectRefused(
+        t.settings.saveProvider({ name: name!, baseUrl: baseUrl!, api: "anthropic-messages", apiKey: "sk-test-0123456789" }), "invalid_input", /never sends requests to Claude/,
+      );
+    }
+    expect(JSON.stringify(loadLeadModelConfig(t.dataDir).providers)).toBe(before);
+    expect(t.secrets().get(providerSecretName("anthropic"))).toBeNull();
+    expect(t.providerRefreshes()).toBe(0);
+  });
+
+  it("does not ask a provider named anthropic or claude-code for its catalog when it is already in config.json", async () => {
+    const dataDir = tempDir("plc-model-settings-claude-");
+    const db = openDb(join(dataDir, "plc.db"));
+    writePlcConfig({
+      lead: {
+        providers: {
+          anthropic: { baseUrl: "http://127.0.0.1:9/v1", discover: true }, "claude-code": { baseUrl: "http://127.0.0.1:9/v1", discover: true },
+          acme: { baseUrl: "https://llm.example.com/v1", discover: true },
+        },
+        models: ["acme/gpt-5-5"],
+      },
+    }, dataDir);
+    const asked: string[] = [];
+    const fetchImpl = (async (input: string | URL) => {
+      const url = new URL(String(input));
+      asked.push(url.href);
+      return new Response(JSON.stringify({ data: [{ id: "gpt-5-5" }] }), { status: 200 });
+    }) as typeof fetch;
+    const settings = new ModelSettings({
+      db, dataDir, vault: new Vault(randomBytes(32)), log: () => {}, memory: null, externalSecret: () => null, smartModelLlm: () => null,
+      publish: () => {}, env: {}, fetch: fetchImpl,
+      brain: { current: () => "acme/gpt-5-5", blocked: () => [], applyChain: async () => "now", providersChanged: async () => {} },
+    });
+    instances.push(settings);
+    const dto = await settings.get();
+    expect(asked.every((href) => href.startsWith("https://llm.example.com/"))).toBe(true);
+    expect(asked.length).toBeGreaterThan(0);
+    expect(dto.brain.providers.find((provider) => provider.name === "anthropic")).toMatchObject({ models: [], problem: expect.stringContaining("never sends requests to Claude") });
   });
 });

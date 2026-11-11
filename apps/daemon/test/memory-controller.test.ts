@@ -3,7 +3,7 @@
 // launchd、下载、网络都是替身（memory-fakes.ts），ensureHindsightService 是真的。
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { loadPlcConfig, writePlcConfig } from "@pi-lead-child/core";
@@ -680,17 +680,17 @@ describe("MemoryController: summary models", () => {
   it("saves a consolidation model, restarts Hindsight with its own model and key, and keeps keys out of the plain files", async () => {
     const t = setup();
     await runningLocal(t);
-    expect(readServiceFile(t.dataDir)).toMatchObject({ llm: { model: "claude-haiku-5-5" }, consolidationLlm: null, observations: true, missions: { retain: expect.stringMatching(/not only coding/) } });
+    expect(readServiceFile(t.dataDir)).toMatchObject({ llm: { model: "deepseek-chat" }, consolidationLlm: null, observations: true, missions: { retain: expect.stringMatching(/not only coding/) } });
     const before = t.harness.service.length;
-    const change = await t.controller.setSummaryModel({ slot: "consolidation", model: "anthropic/claude-sonnet-5-5" });
-    expect(change).toEqual({ summary: "整理观察的模型改成 anthropic/claude-sonnet-5-5", note: "记忆服务正在重启，几秒里召回只用全文检索" });
+    const change = await t.controller.setSummaryModel({ slot: "consolidation", model: "other/gpt-5-5" });
+    expect(change).toEqual({ summary: "整理观察的模型改成 other/gpt-5-5", note: "记忆服务正在重启，几秒里召回只用全文检索" });
     expect(t.harness.service.slice(before)).toEqual(["restart"]);
-    expect(loadPlcConfig(t.dataDir).memory?.llm).toEqual({ consolidation: "anthropic/claude-sonnet-5-5" });
-    expect(readServiceFile(t.dataDir)?.consolidationLlm).toEqual({ provider: "anthropic", baseUrl: "https://api.anthropic.example/v1", model: "claude-sonnet-5-5" });
-    expect(t.sealed()).toMatchObject({ llmApiKey: "vibe-key", consolidationLlmApiKey: "anthropic-key" });
+    expect(loadPlcConfig(t.dataDir).memory?.llm).toEqual({ consolidation: "other/gpt-5-5" });
+    expect(readServiceFile(t.dataDir)?.consolidationLlm).toEqual({ provider: "other", baseUrl: "https://llm.example.com/v1", model: "gpt-5-5" });
+    expect(t.sealed()).toMatchObject({ llmApiKey: "vibe-key", consolidationLlmApiKey: "other-key" });
     for (const file of ["config.json", join("hindsight", "service.json")]) {
       const raw = readFileSync(join(t.dataDir, file), "utf8");
-      expect(raw).not.toContain("anthropic-key");
+      expect(raw).not.toContain("other-key");
       expect(raw).not.toContain("vibe-key");
     }
     expect(t.published).toContain("memory");
@@ -700,11 +700,49 @@ describe("MemoryController: summary models", () => {
     expect(t.sealed().consolidationLlmApiKey).toBeUndefined();
   });
 
+  // The daemon never sends requests to Claude: a Claude summary model yields llm: null (memory store and recall keep
+  // working, Hindsight just does not extract new facts), and its key is not even sealed.
+  it("gives Hindsight no summary model when the one selected is Claude, keeps the service up, and seals no key for it", async () => {
+    const t = setup(undefined, {
+      summaryModels: async () => ({
+        default: {
+          slot: "default", spec: "claude-code/haiku", source: "settings", setting: "claude-code/haiku", problem: null,
+          llm: { provider: "claude-code", model: "haiku", baseUrl: "http://127.0.0.1:1/v1", apiKey: "claude-secret" },
+        },
+        consolidation: {
+          slot: "consolidation", spec: "proxy/claude-sonnet-5", source: "settings", setting: "proxy/claude-sonnet-5", problem: null,
+          llm: { provider: "proxy", model: "claude-sonnet-5", baseUrl: "http://127.0.0.1:8317/v1", apiKey: "claude-secret-2" },
+        },
+      }),
+    });
+    await runningLocal(t);
+    expect(readServiceFile(t.dataDir)).toMatchObject({ llm: null, consolidationLlm: null, observations: false, missions: null });
+    expect(t.controller.get().service.state).toBe("healthy");
+    expect(t.sealed().llmApiKey).toBeUndefined();
+    expect(t.sealed().consolidationLlmApiKey).toBeUndefined();
+    for (const file of ["config.json", join("hindsight", "service.json")]) {
+      const raw = existsSync(join(t.dataDir, file)) ? readFileSync(join(t.dataDir, file), "utf8") : "";
+      expect(raw).not.toMatch(/claude-secret|claude-code|haiku/);
+    }
+  });
+
+  it("refuses to save a Claude summary model, in the user's language, and changes nothing", async () => {
+    const t = setup();
+    await runningLocal(t);
+    const before = t.harness.service.length;
+    await expect(t.controller.setSummaryModel({ slot: "default", model: "claude-code/haiku" }))
+      .rejects.toMatchObject({ code: "invalid_input", message: expect.stringContaining("不会向 Claude 模型发请求") });
+    await expect(t.controller.setSummaryModel({ slot: "consolidation", model: "vibeproxy/claude-sonnet-5-5" }))
+      .rejects.toMatchObject({ code: "invalid_input", message: expect.stringContaining("是 Claude 模型") });
+    expect(loadPlcConfig(t.dataDir).memory?.llm).toBeUndefined();
+    expect(t.harness.service.length).toBe(before);
+  });
+
   it("refuses a model whose provider the Lead does not have, and changes nothing", async () => {
     const t = setup();
     await runningLocal(t);
     const before = t.harness.service.length;
-    await expect(t.controller.setSummaryModel({ slot: "default", model: "openrouter/haiku" }))
+    await expect(t.controller.setSummaryModel({ slot: "default", model: "openrouter/gpt-5-5" }))
       .rejects.toMatchObject({ code: "invalid_input", message: expect.stringMatching(/服务商 openrouter 不在/) });
     expect(loadPlcConfig(t.dataDir).memory?.llm).toBeUndefined();
     expect(t.harness.service.length).toBe(before);
@@ -768,9 +806,9 @@ describe("MemoryController in English", () => {
   it("writes the summary model results and the write problems in English", async () => {
     const t = setup(undefined, {}, { locale: "en" });
     await runningLocal(t);
-    const change = await t.controller.setSummaryModel({ slot: "consolidation", model: "anthropic/claude-sonnet-5-5" });
+    const change = await t.controller.setSummaryModel({ slot: "consolidation", model: "other/gpt-5-5" });
     expect(change).toEqual({
-      summary: "The model that consolidates observations is set to anthropic/claude-sonnet-5-5",
+      summary: "The model that consolidates observations is set to other/gpt-5-5",
       note: "The memory service is restarting. For a few seconds, recall uses only full-text search.",
     });
     t.notes.writes = { notes: 4, completed: 2, pending: 1, failed: 1, lastError: "Error code: 401" };

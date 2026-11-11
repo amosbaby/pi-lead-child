@@ -189,8 +189,8 @@ describe("memory settings through the daemon", () => {
     expect(read.status).toBe(200);
     expect(Value.Check(MemoryHindsightResponseSchema, read.body)).toBe(true);
     expect(read.body.hindsight.summaryModels).toEqual([
-      { slot: "default", model: "vibeproxy/claude-haiku-5-5", source: "auto", setting: null, problem: null },
-      { slot: "consolidation", model: "vibeproxy/claude-haiku-5-5", source: "inherit", setting: null, problem: null },
+      { slot: "default", model: "vibeproxy/deepseek-chat", source: "auto", setting: null, problem: null },
+      { slot: "consolidation", model: "vibeproxy/deepseek-chat", source: "inherit", setting: null, problem: null },
     ]);
     expect(read.body.hindsight.writes).toMatchObject({ failed: 0 });
     // 现在失效着的事实（2026-10-29）：最近失效的在前，恢复了的不列。
@@ -209,14 +209,14 @@ describe("memory settings through the daemon", () => {
 
     const before = harness.service.length;
     const changed = await call("POST", "/v1/actions/memory_settings/memory/set_summary_model", {
-      input: { slot: "consolidation", model: "anthropic/claude-sonnet-5-5" },
+      input: { slot: "consolidation", model: "other/gpt-5-5" },
     });
     expect(changed.status).toBe(200);
     expect(harness.service.slice(before)).toContain("restart");
-    expect(loadPlcConfig(dir).memory?.llm).toEqual({ consolidation: "anthropic/claude-sonnet-5-5" });
-    expect(readServiceFile(dir)?.consolidationLlm).toMatchObject({ model: "claude-sonnet-5-5" });
-    expect(readFileSync(join(dir, "config.json"), "utf8")).not.toContain("anthropic-key");
-    expect((await call("GET", "/v1/memory/hindsight")).body.hindsight.summaryModels[1]).toMatchObject({ source: "settings", model: "anthropic/claude-sonnet-5-5" });
+    expect(loadPlcConfig(dir).memory?.llm).toEqual({ consolidation: "other/gpt-5-5" });
+    expect(readServiceFile(dir)?.consolidationLlm).toMatchObject({ model: "gpt-5-5" });
+    expect(readFileSync(join(dir, "config.json"), "utf8")).not.toContain("other-key");
+    expect((await call("GET", "/v1/memory/hindsight")).body.hindsight.summaryModels[1]).toMatchObject({ source: "settings", model: "other/gpt-5-5" });
     // 没有 tickets:create 的设备看得到，改不了。
     const readOnly = createLoopbackBinding(db, { name: "read-only", scopes: ["tickets:view"] });
     expect((await call("GET", "/v1/memory/hindsight", undefined, readOnly.accessToken)).status).toBe(200);

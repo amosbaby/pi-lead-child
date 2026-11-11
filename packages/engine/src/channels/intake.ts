@@ -19,7 +19,7 @@
 // 送出去的文字先按 redactSecretText 的规则脱敏，再截断（redactAndCap）；不送发信人的名字。调用带 purpose channel_intake，
 // SmartModel 自己记 decision_model.called。不可用、超时或出错时结果是 unavailable：不代查，卡照常投递。
 // 后端（issue 10，用户 2026-10-30）：先只问决策模型（Jev 这一类，decisionOnly）；没有配置、或者它失败（429、超时、回答不合法）时，
-// 同一条消息改由 Lead 的便宜模型（Haiku）按 intake-llm.ts 的原生提示判断，结果里写明换了、为什么换。不再落到 llm.ts 的通用适配。
+// 同一条消息改由 Lead 的 LLM 兜底模型（不是 Claude）按 intake-llm.ts 的原生提示判断，结果里写明换了、为什么换。不再落到 llm.ts 的通用适配。
 // 这里不出现任何具体来源的名字。
 import {
   CHANNEL_CLOSING_KINDS, CHANNEL_HANDBOOK_DEFAULTS, CHANNEL_REACTION_EMOJIS, CHANNEL_RULE_CHANGE_FLAG, CHANNEL_RULE_CHANGE_KINDS,
@@ -508,7 +508,7 @@ export async function judgeChannelIntake(input: {
   intake: ChannelIntakeInput;
   model: SmartModel | null;
   timeoutMs?: number;
-  // Lead 的便宜模型（Haiku）。没有时只问决策模型。
+  // Lead 的 LLM 兜底模型（不是 Claude）。没有时只问决策模型。
   text?: SmartTextComplete | null;
   textTimeoutMs?: number;
 }): Promise<ChannelIntakeResult> {

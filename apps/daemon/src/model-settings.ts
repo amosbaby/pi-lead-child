@@ -17,11 +17,11 @@ import {
   type SetFastChainRequest,
 } from "@pi-lead-child/protocol";
 import {
-  assertConfiguredLeadModel, effectiveAccountPrefix, leadModelCatalog, loadLeadModelConfig, OPENAI_COMPATIBLE_APIS, removeLeadProviderInConfig,
+  assertConfiguredLeadModel, claudeGuardMessages, effectiveAccountPrefix, leadModelCatalog, loadLeadModelConfig, OPENAI_COMPATIBLE_APIS, removeLeadProviderInConfig,
   saveLeadProviderInConfig, setLeadProviderKeySource, type LeadCatalogModel, type LeadCatalogProviderInfo, type LeadModelConfig,
   type LeadProviderConfig,
 } from "@pi-lead-child/lead";
-import { resolveEnvSpec } from "@pi-lead-child/core";
+import { isClaudeTarget, resolveEnvSpec } from "@pi-lead-child/core";
 import { UiActionError, type ModelSettingsChange, type ModelSettingsService, type ModelSettingsSummary } from "@pi-lead-child/engine";
 import type { SecretVault } from "@pi-lead-child/connections";
 import { getLocale, leadDisplayName, type Db } from "@pi-lead-child/store";
@@ -325,7 +325,7 @@ export class ModelSettings implements ModelSettingsService {
       const config = this.config();
       for (const spec of specs) {
         try {
-          await assertConfiguredLeadModel(spec, config, this.options.env, this.options.fetch);
+          await assertConfiguredLeadModel(spec, config, this.options.env, this.options.fetch, { locale });
         } catch (error) {
           invalid(error instanceof Error ? error.message : String(error));
         }
@@ -347,6 +347,8 @@ export class ModelSettings implements ModelSettingsService {
       const m = modelSettingsMessages(locale);
       if (!(OPENAI_COMPATIBLE_APIS as readonly string[]).includes(request.api)) invalid(m.apiFormat(OPENAI_COMPATIBLE_APIS));
       const baseUrl = checkedUrl(request.baseUrl, locale);
+      // The daemon never sends requests to Claude: a provider that is Claude itself is not added, and nothing is stored for it.
+      if (isClaudeTarget({ provider: request.name, baseUrl })) invalid(claudeGuardMessages(locale).providerRefused(request.name));
       const host = serviceUrlHost(baseUrl);
       const existed = request.name in this.config().providers;
       const { droppedConfigKey } = saveLeadProviderInConfig(request.name, {
@@ -488,7 +490,7 @@ export class ModelSettings implements ModelSettingsService {
         llmFallback = request.llmFallback === null ? null : leadModelSpec(request.llmFallback);
         if (llmFallback) {
           try {
-            await assertConfiguredLeadModel(llmFallback, this.config(), this.options.env, this.options.fetch);
+            await assertConfiguredLeadModel(llmFallback, this.config(), this.options.env, this.options.fetch, { locale });
           } catch (error) {
             invalid(error instanceof Error ? error.message : String(error));
           }

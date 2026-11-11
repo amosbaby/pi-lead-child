@@ -53,6 +53,7 @@ import {
   dropLedgerGuards, importLegacyDb, ledgerGuardedTables, ledgerGuardDropSql, ledgerGuardTriggers, missingLedgerGuards, openExistingDb,
   schedulerEventsOfUnit, schedulerUnitsOfTurn, type EventRecord,
 } from "@pi-lead-child/store";
+import { collectClaudeModelTargets } from "./claude-targets.js";
 import { formatSchedTrace, readTraceLogLines, readTraceSessionEntries, SCHED_TRACE_ID, schedTrace, unitsOf } from "./sched-trace.js";
 
 const PROJECT_ROOT = projectRoot();
@@ -587,6 +588,10 @@ async function doctor(): Promise<number> {
       let configured: readonly string[] = [];
       try { configured = loadPlcConfig(dataDir()).runtimes?.disabled ?? []; } catch { /* configParses 会报告 */ }
       return [...configured, ...(process.env.PLC_DISABLED_RUNTIMES ?? "").split(",").map((id) => id.trim())].includes(claudeAdapter.id);
+    },
+    // 配置里还指着 Claude 模型的地方：daemon 拒绝它们。读不出配置时不列，configParses 会报告。
+    claudeModelTargets: () => {
+      try { return collectClaudeModelTargets(dataDir()); } catch { return []; }
     },
   };
   const checks = await runDoctor(probes);

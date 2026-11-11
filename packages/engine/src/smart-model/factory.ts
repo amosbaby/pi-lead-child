@@ -1,7 +1,7 @@
 // SmartModel 的工厂（2026-10-16 用户决定）：
 //   - 决策模型（设置页「模型」的「直觉」：TypeSafe 的 Jev 或者兼容的端点）有 key 时，它先回答；失败（网络、429、5xx、超时、
 //     回答不合法）时改由 LLM 回答。2026-10-29 起可以配多条：按分工的顺序问（主用、备用 1、备用 2……），都失败时问 LLM。
-//   - 没有 key 时只用 LLM（Lead 的模型配置里的 Haiku，见 packages/lead 的 smart-model.ts）。
+//   - 没有 key 时只用 LLM（Lead 自己的模型，不会是 Claude，见 packages/lead 的 smart-model.ts）。
 // 决策模型的配置每次调用时读一次：用户在设置页改了 key 或者端点，下一次调用就用新的，不用重建 Lead 会话。
 // key 只经 decisionModel() 传进来（daemon 的保险库），不读 process.env：child 继承 daemon 的全部环境。
 // 每次调用的结果里写明是哪个后端回答的。给了日志路径时，每次调用记一行决策日志。

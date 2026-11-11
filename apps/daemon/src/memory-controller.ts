@@ -50,7 +50,8 @@ import {
   type SummaryModelSlot,
   fastModelAuthHeaders,
 } from "@pi-lead-child/protocol";
-import { loadPlcConfig, writePlcConfig, type PlcMemoryConfig } from "@pi-lead-child/core";
+import { isClaudeTarget, loadPlcConfig, writePlcConfig, type PlcMemoryConfig } from "@pi-lead-child/core";
+import { claudeGuardMessages, isClaudeLeadSpec, loadLeadModelConfig } from "@pi-lead-child/lead";
 import {
   HindsightBackend, invalidatedMemoryFacts, memoryBackendSetting, UiActionError,
   type DecisionModelCredentials, type MemorySettingsChange, type MemorySettingsService, type MemorySettingsSummary, type NotesMemory,
@@ -192,8 +193,11 @@ const embeddingHost = (embedding: HindsightEmbedding | null) =>
   embedding?.provider === "openai" ? serviceUrlHost(embedding.baseUrl) : null;
 const sameEmbedding = (a: HindsightEmbedding | null, b: HindsightEmbedding | null) =>
   (a === null || b === null) ? a === b : embeddingFingerprint(a) === embeddingFingerprint(b);
+// 交给 Hindsight 的摘要模型。Claude 系的一律不交（daemon 不向 Claude 发请求）：这一槽没有模型，Hindsight 只召回。
+// summaryModels 已经把它们挡在外面；这里再拦一次，注入的假 summaryModels 和以后的改动都绕不过去。
 const target = (choice: SummaryModelChoice | undefined): HindsightLlmTarget | null =>
-  choice?.llm ? { provider: choice.llm.provider, baseUrl: choice.llm.baseUrl, model: choice.llm.model } : null;
+  choice?.llm && !isClaudeTarget(choice.llm)
+    ? { provider: choice.llm.provider, baseUrl: choice.llm.baseUrl, model: choice.llm.model } : null;
 // 交给 Hindsight 的摘要模型。整理观察只在单独选了、而且和缺省不同的时候才给：否则 Hindsight 用缺省。
 function llmTargets(models: SummaryModels | null): { default: HindsightLlmTarget | null; consolidation: HindsightLlmTarget | null } {
   const fallback = target(models?.default);
@@ -574,7 +578,7 @@ export class MemoryController implements MemoryService {
       : sealed ? sealed.embeddingApiKey ?? null : this.embeddingKey(embeddingHost(next.embedding));
     const decisionApiKey = next.reranker.provider === "typesafe" ? this.decisionKey(rerankHost(next.reranker))?.value ?? null : null;
     const targets = llmTargets(models);
-    const llmApiKey = models?.default.llm?.apiKey ?? null;
+    const llmApiKey = targets.default ? models?.default.llm?.apiKey ?? null : null;
     const consolidationLlmApiKey = targets.consolidation ? models?.consolidation.llm?.apiKey ?? null : null;
     return {
       // daemon 第一次初始化 Hindsight 时生成（2026-10-16 用户决定）。之后连接和启动都用它。
@@ -1095,6 +1099,10 @@ export class MemoryController implements MemoryService {
     return this.serial(async () => {
       const m = this.m();
       if (request.model !== null) {
+        // The daemon never sends requests to Claude: refuse before anything is stored.
+        if (isClaudeLeadSpec(request.model, loadLeadModelConfig(this.options.dataDir, this.env))) {
+          throw new UiActionError("invalid_input", claudeGuardMessages(getLocale(this.options.db)).modelRefused(request.model));
+        }
         const models = await this.options.summaryModels({ ...(this.config().llm ?? {}), [request.slot]: request.model });
         const choice = models[request.slot];
         if (choice.source !== "settings" && choice.source !== "env") {

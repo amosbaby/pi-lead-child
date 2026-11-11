@@ -26,11 +26,11 @@ describe("lead model config", () => {
 
   it("lets config.json lead.models win over PLC_LEAD_MODEL", () => {
     writeFileSync(join(dir, "config.json"), JSON.stringify({
-      lead: { models: ["vibeproxy/claude-sonnet-4-5-20250929"] },
+      lead: { models: ["vibeproxy/gemini-3.7-flash-high"] },
     }));
     const config = loadLeadModelConfig(dir, { PLC_LEAD_MODEL: "openai/gpt-5.5" });
     expect(selectedLeadModelSpec(config, { PLC_LEAD_MODEL: "openai/gpt-5.5" }))
-      .toBe("vibeproxy/claude-sonnet-4-5-20250929");
+      .toBe("vibeproxy/gemini-3.7-flash-high");
   });
 
   it("falls back to the built-in default when nothing is configured", () => {

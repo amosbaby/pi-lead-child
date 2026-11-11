@@ -45,7 +45,9 @@ import {
   parseModelName,
   registerLeadProviders,
   resolveLeadModel,
+  refusedLeadModels,
   selectedLeadModelSpec,
+  usableLeadModels,
 } from "./model-config.js";
 import { createLeadSmartModel } from "./smart-model.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
@@ -287,6 +289,10 @@ export async function createLeadSession(opts: {
   const registered = await registerLeadProviders(modelRuntime, leadModels);
   for (const note of registered.notes) {
     console.error(`[lead] ${note}`);
+  }
+  // The daemon never sends requests to Claude: a Claude entry in lead.models is not used (plc doctor lists it too).
+  for (const refused of refusedLeadModels(leadModels)) {
+    console.error(`[lead] refusing the Claude model ${refused}: the daemon never sends requests to Claude models`);
   }
   const spec = selectedLeadModelSpec(leadModels);
   parseModelName(spec);
@@ -606,7 +612,7 @@ export async function createLeadSession(opts: {
       logLeadSolPi(session.getAllTools().map((tool) => tool.name), solPi);
     },
     // 模型切换（spec D9，model-failover.ts）：限流或者连续溢出时，daemon 按这个顺序换模型。第一个是正在用的。
-    models: [...new Set([spec, ...leadModels.models])],
+    models: [...new Set([spec, ...usableLeadModels(leadModels)])],
     // 在会话里换模型，不改 config.json（setModel 不带 persist），也不重启：限流过去以后 daemon 再换回第一个。
     // 输入框里选的新模型（例如带推理强度的 as4/claude-sonnet-5(high)）启动时没有注册：照 config.json 现在的样子重新注册一次。
     switchModel: async (next: string) => {

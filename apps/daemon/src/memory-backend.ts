@@ -1,9 +1,9 @@
 // Hindsight 记忆服务的两样启动参数（memory-controller.ts 用）：launchd 运行的命令，和 Hindsight 的摘要模型。
 import { existsSync, lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { distDir, packageSource, projectRoot } from "@pi-lead-child/core";
-import { listConfiguredLeadModelSpecs, loadLeadModelConfig, newestModelSpec, parseModelName, resolveLeadApiKey } from "@pi-lead-child/lead";
-import type { SummaryModelSlot, SummaryModelSource } from "@pi-lead-child/protocol";
+import { distDir, isClaudeTarget, packageSource, projectRoot } from "@pi-lead-child/core";
+import { claudeGuardMessages, loadLeadModelConfig, parseModelName, resolveLeadApiKey } from "@pi-lead-child/lead";
+import type { Locale, SummaryModelSlot, SummaryModelSource } from "@pi-lead-child/protocol";
 import { AGENT_MEMORY_LAUNCH_NAME } from "@pi-lead-child/supervisor";
 
 // supervisor 运行 Hindsight 的命令（写进 run.json）。和 supervisor 运行 daemon 的方式一样：有构建产物用它，PLC_DEV 或者
@@ -57,14 +57,15 @@ export interface SummaryModelSettings {
 
 /**
  * Hindsight 的两个摘要模型（.scratch/hindsight-primary-memory/spec.md D16）。
- * - 缺省：环境变量 PLC_HINDSIGHT_LLM > 设置页的选择 > 自动（Lead 目录里版本最新的 haiku：便宜、快，2026-10-16 用户决定）。
- *   目录含 provider discover 出来的模型。都没有时是 none：Hindsight 只召回。
+ * - 缺省：环境变量 PLC_HINDSIGHT_LLM > 设置页的选择。都没有时是 none：Hindsight 只召回，不提取新事实。
+ *   以前缺省自动选 Lead 目录里最新的 haiku；daemon 不向 Claude 系的模型发请求，这一步删掉了。
  * - 整理观察：设置页的选择；没选时跟缺省一样（inherit）。
- * 选的模型用不了（服务商不在 lead.providers 里）时写明原因，再按下一个来源选。
+ * 选的模型用不了（服务商不在 lead.providers 里，或者是 Claude 系的）时写明原因，再按下一个来源选。
+ * 一个 Claude 系的模型不会变成 llm：这个槽没有模型，Hindsight 只召回（plc doctor 报出配置里的 Claude 模型）。
  */
 export async function summaryModels(
   dir: string, settings: SummaryModelSettings = {},
-  env: Record<string, string | undefined> = process.env, fetchImpl: typeof fetch = fetch,
+  env: Record<string, string | undefined> = process.env, locale: Locale = "en",
 ): Promise<SummaryModels> {
   const config = loadLeadModelConfig(dir, env);
   const resolve = (spec: string): HindsightLlm | string => {
@@ -76,6 +77,7 @@ export async function summaryModels(
     }
     const provider = config.providers[parsed.provider];
     if (!provider) return `服务商 ${parsed.provider} 不在设置 → 模型的服务商里（config.json 的 lead.providers）`;
+    if (isClaudeTarget({ provider: parsed.provider, model: parsed.id, baseUrl: provider.baseUrl })) return claudeGuardMessages(locale).modelRefused(spec);
     return { provider: parsed.provider, model: parsed.id, baseUrl: provider.baseUrl, apiKey: resolveLeadApiKey(provider, env, parsed.provider) ?? null };
   };
   const chosen = (slot: SummaryModelSlot, spec: string, source: SummaryModelSource, setting: string | null, problem: string | null): SummaryModelChoice | string => {
@@ -97,12 +99,6 @@ export async function summaryModels(
     const result = chosen("default", settingDefault, "settings", settingDefault, null);
     if (typeof result === "string") problems.push(result);
     else picked = result;
-  }
-  if (!picked) {
-    const auto = newestModelSpec((await listConfiguredLeadModelSpecs(config, env, fetchImpl))
-      .filter((spec) => /haiku/i.test(spec.slice(spec.indexOf("/") + 1))));
-    const result = auto ? chosen("default", auto, "auto", settingDefault, null) : null;
-    if (result && typeof result !== "string") picked = result;
   }
   const fallbackProblem = problems.length ? problems.join("；") : null;
   const defaultChoice: SummaryModelChoice = picked

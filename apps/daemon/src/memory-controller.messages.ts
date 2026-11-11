@@ -48,7 +48,7 @@ export const memoryControllerMessages = defineMessages({
     noSummaryModels: "The summary models are not known yet (the daemon cannot read the model catalog of Lead).",
     modelNotUsable: (model: string) => `${model} cannot be used.`,
     slotReset: (slot: string, isDefault: boolean) =>
-      `${slot} is set back to ${isDefault ? "automatic (the newest haiku)" : "the same as the default"}`,
+      `${slot} is set back to ${isDefault ? "automatic (no summary model)" : "the same as the default"}`,
     slotSet: (slot: string, model: string) => `${slot} is set to ${model}`,
     noteRestarting: "The memory service is restarting. For a few seconds, recall uses only full-text search.",
     noteNotHindsight: "The memory backend is not Hindsight now. The daemon saved your choice. It takes effect when you turn on Hindsight.",
@@ -95,7 +95,7 @@ export const memoryControllerMessages = defineMessages({
     decisionWorks: "决策模型可用",
     noSummaryModels: "还没有算出摘要模型（读不到 Lead 的模型目录）",
     modelNotUsable: (model) => `${model} 用不了`,
-    slotReset: (slot, isDefault) => `${slot}改回${isDefault ? "自动（最新的 haiku）" : "跟缺省一样"}`,
+    slotReset: (slot, isDefault) => `${slot}改回${isDefault ? "自动（不用摘要模型）" : "跟缺省一样"}`,
     slotSet: (slot, model) => `${slot}改成 ${model}`,
     noteRestarting: "记忆服务正在重启，几秒里召回只用全文检索",
     noteNotHindsight: "记忆后端现在不是 Hindsight：选择存下了，启用 Hindsight 后生效",

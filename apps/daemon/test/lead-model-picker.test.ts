@@ -28,7 +28,7 @@ async function startVibeproxy(): Promise<string> {
     if (url.pathname !== "/v1/models") { res.statusCode = 404; res.end("{}"); return; }
     if (url.searchParams.get("client_version") === "pi") {
       res.end(JSON.stringify({
-        models: ["claude-sonnet-5", "as1/claude-sonnet-5", "as4/claude-sonnet-5"].map((slug) => ({
+        models: ["gpt-5-sol", "as1/gpt-5-sol", "as4/gpt-5-sol"].map((slug) => ({
           slug, input_modalities: ["text", "image"], supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
         })).concat([{ slug: "gemini-3.8-flash-high", input_modalities: ["text", "image"], supported_reasoning_levels: [] } as never]),
       }));
@@ -36,10 +36,10 @@ async function startVibeproxy(): Promise<string> {
     }
     res.end(JSON.stringify({
       data: [
-        { id: "claude-sonnet-5", owned_by: "anthropic" },
+        { id: "gpt-5-sol", owned_by: "openai" },
         { id: "gemini-3.8-flash-high", owned_by: "antigravity" },
-        { id: "as1/claude-sonnet-5", owned_by: "anthropic" },
-        { id: "as4/claude-sonnet-5", owned_by: "anthropic" },
+        { id: "as1/gpt-5-sol", owned_by: "openai" },
+        { id: "as4/gpt-5-sol", owned_by: "openai" },
       ],
     }));
   });
@@ -57,7 +57,7 @@ beforeEach(async () => {
   writeFileSync(join(dir, "config.json"), JSON.stringify({
     lead: {
       providers: { vibeproxy: { baseUrl: await startVibeproxy(), apiKey: { value: "vibeproxy" }, discover: true } },
-      models: ["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"],
+      models: ["vibeproxy/gpt-5-sol", "vibeproxy/gemini-3.8-flash-high"],
     },
   }));
 });
@@ -79,8 +79,8 @@ function stubLead() {
   const prompts: string[] = [];
   let hold: Promise<void> | null = null;
   const factory = async () => ({
-    modelName: "vibeproxy/claude-sonnet-5",
-    models: ["vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high"],
+    modelName: "vibeproxy/gpt-5-sol",
+    models: ["vibeproxy/gpt-5-sol", "vibeproxy/gemini-3.8-flash-high"],
     switchModel: async (spec: string) => { switched.push(spec); },
     session: {
       sessionId: "stub-session",
@@ -134,32 +134,32 @@ describe("choosing Lead's model in the composer", () => {
     const { status, body } = await http("GET", "/v1/lead/models");
     expect(status).toBe(200);
     expect(Value.Check(LeadModelCatalogSchema, body)).toBe(true);
-    expect(body.current).toEqual({ model: "vibeproxy/claude-sonnet-5", effort: null });
-    expect(body.models.find((model: any) => model.model === "vibeproxy/as4/claude-sonnet-5")).toMatchObject({
-      prefix: "as4", source: "anthropic", image: true, efforts: ["low", "high"], blockedUntil: null,
+    expect(body.current).toEqual({ model: "vibeproxy/gpt-5-sol", effort: null });
+    expect(body.models.find((model: any) => model.model === "vibeproxy/as4/gpt-5-sol")).toMatchObject({
+      prefix: "as4", source: "openai", image: true, efforts: ["low", "high"], blockedUntil: null,
     });
   });
 
   it("switches at once while Lead is idle, without a restart, and tells every page", async () => {
     const lead = stubLead();
     const { events, http, send } = await start(lead);
-    const { status, body } = await http("POST", "/v1/lead/model", { model: "vibeproxy/as4/claude-sonnet-5", effort: "high" });
+    const { status, body } = await http("POST", "/v1/lead/model", { model: "vibeproxy/as4/gpt-5-sol", effort: "high" });
     expect(status).toBe(200);
     expect(body).toEqual({
-      previous: { model: "vibeproxy/claude-sonnet-5", effort: null },
-      selected: { model: "vibeproxy/as4/claude-sonnet-5", effort: "high" },
+      previous: { model: "vibeproxy/gpt-5-sol", effort: null },
+      selected: { model: "vibeproxy/as4/gpt-5-sol", effort: "high" },
       applied: "now",
     });
-    expect(lead.switched).toEqual(["vibeproxy/as4/claude-sonnet-5(high)"]);
+    expect(lead.switched).toEqual(["vibeproxy/as4/gpt-5-sol(high)"]);
     expect(configuredModels()).toEqual([
-      "vibeproxy/as4/claude-sonnet-5(high)", "vibeproxy/claude-sonnet-5", "vibeproxy/gemini-3.8-flash-high",
+      "vibeproxy/as4/gpt-5-sol(high)", "vibeproxy/gpt-5-sol", "vibeproxy/gemini-3.8-flash-high",
     ]);
     await vi.waitFor(() => expect(events.some((event) => event.type === "daemon.status.changed"
-      && event.payload.model === "vibeproxy/as4/claude-sonnet-5(high)")).toBe(true));
-    expect((await http("GET", "/v1/lead/models")).body.current).toEqual({ model: "vibeproxy/as4/claude-sonnet-5", effort: "high" });
+      && event.payload.model === "vibeproxy/as4/gpt-5-sol(high)")).toBe(true));
+    expect((await http("GET", "/v1/lead/models")).body.current).toEqual({ model: "vibeproxy/as4/gpt-5-sol", effort: "high" });
     // Lead 知道换了，不用再告诉用户。
     const switchedEvent = listEvents(db, { kind: "lead.model_switched" }).at(-1);
-    expect(switchedEvent?.payload).toMatchObject({ to: "vibeproxy/as4/claude-sonnet-5(high)" });
+    expect(switchedEvent?.payload).toMatchObject({ to: "vibeproxy/as4/gpt-5-sol(high)" });
     expect(switchedEvent?.payload.mustTell).toBeUndefined();
     // 下一轮就用它，不再换。
     await send("在吗");
@@ -188,13 +188,13 @@ describe("choosing Lead's model in the composer", () => {
   it("refuses a model or an effort that is not in the catalog, and changes nothing", async () => {
     const lead = stubLead();
     const { http } = await start(lead);
-    const effort = await http("POST", "/v1/lead/model", { model: "vibeproxy/as4/claude-sonnet-5", effort: "max" });
+    const effort = await http("POST", "/v1/lead/model", { model: "vibeproxy/as4/gpt-5-sol", effort: "max" });
     expect(effort.status).toBe(400);
     expect(effort.body.error.message).toContain("可选：low、high");
-    const model = await http("POST", "/v1/lead/model", { model: "vibeproxy/as9/claude-sonnet-5", effort: null });
+    const model = await http("POST", "/v1/lead/model", { model: "vibeproxy/as9/gpt-5-sol", effort: null });
     expect(model.status).toBe(400);
-    expect((await http("POST", "/v1/lead/model", { model: "vibeproxy/claude-sonnet-5" })).status).toBe(400);
+    expect((await http("POST", "/v1/lead/model", { model: "vibeproxy/gpt-5-sol" })).status).toBe(400);
     expect(lead.switched).toEqual([]);
-    expect(configuredModels()[0]).toBe("vibeproxy/claude-sonnet-5");
+    expect(configuredModels()[0]).toBe("vibeproxy/gpt-5-sol");
   });
 });

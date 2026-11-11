@@ -772,7 +772,7 @@ const text = (testID: string) => screen.getByTestId(testID).textContent;
 describe('the Hindsight rules', () => {
   it('says how each summary model was chosen, and why a choice does not apply', () => {
     const [auto, inherit] = hindsight().summaryModels;
-    expect(summarySourceLabel(auto!, 'zh')).toBe('自动：最新的 haiku');
+    expect(summarySourceLabel(auto!, 'zh')).toBe('自动：不用摘要模型');
     expect(summarySourceLabel(inherit!, 'zh')).toBe('跟缺省一样');
     expect(summarySourceLabel({ ...auto!, source: 'settings', setting: HAIKU }, 'zh')).toBe('你选的');
     expect(summarySourceLabel({ ...auto!, model: null, source: 'none' }, 'zh')).toBe('Hindsight 只召回，不提取新事实');
@@ -800,7 +800,7 @@ describe('the Hindsight part of the memory section', () => {
     const { runtime } = hindsightRuntime(hindsight());
     renderWithRuntime(<MemorySection />, runtime);
     expect(text('memory-summary-slot-default')).toContain('Claude Haiku 5.5');
-    expect(text('memory-summary-slot-default')).toContain('vibeproxy · Automatic: the latest haiku');
+    expect(text('memory-summary-slot-default')).toContain('vibeproxy · Automatic: no summary model');
     expect(text('memory-summary-slot-consolidation')).toContain('Claude Haiku 5.5');
     expect(text('memory-summary-slot-consolidation')).toContain('vibeproxy · Same as the default');
     expect(text('memory-writes-counts')).toBe('Writes: 10 done, 2 in progress, 0 failed');

@@ -13,3 +13,4 @@ export * from "./file-read.js";
 export * from "./home-paths.js";
 export * from "./host-jobs.js";
 export * from "./host-probes.js";
+export * from "./claude-guard.js";

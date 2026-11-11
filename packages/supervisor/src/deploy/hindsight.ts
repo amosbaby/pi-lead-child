@@ -22,7 +22,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { dataDir as currentDataDir, isPreRenameDataDir, PRE_RENAME_HINDSIGHT_LABEL } from "@pi-lead-child/core";
+import { dataDir as currentDataDir, isClaudeTarget, isPreRenameDataDir, PRE_RENAME_HINDSIGHT_LABEL } from "@pi-lead-child/core";
 import { launchctl } from "./launchd.js";
 
 export const HINDSIGHT_LABEL = "com.bytezard.plc.hindsight";
@@ -135,6 +135,11 @@ export interface HindsightLlmTarget {
   provider: string;
   baseUrl: string;
   model: string;
+}
+
+// 摘要模型不能是 Claude 系的（daemon 不向 Claude 发请求）。是的话这一槽没有模型：Hindsight 只召回，不提取新事实。
+export function withoutClaudeLlm(target: HindsightLlmTarget | null | undefined): HindsightLlmTarget | null {
+  return target && !isClaudeTarget(target) ? target : null;
 }
 
 // <dataDir>/hindsight/service.json：服务的期望状态。不含密钥。
@@ -410,10 +415,15 @@ export async function ensureHindsightService(o: EnsureHindsightOptions): Promise
   const databaseUrl = database.kind === "pg0" ? pg0Url(fingerprint)
     : await (o.preparePostgres ?? preparePostgresDatabase)(database, `plc_hindsight_${fingerprint}`);
   const tuning = hindsightTuning(env, log);
+  const llm = withoutClaudeLlm(o.llm);
+  if (o.llm && !llm) {
+    log(`[hindsight] the summary model ${o.llm.provider}/${o.llm.model} is a Claude model and the daemon never sends requests to Claude; Hindsight recalls but does not extract new facts`);
+  }
+  const consolidationLlm = withoutClaudeLlm(o.consolidationLlm);
   const service: HindsightServiceFile = {
     version: HINDSIGHT_VERSION, resolvedBefore: HINDSIGHT_RESOLVED_BEFORE, port, database, databaseUrl, embedding: o.embedding, reranker: o.reranker,
-    llm: o.llm, consolidationLlm: o.llm ? o.consolidationLlm ?? null : null, observations: Boolean(o.llm && o.observations),
-    missions: o.llm ? HINDSIGHT_MISSIONS : null,
+    llm, consolidationLlm: llm ? consolidationLlm : null, observations: Boolean(llm && o.observations),
+    missions: llm ? HINDSIGHT_MISSIONS : null,
     secretsVersion: o.secretsVersion, tuning, uvx,
   };
   writeServiceFile(o.dataDir, service);
@@ -541,6 +551,10 @@ export function hindsightEnvironment(input: {
   const { service, secrets } = input;
   const notes: string[] = [];
   const env: Record<string, string> = {};
+  // An older service.json can still name a Claude model (written before the daemon stopped calling Claude), and the
+  // supervisor may start this service before the daemon rewrites the file: the last hop checks again.
+  const llm = withoutClaudeLlm(service.llm);
+  if (service.llm && !llm) notes.push(`ignored the summary model ${service.llm.provider}/${service.llm.model}: a Claude model, which the daemon never calls`);
   for (const name of HINDSIGHT_INHERITED_ENV) {
     const value = input.env[name];
     if (value !== undefined) env[name] = value;
@@ -561,7 +575,7 @@ export function hindsightEnvironment(input: {
     HINDSIGHT_API_MCP_ENABLED: "false",
     // observation 是 Hindsight 整理多条事实得出的观察，要额外的 LLM 调用。2026-10-29 用户决定打开（service.observations），
     // 有 LLM 时才开：没有 LLM 时整理只会失败。
-    HINDSIGHT_API_ENABLE_OBSERVATIONS: service.observations && service.llm ? "true" : "false",
+    HINDSIGHT_API_ENABLE_OBSERVATIONS: service.observations && llm ? "true" : "false",
     // Python 在 launchd 下会把输出攒在缓冲区里：2026-10-26 日志 15 小时没有一行（spec D13）。
     PYTHONUNBUFFERED: "1",
     // 任务归属看 worker id。缺省是主机名，Mac 的主机名会变，变了之后旧任务就没人认领了。
@@ -607,7 +621,6 @@ export function hindsightEnvironment(input: {
     env.HINDSIGHT_API_RERANKER_PROVIDER = "rrf";
   }
   notes.push(`embedding ${describeEmbedding(service.embedding)}, reranker ${describeReranker(service.reranker)}`);
-  const llm = service.llm;
   if (!llm) {
     env.HINDSIGHT_API_LLM_PROVIDER = "none";
     notes.push("no LLM configured; Hindsight recalls but does not extract new facts");
@@ -620,7 +633,7 @@ export function hindsightEnvironment(input: {
   env.HINDSIGHT_API_LLM_API_KEY = secrets.llmApiKey ?? "not-needed";
   notes.push(`LLM ${llm.provider}/${llm.model}`);
   // 整理观察单独选的模型（configuration.mdx 的 Per-Operation LLM Configuration）。没选时 Hindsight 用上面的缺省。
-  const consolidation = service.consolidationLlm;
+  const consolidation = withoutClaudeLlm(service.consolidationLlm);
   if (consolidation && service.observations) {
     env.HINDSIGHT_API_CONSOLIDATION_LLM_PROVIDER = "openai";
     env.HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL = consolidation.baseUrl;

@@ -10,11 +10,11 @@ import type { SummaryModelSlot } from "@pi-lead-child/protocol";
 import type { MemoryControllerHooks } from "../src/memory-controller.js";
 import type { SummaryModelChoice, SummaryModels, SummaryModelSettings } from "../src/memory-backend.js";
 
-// 摘要模型（memory-backend.ts 的 summaryModels）的替身：两个服务商 vibeproxy、anthropic，各有自己的 key。
-// 缺省槽：设置里选了就用它，否则自动（vibeproxy 的 haiku）；整理观察槽：选了就用它，否则跟缺省一样。别的服务商用不了。
+// 摘要模型（memory-backend.ts 的 summaryModels）的替身：两个服务商 vibeproxy、other，各有自己的 key。
+// 缺省槽：设置里选了就用它，否则用一个固定的非 Claude 模型（真的 summaryModels 没选时没有模型，也不会选 haiku；这里要有一个缺省好测重启和密钥）；整理观察槽：选了就用它，否则跟缺省一样。别的服务商用不了。
 const SUMMARY_PROVIDERS: Record<string, { baseUrl: string; apiKey: string }> = {
   vibeproxy: { baseUrl: "http://127.0.0.1:8317/v1", apiKey: "vibe-key" },
-  anthropic: { baseUrl: "https://api.anthropic.example/v1", apiKey: "anthropic-key" },
+  other: { baseUrl: "https://llm.example.com/v1", apiKey: "other-key" },
 };
 
 export function fakeSummaryModels(settings: SummaryModelSettings): SummaryModels {
@@ -24,7 +24,7 @@ export function fakeSummaryModels(settings: SummaryModelSettings): SummaryModels
     return known ? { slot, spec, source, setting, problem: null, llm: { provider, model, ...known } } : `服务商 ${provider} 不在设置 → 模型的服务商里`;
   };
   const chosen = settings.default ? choose("default", settings.default, "settings", settings.default) : null;
-  const fallback = choose("default", "vibeproxy/claude-haiku-5-5", "auto", settings.default ?? null) as SummaryModelChoice;
+  const fallback = choose("default", "vibeproxy/deepseek-chat", "auto", settings.default ?? null) as SummaryModelChoice;
   const first = chosen && typeof chosen !== "string" ? chosen : { ...fallback, problem: typeof chosen === "string" ? chosen : null };
   const consolidation = settings.consolidation ? choose("consolidation", settings.consolidation, "settings", settings.consolidation) : null;
   return {

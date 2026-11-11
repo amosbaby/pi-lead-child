@@ -171,7 +171,7 @@ export interface ChannelHubOptions {
   // 判断别人发来的消息紧不紧急用的 SmartModel（urgency.ts）。daemon 给的是 Lead 会话的那一个（Jev 优先，LLM 兜底）。
   // 每条消息调用一次：会话中途才建好、换了模型时也拿到新的。不给或者返回 null 时，消息都按不紧急处理。
   smartModel?: () => SmartModel | null;
-  // Lead 的便宜模型（Haiku）的自由文本补全。收件判断在决策模型没有配置或者失败时用它（intake-llm.ts，issue 10）。不给时只问决策模型。
+  // Lead 的 LLM 兜底模型（不是 Claude）的自由文本补全。收件判断在决策模型没有配置或者失败时用它（intake-llm.ts，issue 10）。不给时只问决策模型。
   textModel?: () => SmartTextComplete | null;
   // 问紧急程度最多等多久。缺省 CHANNEL_URGENCY_TIMEOUT_MS。
   urgencyTimeoutMs?: number;

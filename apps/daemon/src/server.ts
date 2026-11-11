@@ -119,7 +119,7 @@ import {
 import { createConfigWatch } from "./config-watch.js";
 import {
   contextUsageRatio, createLeadModelFailover, createTurnUserActions, nextWeeklyReset, PRECIPITATE_PROMPT, PRECIPITATE_RATIO,
-  type LeadModelQuotaReset,
+  usableLeadModels, type LeadModelQuotaReset,
 } from "@pi-lead-child/lead";
 import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-child/gateway";
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
@@ -2957,7 +2957,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       publishControlEvent({ type: "snapshot.required", requiredScope: "tickets:view", payload: { resource } });
     },
     externalSecret: (name) => daemonOnlySecrets.get(name) ?? cachedKeychainSecret(name),
-    summaryModels: (settings) => summaryModels(opts.dataDir, settings),
+    summaryModels: (settings) => summaryModels(opts.dataDir, settings, process.env, getLocale(db)),
     programArguments: hindsightProgram(),
     ...(typeof opts.manageMemory === "object" ? opts.manageMemory : {}),
   }) : null;
@@ -3252,7 +3252,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 你选的：config.json 的 lead.models 的第一个。读不到 config 时就是正在用的。
   const selectedLeadSpec = (): string => {
     try {
-      return loadLeadModelConfig(opts.dataDir).models[0] ?? leadModelName;
+      return usableLeadModels(loadLeadModelConfig(opts.dataDir))[0] ?? leadModelName;
     } catch {
       return leadModelName;
     }
@@ -3261,7 +3261,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let leadCatalogCache: { at: number; models: Promise<LeadCatalogModel[]> } | null = null;
   const LEAD_CATALOG_TTL_MS = 30_000;
   const rebuildModelFailover = () => {
-    modelFailover = createLeadModelFailover({ models: loadLeadModelConfig(opts.dataDir).models, ...failoverOptions });
+    // Claude entries are never in the fail-over order (the daemon never sends requests to Claude).
+    const usable = usableLeadModels(loadLeadModelConfig(opts.dataDir));
+    modelFailover = createLeadModelFailover({ models: usable.length ? usable : [leadModelName], ...failoverOptions });
   };
   const leadModelService: LeadModelService = {
     state: () => ({ current: choiceOf(leadModelName), selected: choiceOf(selectedLeadSpec()) }),
@@ -3299,7 +3301,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (!modelFailover || !switchLeadModel) throw new UiActionError("unavailable", serverMessages(getLocale(db)).model.cannotSwitchWhileRunning);
       // 在不在目录里、推理强度支不支持：不行时拒绝，原因里写着可选的。
       try {
-        await assertConfiguredLeadModel(spec, loadLeadModelConfig(opts.dataDir));
+        await assertConfiguredLeadModel(spec, loadLeadModelConfig(opts.dataDir), process.env, fetch, { locale: getLocale(db) });
       } catch (error) {
         throw new UiActionError("invalid_input", error instanceof Error ? error.message : String(error));
       }

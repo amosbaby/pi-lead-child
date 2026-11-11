@@ -58,6 +58,9 @@ export interface DoctorProbes {
   gatewayExposure?(): Promise<GatewayExposureStatus | null>;
   // 用户有没有停用 Claude Code（config.json 的 runtimes.disabled，加上进程环境里的名单）。缺席时不列 Claude Code 那一项。
   claudeDisabled?(): boolean;
+  // 配置里还指着 Claude 模型的地方（Lead 的分工、SmartModel 的 LLM、Hindsight 的摘要模型……）：daemon 拒绝它们、不会调用，这里报出来。
+  // 缺席时不列这一项。
+  claudeModelTargets?(): Array<{ where: string; spec: string }>;
 }
 
 // locale 只管用 messages 写的检查项；其余检查项还是中文，所以缺省是 zh，整份输出语言一致。
@@ -94,7 +97,7 @@ export async function runDoctor(p: DoctorProbes, locale: Locale = "zh"): Promise
     detail: tv === "broken" ? "config.json 有条目但无法解析（检查 value/fromEnv 拼写）" : tv ? `来源: ${tv}` : "未配置，web_search 不可用",
     fix: tv === "broken" ? "检查 config.json 里 TAVILY_API_KEY 条目的 value/fromEnv 拼写" : undefined,
   });
-  // 可选：没有它时 SmartModel 退回 Lead 的 LLM（Haiku），只算 –。
+  // 可选：没有它时 SmartModel 退回 Lead 的 LLM（不是 Claude），只算 –。
   const ts = p.resolveKey("TYPESAFE_API_KEY");
   checks.push({
     name: "凭证 TYPESAFE_API_KEY（可选）",
@@ -157,6 +160,7 @@ export async function runDoctor(p: DoctorProbes, locale: Locale = "zh"): Promise
   checks.push({ name: "FTS5 检索", ok: fts5, detail: fts5 ? "可用" : "不可用，notes 检索降级 LIKE" });
   checks.push({ name: "node", ok: true, detail: p.nodeVersion() });
   if (p.claudeDisabled) checks.push(claudeCheck(p.claudeDisabled(), locale));
+  if (p.claudeModelTargets) checks.push(claudeModelsCheck(p.claudeModelTargets(), locale));
   if (p.agentNodeVersion && !release) checks.push(agentNodeCheck(p.agentNodeVersion(), p.nodeVersion()));
   return checks;
 }
@@ -167,6 +171,16 @@ function claudeCheck(disabled: boolean, locale: Locale): DoctorCheck {
   return disabled
     ? { name: m.claudeName, ok: true, detail: m.claudeDisabled }
     : { name: m.claudeName, ok: null, detail: m.claudeEnabled, fix: m.claudeEnabledFix };
+}
+
+// daemon 也不向 Claude 模型发 HTTP 请求。配置里还指着 Claude 的地方被拒绝了（不会被调用），这里列出来，让用户去换。
+function claudeModelsCheck(targets: ReadonlyArray<{ where: string; spec: string }>, locale: Locale): DoctorCheck {
+  const m = doctorMessages(locale);
+  if (!targets.length) return { name: m.claudeModelsName, ok: true, detail: m.claudeModelsNone };
+  return {
+    name: m.claudeModelsName, ok: null, fix: m.claudeModelsFix,
+    detail: m.claudeModelsFound(targets.map((target) => `${target.where} = ${target.spec}`)),
+  };
 }
 
 // 开发机的后台服务用 Node 的副本运行（设计第 8.7 节，P0-8）。开发机换了 Node 以后副本还是旧的：launchd 跑的和
