@@ -17,6 +17,6 @@ export { trackTicket, WORKER_TRACKED_DECISION, type TrackTicketInput, type Track
 export { listTickets, ticketNeedsMe, workerTicket, type WorkerNote, type WorkerTicketGrant, type WorkerTicketRow, type WorkerTicketView } from "./read.js";
 export { effectiveTicketSources, ticketLinks, ticketMeta } from "./links.js";
 export {
-  createTicketPusher, syncTicketPush, TICKET_PUSH_RECENT_MS, ticketPushesToSync, ticketPushState, ticketsToPush,
+  createTicketPusher, ensureTicketPushBaseline, syncTicketPush, TICKET_PUSH_RECENT_MS, ticketPushesToSync, ticketPushState, ticketsToPush,
   type TicketPushOptions, type TicketPushReason, type TicketPusher, type TicketPusherDeps, type TicketPushSlack, type TicketPushState,
 } from "./pushes.js";

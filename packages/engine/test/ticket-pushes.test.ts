@@ -6,15 +6,17 @@
 //   - 没有用户自己的私信时只弹桌面通知，而且只弹一次；
 //   - 两个开关（Slack 私信、桌面通知）各管各的，缺省开；它们是设置页的操作，改规则（changesRules）；
 //   - 消息里的链接只有 https 的来源、只用编号拼的工单链接、claude:/https: 的会话链接；工单的文字不进任何链接；
-//   - 功能上线以前就在等用户的单不涌进私信（只推最近一小时里变成「待你处理」的）。
+//   - 基线（ruling R22）：第一次同步时已经在等用户的单只记一行、不推；之后变成「待你处理」的不管过了多久（daemon 停了两小时）
+//     都推；碰了基线里老单的 updated_at 也不推；
+//   - 关掉推送只认用户本人正在说话的这一轮，Lead 自己（定时器叫醒的一轮）关不了；打开 Lead 能做。
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  addTicketSource, createItem, createLoopbackBinding, getTicketPushSetting, openDb, rememberOwnerConversation, setHandling, type Db,
+  addLeadFollowUp, addTicketSource, completeTurn, createItem, createLoopbackBinding, createTurn, getTicketPush, getTicketPushSetting, openDb, rememberOwnerConversation, setHandling, type Db,
 } from "@pi-lead-child/store";
 import {
-  createTicketPusher, listLeadUiActions, runTicketAction, runUiAction, syncTicketPush, ticketsToPush, UI_ACTIONS,
+  createTicketPusher, ensureTicketPushBaseline, listLeadUiActions, runTicketAction, runUiAction, syncTicketPush, ticketsToPush, UI_ACTIONS,
   type TicketActionCaller, type TicketPushSlack,
 } from "../src/index.js";
 
@@ -22,6 +24,8 @@ let db: Db;
 
 beforeEach(() => {
   db = openDb(join(tempDir("plc-ticket-pushes-"), "plc.db"));
+  // 基线建在空库上：下面每个用例里建的单都是基线以后的。基线本身的用例另起一个库。
+  ensureTicketPushBaseline(db, new Date());
 });
 
 afterEach(() => {
@@ -182,7 +186,7 @@ describe("pushing tickets that need you to your own Slack DM", () => {
 
   it("never puts the ticket text into a URL", async () => {
     ownerDm();
-    const title = "leak](https://evil.example.com/steal) ?q=secret&x=1 <@U0ALICE>";
+    const title = "leak](https://evil.example.com/steal) ?q=secret&x=1 <@U0ALICE> www.evil.example.com";
     const itemId = needsYou(title, "reason with [a link](https://evil.example.com/r)");
     // 来源：只给 https 的；http、javascript 的不给。
     addTicketSource(db, { itemId, kind: "manual", url: "javascript:alert(1)" });
@@ -209,19 +213,23 @@ describe("pushing tickets that need you to your own Slack DM", () => {
     }
     // 工单的文字原样留在正文里，但拼不成链接，也不会被 Slack 当成提到谁。
     expect(text).not.toContain("](https://evil");
+    // 裸网址也拼不成：Slack 会把正文里的完整网址和 www. 开头的自动变成链接。
+    expect(text).not.toContain("https://evil");
+    expect(text).not.toContain("www.evil");
+    expect(text).toContain("see https:\u200b//evil.example.com/x");
     expect(text).not.toContain("<@U0ALICE>");
     expect(text).toContain("&lt;@U0ALICE&gt;");
   });
 
-  it("does not flood the DM with tickets that needed you before the window", async () => {
+  it("pushes a ticket that became needs-you while the daemon was down for two hours", async () => {
     ownerDm();
-    const old = needsYou("waiting since last week");
-    db.prepare("UPDATE items SET updated_at = datetime('now', '-3 days') WHERE id = ?").run(old);
-    const fresh = needsYou("just judged");
-    expect(ticketsToPush(db, new Date())).toEqual([{ itemId: fresh, reason: "needs_user" }]);
+    const itemId = needsYou("judged while the daemon was down");
+    db.prepare("UPDATE items SET updated_at = datetime('now', '-2 hours') WHERE id = ?").run(itemId);
     const { slack, posts } = fakeSlack();
-    await pusher(slack).sync();
-    expect(posts.map((post) => post.key)).toEqual([`ticket-push:${fresh}`]);
+    const desktop: string[] = [];
+    await pusher(slack, desktop).sync();
+    expect(posts.map((post) => post.key)).toEqual([`ticket-push:${itemId}`]);
+    expect(desktop).toHaveLength(1);
   });
 
   it("retries a post that failed with the same key, without a second desktop notification", async () => {
@@ -250,11 +258,52 @@ describe("pushing tickets that need you to your own Slack DM", () => {
   });
 });
 
+describe("the baseline when pushes start (ruling R22)", () => {
+  let fresh: Db;
+
+  beforeEach(() => {
+    fresh = openDb(join(tempDir("plc-ticket-pushes-baseline-"), "plc.db"));
+  });
+
+  afterEach(() => {
+    fresh.close();
+  });
+
+  it("posts nothing for tickets that already needed you, and ignores later bumps to them", async () => {
+    const { binding } = createLoopbackBinding(fresh, { name: "Slack 私信（你自己）" });
+    rememberOwnerConversation(fresh, { source: "slack", conversation: DM, bindingId: binding.id });
+    const old = createItem(fresh, { title: "waiting since last week", brief: "", createdBy: "user" });
+    setHandling(fresh, old, { handling: "needs_user", reason: "要你定" });
+    const { slack, posts, edits } = fakeSlack();
+    const desktop: string[] = [];
+    const push = createTicketPusher({ db: fresh, slack, desktop: (text) => desktop.push(text), webBase: () => WEB, log: () => {} });
+    await push.sync();
+    expect(posts).toHaveLength(0);
+    expect(desktop).toHaveLength(0);
+    expect(getTicketPush(fresh, old)).toMatchObject({ conversation: null, messageRef: null, shownState: "needs_user" });
+
+    // 和推送无关的改动碰了老单的 updated_at：不推。
+    fresh.prepare("UPDATE items SET priority = 'high', updated_at = datetime('now') WHERE id = ?").run(old);
+    await push.sync();
+    expect(posts).toHaveLength(0);
+    expect(edits).toHaveLength(0);
+    expect(desktop).toHaveLength(0);
+
+    // 基线以后才要你处理的单照推；基线只建一次（重建推送实例也不再建）。
+    const later = createItem(fresh, { title: "judged after the baseline", brief: "", createdBy: "user" });
+    setHandling(fresh, later, { handling: "needs_user", reason: "要你看" });
+    await createTicketPusher({ db: fresh, slack, desktop: (text) => desktop.push(text), webBase: () => WEB, log: () => {} }).sync();
+    expect(posts.map((post) => post.key)).toEqual([`ticket-push:${later}`]);
+    expect(desktop).toHaveLength(1);
+  });
+});
+
 describe("the two push switches are settings operations", () => {
-  it("declare changesRules, and Lead can list them with their state", async () => {
-    for (const id of ["enable", "disable"]) {
-      expect(UI_ACTIONS.ticket_push[id]).toMatchObject({ changesRules: true, permission: "lead_allowed" });
-    }
+  it("declare changesRules; enabling is Lead's to do, disabling only the user's own live turn", async () => {
+    expect(UI_ACTIONS.ticket_push.enable).toMatchObject({ changesRules: true, permission: "lead_allowed" });
+    expect(UI_ACTIONS.ticket_push.disable).toMatchObject({
+      changesRules: true, permission: "user_only", userTurnOnly: true, liveUserTurnOnly: true,
+    });
     const listing = await listLeadUiActions(db, { type: "ticket_push", id: "desktop" }, { turnId: null });
     expect(listing.target).toMatchObject({ type: "ticket_push", enabled: true });
     expect(listing.actions.map((action) => [action.id, action.available])).toEqual([["enable", false], ["disable", true]]);
@@ -263,5 +312,26 @@ describe("the two push switches are settings operations", () => {
       caller: { kind: "lead", turnId: null, externalContent: [{ via: "message", source: "slack" }] },
     })).rejects.toMatchObject({ code: "external_turn" });
     expect(getTicketPushSetting(db, "slack_dm").enabled).toBe(true);
+  });
+
+  it("Lead cannot turn a push off on its own, also not in a turn a timer wakes; the user can", async () => {
+    const target = { type: "ticket_push", id: "desktop" } as const;
+    await expect(runUiAction(db, { target, action: "disable", reason: "通知太多了", caller: { kind: "lead", turnId: null } }))
+      .rejects.toMatchObject({ code: "needs_user_turn" });
+    const owner = createLoopbackBinding(db, { name: "Mac 网页" }).binding;
+    createTurn(db, { id: "turn-set", originBindingId: owner.id, originKind: "paired:companion", userText: "明天提醒我", state: "streaming" });
+    const followUp = addLeadFollowUp(db, {
+      at: new Date(Date.now() - 1_000), note: "到点关掉通知", setBy: { turnId: "turn-set", bindingId: owner.id, startedAt: new Date().toISOString() },
+    });
+    completeTurn(db, "turn-set");
+    await expect(runUiAction(db, { target, action: "disable", reason: "到点了", caller: { kind: "lead", turnId: `timer:${followUp}` } }))
+      .rejects.toMatchObject({ code: "needs_user_turn" });
+    expect(getTicketPushSetting(db, "desktop").enabled).toBe(true);
+
+    await runUiAction(db, { target, action: "disable", caller: user() });
+    expect(getTicketPushSetting(db, "desktop")).toMatchObject({ enabled: false, updatedBy: "user" });
+    // 打开 Lead 能自己做（没读过外部内容的一轮）。
+    await runUiAction(db, { target, action: "enable", reason: "用户的通知没开", caller: { kind: "lead", turnId: null } });
+    expect(getTicketPushSetting(db, "desktop")).toMatchObject({ enabled: true, updatedBy: "lead" });
   });
 });

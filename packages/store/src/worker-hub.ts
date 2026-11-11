@@ -200,6 +200,31 @@ export function insertTicketPush(db: Db, input: {
   ).run(input.itemId, input.reason, input.conversation, input.shownState, at, at).changes === 1;
 }
 
+const TICKET_PUSH_BASELINE_KEY = "ticket_push.baseline_at";
+
+/** 推送的基线时间（engine 的 ensureTicketPushBaseline 记的）。还没有基线时 null。 */
+export function ticketPushBaselineAt(db: Db): string | null {
+  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(TICKET_PUSH_BASELINE_KEY) as { value: string } | undefined;
+  return row ? row.value : null;
+}
+
+/**
+ * 记下基线：基线时间，和那一刻已经「待你处理」的每张单一行不发的推送（没有私信，shown_state 是那时的状态）。
+ * 已经有推送行的单不动。调用方包在事务里。
+ */
+export function insertTicketPushBaseline(db: Db, input: { items: Array<{ itemId: number; state: string }>; now: Date }): void {
+  const at = input.now.toISOString();
+  const row = db.prepare(
+    `INSERT OR IGNORE INTO ticket_pushes (item_id, reason, conversation, message_ref, shown_state, created_at, updated_at)
+     VALUES (?, ?, NULL, NULL, ?, ?, ?)`,
+  );
+  for (const item of input.items) row.run(item.itemId, item.state, item.state, at, at);
+  db.prepare(
+    `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(TICKET_PUSH_BASELINE_KEY, at);
+}
+
 /** 那条消息发出去了：记下它在来源里的位置和消息上的状态。 */
 export function setTicketPushMessage(db: Db, itemId: number, ref: Record<string, string>, shownState: string, now: Date): void {
   db.prepare("UPDATE ticket_pushes SET message_ref = ?, shown_state = ?, updated_at = ? WHERE item_id = ?")

@@ -1,4 +1,5 @@
 // 「待你处理」推送在 daemon 里走一遍（计划 Task 12，engine 的 worker-queue/pushes.ts）：
+//   daemon 第一次启动前就在等用户的单只记进基线，不推（ruling R22）→
 //   用户先在自己的 Slack 私信里和 Lead 说过话（daemon 记下这条私信）→ Lead 判断一张单要用户处理 → daemon 下一拍把它推到那条私信
 //   （署名的色条，和私信里的回复同一条路），再弹一条桌面通知 → 用户取消了这张单 → 改写同一条消息，不另发 →
 //   daemon 重启 → 不重发、不重改。
@@ -7,7 +8,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { FakeSlack } from "@pi-lead-child/engine/testing";
-import { createItem, openDb, setHandling, transition, type Db } from "@pi-lead-child/store";
+import { createItem, getTicketPush, openDb, setHandling, ticketPushBaselineAt, transition, type Db } from "@pi-lead-child/store";
 import { startDaemon } from "../src/server.js";
 import { fakePiLead } from "./fake-pi-session.js";
 
@@ -59,7 +60,12 @@ describe("pushing a ticket that needs you to your own Slack DM, in the daemon", 
         credentials: { credential: async (provider) => (provider === "slack" ? slack.credential : null) },
       },
     });
+    // 推送上线前就在等你的单：daemon 第一次同步时记进基线，不推。
+    const old = createItem(db, { title: "waiting since last week", brief: "", createdBy: "lead" });
+    setHandling(db, old, { handling: "needs_user", reason: "要你定" });
     daemon = await start();
+    await vi.waitFor(() => expect(ticketPushBaselineAt(db)).not.toBeNull(), { timeout: 10_000 });
+    expect(getTicketPush(db, old)).toMatchObject({ conversation: null, shownState: "needs_user" });
 
     // 用户在自己的私信里和 Lead 说过话：daemon 记下这条私信。
     await daemon.channels!.receive("slack", slack.selfReply("D0SELF", "你好"));
@@ -88,5 +94,6 @@ describe("pushing a ticket that needs you to your own Slack DM, in the daemon", 
     expect(slack.sent("D0SELF")).toHaveLength(2);
     expect(slack.sent("D0SELF")[1]!.edits).toBe(1);
     expect(desktop).toHaveLength(1);
+    expect(slack.sent("D0SELF").some((message) => fallbackOf(message).includes(`#${old} `))).toBe(false);
   }, 30_000);
 });

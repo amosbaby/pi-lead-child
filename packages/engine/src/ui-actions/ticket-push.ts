@@ -1,8 +1,10 @@
 // 「待你处理」推送的两个开关（设置 → 消息通道，计划 Task 12，engine 的 worker-queue/pushes.ts）：推到 Slack 私信（slack_dm）、
 // 桌面通知（desktop）。各自能打开（enable）、关掉（disable），缺省都开。
 // 页面（POST /v1/actions/ticket_push/<编号>/<操作>）和 Lead（perform_action）调同一个定义。开关存在 kv（store 的 getTicketPushSetting）。
-// 权限：lead_allowed，改规则（设置页的选项，AGENTS.md「UI Actions」）：Lead 在没读过外部内容的一轮里可以自己改；
-// 外部消息叫醒的一轮、读过外部内容的一轮里被拒，拒绝里带确认卡。
+// 权限（ruling R22）：都改规则（设置页的选项，AGENTS.md「UI Actions」），外部消息叫醒的一轮、读过外部内容的一轮里被拒。
+//   - enable：lead_allowed，Lead 在没读过外部内容的一轮里可以自己打开。
+//   - disable：只认用户本人正在说话的这一轮（和 owner_dm_sync 一样：user_only、userTurnOnly、liveUserTurnOnly）。
+//     这是提醒用户的那条路，Lead 不能自己把它关掉；定时器（包括用户设的跟进）叫醒的一轮也不算。
 import { getTicketPushSetting, isTicketPushChannel, writeTicketPushSetting, type TicketPushSetting } from "@pi-lead-child/store";
 import { AVAILABLE, unavailable } from "../ticket-actions/types.js";
 import type { UiActionDefinition, UiActionRun, UiActionTargetKind } from "./types.js";
@@ -28,14 +30,13 @@ function setPush(run: UiActionRun<TicketPushSetting, unknown>, enabled: boolean)
 }
 
 const common = {
-  target: "ticket_push", scope: "tickets:create",
-  permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
+  target: "ticket_push", scope: "tickets:create", changesRules: true, external: false, irreversible: false,
   where: TICKET_PUSH_WHERE,
 } as const;
 
 export const TICKET_PUSH_ACTIONS = {
   enable: {
-    ...common, id: "enable", label: "打开待你处理推送",
+    ...common, permission: "lead_allowed", id: "enable", label: "打开待你处理推送",
     hint: "要用户拿主意的工单（Lead 判断要他处理、工人交回给他）推给他：slack_dm 是推到他自己的 Slack 私信（状态变了改写那一条），"
       + "desktop 是弹桌面通知。用户说「要我处理的单发我 Slack」「弹个通知」这类话时打开对应的那个。",
     defaultReason: "在设置页打开了待你处理推送",
@@ -44,7 +45,9 @@ export const TICKET_PUSH_ACTIONS = {
     forLead: (run) => ({ result: "enabled", next: `已经打开（${NAMES[run.target.channel]}）。用一句话告诉用户。` }),
   },
   disable: {
-    ...common, id: "disable", label: "关掉待你处理推送",
+    ...common, permission: "user_only", userTurnOnly: true, liveUserTurnOnly: true,
+    permissionNote: "只属于用户：只有用户本人在这一轮明确要求时代他关掉（App 里或者他自己的 Slack 私信里）",
+    id: "disable", label: "关掉待你处理推送",
     hint: "用户不要再把要他处理的工单推到 Slack 私信（slack_dm）或者弹桌面通知（desktop）时关掉对应的那个。关掉以后网页列表里照样能看到。",
     defaultReason: "在设置页关掉了待你处理推送",
     available: (setting) => (setting.enabled ? AVAILABLE : unavailable("已经关着")),

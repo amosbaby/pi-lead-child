@@ -6,13 +6,17 @@
 //     不另发；重启以后按库里记的状态比，不重发也不重改。又变成「待你处理」时改写那条，桌面通知再弹一次（Slack 改消息不提醒）。
 //   - 只推到用户自己的私信（store 的 ownerConversationOf），不发到来源频道。没有私信、Slack 私信推送关着时只弹桌面通知。
 //     私信推送和私信里的决定请求一样，不看「同步到 Slack 私信」开关、也不看「自动代你处理」：那两个管的是 Lead 写的话。
-//   - 只推最近一小时里变成「待你处理」的（items.updated_at）：功能上线时以前就在等的单不会一起涌进私信。
+//   - 基线（ruling R22）：第一次同步时（kv 里还没有 ticket_push.baseline_at），在一笔事务里记下基线时间，并给那一刻已经在
+//     「待你处理」的每张单记一行不发的推送（conversation 为空，shown_state 是那时的状态）：功能上线时以前就在等的单不涌进私信。
+//     之后没有推送行的「待你处理」都是新的，不看 updated_at：daemon 停了多久都照推，别的改动碰了 updated_at 也不会补推老单。
+//     一小时的窗口只用来重发没发出去的消息。
 //   - 消息里：工单编号和标题、来源链接（只有 https 的）、理由、工单链接（只用编号拼）、有会话链接时「在 Claude Code 打开」
-//     （只有 claude: 和 https: 的）。工单的文字（标题、理由、工人名字）只当纯文字放进正文，不进任何链接，也拼不成链接或提到谁。
+//     （只有 claude: 和 https: 的）。工单的文字（标题、理由、工人名字）只当纯文字放进正文，不进任何链接，也拼不成链接或提到谁
+//     （Slack 会把正文里的裸网址自动变成链接，所以「://」「www.」也拆开）。
 //   - 发消息走通道 hub 的「回给用户本人」（daemon 接上），幂等键是工单编号：发到一半崩溃后重试，来源里也不会多一条。
 import { EXTERNAL_RUNTIME_ID, WORKER_SESSION_URL_SCHEMES } from "@pi-lead-child/protocol";
 import {
-  detachTicketPushMessage, getItem, getLocale, getTicketPush, getTicketPushSetting, insertTicketPush, openTicketPushes,
+  detachTicketPushMessage, getItem, getLocale, insertTicketPushBaseline, ticketPushBaselineAt, getTicketPush, getTicketPushSetting, insertTicketPush, openTicketPushes,
   ownerConversationOf, setTicketPushMessage, setTicketPushShown, type Db,
 } from "@pi-lead-child/store";
 import { latestWorkerClaim, openWorkerClaim } from "./claim.js";
@@ -30,7 +34,7 @@ export type TicketPushState = "needs_user" | "handed_back" | "claimed" | "in_rev
 
 // 用户自己的私信在哪个来源里（计划 Task 12：ownerConversationOf(db, "slack")）。
 const OWNER_DM_SOURCE = "slack";
-// 只推这段时间里变成「待你处理」的；没发出去的消息也只在这段时间里重发（和私信里的决定请求一样，owner-decisions.ts）。
+// 没发出去的消息只在这段时间里重发（和私信里的决定请求一样，owner-decisions.ts）。
 export const TICKET_PUSH_RECENT_MS = 60 * 60_000;
 // 发不出去、改不成的，过多久再试（同一个幂等键，来源里不会多发）。
 const RETRY_MS = 60_000;
@@ -81,17 +85,31 @@ export function ticketPushState(db: Db, itemId: number): TicketPushState | null 
   return "cleared";
 }
 
-/** 要推、还没推过的单：「待你处理」、最近一小时里变成这样的、从没推过的。按编号。 */
-export function ticketsToPush(db: Db, now: Date): Array<{ itemId: number; reason: TicketPushReason }> {
-  const since = new Date(now.getTime() - TICKET_PUSH_RECENT_MS).toISOString();
-  const ids = (db.prepare(
-    `SELECT i.id FROM items i
-     WHERE ${NEEDS_ME}
-       AND NOT EXISTS (SELECT 1 FROM ticket_pushes p WHERE p.item_id = i.id)
-       AND datetime(i.updated_at) >= datetime(?)
-     ORDER BY i.id LIMIT ?`,
-  ).all(EXTERNAL_RUNTIME_ID, since, LIST_LIMIT) as Array<{ id: number }>).map((row) => row.id);
-  return ids.map((itemId) => ({ itemId, reason: handedBack(db, itemId) ? "handed_back" : "needs_user" }));
+const needsYouWithoutPush = (db: Db, limit: number): number[] => (db.prepare(
+  `SELECT i.id FROM items i
+   WHERE ${NEEDS_ME}
+     AND NOT EXISTS (SELECT 1 FROM ticket_pushes p WHERE p.item_id = i.id)
+   ORDER BY i.id LIMIT ?`,
+).all(EXTERNAL_RUNTIME_ID, limit) as Array<{ id: number }>).map((row) => row.id);
+
+/**
+ * 基线（ruling R22）：还没有基线时，在一笔事务里记下基线时间，给现在已经「待你处理」的每张单记一行不发的推送。
+ * 返回这次记下的单（已经有基线时是空的）。
+ */
+export function ensureTicketPushBaseline(db: Db, now: Date): number[] {
+  return db.transaction((): number[] => {
+    if (ticketPushBaselineAt(db) !== null) return [];
+    const ids = needsYouWithoutPush(db, -1);
+    insertTicketPushBaseline(db, {
+      items: ids.map((itemId) => ({ itemId, state: ticketPushState(db, itemId) ?? "needs_user" })), now,
+    });
+    return ids;
+  }).immediate();
+}
+
+/** 要推、还没推过的单：「待你处理」、没有推送行的（基线以后才变成这样的）。按编号。基线由推送那一层先建（ensureTicketPushBaseline）。 */
+export function ticketsToPush(db: Db, _now: Date): Array<{ itemId: number; reason: TicketPushReason }> {
+  return needsYouWithoutPush(db, LIST_LIMIT).map((itemId) => ({ itemId, reason: handedBack(db, itemId) ? "handed_back" : "needs_user" }));
 }
 
 const isRecent = (at: string, now: Date) => now.getTime() - Date.parse(at) < TICKET_PUSH_RECENT_MS;
@@ -110,9 +128,11 @@ export function ticketPushesToSync(db: Db, now: Date): number[] {
 // ── 文字 ──────────────────────────────────────────────────────────────────────────────
 
 // 工单的文字放进 Slack 正文：一行、截断、转义 & < >（不会被当成提到谁、频道或链接），拆开 Markdown 链接的「](」
-// （hub 发送时把正文的 Markdown 换成 Slack 的格式，[文字](地址) 会变成链接）。
+// （hub 发送时把正文的 Markdown 换成 Slack 的格式，[文字](地址) 会变成链接），拆开裸网址的「://」和「www.」
+// （正文的 section 不是 verbatim，Slack 会把裸网址自动变成链接）。拆开用的是零宽空格，看上去还是原话。
 function slackPlain(text: string, max: number): string {
-  return clip(text, max).replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").replace(/\]\(/gu, "]​(");
+  return clip(text, max).replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;").replace(/\]\(/gu, "]\u200b(")
+    .replace(/:\/\//gu, ":\u200b//").replace(/\b(www)\./giu, "$1\u200b.");
 }
 
 function clip(text: string, max: number): string {
@@ -274,6 +294,7 @@ export function createTicketPusher(deps: TicketPusherDeps): TicketPusher {
       syncing = true;
       try {
         const at = now();
+        ensureTicketPushBaseline(deps.db, at);
         const ids = [...new Set([...ticketsToPush(deps.db, at).map((ticket) => ticket.itemId), ...ticketPushesToSync(deps.db, at)])];
         for (const itemId of ids) {
           const due = retryAt.get(itemId);
