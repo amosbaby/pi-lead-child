@@ -384,6 +384,8 @@ export class LeadSchedulerRuntime {
         ...(running ? { stage: running.stage, step: running.step } : {}),
         ...(result.error ? { error: result.error } : {}),
       };
+      // 宽限到点时已经释放过了（用户第二次 /stop）：release.* 已经记了这一步，旧会话也换掉了，不再写 abort.stuck。
+      if (!result.settled && pending.released) return result;
       // 过了宽限时间还没停下：中止本身挂住了（有东西不听 signal）。照样往下走，留一条日志，再等 releaseWaitMs 就释放。
       this.#options.log(schedulerLine(result.settled ? "abort.done" : "abort.stuck", { ...fields, graceMs }));
       if (!result.settled && !pending.settled) this.#stuck(pending);

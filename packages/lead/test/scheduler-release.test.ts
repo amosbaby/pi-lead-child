@@ -64,6 +64,19 @@ describe("releasing Lead when a step does not stop", () => {
     expect(releases).toHaveLength(1);
   });
 
+  // 开发模式评估（2026-11-11）：第二次 /stop 马上释放以后，两次中止的宽限到点，又各写了一行 abort.stuck，
+  // 读日志的人会以为新会话也卡住了。
+  it("writes no abort.stuck once the stop was released before its grace ran out", async () => {
+    const { rt, logs, releases } = runtime(() => new Promise(() => {}), { graceMs: 30, waitMs: 60_000 });
+    rt.dispatch({ type: "stop.request", canAbort: true });
+    expect(rt.releaseNow()).toBe(true);
+    await rt.releasing;
+    await rt.aborting;
+    await delay(10);
+    expect(releases).toHaveLength(1);
+    expect(logs.filter((line) => line.startsWith("[sched] abort.stuck"))).toEqual([]);
+  });
+
   it("does not release for a unit that already ended", async () => {
     const { rt, releases } = runtime(() => new Promise(() => {}));
     rt.dispatch({ type: "stop.request", canAbort: true });
