@@ -6,8 +6,8 @@
 // （authority.ts）、同样的实现（定义里的 run）、同样的线上事件和主人操作。账本里只有 actor 不同。
 import type { Item } from "@pi-lead-child/core";
 import {
-  OWNER_ACTIONS, TICKET_ACTION_IDS, TICKET_ACTION_INPUT_SCHEMAS, isTicketActionId,
-  type OwnerActionSource, type TicketAction, type TicketActionId,
+  OWNER_ACTIONS, TICKET_ACTION_IDS, TICKET_ACTION_INPUT_SCHEMAS, WORKER_ACTION_IDS, WORKER_ACTION_INPUT_SCHEMAS, isTicketActionId,
+  isWorkerActionId, type OwnerActionSource, type TicketAction, type TicketActionId, type WorkerActionId,
 } from "@pi-lead-child/protocol";
 import type { TSchema } from "typebox";
 import {
@@ -19,16 +19,18 @@ import { ticketDelivery, type PullRequestRunner, type TicketDelivery } from "../
 import type { ActionAttribution } from "./attribution.js";
 import {
   activeUserTurnReason, isUserTurnOnlyTicketAction, leadAuthorityMode, leadMayRequest, narrowCredentialTurn, resolveAuthority,
-  type LeadAuthorityMode,
+  workerCallerBlocker, type LeadAuthorityMode,
 } from "./authority.js";
 import { userTurnRefusalText } from "../ui-actions/authority.js";
 import { TICKET_ACTIONS } from "./catalog.js";
 import { liveItemIdsOf, type TicketActionHost } from "./lifecycle.js";
 import {
   TicketActionError, permissionOf,
-  type OwnerCredential, type TicketActionAuthority, type TicketActionCaller, type TicketActionDefinition, type TicketActionEnv,
-  type TicketActionRun,
+  type OwnerCredential, type PersonCaller, type TicketActionAuthority, type TicketActionCaller, type TicketActionDefinition,
+  type TicketActionEnv, type TicketActionRun, type WorkerActionDefinition, type WorkerAttribution,
 } from "./types.js";
+import { OWN_CLAIM_WORKER_ACTIONS, WORKER_ACTIONS } from "./worker.js";
+import { ownClaimBlocker } from "../worker-queue/index.js";
 
 export * from "./attribution.js";
 export * from "./authority.js";
@@ -36,6 +38,7 @@ export * from "./lifecycle.js";
 export { changeExecutorRuntime, setRunProfile, type ExecutorRuntimeResult, type RunProfile, type RunProfileApplied, type RunProfileResult } from "./run-profile.js";
 export * from "./types.js";
 export { TICKET_ACTIONS, relationLinkResult, relationRevokeResult } from "./catalog.js";
+export { WORKER_ACTIONS } from "./worker.js";
 export {
   DelegationBlockedError, delegationPreflightFor, grantItemDelegation, type DelegateInput, type DelegationGrant,
 } from "./delegation.js";
@@ -163,10 +166,11 @@ export interface TicketActionRequest {
 
 export interface TicketActionOutcome {
   ticketId: number;
-  action: TicketActionId;
+  action: TicketActionId | WorkerActionId;
   result: unknown;
-  by: ActionAttribution;
-  authority: TicketActionAuthority;
+  // 工人的操作（protocol 的 worker.ts）是 WorkerAttribution，别的是你或 Lead。
+  by: ActionAttribution | WorkerAttribution;
+  authority: TicketActionAuthority | "worker";
   // 这次记下的主人操作（事件编号）。没有记时为 null。
   ownerActionEventId: string | null;
 }
@@ -176,7 +180,7 @@ function inputError(schema: TSchema, input: unknown): string {
   return first ? `${first.instancePath || "input"}: ${first.message}` : "input 不对";
 }
 
-function ownerCredential(db: Db, caller: TicketActionCaller, by: ActionAttribution): {
+function ownerCredential(db: Db, caller: PersonCaller, by: ActionAttribution): {
   credential: OwnerCredential; source: OwnerActionSource;
 } | null {
   if (caller.kind === "user") {
@@ -192,8 +196,15 @@ function ownerCredential(db: Db, caller: TicketActionCaller, by: ActionAttributi
   };
 }
 
-/** 执行一个工单操作。两个入口都调它。 */
+/** 执行一个工单操作。两个入口都调它。外部工人的操作（protocol 的 worker.ts）也走这里，caller 是 worker。 */
 export async function runTicketAction(db: Db, request: TicketActionRequest): Promise<TicketActionOutcome> {
+  if (request.caller.kind === "worker" || isWorkerActionId(request.action)) return runWorkerAction(db, request);
+  return runPersonTicketAction(db, request, request.caller);
+}
+
+async function runPersonTicketAction(
+  db: Db, request: TicketActionRequest, caller: PersonCaller,
+): Promise<TicketActionOutcome> {
   const definition = ticketActionDefinition(request.action);
   if (!definition) throw new TicketActionError("not_found", `没有这个工单操作：${request.action}`);
   const id = definition.id as TicketActionId;
@@ -204,37 +215,37 @@ export async function runTicketAction(db: Db, request: TicketActionRequest): Pro
     throw new TicketActionError("invalid_input", `${id} 的输入不对：${inputError(schema, input)}`);
   }
   const given = typeof request.reason === "string" ? request.reason.trim() : "";
-  if (request.caller.kind === "lead" && !given) {
+  if (caller.kind === "lead" && !given) {
     throw new TicketActionError("invalid_input", `${id}：要写 reason（凭什么做，例如「用户说……」）`);
   }
   // 只在本机生效的操作（打开文件）：页面的请求要从回环地址来（网关按 socket 填 source.loopback）；Lead 是本机的 daemon。
   // 没有来源的调用不知道从哪里来，当作不是本机。已知的缺口（工单 07 审查 H1，留到以后）：Lead 代你做时凭的那一轮
   // 可能来自手机上的配对凭证，这里没有要求它来自本机的凭证。
-  const local = request.caller.kind === "lead" || request.caller.source?.loopback === true;
+  const local = caller.kind === "lead" || caller.source?.loopback === true;
   const env = createEnv(db, item, { ...request, local });
   // Lead 在用户本人这一轮里发起、要用户在确认卡上点的操作（authority.ts 的 leadMayRequest）：现在能做时不动手，
   // 拒绝成 needs_user_turn，带着卡上的标题和后果；Lead 那边存下这一次、发确认卡（packages/lead 的 tools.ts）。
-  if (leadMayRequest(db, definition, item, request.caller)) {
+  if (leadMayRequest(db, definition, item, caller)) {
     const availability = await definition.available(item, env);
     if (!availability.available) throw new TicketActionError("unavailable", availability.reason ?? `${definition.label}现在不能做。`);
     const card = definition.leadRequest!(item, input as never);
     throw new TicketActionError("needs_user_turn", card.why, { label: card.label });
   }
   // 先认人，再查状态、再动手：对外的操作在认人之前不碰任何东西（delivery.ts 的同一条规则）。
-  const { by, authority } = resolveAuthority(db, definition, item, request.caller, env);
+  const { by, authority } = resolveAuthority(db, definition, item, caller, env);
   const availability = await definition.available(item, env);
   if (!availability.available) {
     throw new TicketActionError("unavailable", availability.reason ?? `${definition.label}现在不能做。`);
   }
-  const credential = ownerCredential(db, request.caller, by);
+  const credential = ownerCredential(db, caller, by);
   const run: TicketActionRun<never> = {
     db, env, item, input: input as never,
     reason: given || definition.defaultReason,
     reasonGiven: given.length > 0,
     by, authority,
-    turnId: request.caller.kind === "lead" ? request.caller.turnId : null,
+    turnId: caller.kind === "lead" ? caller.turnId : null,
     bindingId: credential?.credential.id ?? null,
-    ...(request.caller.kind === "user" && request.caller.confirmation ? { confirmation: request.caller.confirmation } : {}),
+    ...(caller.kind === "user" && caller.confirmation ? { confirmation: caller.confirmation } : {}),
   };
   const recordOwner = (result: unknown): string | null => {
     const owner = definition.ownerAction ? credential : null;
@@ -279,6 +290,49 @@ export async function runTicketAction(db: Db, request: TicketActionRequest): Pro
   }
   const ownerActionEventId = recordOwner(result);
   return { ticketId: item.id, action: id, result, by, authority, ownerActionEventId };
+}
+
+/**
+ * 外部工人的操作（protocol 的 worker.ts，业务规则在 worker-queue/）。只有 worker 调用方能做，工人也只能做它们：
+ * 页面、Lead 调工人的操作，或者工人调别的工单操作，一律 forbidden。顺序：认人（凭证活着、带 worker 权限）→ 输入 →
+ * 是不是它领着的单（领单以外的操作）→ 现在能不能做 → 做。不记主人操作（不是你做的）。
+ */
+async function runWorkerAction(db: Db, request: TicketActionRequest): Promise<TicketActionOutcome> {
+  const { caller } = request;
+  if (caller.kind !== "worker") {
+    throw new TicketActionError("forbidden", `${request.action}：只有外部工人（带 worker 权限的配对凭证）能做。`);
+  }
+  if (!isWorkerActionId(request.action)) {
+    throw new TicketActionError("forbidden", `外部工人只能做工人的操作（${WORKER_ACTION_IDS.join("、")}），不能做 ${request.action}。`);
+  }
+  const id = request.action;
+  const definition = WORKER_ACTIONS[id] as unknown as WorkerActionDefinition;
+  const blocker = workerCallerBlocker(db, caller);
+  if (blocker) throw new TicketActionError("forbidden", `${id}：${blocker}`);
+  const item = requireItem(db, request.itemId);
+  const input = request.input ?? {};
+  const schema = WORKER_ACTION_INPUT_SCHEMAS[id];
+  if (!Value.Check(schema, input)) {
+    throw new TicketActionError("invalid_input", `${id} 的输入不对：${inputError(schema, input)}`);
+  }
+  if (OWN_CLAIM_WORKER_ACTIONS.has(id)) {
+    const notMine = ownClaimBlocker(db, item.id, caller.bindingId);
+    if (notMine) throw new TicketActionError("forbidden", `${id}：${notMine}`);
+  }
+  const env = createEnv(db, item, { ...request, local: false });
+  const availability = await definition.available(item, env, caller);
+  if (!availability.available) {
+    throw new TicketActionError("unavailable", availability.reason ?? `${definition.label}现在不能做。`);
+  }
+  const result = await definition.run({ db, env, item, input: input as never, worker: caller });
+  const runId = (result as { runId?: unknown } | null)?.runId;
+  if (typeof runId === "number") publishGatewayEvent(db, runUpdatedEvent(item.id, runId));
+  publishGatewayEvent(db, itemUpdatedEvent(item.id));
+  return {
+    ticketId: item.id, action: id, result,
+    by: { actor: "worker", bindingId: caller.bindingId, workerName: caller.workerName },
+    authority: "worker", ownerActionEventId: null,
+  };
 }
 
 // user_direct 里 Lead 可以发起的操作（定义里有 leadRequest，工单 #71）。

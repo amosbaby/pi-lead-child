@@ -11,7 +11,7 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { EXTERNAL_RUNTIME_ID } from "@pi-lead-child/protocol";
 import {
   createDispatcher, createOrchestrator, createScheduler, deferIfExternal, EXECUTION_DEFERRED_DECISION, ExecutionDeferredError,
-  setExecutionMode, startItem,
+  runTicketAction, setExecutionMode, startItem,
 } from "@pi-lead-child/engine";
 import { createUserActionService } from "@pi-lead-child/gateway";
 import {
@@ -21,7 +21,8 @@ import {
 import { RuntimeRegistry } from "@pi-lead-child/runtime";
 import { ReplayRuntime } from "@pi-lead-child/runtime/testing";
 import {
-  createItem, createOnceTrigger, createRun, getItem, getRun, listActivities, listRuns, openDb, transition, updateRun, type Db,
+  createItem, createLoopbackBinding, createOnceTrigger, createRun, getItem, getRun, listActivities, listRuns, openDb, transition,
+  updateRun, type Db,
 } from "@pi-lead-child/store";
 import { recoverOrphans } from "../src/server.js";
 import { createAgentTaskDispatcher } from "../src/agent-tasks.js";
@@ -330,12 +331,23 @@ describe("switching the mode", () => {
     expect(deferrals(itemId)).toEqual([expect.objectContaining({ mode: "external", reason: "run_item" })]);
   });
 
-  it("paused mode also blocks worker claims", () => {
-    // 工人领单在 Task 7（worker.claim）。这里先断言 paused 下派发不建 Run；领单的断言等 Task 7 补上。
+  it("paused mode also blocks worker claims", async () => {
+    // 总闸：paused 下派发不建 Run，外部工人也领不了单（worker.claim 拒绝，不建外部 Run，工单不动）。
     setExecutionMode(db, "paused");
     const itemId = ticket();
     expect(deferIfExternal(db, itemId, "worker_claim")).toBe(true);
+    const { binding } = createLoopbackBinding(db, { name: "Ethan's Claude Code", scopes: ["worker"] });
+    await expect(runTicketAction(db, {
+      itemId, action: "worker.claim", caller: { kind: "worker", bindingId: binding.id, workerName: binding.display_name },
+    })).rejects.toMatchObject({ code: "unavailable" });
     expect(listRuns(db, itemId)).toEqual([]);
+    expect(getItem(db, itemId)!.stage).toBe("ready");
+    // 切回 external 就能领。
+    setExecutionMode(db, "external");
+    await runTicketAction(db, {
+      itemId, action: "worker.claim", caller: { kind: "worker", bindingId: binding.id, workerName: binding.display_name },
+    });
+    expect(listRuns(db, itemId).map((run) => run.runtime)).toEqual([EXTERNAL_RUNTIME_ID]);
   });
 
   it("ticket chat on a claimed ticket does not spawn", () => {

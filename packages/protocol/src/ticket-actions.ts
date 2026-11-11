@@ -32,6 +32,8 @@ export const TICKET_ACTION_IDS = [
   "open_delivery_file",
   // 「沙箱外执行」授权（工单 #62）：只有用户本人能开关（user_direct）。
   "set_unsandboxed",
+  // 放掉外部工人领走的单（.scratch/external-worker-hub/spec.md P1-4）：外部 Run 结束，工单回到待开始。工人自己的操作在 worker.ts。
+  "ticket.release",
   // 验收标准（工单 05）：编辑、确认一条、取消确认。
   ...ACCEPTANCE_CRITERIA_ACTION_IDS,
 ] as const;
@@ -173,6 +175,8 @@ export const TICKET_ACTION_INPUT_SCHEMAS = {
   }),
   // 「沙箱外执行」授权（工单 #62）：true 时这张工单之后的执行 Run 不进沙箱。
   set_unsandboxed: StrictObject({ enabled: Type.Boolean() }),
+  // 放掉外部工人领走的单：没有输入，原因写在请求体的 reason。
+  "ticket.release": Empty,
   // 验收标准（工单 05）。
   ...ACCEPTANCE_CRITERIA_ACTION_INPUT_SCHEMAS,
 } as const satisfies Record<TicketActionId, TSchema>;

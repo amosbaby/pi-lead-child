@@ -4,6 +4,7 @@
 import type { Item } from "@pi-lead-child/core";
 import type {
   OwnerActionId, OwnerActionSource, Scope, TicketActionArea, TicketActionId, TicketActionInputs, TicketActionPermission,
+  WorkerActionId, WorkerActionInputs,
 } from "@pi-lead-child/protocol";
 import type { Binding, Db, OwnerActionInput } from "@pi-lead-child/store";
 import type { PullRequestRunner, TicketDelivery } from "../coordinator/delivery.js";
@@ -18,7 +19,14 @@ export type OwnerCredential = Pick<Binding, "id" | "kind" | "display_name" | "or
 export type TicketActionCaller =
   | { kind: "user"; credential?: OwnerCredential | null; source?: OwnerActionSource | null; confirmation?: string }
   // externalTurn：这一轮读过外部内容（Lead 的 turnOrigin().external）。原来要用户这一轮的操作这时做不了（authority.ts）。
-  | { kind: "lead"; turnId: string | null; externalTurn?: boolean };
+  | { kind: "lead"; turnId: string | null; externalTurn?: boolean }
+  // 外部工人（protocol 的 worker.ts）：带 worker 权限的配对凭证。它只能做工人的操作（worker.ts 的 WORKER_ACTIONS），
+  // 别的工单操作一律拒绝；工人的操作也只认它（authority.ts 的 workerCallerBlocker）。
+  | { kind: "worker"; bindingId: number; workerName: string };
+
+export type WorkerCaller = Extract<TicketActionCaller, { kind: "worker" }>;
+// 页面（你本人）和 Lead：工单操作原来的两种调用方。
+export type PersonCaller = Exclude<TicketActionCaller, WorkerCaller>;
 
 export interface Availability {
   available: boolean;
@@ -113,6 +121,36 @@ export function permissionOf(definition: Pick<TicketActionDefinition, "permissio
 }
 
 export type TicketActionCatalog = { readonly [K in TicketActionId]: TicketActionDefinition<K> };
+
+// 工人的操作（protocol 的 worker.ts）。只有 worker 调用方能做，所以没有 Lead 的权限档（permission）：Lead 的工具不列它们，
+// 页面和 Lead 调用时得到 forbidden。它们不改规则，不对外，不记主人操作。业务规则在 worker-queue/，这里只做声明和转调。
+export interface WorkerActionRun<I> {
+  db: Db;
+  env: TicketActionEnv;
+  item: Item;
+  input: I;
+  worker: WorkerCaller;
+}
+
+export interface WorkerActionDefinition<K extends WorkerActionId = WorkerActionId> {
+  id: K;
+  label: string;
+  // 凭证要有的 scope：一律是 worker。
+  scope: "worker";
+  // 给工人看的一句话：什么时候用（Task 9 的工具说明用它）。
+  hint: string;
+  available(item: Item, env: TicketActionEnv, worker: WorkerCaller): Availability | Promise<Availability>;
+  run(run: WorkerActionRun<WorkerActionInputs[K]>): unknown;
+}
+
+export type WorkerActionCatalog = { readonly [K in WorkerActionId]: WorkerActionDefinition<K> };
+
+// 工人做的：账本里记的是 system（stage 的边）和 child（工人的笔记），凭的是它的配对凭证。
+export interface WorkerAttribution {
+  actor: "worker";
+  bindingId: number;
+  workerName: string;
+}
 
 // stale：页面看到的已经过时了（例如别人刚改过这一条验收标准、交付已经更新）。刷新以后再做。
 // user_direct：只有你本人能做的操作（授予 Lead 权力、带密钥），Lead 调用时总是这个拒绝。

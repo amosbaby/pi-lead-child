@@ -1317,6 +1317,7 @@ export * from "./i18n.ts";
 export * from "./reply-style.ts";
 export * from "./host-bypass.ts";
 export * from "./execution-mode.ts";
+export * from "./worker.ts";
 export * from "./busy-placement.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";

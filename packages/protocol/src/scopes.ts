@@ -11,11 +11,14 @@ export const ScopeSchema = Type.Union([
   Type.Literal("notices"),
   // 管理权限（配对、撤销 binding、aish 凭证）。缺省不授予，见 admin.ts 的 ADMIN_SCOPE。
   Type.Literal("admin"),
+  // 外部工人（Claude Code、Codex）领单和回写（worker.ts）。只给 plc worker pair 单独配对的凭证，永远不进缺省授予的清单
+  // （store 的 DEFAULT_SCOPES、CLI_CREDENTIAL_SCOPES、LOOPBACK_AUTO_PAIR_SCOPES）。
+  Type.Literal("worker"),
 ]);
 export type Scope = Static<typeof ScopeSchema>;
 
 export const ALL_SCOPES: Scope[] = [
-  "chat", "tickets:view", "tickets:create", "approvals:respond", "notices", "admin",
+  "chat", "tickets:view", "tickets:create", "approvals:respond", "notices", "admin", "worker",
 ];
 
 export const BindingDtoSchema = Type.Object({

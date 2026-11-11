@@ -16,6 +16,7 @@ import { runUpdatedEvent } from "@pi-lead-child/store";
 import { getItem, transition } from "@pi-lead-child/store";
 import { getRun, updateRun } from "@pi-lead-child/store";
 import type { Run, RunPurpose, RuntimeId } from "@pi-lead-child/core";
+import { EXTERNAL_RUNTIME_ID } from "@pi-lead-child/protocol";
 import { failureNextStep, typedFailure } from "@pi-lead-child/runtime";
 import {
   LAUNCH_FILES, launcherWithin, parseLauncherIdentity, readExitRecord, readLaunchRecord, reattachLauncher,
@@ -211,13 +212,14 @@ export interface RestartCandidate {
 
 // 第一步只读：找出活动的 Run，核对每个垫片。核对是异步的，这一步不写库，
 // 所以它和后面的启动修复不会交错。身份指向 launchRoot 以外的路径时，不核对它，Run 走孤儿回收。
+// 外部工人领单建的 Run（runtime=external，engine 的 worker-queue/）没有进程：不接管，也不当孤儿回收，工人照旧领着。
 export async function planRestartRecovery(
   db: Db,
   options: { launchRoot: string; timeoutMs?: number },
 ): Promise<RestartCandidate[]> {
   const runs = db.prepare(
-    "SELECT * FROM runs WHERE state IN ('starting','running') ORDER BY id",
-  ).all() as Run[];
+    "SELECT * FROM runs WHERE state IN ('starting','running') AND runtime <> ? ORDER BY id",
+  ).all(EXTERNAL_RUNTIME_ID) as Run[];
   return Promise.all(runs.map(async (run) => {
     const identity = parseLauncherIdentity(run.launcher);
     const trusted = identity && launcherWithin(identity, options.launchRoot) ? identity : null;

@@ -19,7 +19,8 @@
 //     - 确认、撤回一条验收标准（confirm_criterion、unconfirm_criterion）：它记的是用户自己看过，Lead 替他记就是假记录。
 import type { Item } from "@pi-lead-child/core";
 import type { TicketActionPermission } from "@pi-lead-child/protocol";
-import { UserTurnScopeError, type Db } from "@pi-lead-child/store";
+import { WORKER_SCOPE } from "@pi-lead-child/protocol";
+import { bindingScopes, getBinding, UserTurnScopeError, type Db } from "@pi-lead-child/store";
 import {
   activeUserTurnBlocker, isLiveUserTurn, leadAuthorityFor, userTurnAttribution, userTurnRefusalText, type LeadAuthorityMode,
 } from "../ui-actions/authority.js";
@@ -34,7 +35,8 @@ const USER_TURN_ONLY_TICKET_ACTIONS: ReadonlySet<string> = new Set([
 ]);
 import {
   TicketActionError, permissionOf,
-  type TicketActionAuthority, type TicketActionCaller, type TicketActionDefinition, type TicketActionEnv,
+  type PersonCaller, type TicketActionAuthority, type TicketActionCaller, type TicketActionDefinition, type TicketActionEnv,
+  type WorkerCaller,
 } from "./types.js";
 
 export type { LeadAuthorityMode } from "../ui-actions/authority.js";
@@ -79,7 +81,7 @@ export function resolveAuthority(
   db: Db,
   definition: TicketActionDefinition<never> | TicketActionDefinition,
   item: Item,
-  caller: TicketActionCaller,
+  caller: PersonCaller,
   env: TicketActionEnv,
 ): ResolvedAuthority {
   if (caller.kind === "user") return { by: { actor: "user" }, authority: "user" };
@@ -152,4 +154,17 @@ export function activeUserTurnReason(
   db: Db, turnId: string | null, definition: TicketActionDefinition<never> | TicketActionDefinition,
 ): string | null {
   return activeUserTurnBlocker(db, turnId, definition.scope);
+}
+
+/**
+ * 外部工人的凭证现在能不能做工人的操作：配对凭证要还在、没撤销、带 worker 权限（protocol 的 worker.ts）。
+ * 能做时为 null，不能时是给工人看的原因。工人的每个操作都先过它（index.ts 的 runWorkerAction）。
+ */
+export function workerCallerBlocker(db: Db, caller: WorkerCaller): string | null {
+  const binding = getBinding(db, caller.bindingId);
+  if (!binding || binding.status !== "active") return `配对凭证 #${caller.bindingId} 不存在或者已经撤销。`;
+  if (!bindingScopes(binding).includes(WORKER_SCOPE)) {
+    return `配对凭证 #${caller.bindingId} 没有 ${WORKER_SCOPE} 权限：工人要用 plc worker pair 单独配对。`;
+  }
+  return null;
 }

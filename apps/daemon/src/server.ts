@@ -64,6 +64,7 @@ import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { isStopCommand, LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import { CONVERSATION_TURN_INTERRUPTED_BY_STEER } from "@pi-lead-child/protocol";
+import { EXTERNAL_RUNTIME_ID } from "@pi-lead-child/protocol";
 import type {
   ChannelHub, ChannelLookupCandidate, ChannelOwnerChooseRequest, ChannelOwnerConfirmRequest, ChannelOwnerMessage,
 } from "@pi-lead-child/engine";
@@ -361,9 +362,10 @@ export function recoverOrphans(
   },
 ): number {
   const coordinator = createCoordinator({ db });
+  // 外部工人领单建的 Run（runtime=external）没有进程：不是孤儿，工人照旧领着（engine 的 worker-queue/）。
   const orphans = (db.prepare(
-    "SELECT id, item_id, pid, launcher, purpose FROM runs WHERE state IN ('starting','running')",
-  ).all() as Array<{ id: number; item_id: number; pid: number | null; launcher: string | null; purpose: string }>)
+    "SELECT id, item_id, pid, launcher, purpose FROM runs WHERE state IN ('starting','running') AND runtime <> ?",
+  ).all(EXTERNAL_RUNTIME_ID) as Array<{ id: number; item_id: number; pid: number | null; launcher: string | null; purpose: string }>)
     .filter((orphan) => !opts?.runIds || opts.runIds.has(orphan.id));
   for (const o of orphans) {
     // 代查（slack-takeover 工单 03）是 daemon 进程里的会话，没有进程可杀：记成失败，工单进 cancelled，

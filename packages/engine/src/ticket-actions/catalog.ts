@@ -28,6 +28,7 @@ import { DELEGATION_ACTIONS } from "./delegation.js";
 import { REVIEW_FAILURE_ACTIONS } from "./review-failure.js";
 import { RUN_PROFILE_ACTIONS } from "./run-profile.js";
 import { UNSANDBOXED_ACTIONS } from "./unsandboxed.js";
+import { RELEASE_ACTIONS } from "./worker.js";
 import { behalfCursor, behalfFields } from "./attribution.js";
 import {
   activeUserReworkDispatchRequest, cancelItem, completeItem, confirmItem, pauseItemRun, requestReview, restoreItem, resumeItemRun,
@@ -855,4 +856,6 @@ export const TICKET_ACTIONS: TicketActionCatalog = {
   ...DELEGATION_ACTIONS,
   // 沙箱外执行（工单 #62）：只有你本人能做。定义在 unsandboxed.ts。
   ...UNSANDBOXED_ACTIONS,
+  // 放掉外部工人领着的单（external-worker-hub P1-4）。定义在 worker.ts，业务规则在 worker-queue/。
+  ...RELEASE_ACTIONS,
 };

@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createControlPlaneService, createUserActionService, startPairedServer } from "@pi-lead-child/gateway";
 import { createLeadTools, type LeadDeps } from "@pi-lead-child/lead";
-import { liveChildren, prepareRunWorkspaceNowForTesting, type PullRequestRunner } from "@pi-lead-child/engine";
+import { claimTicket, liveChildren, prepareRunWorkspaceNowForTesting, type PullRequestRunner } from "@pi-lead-child/engine";
 import { computeRunGrant, DEFAULT_INTENT_GRANT_BOUNDS, type TicketActionId } from "@pi-lead-child/protocol";
 import {
   addAcceptanceCriteria, confirmCriterion, createItem, createLoopbackBinding, createPairing, createRun, createTurn, getItem,
@@ -149,6 +149,14 @@ function deliveredWithCriteria(db: Db, confirmed = false): { itemId: number; cri
   return { itemId, criterionId: criterion!.id };
 }
 
+// 外部工人领走的单（external-worker-hub P1-4）：一个带 worker 权限的凭证领了它。
+function claimedByWorker(db: Db): number {
+  const itemId = ready(db);
+  const { binding } = createLoopbackBinding(db, { name: "Ethan's Claude Code", scopes: ["worker"] });
+  claimTicket(db, { itemId, bindingId: binding.id, workerName: binding.display_name });
+  return itemId;
+}
+
 interface Case {
   action: TicketActionId;
   // 建好夹具，返回要操作的工单和这次的输入。
@@ -238,6 +246,7 @@ const CASES: Case[] = [
     const { itemId, criterionId } = deliveredWithCriteria(db);
     return { itemId, input: { criterionId } };
   } },
+  { action: "ticket.release", authority: "lead", fixture: (db) => ({ itemId: claimedByWorker(db) }) },
   { action: "unconfirm_criterion", authority: "on_behalf", fixture: (db) => {
     const { itemId, criterionId } = deliveredWithCriteria(db, true);
     return { itemId, input: { criterionId } };

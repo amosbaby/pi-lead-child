@@ -60,7 +60,8 @@ export interface TicketActionRouteContext extends UserTicketActionContext {
 }
 
 const LIST_PATH = /^\/v1\/tickets\/(\d+)\/actions$/;
-const RUN_PATH = /^\/v1\/tickets\/(\d+)\/actions\/([a-z_]+)$/;
+// 操作名是 snake_case，或者带一段命名空间（ticket.release）。
+const RUN_PATH = /^\/v1\/tickets\/(\d+)\/actions\/([a-z_]+(?:\.[a-z_]+)?)$/;
 
 // 处理了返回 true；不是这两条路由返回 false。
 export async function handleTicketActionRoute(ctx: TicketActionRouteContext): Promise<boolean> {
