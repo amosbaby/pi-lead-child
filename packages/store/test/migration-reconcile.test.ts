@@ -18,6 +18,15 @@ const foreignNames = (db: Db) =>
   tableNames(db).includes("schema_migrations_foreign")
     ? (db.prepare("SELECT name FROM schema_migrations_foreign ORDER BY name").all() as Array<{ name: string }>).map((r) => r.name)
     : [];
+// 每张业务表的行数。排除的表：schema_migrations 和 schema_migrations_foreign 本来就是对齐要改的；
+// notes_fts*（FTS 影子表）和 sqlite_*（SQLite 内部表）由 SQLite 自己维护，行数随索引重建变化，和用户数据无关。
+// hub 迁移链在每次打开时幂等播种的表（常设指令、交接说明等）没有单独排除：库是用 hub 的 openDb 建的，种子已经在里面，
+// 再次打开不会变；如果哪天某张表因此变了，这个断言应该失败，让人看一眼。
+const EXCLUDED_FROM_COUNTS = /^(schema_migrations|schema_migrations_foreign|sqlite_.*|notes_fts.*)$/;
+const rowCounts = (db: Db, only?: string[]): Record<string, number> => {
+  const names = tableNames(db).filter((name) => !EXCLUDED_FROM_COUNTS.test(name) && (!only || only.includes(name))).sort();
+  return Object.fromEntries(names.map((name) => [name, (db.prepare(`SELECT COUNT(*) AS n FROM "${name}"`).get() as { n: number }).n]));
+};
 const stageCounts = (db: Db) => db.prepare("SELECT stage, COUNT(*) AS n FROM items GROUP BY stage ORDER BY stage").all();
 
 const LATEST_ROWS: Array<[number, string]> = [
@@ -29,7 +38,7 @@ const LATEST_ROWS: Array<[number, string]> = [
 
 // 造一个 integration/latest 迁移过的库：先用 hub 的完整入口建库，再把 v64–v67 的行换成 latest 的，
 // 去掉 hub 在 v64/v65 才加的列，补上 latest 的 claude_memory_sync 表。items.unsandboxed_execution 本来就在。
-function latestShapedDb(path: string): { stages: unknown; unsandboxedId: number } {
+function latestShapedDb(path: string): { stages: unknown; unsandboxedId: number; counts: Record<string, number> } {
   const db = openDb(path);
   const ids = [
     createItem(db, { title: "draft", brief: "b", createdBy: "user" }),
@@ -52,8 +61,9 @@ function latestShapedDb(path: string): { stages: unknown; unsandboxedId: number 
   const insert = db.prepare("INSERT INTO schema_migrations (version, name) VALUES (?, ?)");
   for (const [version, name] of LATEST_ROWS) insert.run(version, name);
   const stages = stageCounts(db);
+  const counts = rowCounts(db);
   db.close();
-  return { stages, unsandboxedId: ids[1]! };
+  return { stages, unsandboxedId: ids[1]!, counts };
 }
 
 describe("reconcileMigrationRows", () => {
@@ -66,7 +76,7 @@ describe("reconcileMigrationRows", () => {
 
   it("reconciles a latest-branch database", () => {
     const path = join(tempDir("plc-reconcile-latest-"), "plc.db");
-    const { stages, unsandboxedId } = latestShapedDb(path);
+    const { stages, unsandboxedId, counts } = latestShapedDb(path);
 
     const db = openDb(path); // 完整入口：对齐、再跑 hub 自己的迁移
     expect(versions(db)).toEqual(expect.arrayContaining([
@@ -75,6 +85,9 @@ describe("reconcileMigrationRows", () => {
     expect(versions(db)).toHaveLength(4);
     expect(foreignNames(db)).toEqual(["claude-memory-sync-v1", "token-usage-resume-recompute-v1"]);
     expect(stageCounts(db)).toEqual(stages); // 生命周期不变
+    expect(rowCounts(db, Object.keys(counts))).toEqual(counts); // 每张业务表的行数不变（对齐只改迁移账本）
+    expect(counts.items).toBe(3);
+    expect(Object.values(counts).some((n) => n > 0)).toBe(true);
     // latest 的库已经有 unsandboxed_execution：hub 的 v66 已记，不再加列，也没有报错，值原样。
     expect(columns(db, "items").filter((c) => c === "unsandboxed_execution")).toHaveLength(1);
     expect(db.prepare("SELECT unsandboxed_execution AS v FROM items WHERE id = ?").get(unsandboxedId)).toEqual({ v: 1 });
@@ -122,6 +135,7 @@ describe("reconcileMigrationRows", () => {
 
   it("leaves a fresh database untouched", () => {
     const db = openDb(join(tempDir("plc-reconcile-fresh-"), "plc.db"));
+    expect(tableNames(db)).not.toContain("schema_migrations_foreign");
     expect(foreignNames(db)).toEqual([]);
     expect(versions(db).map(([, name]) => name)).toEqual(["item-usage-parts-v1", "watch-host-run-v1", "unsandboxed-execution-v1", "channel-owner-dm-v1"]);
     expect(reconcileMigrationRows(db)).toEqual({ renumbered: [], foreign: [] });
@@ -140,16 +154,27 @@ describe("reconcileMigrationRows", () => {
     // 只跑过 hub 自己 v64/v65（上游那两条）的库：行的名字和号码本来就对。
     const path = join(tempDir("plc-reconcile-upstream-"), "plc.db");
     const legacy = openDb(path);
+    createItem(legacy, { title: "draft", brief: "b", createdBy: "user" });
+    const active = createItem(legacy, { title: "active", brief: "b", createdBy: "user" });
+    transition(legacy, { itemId: active, to: "active", actor: "system", reason: "spawn" });
     legacy.prepare("DELETE FROM schema_migrations WHERE version >= 66").run();
     legacy.exec("DROP TABLE channel_decision_pushes; DROP TABLE channel_ticket_origins;");
     const before = legacy.prepare("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all();
+    const stagesBefore = stageCounts(legacy);
+    const countsBefore = rowCounts(legacy);
+    expect(countsBefore.items).toBe(2);
     expect(reconcileMigrationRows(legacy)).toEqual({ renumbered: [], foreign: [] });
+    expect(stageCounts(legacy)).toEqual(stagesBefore);
+    expect(rowCounts(legacy)).toEqual(countsBefore);
     expect(legacy.prepare("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all()).toEqual(before);
     expect(foreignNames(legacy)).toEqual([]);
     legacy.close();
     const reopened = openDb(path);
     expect(foreignNames(reopened)).toEqual([]);
     expect(versions(reopened).map(([version]) => version)).toEqual([64, 65, 66, 67]);
+    // 重新打开补回 v66/v67 时新建的两张表不在「之前」里，其余表的行数和阶段分布不变。
+    expect(stageCounts(reopened)).toEqual(stagesBefore);
+    expect(rowCounts(reopened, Object.keys(countsBefore))).toEqual(countsBefore);
     reopened.close();
   });
 
