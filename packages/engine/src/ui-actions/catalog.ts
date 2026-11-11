@@ -33,6 +33,7 @@ import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.
 import { EXECUTION_MODE_ACTIONS, EXECUTION_MODE_TARGET } from "./execution-mode.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
 import { OWNER_DM_SYNC_ACTIONS, OWNER_DM_SYNC_TARGET } from "./owner-dm-sync.js";
+import { TICKET_PUSH_ACTIONS, TICKET_PUSH_TARGET } from "./ticket-push.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
 import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.js";
@@ -1232,6 +1233,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   busy_placement: BUSY_PLACEMENT_TARGET,
   execution_mode: EXECUTION_MODE_TARGET,
   owner_dm_sync: OWNER_DM_SYNC_TARGET,
+  ticket_push: TICKET_PUSH_TARGET,
   pull_request: PULL_REQUEST_TARGET,
 };
 
@@ -1286,6 +1288,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   execution_mode: EXECUTION_MODE_ACTIONS,
   // 不在看 App 时同步到 Slack 私信的开关（2026-11-06，工单 #88）。定义在 owner-dm-sync.ts。
   owner_dm_sync: OWNER_DM_SYNC_ACTIONS,
+  // 「待你处理」推送的两个开关（计划 Task 12）：Slack 私信、桌面通知。改规则，Lead 也能改。定义在 ticket-push.ts。
+  ticket_push: TICKET_PUSH_ACTIONS,
   // 「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」（2026-11-06，工单 #99）。定义在 pull-requests.ts。
   pull_request: PULL_REQUEST_ACTIONS,
 };

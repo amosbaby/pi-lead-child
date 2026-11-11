@@ -115,6 +115,14 @@ export const channelsMessages = defineMessages({
       + `Replies to messages you sent in Slack go there anyway. Takes effect right away. You can also ask ${leadName} to turn it on or off.`,
     ownerDmSyncLoadFailed: (reason: string) => `Could not load this setting: ${reason}`,
     ownerDmSyncFailed: (reason: string) => `Could not change this setting: ${reason}`,
+    ticketPushTitle: 'Tickets that need you',
+    ticketPushSlackLabel: 'Send tickets that need me to my Slack DM',
+    ticketPushDesktopLabel: 'Show a desktop notification',
+    ticketPushDescription: (leadName: string) =>
+      `When ${leadName} decides a ticket needs you, or a worker hands one back to you, you get one message in your own Slack DM. `
+      + `When the ticket changes, that message is updated instead of sending a new one. Tickets ${leadName} handles on its own are not sent one by one.`,
+    ticketPushLoadFailed: (reason: string) => `Could not load this setting: ${reason}`,
+    ticketPushFailed: (reason: string) => `Could not change this setting: ${reason}`,
   },
   zh: {
     description: (leadName) => `外部的消息来源。${leadName} 用你本人的账号读这里的消息，替你查资料，有把握时代你回复。`,
@@ -218,5 +226,13 @@ export const channelsMessages = defineMessages({
       + `改了马上生效。也可以直接让 ${leadName} 打开或关掉。`,
     ownerDmSyncLoadFailed: (reason) => `没有读到这个设置：${reason}`,
     ownerDmSyncFailed: (reason) => `没有改成这个设置：${reason}`,
+    ticketPushTitle: '待你处理推送',
+    ticketPushSlackLabel: '要我处理的工单推到我的 Slack 私信',
+    ticketPushDesktopLabel: '弹桌面通知',
+    ticketPushDescription: (leadName) =>
+      `${leadName} 判断一张单要你处理、或者工人把单交回给你时，你自己的 Slack 私信里收到一条消息。`
+      + `之后这张单的状态变了，改写那一条，不另发。${leadName} 自己能处理的单不逐条推。`,
+    ticketPushLoadFailed: (reason) => `没有读到这个设置：${reason}`,
+    ticketPushFailed: (reason) => `没有改成这个设置：${reason}`,
   },
 });

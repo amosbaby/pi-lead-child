@@ -728,7 +728,9 @@ export class ChannelHub {
    * （用户 2026-11-05：同一个人连发的消息排在一个头像下，分不清哪句是 Lead 的）。key 是幂等键（daemon 用轮次的编号），重试不会发两次。
    * 没有经过卡、授权表和信心模型：这是用户本人和 Lead 的对话。发不出去时抛 ChannelActionError。
    */
-  async replyToOwner(conversationId: string, text: string, key: string): Promise<{ objectKey: string; status: ChannelOutboundOutcome["status"] }> {
+  async replyToOwner(
+    conversationId: string, text: string, key: string,
+  ): Promise<{ objectKey: string; status: ChannelOutboundOutcome["status"]; remoteRef: Record<string, string> | null }> {
     const source = conversationId.split(":")[0] ?? "";
     const adapter = this.options.registry.get(source);
     if (!adapter?.capabilities.reply || !adapter.resolveConversation) throw new ChannelActionError("unavailable", `来源 ${source} 不能直接发消息`);
@@ -746,7 +748,36 @@ export class ChannelHub {
       request: { action: "reply", objectKey: place.objectKey, target: place.target, text: signed.text, parts: signed.parts, style: "owner_reply" },
     });
     if (outcome.status === "failed") throw new ChannelActionError("outbound_failed", `没有发出去：${outcome.error ?? "未知原因"}`);
-    return { objectKey: place.objectKey, status: outcome.status };
+    return { objectKey: place.objectKey, status: outcome.status, remoteRef: outcome.remoteRef };
+  }
+
+  /**
+   * 把 replyToOwner 发过的一条改成 text（「待你处理」推送状态变了，engine 的 worker-queue/pushes.ts）：样式和发的时候一样
+   * （署名、owner_reply）。message 是 replyToOwner 返回的位置。key 是这一次改写的幂等键。
+   * 那条消息已经没了时返回 targetGone（不抛错，调用方不再改它）。来源不能改消息、没接上、改不成时抛 ChannelActionError。
+   */
+  async editOwnerReply(
+    conversationId: string, message: Record<string, string>, text: string, key: string,
+  ): Promise<{ status: ChannelOutboundOutcome["status"]; targetGone?: true }> {
+    const source = conversationId.split(":")[0] ?? "";
+    const adapter = this.options.registry.get(source);
+    if (!adapter?.capabilities.edit || !adapter.resolveConversation) throw new ChannelActionError("unavailable", `来源 ${source} 不能改消息`);
+    const context = await this.context(adapter);
+    if (!context) throw new ChannelActionError("unavailable", `来源 ${source} 现在没有接上`);
+    let place;
+    try {
+      place = await adapter.resolveConversation(conversationId, context);
+    } catch (error) {
+      throw new ChannelActionError("not_found", errorText(error));
+    }
+    const signed = ownerReplyDisclosure(this.assistantFor(adapter), text.trim());
+    const outcome = await this.outbox.perform(adapter, context, {
+      key: `owner-edit:${key}`, purpose: "auto_reply", cardId: null,
+      request: { action: "edit", objectKey: place.objectKey, target: message, text: signed.text, parts: signed.parts, style: "owner_reply" },
+    });
+    if (outcome.status === "failed" && outcome.targetGone) return { status: outcome.status, targetGone: true };
+    if (outcome.status === "failed") throw new ChannelActionError("outbound_failed", `没有改成：${outcome.error ?? "未知原因"}`);
+    return { status: outcome.status };
   }
 
   /**

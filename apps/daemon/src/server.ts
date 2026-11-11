@@ -73,6 +73,7 @@ import {
   slackEmojiPreview,
 } from "@pi-lead-child/engine";
 import { deferIfExternal, ExecutionDeferredError, executionModeMessages } from "@pi-lead-child/engine";
+import { createTicketPusher, type TicketPusher } from "@pi-lead-child/engine";
 import { outageStart, outageStep, restoreOutages, type OpenOutage, type OutageItem } from "./lead-outage.js";
 import { DEFAULT_WAKE_RETRY_MAX_FAILURES, nextWakeRetry as nextCappedRetry, wakeRetryBlocks, type WakeRetry } from "./lead-wake-retry.js";
 import type { LeadDaemonEnvironment, LeadEngine, LeadEngineFactoryResult } from "@pi-lead-child/lead";
@@ -5394,6 +5395,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         holding: new Set([...channelOwnerChoices.values()].flat().map((choice) => choice.decisionId)),
       });
     });
+    // 要用户拿主意的工单推到他自己的私信、弹桌面通知，状态变了改写那条消息（计划 Task 12）。没有消息通道时也跑（只弹桌面通知）。
+    pollStep("ticket-pushes", () => { void ticketPusher.sync(); });
     // 记忆沉淀（工单 07）：整理攒够了的对话。在后台跑，不阻塞这一拍。
     pollStep("channel-memory", () => { void channelMemory?.tick(); });
   }
@@ -6456,6 +6459,25 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     transport: {
       sendOwnerChoices: async (conversation, content, key) => (channelHub ? channelHub.sendOwnerChoices(conversation, content, key) : null),
       editOwnerChoices: async (conversation, message, content) => (channelHub ? channelHub.editOwnerChoices(conversation, message, content) : null),
+    },
+  });
+
+  // 「待你处理」推送（engine 的 worker-queue/pushes.ts，计划 Task 12）：发和改写走通道 hub 回给用户本人的那条路
+  // （署名、色条、Markdown 换成来源的格式），桌面通知走 desktop-notifier.ts。工单链接是网关上的网页（只用编号拼）。
+  const ticketPusher: TicketPusher = createTicketPusher({
+    db, log, desktop: notifyDesktop, webBase: () => gatewayUrl || null,
+    slack: {
+      post: async (conversation, text, key) => {
+        if (!channelHub) throw new Error("消息通道还没有接上");
+        const sent = await channelHub.replyToOwner(conversation, text, key);
+        if (!sent.remoteRef) throw new Error("来源没有给出那条消息的位置");
+        return { ref: sent.remoteRef };
+      },
+      edit: async (conversation, ref, text, key) => {
+        if (!channelHub) throw new Error("消息通道还没有接上");
+        const edited = await channelHub.editOwnerReply(conversation, ref, text, key);
+        return edited.targetGone ? { gone: true } : {};
+      },
     },
   });
 

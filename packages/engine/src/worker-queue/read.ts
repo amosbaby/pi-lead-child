@@ -130,9 +130,9 @@ export interface WorkerTicketRow {
 const PRIORITY_RANK = "CASE i.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 ELSE 4 END";
 const COMPLEXITY_RANK = "CASE i.complexity WHEN 'simple' THEN 0 WHEN 'medium' THEN 1 WHEN 'complex' THEN 2 ELSE 3 END";
 const NO_LIVE_RUN = "NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.state IN ('starting','running'))";
-// needs_me（ruling R15）：要用户拿主意的单。工人的 list_tickets 和网页的「要你拿主意」（ticketMeta 的 needsYou，ruling R18）用同一条。
-// 一个 ? 参数：EXTERNAL_RUNTIME_ID。表的别名是 i。
-const NEEDS_ME = `i.kind='task' AND i.handling='needs_user' AND i.stage NOT IN ('done','cancelled')
+// needs_me（ruling R15）：要用户拿主意的单。工人的 list_tickets、网页的「要你拿主意」（ticketMeta 的 needsYou，ruling R18）
+// 和推到用户私信的「待你处理」（pushes.ts）用同一条。一个 ? 参数：EXTERNAL_RUNTIME_ID。表的别名是 i。
+export const NEEDS_ME = `i.kind='task' AND i.handling='needs_user' AND i.stage NOT IN ('done','cancelled')
   AND NOT EXISTS (SELECT 1 FROM runs r WHERE r.item_id=i.id AND r.runtime=? AND r.state IN ('starting','running'))`;
 
 /** 这张单现在要不要用户拿主意（needs_me 的同一条规则）。不存在的单为 false。 */

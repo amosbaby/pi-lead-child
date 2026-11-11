@@ -98,9 +98,10 @@ describe("the user's own Slack DM to themself", () => {
       return true;
     });
     const sent = await hub.replyToOwner(`slack:${SELF_DM}:main`, "## 结论\n**今天不发布**，见 [日历](https://cal.test/x)。", "turn_1");
-    expect(sent).toEqual({ objectKey: `slack:${SELF_DM}:main`, status: "sent" });
     const posted = slack.messages.filter((message) => message.channel === SELF_DM);
     expect(posted).toHaveLength(1);
+    // remoteRef：那条消息的位置（「待你处理」推送以后按它改写，engine 的 worker-queue/pushes.ts）。
+    expect(sent).toEqual({ objectKey: `slack:${SELF_DM}:main`, status: "sent", remoteRef: { channel: SELF_DM, ts: posted[0]!.ts } });
     expect(posted[0]!.text).toBe("");
     expect(posted[0]!.attachments).toEqual([{
       color: SLACK_OWNER_REPLY_COLOR, fallback: ":robot_face: Fairy (Assistant)\n*结论*\n*今天不发布*，见 <https://cal.test/x|日历>。",

@@ -100,12 +100,13 @@ export const ActionPermissionSchema = Type.Union([
 //   pull_request  GitHub 上的一个 PR 的一个提交（「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」，2026-11-06，工单 #99）。
 //     编号是 pullRequestTargetId 拼的 <owner>_<repo>_<PR 编号>_<head sha>，例如 acme_web_12_<40 位 sha>。
 //   execution_mode  执行模式：self、external（外部工人领单）、paused（总闸）（execution-mode.ts）。编号只有 daemon。
+//   ticket_push  「待你处理」推送的开关（设置 → 消息通道，计划 Task 12）。编号是 slack_dm（推到 Slack 私信）或 desktop（桌面通知）。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement", "owner_dm_sync", "pull_request", "execution_mode",
+  "busy_placement", "owner_dm_sync", "pull_request", "execution_mode", "ticket_push",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -435,6 +436,12 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   execution_mode: {
     // 切执行模式。只有你本人能做（user_direct），改规则。正在跑的 Run 不受影响。
     set: SetExecutionModeRequestSchema,
+  },
+  ticket_push: {
+    // 打开：要你拿主意的工单推到你自己的 Slack 私信（slack_dm）或者弹桌面通知（desktop）。改规则。
+    enable: Empty,
+    // 关掉：只在网页列表里看。
+    disable: Empty,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

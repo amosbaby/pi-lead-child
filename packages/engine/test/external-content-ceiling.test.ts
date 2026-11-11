@@ -175,6 +175,8 @@ describe("the rule-change flag in the catalog", () => {
       "execution_mode.set",
       // 不在看 App 时同步到 Slack 私信（2026-11-06，工单 #88）：设置页的选项。
       "owner_dm_sync.enable", "owner_dm_sync.disable",
+      // 「待你处理」推送的两个开关（计划 Task 12）：设置页的选项。
+      "ticket_push.enable", "ticket_push.disable",
     ]);
   });
 

@@ -1,6 +1,6 @@
 // 外部工人 hub 的存储层（v68，表在 schema.ts 的 WORKER_HUB_SCHEMA）。
 // 工单的来源（Slack、Jira、Notion、手动）、Lead 对工单的判断（能不能自动处理、复杂度）、用户说「没找到」的记录。
-// ticket_pushes（推给用户私信的消息）只有表，读写由用到它的模块加。
+// ticket_pushes：每张工单最多一条推给用户私信的「待你处理」消息（engine 的 worker-queue/pushes.ts），和推送的两个开关（Slack 私信、桌面通知）。
 import type { Db } from "./db.js";
 
 export const TICKET_SOURCE_KINDS = ["slack", "jira", "notion", "manual"] as const;
@@ -157,4 +157,123 @@ export function recordMiss(db: Db, text: string, now: Date = new Date()): void {
 /** 从 since 起（含）记了几次「没找到」。 */
 export function missesSince(db: Db, since: Date): number {
   return (db.prepare("SELECT COUNT(*) AS n FROM ticket_misses WHERE created_at >= ?").get(since.toISOString()) as { n: number }).n;
+}
+
+// ── 待你处理推送（ticket_pushes，engine 的 worker-queue/pushes.ts）────────────────────────────
+
+export interface TicketPush {
+  itemId: number;
+  // 第一次推的原因（needs_user、handed_back）；之后又变成「待你处理」时换成那一次的原因。
+  reason: string | null;
+  // 推到的用户自己的私信。没有私信、Slack 私信推送关着时是 null（只弹了桌面通知）。
+  conversation: string | null;
+  // 那条消息在来源里的位置（例如 Slack 的 channel、ts）。还没发出去时是 null。
+  messageRef: Record<string, string> | null;
+  // 用户现在看到的状态（消息上写的，或者桌面通知弹的）。
+  shownState: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+interface TicketPushRow {
+  item_id: number; reason: string | null; conversation: string | null; message_ref: string | null; shown_state: string | null;
+  created_at: string; updated_at: string;
+}
+
+export function getTicketPush(db: Db, itemId: number): TicketPush | null {
+  const row = db.prepare("SELECT * FROM ticket_pushes WHERE item_id = ?").get(itemId) as TicketPushRow | undefined;
+  return row ? {
+    itemId: row.item_id, reason: row.reason, conversation: row.conversation,
+    messageRef: row.message_ref ? JSON.parse(row.message_ref) as Record<string, string> : null,
+    shownState: row.shown_state, createdAt: row.created_at, updatedAt: row.updated_at,
+  } : null;
+}
+
+/** 记下一张要推的工单。这张单推过（不管推到哪里）时不记，返回 false。 */
+export function insertTicketPush(db: Db, input: {
+  itemId: number; reason: string; conversation: string | null; shownState: string; now: Date;
+}): boolean {
+  const at = input.now.toISOString();
+  return db.prepare(
+    `INSERT OR IGNORE INTO ticket_pushes (item_id, reason, conversation, message_ref, shown_state, created_at, updated_at)
+     VALUES (?, ?, ?, NULL, ?, ?, ?)`,
+  ).run(input.itemId, input.reason, input.conversation, input.shownState, at, at).changes === 1;
+}
+
+/** 那条消息发出去了：记下它在来源里的位置和消息上的状态。 */
+export function setTicketPushMessage(db: Db, itemId: number, ref: Record<string, string>, shownState: string, now: Date): void {
+  db.prepare("UPDATE ticket_pushes SET message_ref = ?, shown_state = ?, updated_at = ? WHERE item_id = ?")
+    .run(JSON.stringify(ref), shownState, now.toISOString(), itemId);
+}
+
+/** 用户现在看到的状态改成了 shownState。reason 给了时一起换（又变成「待你处理」）。 */
+export function setTicketPushShown(db: Db, itemId: number, input: { shownState: string; reason?: string; now: Date }): void {
+  db.prepare("UPDATE ticket_pushes SET shown_state = ?, reason = COALESCE(?, reason), updated_at = ? WHERE item_id = ?")
+    .run(input.shownState, input.reason ?? null, input.now.toISOString(), itemId);
+}
+
+/** 以后不再碰来源里的那条消息（例如用户删了它）：只当作弹过桌面通知。 */
+export function detachTicketPushMessage(db: Db, itemId: number, now: Date): void {
+  db.prepare("UPDATE ticket_pushes SET conversation = NULL, updated_at = ? WHERE item_id = ?").run(now.toISOString(), itemId);
+}
+
+/**
+ * 可能要同步的推送：除了消息上已经是结束状态（done、cancelled）、工单也还是那个状态的。按工单编号。
+ * 状态比较在 engine 里做（状态是从工单、Run 算出来的）。
+ */
+export function openTicketPushes(db: Db): number[] {
+  return (db.prepare(
+    `SELECT p.item_id AS id FROM ticket_pushes p JOIN items i ON i.id = p.item_id
+     WHERE NOT (p.shown_state IN ('done','cancelled') AND i.stage = p.shown_state)
+     ORDER BY p.item_id`,
+  ).all() as Array<{ id: number }>).map((row) => row.id);
+}
+
+// 推送的两个开关（设置 → 消息通道 → 待你处理推送）：Slack 私信、桌面通知。存在 kv，缺省开；读到的值坏了时按缺省（开）算。
+// 改它走 engine 的操作层 ticket_push（页面和 Lead 调同一个函数）。
+export const TICKET_PUSH_CHANNELS = ["slack_dm", "desktop"] as const;
+export type TicketPushChannel = (typeof TICKET_PUSH_CHANNELS)[number];
+
+export interface TicketPushSetting {
+  channel: TicketPushChannel;
+  enabled: boolean;
+  // 最近一次修改。从没改过时都是 null。
+  updatedAt: string | null;
+  updatedBy: "user" | "lead" | null;
+}
+
+const ticketPushKey = (channel: TicketPushChannel) => `ticket_push.${channel}`;
+
+export function isTicketPushChannel(value: string): value is TicketPushChannel {
+  return (TICKET_PUSH_CHANNELS as readonly string[]).includes(value);
+}
+
+/** 开关现在的样子。从没改过、读不到时是开。 */
+export function getTicketPushSetting(db: Db, channel: TicketPushChannel): TicketPushSetting {
+  const fallback: TicketPushSetting = { channel, enabled: true, updatedAt: null, updatedBy: null };
+  const row = db.prepare("SELECT value FROM kv WHERE key = ?").get(ticketPushKey(channel)) as { value: string } | undefined;
+  if (!row) return fallback;
+  try {
+    const stored = JSON.parse(row.value) as { enabled?: unknown; updatedAt?: unknown; updatedBy?: unknown };
+    if (typeof stored.enabled !== "boolean") return fallback;
+    return {
+      channel, enabled: stored.enabled,
+      updatedAt: typeof stored.updatedAt === "string" ? stored.updatedAt : null,
+      updatedBy: stored.updatedBy === "user" || stored.updatedBy === "lead" ? stored.updatedBy : null,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+/** 写入开关。返回写入以后的样子。 */
+export function writeTicketPushSetting(
+  db: Db, channel: TicketPushChannel, enabled: boolean, meta: { by: "user" | "lead"; at: Date },
+): TicketPushSetting {
+  const setting: TicketPushSetting = { channel, enabled, updatedAt: meta.at.toISOString(), updatedBy: meta.by };
+  db.prepare(
+    `INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+  ).run(ticketPushKey(channel), JSON.stringify({ enabled, updatedAt: setting.updatedAt, updatedBy: setting.updatedBy }));
+  return setting;
 }
