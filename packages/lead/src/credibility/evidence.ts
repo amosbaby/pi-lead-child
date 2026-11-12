@@ -55,9 +55,35 @@ export class TurnEvidence {
     if (this.items.length < MAX_ITEMS) this.items.push(item);
   }
 
+  /** 记一条不是工具调用的：例如随这一轮的输入交来的外部原话（tool 写 message）。 */
+  note(tool: string, target: string): void {
+    const item = { tool, target: clip(target) };
+    if (this.items.some((existing) => existing.tool === item.tool && existing.target === item.target)) return;
+    if (this.items.length < MAX_ITEMS) this.items.push(item);
+  }
+
   list(): EvidenceItem[] {
     return [...this.items];
   }
+}
+
+/** 随输入交来的外部原话记成这种证据（2026-11-12）。它是 Lead 看到的话，不是 Lead 自己做的核验。 */
+export const MESSAGE_EVIDENCE = "message";
+
+/**
+ * 这一轮的输入里交给 Lead 的外部原话（envelope.ts 的外部标签）：是谁、从哪个来源、在哪个对话里说的。
+ * 上下文包里的段落（带 part 的）是旧消息，不算这一轮新来的话。
+ */
+export function externalMessagesIn(prompt: string): string[] {
+  const found: string[] = [];
+  for (const match of prompt.matchAll(/<untrusted_external_text([^>]*)>/gu)) {
+    const attrs = new Map<string, string>();
+    for (const attr of match[1]!.matchAll(/([a-z_]+)="([^"]*)"/gu)) attrs.set(attr[1]!, attr[2]!);
+    if (attrs.has("part") || !attrs.get("sender")) continue;
+    const where = [attrs.get("source"), attrs.get("conversation")].filter(Boolean).join("，");
+    found.push(`${attrs.get("sender")}${where ? `（${where}）` : ""}`);
+  }
+  return found;
 }
 
 /** 写进记录的一行：这一轮读过的东西，或者写明什么都没读。 */

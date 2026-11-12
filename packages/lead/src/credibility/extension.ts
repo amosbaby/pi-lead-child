@@ -7,6 +7,7 @@
 //    - 会话回复：daemon 一边收一边把文字推给用户，收不回来。pi 的 agent_before_settle 是这一轮最后一个能追加条目、
 //      再要一次回答的边界：核对失败时追加一条不显示的系统说明，让 Lead 在同一轮里写更正。每轮最多一次。
 // 2. 验收证据。记下这一轮 Lead 成功调用过的取证工具（TurnEvidence），record_decision 和 ticket_action 的验收（complete）读它。
+import { externalMessagesIn, MESSAGE_EVIDENCE } from "./evidence.js";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { addActivity, type Db } from "@pi-lead-child/store";
 import {
@@ -186,6 +187,9 @@ export function createCredibilityExtension(options: CredibilityOptions): Extensi
     // 那样更正的次数和这一轮的证据都会被清掉。agent_settled 在一轮彻底结束时只发一次（agent-session.js 的 finally）。
     pi.on("before_agent_start", (event) => {
       prompts.push(event.prompt ?? "");
+      // 随输入交来的外部原话（对外提问的回复、外部通道的消息）：Lead 看到了它，记进这一轮的证据。
+      // 以前 Lead 采纳对接人的回复时，记录里写「这一轮没有读过文件或工具结果」（2026-11-12 真模型走一遍时发现）。
+      for (const message of externalMessagesIn(event.prompt ?? "")) options.evidence.note(MESSAGE_EVIDENCE, message);
     });
 
     pi.on("agent_settled", () => {

@@ -171,6 +171,24 @@ describe("the credibility extension", () => {
     expect(evidence.list()).toEqual([]);
   });
 
+  // 2026-11-12（真模型走一遍时发现）：Lead 采纳对接人的回复时，证据那一行写「这一轮没有读过文件或工具结果」。
+  // 回复是随这一轮的输入到的，不是用工具读的。交给这一轮的外部原话也算它读过的东西：是谁、在哪个对话里说的。
+  it("counts the other person's words that came with the turn's input as something Lead read", async () => {
+    const { db } = ledger();
+    const { fire, evidence } = harness(db);
+    await fire("before_agent_start", {
+      prompt: [
+        '<system_event kind="event" source="daemon" topic="lead_wait">\n事件 #41：你在等的事有了下一步。\n</system_event>',
+        '<untrusted_external_text from="external" source="slack" sender="nina" conversation="slack:D0NINA:main">\nnina说：Keep them.\n</untrusted_external_text>',
+        // 上下文包里的一段不是这一轮新来的话，不算。
+        '<untrusted_external_text from="external" part="conversation" source="slack" conversation="slack:D0NINA:main">\n旧消息\n</untrusted_external_text>',
+      ].join("\n"),
+    });
+    expect(evidence.list()).toEqual([{ tool: "message", target: "nina（slack，slack:D0NINA:main）" }]);
+    await fire("agent_settled", { aborted: false });
+    expect(evidence.list()).toEqual([]);
+  });
+
   it("asks for one correction of a reply per run, in the tickets the run worked on", async () => {
     const { db, ticket } = ledger();
     const { fire } = harness(db);
@@ -270,6 +288,17 @@ describe("ticket_action's acceptance evidence", () => {
     const { db, ticket, run, ledgerText } = accept(new TurnEvidence(), smart(0.95));
     await run("实地只读核验，测试通过");
     expect(getItem(db, ticket)!.stage).toBe("done");
+    expect(ledgerText()).toContain("按转述记");
+  });
+
+  // 交给这一轮的一条消息不是核验：只有它、理由又说自己核验过时，照旧问一次快模型，按转述记。
+  it("does not take a message in the input for an own check", async () => {
+    const evidence = new TurnEvidence();
+    evidence.note("message", "nina（slack，slack:D0NINA:main）");
+    const { db, ticket, run, ledgerText } = accept(evidence, smart(0.95));
+    await run("实地只读核验，测试通过");
+    expect(getItem(db, ticket)!.stage).toBe("done");
+    expect(ledgerText()).toContain("message nina（slack，slack:D0NINA:main）");
     expect(ledgerText()).toContain("按转述记");
   });
 

@@ -187,7 +187,7 @@ import { createSkillTools, type UserSkillInfo } from "./skill-tools.js";
 import { applyLeadToolExposure } from "./tool-exposure.js";
 import { createDesignTools } from "./design-tools.js";
 import { createChannelCardTools, externalMessageOf, type LeadChannelCards } from "./channel-tools.js";
-import { describeEvidence, type EvidenceItem } from "./credibility/evidence.js";
+import { describeEvidence, MESSAGE_EVIDENCE, type EvidenceItem } from "./credibility/evidence.js";
 import { judgeVerificationClaim, type VerificationClaim } from "./credibility/verification-claim.js";
 import { fallbackWithMessages, resolveChannelMessages, type ChannelMessageReference } from "./credibility/channel-message.js";
 import { fallbackWithQuotes, resolveSourceQuote, type SourceQuoteLocation } from "./credibility/source-quote.js";
@@ -310,7 +310,8 @@ async function decisionBasis(
   if (!deps.turnEvidence) return { payload: {}, line: "", note: "" };
   const items = deps.turnEvidence();
   let check: VerificationClaim | null = null;
-  if (items.length === 0) check = await judgeVerificationClaim(reason, deps.smartModel);
+  // 随输入交来的消息是 Lead 看到的话，不是它自己做的核验：只有消息时照样问一次。
+  if (items.every((item) => item.tool === MESSAGE_EVIDENCE)) check = await judgeVerificationClaim(reason, deps.smartModel);
   const unsupported = check?.by === "smart_model" && check.claims;
   const summary = unsupported ? `${describeEvidence(items)}；理由里说核验过，那是之前的轮次或别人做的，这一条按转述记` : describeEvidence(items);
   return {
