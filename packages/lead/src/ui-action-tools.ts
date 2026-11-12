@@ -275,21 +275,35 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
         + "转告用户口述的事时，位置、名字、数字、步骤照用户说的写；你认为用户说错了，先在会话里指出、问一句，确认后再发。"
         + "这条消息做的是另一个对话里那张卡上的事（例如用户让你照卡上的话转告别人）时，card_id 填那张卡：卡结束，在对方的消息上回 ✅。"
         + "写法：像平时聊天。一件事的第一条消息称呼对方一次；接着说同一件事、或者对方刚和用户说过话时，不加称呼。"
-        + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就用 mark_channel_card_handled 结束它。",
+        + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就用 mark_channel_card_handled 结束它。"
+        + "替一张工单问人（child 的决定请求你答不了，去问工单里写的对接人）时，填 ticket_id 和 decision_id：系统在工单上记一笔，"
+        + "对方在这个对话里回复时叫醒你，带着工单和你问的话，不用你设跟进。一个问题最多发 6 条，从第一次问起最长等 1 天；"
+        + "到了会被拒绝，照拒绝里写的把摘要交给用户。问人发私信，或者发在已有的线程里：发在频道的主时间线上时，回复在新的线程里，系统对不上。",
       parameters: Type.Object({
         conversation,
         text: Type.String({ minLength: 1, maxLength: 4000 }),
         words: Type.Union([Type.Literal("user"), Type.Literal("assistant")]),
         card_id: Type.Optional(Type.Integer({ minimum: 1, description: "这条消息做的是哪张卡上的事（卡在另一个对话里时填）" })),
+        ticket_id: Type.Optional(Type.Integer({ minimum: 1, description: "替哪张工单问的（对外提问时填）" })),
+        decision_id: Type.Optional(Type.Integer({ minimum: 1, description: "问的是这张工单上的哪个决定请求（和 ticket_id 一起填）" })),
         reason,
       }),
-      execute: async (_id, params: { conversation: string; text: string; words: "user" | "assistant"; card_id?: number; reason: string }) =>
-        performLeadUiAction(deps, {
+      execute: async (_id, params: {
+        conversation: string; text: string; words: "user" | "assistant"; card_id?: number; ticket_id?: number; decision_id?: number; reason: string;
+      }) => {
+        if (params.decision_id !== undefined && params.ticket_id === undefined) throw new Error("填了 decision_id 就要一起填 ticket_id");
+        return performLeadUiAction(deps, {
           target: { type: "channel_conversation", id: params.conversation },
           action: "send_message",
-          input: { text: params.text, words: params.words, ...(params.card_id !== undefined ? { cardId: params.card_id } : {}) },
+          input: {
+            text: params.text, words: params.words, ...(params.card_id !== undefined ? { cardId: params.card_id } : {}),
+            ...(params.ticket_id !== undefined
+              ? { question: { ticketId: params.ticket_id, ...(params.decision_id !== undefined ? { decisionId: params.decision_id } : {}) } }
+              : {}),
+          },
           reason: params.reason,
-        }),
+        });
+      },
     }),
     defineTool({
       name: "react_channel_message",

@@ -2,6 +2,9 @@
 //
 // available 是「现在能不能做」的唯一判断：list_actions 读它，runUiAction 执行前也查它。
 // run 调已有的实现（daemon 的 RuntimeSettings.update、store 的 revokeBinding……），不另写一份。
+import {
+  assertQuestionAllowed, OutboundQuestionRefused, recordQuestionSent, type RecordedQuestion,
+} from "../coordinator/outbound-questions.js";
 import type { Approval, DecisionRequest, Item, RuntimeDisabledBy, RuntimeId, RuntimeSwitchBy, Workspace } from "@pi-lead-child/core";
 import {
   KERNEL_RUNTIME_IDS, MILESTONE_KIND_LABELS, REMINDER_SNOOZE_MS, channelConfidenceProblems,
@@ -500,17 +503,46 @@ const CHANNEL_CONVERSATION_ACTIONS = {
     available: (target, env) => (channelMessages(env).canSend(target.source)
       ? AVAILABLE
       : unavailable(channelMessages(env).blockedReason?.(target.source) ?? `来源 ${target.source} 现在不能直接发消息。`)),
-    run: (run) => {
+    run: async (run): Promise<ChannelSentMessage & { question?: RecordedQuestion }> => {
       const input = run.input as UiActionInputOf<"channel_conversation", "send_message">;
-      return channelMessages(run.env).send(run.target.id, {
+      // 对外提问：替一张工单问人（coordinator 的 outbound-questions.ts）。发之前先查上限，超了就不发。
+      if (input.question) {
+        try {
+          assertQuestionAllowed(run.db, input.question, run.env.now);
+        } catch (error) {
+          if (error instanceof OutboundQuestionRefused) throw new UiActionError(error.code, error.message);
+          throw error;
+        }
+      }
+      const sent = await channelMessages(run.env).send(run.target.id, {
         text: input.text, words: input.words, by: conversationBy(run), forUser: forUserOf(run), seenBefore: run.turnStartedAt,
         ...(input.cardId !== undefined ? { cardId: input.cardId } : {}),
         ...(input.event !== undefined ? { event: input.event } : {}),
         ...(input.refusal ? { refusal: true } : {}),
       });
+      // 变成草稿交给用户的没有发出去：不登记。
+      if (!input.question || sent.outcome === "drafted") return sent;
+      const question = recordQuestionSent(run.db, {
+        question: input.question, conversation: run.target.id, objectKey: sent.objectKey, text: input.text,
+        actor: run.by.actor === "user" ? "user" : "lead", now: run.env.now,
+      });
+      return { ...sent, question };
     },
     // 发到哪个对话、发了什么（发出去的是用户的话或者你写的话，不是对方的原文）、结束了哪张卡，和还在等用户的卡（自查）。
-    forLead: (run, result) => ({ sent: result, openCards: channelMessages(run.env).openCards(), next: SELF_CHECK }),
+    // 替工单问的：第几条、等到什么时候。回复来了系统叫醒你，不用设跟进去查。
+    forLead: (run, result) => {
+      const { question, ...sent } = result as ChannelSentMessage & { question?: RecordedQuestion };
+      return {
+        sent, openCards: channelMessages(run.env).openCards(), next: SELF_CHECK,
+        ...(question ? {
+          question: {
+            ticketId: question.ticketId, decisionId: question.decisionId, round: question.round, maxMessages: question.maxMessages,
+            waitUntil: question.waitUntil,
+            note: "系统已经登记等待：对方在这个对话里回复时叫醒你，带着工单和你问的话。到期还没有回复也叫醒你。不用另设跟进。",
+          },
+        } : {}),
+      };
+    },
     detail: (run, result) => ({
       conversation: run.target.id, objectKey: (result as ChannelSentMessage).objectKey,
       words: (run.input as { words: string }).words, card: (result as ChannelSentMessage).card,

@@ -177,6 +177,12 @@ export const UI_ACTION_INPUT_SCHEMAS = {
       cardId: Type.Optional(Type.Integer({ minimum: 1 })),
       event: Type.Optional(Type.Integer({ minimum: 1 })),
       refusal: Type.Optional(Type.Boolean()),
+      // 对外提问（2026-11-12）：这条消息是替哪张工单的哪个决定请求问的。带着它时，发出去以后系统在回复会出现的对话上登记等待，
+      // 在工单上记一笔；一个问题最多发 6 条、从第一次问起最长等 1 天（engine 的 coordinator/outbound-questions.ts）。
+      question: Type.Optional(StrictObject({
+        ticketId: Type.Integer({ minimum: 1 }),
+        decisionId: Type.Optional(Type.Integer({ minimum: 1 })),
+      })),
     }),
     // 在一条消息上回表情：缺省是对方在这个对话里最后一条消息，seq 指定一条（事件编号，read_channel_conversation 的消息上有）。
     // remove：撤掉自己回的这个表情（例如回错了，换一个）。

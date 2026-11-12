@@ -7,7 +7,7 @@
 //   · expireLeadWaits：daemon 每一拍调用。到了超时的等待记成 expired，写一条 lead.wait_expired（tell 级）交给 Lead。
 //   · purgeLeadWaits：了结超过 7 天的行删掉，表不会一直涨。
 import {
-  LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, USER_REQUEST_EXPIRED_KIND,
+  LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, USER_REQUEST_EXPIRED_KIND, leadWaitEndedByMessage,
   eventEndsLeadWait, isUserActionRequest, leadWaitKeysOf, type LeadWaitState, type UserActionRequest,
 } from "@pi-lead-child/protocol";
 import type { Db } from "./db.js";
@@ -146,6 +146,15 @@ export function cancelLeadWait(db: Db, id: number, args: { reason: string; now?:
 }
 
 /** 一条事件的一句话说明（了结等待时告诉 Lead 发生了什么）。 */
+function messageSender(event: Pick<EventRecord, "payload">): string | null {
+  const sender = event.payload.sender;
+  const name = sender && typeof sender === "object" ? (sender as { name?: unknown }).name : null;
+  return typeof name === "string" && name.trim() ? name.trim() : null;
+}
+
+// 对外提问的回复在叫醒里最多留多少字。
+const MESSAGE_SUMMARY_CHARS = 1_200;
+
 export function leadWaitTriggerSummary(event: Pick<EventRecord, "kind" | "payload">): string {
   const payload = event.payload;
   const text = (value: unknown) => (typeof value === "string" && value.trim() ? value.trim() : null);
@@ -153,6 +162,11 @@ export function leadWaitTriggerSummary(event: Pick<EventRecord, "kind" | "payloa
     return `stage ${String(payload.from)} → ${String(payload.to)}（${String(payload.actor ?? "")}${text(payload.reason) ? `：${text(payload.reason)}` : ""}）`;
   }
   if (event.kind === "user.message") return `用户发来一条消息：${clipEventText(String(payload.text ?? ""), 160)}`;
+  // 通道的对话里别人发来的消息（对外提问的回复）：是谁、原话。原话留得长一些，Lead 要靠它回答问题。
+  if (leadWaitEndedByMessage(event)) {
+    const sender = payload.sender && typeof payload.sender === "object" ? text((payload.sender as { name?: unknown }).name) : null;
+    return `${sender ?? "对方"}说：${clipEventText(String(payload.text ?? ""), MESSAGE_SUMMARY_CHARS)}`;
+  }
   if (event.kind === "event.acknowledged") return `用户确认了事件 #${String(payload.acknowledgedSeq)}（${String(payload.acknowledgedKind)}）`;
   return clipEventText(text(payload.summary) ?? text(payload.title) ?? text(payload.note) ?? event.kind, 300);
 }
@@ -201,6 +215,10 @@ export function settleLeadWaits(db: Db, event: EventRecord): number {
         ...waitPayload(wait),
         trigger: { seq: event.seq, kind: event.kind, entityKey: event.entityKey, summary },
         coveredBySeq: covered ?? null,
+        // 对话里别人发来的消息：摘要是别人写的话，这条事件算外部内容。
+        ...(leadWaitEndedByMessage(event)
+          ? { external: true as const, source: event.source, ...(messageSender(event) ? { sender: messageSender(event)! } : {}) }
+          : {}),
       },
     });
   }

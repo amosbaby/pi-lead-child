@@ -11,6 +11,8 @@ export * from "./coordinator/run-choice.js";
 export * from "./coordinator/reviewer-choice.js";
 export * from "./coordinator/change-reviewer.js";
 export * from "./coordinator/interventions.js";
+export * from "./coordinator/outbound-questions.js";
+export * from "./coordinator/parked-requests.js";
 export * from "./coordinator/learning.js";
 export * from "./coordinator/review-authority.js";
 export { compareReviewFingerprints, type ReviewFingerprintComparison } from "./coordinator/workspace-integrity.js";

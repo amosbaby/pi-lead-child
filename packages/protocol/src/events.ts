@@ -96,8 +96,10 @@ export interface EventKindDefinition {
   // 异常类：级别是 tell 或 interrupt 时必须带 root_cause（spec D1）。kind 以 .failed 结尾的不论级别都要带。
   anomaly?: boolean;
   // 这种事件能不能了结 Lead 的等待（2026-10-19，lead-waits.ts）：user_action 是用户的一次操作，
-  // state_change 是对象的状态变了。不写的（Run 的进展、工具调用记录、Lead 自己的事）不叫醒在等的 Lead。
-  waitSignal?: "user_action" | "state_change";
+  // state_change 是对象的状态变了，message 是通道的对话里别人发来了一条消息（2026-11-12，对外提问：Lead 替工单问了人，
+  // 等待挂在那个对话上；payload.role 是 message 时才算，用户本人的话和系统发出去的回显不算）。
+  // 不写的（Run 的进展、工具调用记录、Lead 自己的事）不叫醒在等的 Lead。
+  waitSignal?: "user_action" | "state_change" | "message";
   description: string;
 }
 

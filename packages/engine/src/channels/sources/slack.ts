@@ -1719,8 +1719,10 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     conversationName: (payload) => (isString(payload.channelName) ? `#${payload.channelName}` : isString(payload.channelId) ? payload.channelId : "频道"),
   };
 
-  const kind = (name: string, description: string) => ({
+  // reply：这种事件是别人发来的消息，能了结挂在这个对话上的等待（对外提问，protocol 的 EventKindDefinition.waitSignal）。
+  const kind = (name: string, description: string, options: { reply?: boolean } = {}) => ({
     kind: name, sources: [SLACK_SOURCE], payload: channelInboundPayload(SlackFields), description,
+    ...(options.reply ? { waitSignal: "message" as const } : {}),
   });
 
   return {
@@ -1742,14 +1744,14 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     writesBlocked,
     connection,
     eventKinds: [
-      kind(SLACK_EVENT_KINDS.dm, "别人在 Slack 里给用户发了私信（或者在用户在的群聊里发了消息）。"),
-      kind(SLACK_EVENT_KINDS.mention, "别人在 Slack 的频道里提到了用户。"),
+      kind(SLACK_EVENT_KINDS.dm, "别人在 Slack 里给用户发了私信（或者在用户在的群聊里发了消息）。", { reply: true }),
+      kind(SLACK_EVENT_KINDS.mention, "别人在 Slack 的频道里提到了用户。", { reply: true }),
       kind(SLACK_EVENT_KINDS.selfReply, "用户本人在 Slack 里说了话（echo=true 时是系统替用户发的回复被推回来）。对应的卡「别处已处理」。"),
-      kind(SLACK_EVENT_KINDS.thread, "别人在用户的 Slack 线程（已经有道，或者系统替用户发的消息起头的 thread）里发了后续消息，没有提到用户。"),
+      kind(SLACK_EVENT_KINDS.thread, "别人在用户的 Slack 线程（已经有道，或者系统替用户发的消息起头的 thread）里发了后续消息，没有提到用户。", { reply: true }),
       kind(SLACK_EVENT_KINDS.edited, "别人改了 Slack 道里（或者订阅频道的线程里）的一条消息（text 是改后的文字，ts 是那条消息的）。只更新没结束的卡。"),
       kind(SLACK_EVENT_KINDS.deleted, "别人删了 Slack 道里（或者订阅频道的线程里）的一条消息（不带原文，ts 是那条消息的）。只更新没结束的卡。"),
       kind(SLACK_EVENT_KINDS.channel, "用户订阅的 Slack 频道（14 天内有过用户的对话）里，别人没有提到用户的普通消息。只记录。"),
-      kind(SLACK_EVENT_KINDS.followed, "用户关注的 Slack thread（用户在里面发起或者回复过，或者系统替用户回复过）里，别人没有提到用户的消息。只记录，沉淀进记忆。"),
+      kind(SLACK_EVENT_KINDS.followed, "用户关注的 Slack thread（用户在里面发起或者回复过，或者系统替用户回复过）里，别人没有提到用户的消息。只记录，沉淀进记忆。", { reply: true }),
     ],
     standingOrders: SEEDS,
     memory: memorySpec,

@@ -76,6 +76,10 @@ export const decisionLabelMessages = defineMessages({
       acceptance_criteria_edited: 'Changed the acceptance criteria',
       criterion_confirmed: 'Confirmed an acceptance criterion',
       criterion_unconfirmed: 'Removed the confirmation of an acceptance criterion',
+      // 等答复（2026-11-12）：停靠等待和对外提问
+      run_parked: 'The run ended and waits for an answer',
+      parked_run_resumed: 'The answer arrived',
+      question_sent: 'Asked someone for this ticket',
       // 关系与工作区
       link_ticket_relation: 'Linked tickets',
       relation_execution_gate_migrated: 'The start condition of the relation is migrated',
@@ -176,6 +180,10 @@ export const decisionLabelMessages = defineMessages({
       acceptance_criteria_edited: '改了验收标准',
       criterion_confirmed: '确认了一条验收标准',
       criterion_unconfirmed: '取消确认一条验收标准',
+      // 等答复（2026-11-12）：停靠等待和对外提问
+      run_parked: '这一轮结束了，在等答复',
+      parked_run_resumed: '等的答复到了',
+      question_sent: '替这张工单问了人',
       // 关系与工作区
       link_ticket_relation: '建立工单关系',
       relation_execution_gate_migrated: '关系的启动条件已迁移',

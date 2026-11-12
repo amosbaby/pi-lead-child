@@ -79,8 +79,15 @@ export const LEAD_WAIT_EVENT_KINDS: readonly EventKindDefinition[] = [
     kind: LEAD_WAIT_SATISFIED_KIND,
     sources: ["system"],
     // coveredBySeq：已经有一条要交给 Lead 的事件在说这件事（系统自己的通路），这一条只记一笔（record 级）。
-    payload: Type.Object({ ...WaitPayload, trigger: TriggerPayload, coveredBySeq: Nullable(Id) }),
-    description: "Lead 在等的对象上发生了用户的操作或状态变化：等待了结，带着 Lead 的备注和发生了什么。",
+    // external、source（2026-11-12，对外提问）：了结它的是通道的对话里别人发来的消息时，trigger.summary 里是别人写的话。
+    // 这条事件带外部标记和来源名，交给 Lead 的那一轮算外部的一轮（daemon 的 isExternalEvent）。
+    payload: Type.Object({
+      ...WaitPayload, trigger: TriggerPayload, coveredBySeq: Nullable(Id),
+      external: Type.Optional(Type.Literal(true)), source: Type.Optional(Type.String({ minLength: 1 })),
+      // 发消息的人在来源里的名字（给 Lead 看是不是该回答的那个人）。
+      sender: Type.Optional(Type.String({ minLength: 1 })),
+    }),
+    description: "Lead 在等的对象上发生了用户的操作、状态变化，或者对话里来了别人的消息：等待了结，带着 Lead 的备注和发生了什么。",
   },
   {
     kind: LEAD_WAIT_EXPIRED_KIND,
@@ -150,8 +157,11 @@ const positiveId = (value: unknown): number | null =>
  * （Lead 自己改的状态不是用户的下一步）。
  */
 export function eventEndsLeadWait(event: LeadWaitEventLike): boolean {
-  if (!eventKindDefinition(event.kind)?.waitSignal) return false;
+  const signal = eventKindDefinition(event.kind)?.waitSignal;
+  if (!signal) return false;
   if (event.source === "lead") return false;
+  // 对话里的消息：只有别人发来的算（engine 的 channels/payload.ts 的 role）。
+  if (signal === "message" && event.payload.role !== "message") return false;
   if (event.kind === "stage.changed" && event.payload.actor === "lead") return false;
   return true;
 }
@@ -170,6 +180,11 @@ export function leadWaitKeysOf(event: Pick<LeadWaitEventLike, "entityKey" | "pay
     if (ticketId !== null) keys.add(`ticket:${ticketId}`);
   }
   return [...keys];
+}
+
+/** 了结等待的是不是对话里别人发来的消息（waitSignal=message）：它的摘要是别人写的话。 */
+export function leadWaitEndedByMessage(event: Pick<LeadWaitEventLike, "kind">): boolean {
+  return eventKindDefinition(event.kind)?.waitSignal === "message";
 }
 
 /** Lead 声明的对象键合不合格：返回问题，空字符串表示可以用。 */
