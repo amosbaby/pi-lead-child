@@ -131,6 +131,17 @@ describe("changing a signal source", () => {
     expect(getSignalSource(db, "work-mail")?.command).toBe("node tidy2.mjs");
   });
 
+  // 2026-11-12 真模型评估时发现：把间隔从 5 分钟改成 1 分钟，下一次运行还按旧的 5 分钟排着。
+  it("reschedules the next run from the last run when the interval changes", async () => {
+    recordSignalSourceRun(db, "work-mail", { ok: true, emitted: 1 }, NOW);
+    expect(getSignalSource(db, "work-mail")?.nextRunAt).toBe(new Date(NOW.getTime() + 300_000).toISOString());
+    await act(one, "update", { everySeconds: 60 });
+    expect(getSignalSource(db, "work-mail")).toMatchObject({ everySeconds: 60, nextRunAt: new Date(NOW.getTime() + 60_000).toISOString() });
+    // 间隔没变时不动。
+    await act(one, "update", { everySeconds: 60, label: "Mail" });
+    expect(getSignalSource(db, "work-mail")?.nextRunAt).toBe(new Date(NOW.getTime() + 60_000).toISOString());
+  });
+
   it("refuses an update with nothing in it", async () => {
     await expect(act(one, "update", {})).rejects.toMatchObject({ code: "invalid_input" });
   });

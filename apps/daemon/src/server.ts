@@ -5790,6 +5790,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 每条新内容的级别由便宜的模型按用户的规则定。操作层的试跑和「马上跑一次」用同一个执行器。
   const signalDeps = {
     connections: {
+      problem: (connection: string) => {
+        const item = connections.list().find((entry) => entry.key === connection);
+        if (!item) return "没有这个连接（用 list_connections 看有哪些）";
+        return item.state === "connected" ? null : item.problem?.message ?? `连接的状态是 ${item.state}`;
+      },
       isReadOnly: (connection: string, tool: string) => connections.isReadOnlyTool(connection, tool),
       call: async (connection: string, tool: string, args: Record<string, unknown>) => {
         const result = await connections.callTool(connection, tool, args, { role: "lead" });

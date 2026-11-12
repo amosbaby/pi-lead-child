@@ -56,6 +56,8 @@ export function sandboxSignalCommand(operations: Pick<BashOperations, "exec">, c
 
 /** 调连接的工具（daemon 里是连接中心）。 */
 export interface SignalConnectionCalls {
+  // 这个连接现在用不了的原因（没有这个连接、授权失效、暂时连不上）。能用时为 null。不给时不查。
+  problem?(connection: string): string | null;
   isReadOnly(connection: string, tool: string): boolean;
   call(connection: string, tool: string, args: Record<string, unknown>): Promise<{ text: string; isError: boolean }>;
 }
@@ -132,6 +134,9 @@ export async function collectSignalItems(
 ): Promise<SignalCollectResult> {
   const results: Array<{ connection: string; tool: string; text: string; data?: unknown }> = [];
   for (const fetch of source.fetch) {
+    // 连接现在用不了（授权失效、断开了）：写明原因。不先查的话，下面会把它说成「不是只读工具」。
+    const problem = deps.connections.problem?.(fetch.connection) ?? null;
+    if (problem) return { ok: false, error: `${fetch.connection} 现在用不了：${clip(problem, 300)}` };
     // 只读的才调：信号源是定时自己跑的，不能往外部账号里写。
     if (!deps.connections.isReadOnly(fetch.connection, fetch.tool)) {
       return { ok: false, error: `${fetch.connection} 的 ${fetch.tool} 不是只读工具（或者连接、工具不存在）：信号源只能调只读工具` };

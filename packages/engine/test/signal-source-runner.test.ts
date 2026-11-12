@@ -20,6 +20,7 @@ let calls: Array<[string, string, Record<string, unknown>]>;
 let commands: string[];
 let command: (input: { results: Array<{ data?: unknown }> }) => SignalCommandResult | Error;
 let grade: SignalGrader | undefined;
+let connectionProblem: string | null;
 
 interface Mail { id: string; subject: string; from: string; body: string }
 const mail = (id: string, subject = `subject ${id}`, from = "nina@example.com"): Mail => ({ id, subject, from, body: `body of ${id}` });
@@ -36,6 +37,7 @@ const tidy = (input: { results: Array<{ data?: unknown }> }): SignalCommandResul
 
 const runner = () => createSignalSourceRunner(db, {
   connections: {
+    problem: () => connectionProblem,
     isReadOnly: () => readOnly,
     call: async (connection, tool, args) => {
       calls.push([connection, tool, args]);
@@ -75,6 +77,7 @@ beforeEach(() => {
   commands = [];
   command = tidy;
   grade = undefined;
+  connectionProblem = null;
   inbox(mail("m1"), mail("m2"));
 });
 
@@ -180,6 +183,18 @@ describe("a signal source that fails", () => {
     expect(commands).toEqual([]);
     expect(getSignalSource(db, "work-mail")).toMatchObject({ lastStatus: "error", consecutiveErrors: 1 });
     expect(getSignalSource(db, "work-mail")?.lastError).toContain("只读");
+  });
+
+  // 2026-11-12 真模型评估时发现：连接的授权失效以后，原因写成了「不是只读工具」，Lead 要自己猜出是授权的事。
+  it("says the connection cannot be used now, with its reason, instead of calling the tool not read-only", async () => {
+    create();
+    connectionProblem = "授权失效了，要用户重新授权";
+    readOnly = false;
+    await tick();
+    expect(calls).toEqual([]);
+    const error = getSignalSource(db, "work-mail")?.lastError ?? "";
+    expect(error).toContain("workspace 现在用不了：授权失效了，要用户重新授权");
+    expect(error).not.toContain("只读");
   });
 
   it.each([

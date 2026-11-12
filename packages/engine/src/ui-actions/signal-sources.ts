@@ -150,9 +150,13 @@ export const SIGNAL_SOURCE_ACTIONS = {
       if (reshaped) {
         await tryOut(run.env, { name: run.target.name, fetch: input.fetch ?? run.target.fetch, command: input.command ?? run.target.command });
       }
+      // 间隔变了：下一次运行从上一次运行的时刻按新的间隔重排（没跑过的马上到点）。不改时下一次还按旧的间隔排着。
+      const respaced = input.everySeconds !== undefined && input.everySeconds !== run.target.everySeconds;
+      const lastRun = run.target.lastRunAt ? Date.parse(run.target.lastRunAt) : null;
       return changed(run, {
         label: input.label, fetch: input.fetch, command: input.command, everySeconds: input.everySeconds,
         rules: input.rules, policy: input.policy, actForUser: input.actForUser,
+        ...(respaced ? { nextRunAt: new Date(lastRun === null ? run.env.now.getTime() : lastRun + input.everySeconds! * 1000).toISOString() } : {}),
         ...(reshaped ? { baselinedAt: null, nextRunAt: run.env.now.toISOString() } : {}),
       });
     },
