@@ -42,10 +42,24 @@ export interface LeadTurnOrigin {
   externalBy?: readonly ExternalContentSource[];
   // 交给这一轮的外部事件（消息事件、外部来源的定时器到点）的编号。daemon 记，Lead 改不了。
   externalEvents?: readonly number[];
-  // 这一轮读到了第三方写的文字：外部来源工单（external_origin=1）的标题或正文（工单工具读到的），或者连接只读工具的结果
-  // （结果返回以后才记）。只给第三方触发的 Jira 写入闸门用（jiraWriteThirdParty，用户 2026-11-12），规则 1–4 不看它。
-  // daemon 每一轮开始时清掉，一轮之内只加不减。
-  thirdPartyRead?: boolean;
+  // 下面三个只给第三方触发的 Jira 写入闸门用（jiraWriteThirdParty，用户 2026-11-12，ruling R26），规则 1–4 不看它们。
+  // daemon 每一轮开始时清掉，一轮之内只加不减（withThirdPartyRead）。
+  // connectionRead：读到了连接只读工具的结果（结果返回以后才记），或者用 read_connection_result 重读了一段。
+  connectionRead?: boolean;
+  // externalTicketSeen：外部来源工单（external_origin=1）的标题或正文到了 Lead 面前：工单工具、当前局面、收件箱。
+  externalTicketSeen?: boolean;
+  // externalTicketOpened：Lead 自己用 get_ticket 打开了一张外部来源的工单（也算 externalTicketSeen）。
+  externalTicketOpened?: boolean;
+}
+
+/** 这一轮读到了哪一种第三方的文字（LeadDeps.markThirdPartyRead）。 */
+export type ThirdPartyRead = "connection" | "external_ticket_seen" | "external_ticket_opened";
+
+/** 记下这一轮读到的第三方文字（只加不减）。 */
+export function withThirdPartyRead(origin: LeadTurnOrigin, what: ThirdPartyRead): LeadTurnOrigin {
+  if (what === "connection") return { ...origin, connectionRead: true };
+  if (what === "external_ticket_seen") return { ...origin, externalTicketSeen: true };
+  return { ...origin, externalTicketSeen: true, externalTicketOpened: true };
 }
 
 export interface TurnOriginDeps {
@@ -129,27 +143,35 @@ export function withExternalContent(origin: LeadTurnOrigin, source: ExternalCont
 }
 
 // 连接工具的这一笔：daemon 在 call_connection_tool、read_connection_result 开始时就把这一轮记成外部的一轮。Jira 写入闸门不看
-// 这一笔，否则每一次 Jira 写入都被它自己标成第三方触发；连接读到的内容在结果返回以后记进 thirdPartyRead（connection-tools.ts）。
+// 这一笔，否则每一次 Jira 写入都被它自己标成第三方触发；连接读到的内容在结果返回以后记进 connectionRead（connection-tools.ts）。
 const CONNECTION_RESULT_TOOLS: ReadonlySet<string> = new Set(["call_connection_tool", "read_connection_result"]);
 
 /**
  * 第三方触发的 Jira 写入要用户确认（用户 2026-11-12：「jira票的写入如果是第三方则需要我确认在创建或更改」，
- * .scratch/external-worker-hub/spec.md §6）。这一轮算第三方触发，当：
- *   - 外部消息叫醒了这一轮，或者这一轮读过外部内容（external；连接工具开始时给自己记的那一笔不算，见上）；
- *   - 这一轮读到了第三方写的文字（thirdPartyRead：外部来源工单的标题或正文、连接只读工具的结果）；
- *   - 这一轮是为外部来源的工单（external_origin=1）开的（channel_turns.item_id）。
- * 只给 Atlassian 的写工具用（连接中心的 thirdParty），不改规则 1–4。用户本人的一轮也一样：读过第三方的文字就要确认。
+ * .scratch/external-worker-hub/spec.md §6；ruling R26 定了用户本人的一轮怎样算）。
+ *   - 不论哪一轮：这一轮是为外部来源的工单（external_origin=1）开的（channel_turns.item_id），或者 Lead 这一轮用 get_ticket
+ *     打开了一张外部来源的工单（externalTicketOpened）→ 要确认。
+ *   - 用户本人正在说话的一轮（isLiveUserTurn，和改规则的例外同一个判断；插进了外部消息的一轮不算）→ 别的都不算，直接写：
+ *     当前局面、列表里看到的外部工单标题、连接查到的内容、读过的通道对话都不拦（R24）。
+ *   - 别的一轮（定时器，包括用户设的跟进到点、心跳、child 结束、外部消息叫醒的）→ 外部消息叫醒、读过外部内容
+ *     （external；连接工具开始时给自己记的那一笔不算，见上）、connectionRead、externalTicketSeen 任何一个成立就要确认。
+ * 只给 Atlassian 的写工具用（连接中心的 thirdParty），不改规则 1–4。
  */
 export function jiraWriteThirdParty(deps: TurnOriginDeps): boolean {
   const origin = turnOriginOf(deps);
-  if (origin.thirdPartyRead) return true;
-  if (origin.external) {
-    const sources = origin.externalBy ?? [];
-    const counts = (source: ExternalContentSource) => source.via === "message"
-      || (EXTERNAL_TEXT_TOOLS.has(source.tool) && !CONNECTION_RESULT_TOOLS.has(source.tool));
-    // external 而没有记来源（daemon 直接标的）：按第三方算。
-    if (!sources.length || sources.some(counts)) return true;
-  }
+  if (origin.externalTicketOpened || turnTicketIsExternal(deps)) return true;
+  const sources = origin.externalBy ?? [];
+  const injectedMessage = sources.some((source) => source.via === "message");
+  if (!injectedMessage && deps.db && isLiveUserTurn(deps.db, authorityTurnId(deps), "tickets:create")) return false;
+  if (origin.connectionRead || origin.externalTicketSeen) return true;
+  if (!origin.external) return false;
+  // external 而没有记来源（daemon 直接标的）：按第三方算。
+  return !sources.length || sources.some((source) => source.via === "message"
+    || (EXTERNAL_TEXT_TOOLS.has(source.tool) && !CONNECTION_RESULT_TOOLS.has(source.tool)));
+}
+
+// 这一轮是为外部来源的工单开的（channel_turns.item_id）。
+function turnTicketIsExternal(deps: TurnOriginDeps): boolean {
   const current = deps.currentTurnId?.() ?? null;
   if (!deps.db || !current) return false;
   return isExternalOrigin(deps.db, getTurn(deps.db, current)?.item_id ?? null);

@@ -25,7 +25,9 @@ import {
   CONNECTION_REMOVED_EVENT,
   CONNECTION_REQUESTED_EVENT,
   connectionRequestPending,
+  getRun,
   getRunGrant,
+  isExternalOrigin,
   recordRunToolCall,
   settleRunToolCall,
   type RunGrantRecord,
@@ -400,6 +402,11 @@ function confirmsThirdPartyWrites(row: Pick<ConnectionRow, "provider" | "server_
     return false;
   }
 }
+
+// ruling R25：执行外部来源工单的 Run（子 agent、执行者）不能直接写 Jira。它没有用户在场，也拿不到确认卡：拒绝，
+// 告诉它把要写的内容交回，由 Lead 或用户经确认卡去写。
+const EXTERNAL_TICKET_JIRA_WRITE_REFUSAL = "这张工单来自外部来源（external_origin），执行它的 agent 不能直接写 Jira 或 Confluence。"
+  + "用 hand_back 把工单交回，写明你要写什么（连接、工具、参数、为什么），由用户在确认卡上确认以后再写。";
 
 export class ConnectionHub {
   readonly #db: Db;
@@ -1553,6 +1560,11 @@ export class ConnectionHub {
     return row.write_policy === "confirm" || (thirdParty && confirmsThirdPartyWrites(row));
   }
 
+  // 这个 Run 执行的工单来自外部来源，连接又是 Atlassian（ruling R25）。
+  #externalTicketJiraRun(row: ConnectionRow, itemId: number | null | undefined): boolean {
+    return confirmsThirdPartyWrites(row) && isExternalOrigin(this.#db, itemId);
+  }
+
   #assertRole(row: ConnectionRow, key: string, role: ConnectionRole): void {
     if (!connectionRoles(row).includes(role)) {
       throw new ConnectionError("forbidden", `${row.label} 的设置不允许${role === "lead" ? " Lead" : role === "executor" ? "执行工单的 agent" : "评审 agent"}使用`, key);
@@ -1580,6 +1592,9 @@ export class ConnectionHub {
     if (!tool) throw new ConnectionError("unknown_tool", `${row.label} 没有工具 ${toolName}。先用 search_connection_tools 查一下`, key);
     if (!this.#toolVisible(row, tool, options.role)) {
       throw new ConnectionError("forbidden", `${toolName} 会写入 ${row.label}，这个角色不能用它`, key);
+    }
+    if (!tool.readOnly && options.runId && this.#externalTicketJiraRun(row, getRun(this.#db, options.runId)?.item_id)) {
+      throw new ConnectionError("forbidden", `${toolName} 没有执行：${EXTERNAL_TICKET_JIRA_WRITE_REFUSAL}`, key, EXTERNAL_TICKET_JIRA_WRITE_REFUSAL);
     }
     if (!options.confirmed && this.#writeNeedsConfirmation(row, tool, options.thirdParty === true)) {
       const why = row.write_policy === "confirm" ? "" : "这次是第三方触发的，";
@@ -1650,6 +1665,7 @@ export class ConnectionHub {
     const guard = this.#guards.get(realKey) ?? this.#guards.get(key);
     const target = guard?.target?.(toolName, args) ?? null;
     const facts = { ...args, ...(guard?.facts?.(toolName, args) ?? {}) };
+    if (!tool.readOnly && this.#externalTicketJiraRun(row, itemId)) refuse(access, EXTERNAL_TICKET_JIRA_WRITE_REFUSAL, target);
     const check = checkGrantCall(grant, { connection: realKey, aliases: [key, ...this.#aliasesOf(row)], tool: toolName, readOnly: tool.readOnly, facts });
     if (!check.ok) refuse(access, check.reason, target);
     const rule = (check as Extract<typeof check, { ok: true }>).rule;

@@ -281,6 +281,9 @@ export class LeadInput {
   // 上一次成功的一轮交给 Lead 的「在进行的工单、未解决的问题、等用户决定的事」。下一份和它一样时只写一行「没有变化」。
   // 上下文压缩以后（forgetSentSituation）、daemon 重启以后不知道 Lead 还记得什么，整段再给一次。
   private lastSentStatic: string | null = null;
+  // 上一份当前局面里写了标题的工单（在进行的、有问题的、等用户的）。daemon 据此判断这一轮有没有读到外部来源工单的标题
+  // （第三方触发的 Jira 写入，ruling R26）。「没有变化」只写一行时也算：标题已经在 Lead 的上下文里。
+  private situationTickets: number[] = [];
   private afterCache: {
     cursor: number; ranges: SeqRange[]; head: number; at: number; events: EventRecord[]; unread: number;
   } | null = null;
@@ -584,6 +587,11 @@ export class LeadInput {
    * 列出和计数过的变化记在这一轮上，这一轮成功以后算处理完。「在进行的工单、未解决的问题、等用户决定的事」
    * 和上一份一样时只写一行，不重复放。
    */
+  /** 上一份当前局面里写了标题的工单编号。 */
+  situationTicketIds(): readonly number[] {
+    return this.situationTickets;
+  }
+
   renderSituation(context: SituationContext): string {
     const db = this.db;
     const cache = new Map<number, InboxRow | null>();
@@ -652,6 +660,7 @@ export class LeadInput {
     const tickets = this.options.tickets?.() ?? [];
     const open_ = tickets.filter((ticket) => ticket.kind === "task" && !TERMINAL_STAGES.has(ticket.stage));
     const ticketLine = (ticket: TicketSummary) => `#${ticket.id}「${oneLine(ticket.displayTitle ?? ticket.title, 60)}」`;
+    const titled = new Set<number>();
     const problems = open_.flatMap((ticket) => [
       ...(ticket.attention.leadHandling ? [`${ticketLine(ticket)}：你正在处理它的异常，还没处理完`] : []),
       ...(ticket.attention.blockerCount > 0 ? [`${ticketLine(ticket)}：${ticket.attention.blockerCount} 个要用户处理的 blocker`] : []),
@@ -659,6 +668,7 @@ export class LeadInput {
     const waiting = [
       ...tickets.flatMap((ticket) => {
         const reason = ticketNeedsUser(ticket);
+        if (reason) titled.add(ticket.id);
         return reason ? [`${ticketLine(ticket)}：${ticketNeedsUserLabel(reason, "zh")}`] : [];
       }),
       ...pendingApprovals(db).map((approval) =>
@@ -677,6 +687,11 @@ export class LeadInput {
     const idle = open_.filter((ticket) => ticketIsIdle(ticket, now, idleMs));
     const idleIds = new Set(idle.map((ticket) => ticket.id));
     const active = open_.filter((ticket) => !idleIds.has(ticket.id));
+    for (const ticket of open_) {
+      if (ticket.attention.leadHandling || ticket.attention.blockerCount > 0) titled.add(ticket.id);
+    }
+    for (const ticket of active.slice(0, MAX_SITUATION_TICKETS)) titled.add(ticket.id);
+    this.situationTickets = [...titled];
     const ticketLines = active.slice(0, MAX_SITUATION_TICKETS).map((ticket) => ({
       line: `${ticketLine(ticket)}：${ticket.stage}，${ticketRunAnnotation(db, ticket.id).trim()}`,
     }));

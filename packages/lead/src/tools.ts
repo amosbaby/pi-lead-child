@@ -208,7 +208,7 @@ import { createChannelActionTools, createReplyToSourceTool, createUiActionTools,
 import { createHandOffTools, type LeadHandoffDeps } from "./hand-off-tool.js";
 import {
   authorityTurnId, authorizationCardResult, coreMemoryRefusal, jiraWriteThirdParty, setTimerInTurn, turnOriginOf,
-  type CoreMemoryRefusal, type LeadTurnOrigin,
+  type CoreMemoryRefusal, type LeadTurnOrigin, type ThirdPartyRead,
 } from "./turn-origin.js";
 import { decideWatchCommand, type WatchSetDecision } from "./watch-commands.js";
 import { deliverySnapshotLines } from "./delivery-snapshot-lines.js";
@@ -244,9 +244,10 @@ export interface LeadDeps {
   currentTurnId?: () => string | null;
   // 这一轮的来历（turn-origin.ts）：读进了外部来源的原文没有，是不是用户本人设的跟进到点的一轮。daemon 给；缺省时都不是。
   turnOrigin?: () => LeadTurnOrigin;
-  // 这一轮读到了第三方写的文字（外部来源工单的标题或正文、连接只读工具的结果）：daemon 记进这一轮的 thirdPartyRead。
-  // 只给第三方触发的 Jira 写入闸门用（turn-origin.ts 的 jiraWriteThirdParty，用户 2026-11-12）。缺省时（测试）不记。
-  markThirdPartyRead?: () => void;
+  // 这一轮读到了第三方写的文字（外部来源工单的标题或正文、连接只读工具的结果）：daemon 记进这一轮的来历
+  // （turn-origin.ts 的 withThirdPartyRead）。只给第三方触发的 Jira 写入闸门用（jiraWriteThirdParty，用户 2026-11-12）。
+  // 缺省时（测试）不记。
+  markThirdPartyRead?: (what: ThirdPartyRead) => void;
   // 批量取消闸门的计数桶：最近一次用户发起的轮次。lead 自己发起的回合（blocker、通知、心跳）
   // 不是用户回了话，不能重置预算。给出它时闸门按它计数，否则按 currentTurnId。
   cancelBudgetTurnId?: () => string | null;
@@ -1277,13 +1278,17 @@ export function spawnClaimedItem(deps: LeadDeps, claim: DispatchClaim): string {
 
 /**
  * 工单工具读到的工单里有外部来源的（external_origin=1）时，记下这一轮读到了第三方写的标题或正文（用户 2026-11-12）。
+ * get_ticket 打开一张记 external_ticket_opened，列表、状态、收件箱记 external_ticket_seen（ruling R26）。
  * 只给 Jira 写入闸门用：规则 1–4 照旧把工单状态当内部内容（AGENTS.md）。
  */
-function noteTicketsRead(deps: Pick<LeadDeps, "db" | "markThirdPartyRead">, ids: Iterable<number>): void {
+function noteTicketsRead(
+  deps: Pick<LeadDeps, "db" | "markThirdPartyRead">, ids: Iterable<number | null>,
+  what: Exclude<ThirdPartyRead, "connection"> = "external_ticket_seen",
+): void {
   if (!deps.markThirdPartyRead) return;
   for (const id of ids) {
     if (isExternalOrigin(deps.db, id)) {
-      deps.markThirdPartyRead();
+      deps.markThirdPartyRead(what);
       return;
     }
   }
@@ -1804,7 +1809,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       execute: async (_id, params: { id: number }) => {
         const t = getItem(db, params.id);
         if (!t) throw new Error(`item #${params.id} not found`);
-        noteTicketsRead(deps, [t.id]);
+        noteTicketsRead(deps, [t.id], "external_ticket_opened");
         // 最近的 20 条（工单 03）。以前取最早 1000 条里的最后 20 条，活动多的工单显示的是旧记录。
         // 打开文件的记录（工单 07）不算：每次打开都写一条，会把工单上真正发生的事挤出这 20 条。
         const acts = listRecentActivities(db, t.id, 20, { skipDecisions: ["delivery_file_opened"] })
@@ -3557,6 +3562,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         const rows = listInbox(db, { state: params.state ?? ["pending", "delivered"] })
           .filter((row) => !since || Date.parse(`${row.created_at.replace(" ", "T")}${row.created_at.endsWith("Z") ? "" : "Z"}`) >= since.getTime());
         if (!rows.length) return text("（无通知）");
+        noteTicketsRead(deps, rows.map((r) => r.item_id));
         return text(rows.map((r) => {
           const disposition = (() => {
             try {
@@ -5062,7 +5068,7 @@ export function createLeadToolset(deps: LeadDeps): ToolDefinition<any>[] {
     // 第三方触发的 Jira 写入要用户确认（用户 2026-11-12）：连接工具按这一轮的来历判断，读到第三方内容时记一笔。
     ...createConnectionTools(deps.connections, {
       thirdParty: () => jiraWriteThirdParty(deps),
-      ...(deps.markThirdPartyRead ? { onThirdPartyRead: deps.markThirdPartyRead } : {}),
+      ...(deps.markThirdPartyRead ? { onThirdPartyRead: () => deps.markThirdPartyRead!("connection") } : {}),
     }),
     ...createSkillTools(deps),
   ]));

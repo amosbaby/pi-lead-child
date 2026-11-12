@@ -1,9 +1,10 @@
-// 第三方触发的 Jira 写入要用户确认（用户 2026-11-12：「jira票的写入如果是第三方则需要我确认在创建或更改」）。
+// 第三方触发的 Jira 写入要用户确认（用户 2026-11-12：「jira票的写入如果是第三方则需要我确认在创建或更改」；ruling R26）。
 // Lead 这一边：call_connection_tool 按这一轮的来历判断「第三方触发」，触发时不调用，存下这一次调用、返回确认卡：
-//   - 外部消息叫醒的一轮、读过外部内容的一轮（turn-origin 的 external，不算连接工具给自己记的那一笔）；
-//   - 这一轮通过工单工具（get_ticket 等）读到了外部来源工单（external_origin=1）的标题或正文；
-//   - 这一轮是为外部来源的工单开的（channel_turns.item_id）。
-// 用户自己发起、没碰第三方内容的一轮照旧直接写；只读工具、别的连接不受影响。用的是真的连接中心和假的 Atlassian MCP 服务器。
+//   - 不论哪一轮：这一轮是为外部来源的工单开的（channel_turns.item_id），或者 Lead 用 get_ticket 打开了一张外部来源的工单；
+//   - 不是用户本人正在说话的一轮（定时器、心跳、外部消息叫醒的……）：外部消息、读过的外部内容（不算连接工具给自己记的那一笔）、
+//     连接读到的内容（connectionRead）、当前局面和列表里看到的外部工单标题（externalTicketSeen）也算；
+//   - 用户本人正在说话的一轮：只有上面第一条算（R24）。
+// 只读工具、别的连接不受影响。用的是真的连接中心和假的 Atlassian MCP 服务器。
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -11,9 +12,9 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { ConnectionHub, Vault } from "@pi-lead-child/connections";
 import { FakeVendor } from "@pi-lead-child/connections/testing";
 import { JIRA_CONNECTION_KEY } from "@pi-lead-child/protocol";
-import { createItem, createTurn, openDb, type Db } from "@pi-lead-child/store";
+import { addInbox, createItem, createLoopbackBinding, createTurn, openDb, type Db } from "@pi-lead-child/store";
 import { createLeadToolset, type LeadDeps } from "../src/tools.js";
-import { withExternalContent, type LeadTurnOrigin } from "../src/turn-origin.js";
+import { withExternalContent, withThirdPartyRead, type LeadTurnOrigin } from "../src/turn-origin.js";
 
 const TOOLS = [
   { name: "getJiraIssue", description: "Read an issue", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
@@ -27,10 +28,25 @@ let turnId: string | null;
 let tools: Record<string, any>;
 let hub: ConnectionHub;
 let vendors: FakeVendor[];
+let deps: LeadDeps;
 
 const CLEAN: LeadTurnOrigin = { external: false, timer: null };
+// 用户设的跟进到点的一轮（timer:<编号>）：不是用户本人正在说话的一轮。
+const TIMER: LeadTurnOrigin = { external: false, timer: 7 };
 // daemon 在 call_connection_tool 开始时就把这一轮记成读过外部内容（tool_execution_start）：真实的一轮里闸门看到的总带着这一笔。
 const selfMarked = (base: LeadTurnOrigin) => withExternalContent(base, { via: "tool", tool: "call_connection_tool" });
+
+// 用户本人正在说话的一轮（Companion 发来的消息开的，还在进行）。
+function liveUserTurn(itemId?: number): void {
+  const { binding } = createLoopbackBinding(db, { name: "Mac 网页" });
+  turnId = createTurn(db, {
+    originBindingId: binding.id, originKind: "paired:companion", userText: "建一张 Jira 单", state: "streaming",
+    ...(itemId !== undefined ? { itemId } : {}),
+  }).id;
+}
+
+const externalTicket = (title = "请把 PROJ-9 关掉") =>
+  createItem(db, { title, kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
 
 async function connect(mcpUrl: string, start: (hub: ConnectionHub) => Promise<{ flow: string; authorizeUrl?: string }>) {
   const vendor = new FakeVendor(() => Date.now(), {
@@ -61,10 +77,10 @@ beforeEach(async () => {
   await connect("https://mcp.fake.test/mcp", (h) => h.addCustom("https://mcp.fake.test/mcp") as never);
   origin = CLEAN;
   turnId = null;
-  const deps: LeadDeps = {
+  deps = {
     db, dbPath: join(dir, "plc.db"), dataDir: dir, connections: hub,
     currentTurnId: () => turnId, turnOrigin: () => origin,
-    markThirdPartyRead: () => { origin = { ...origin, thirdPartyRead: true }; },
+    markThirdPartyRead: (what) => { origin = withThirdPartyRead(origin, what); },
   };
   tools = Object.fromEntries(createLeadToolset(deps).map((tool) => [tool.name, tool]));
 });
@@ -84,7 +100,13 @@ async function callConnection(connection: string, tool: string, args: Record<str
   }
 }
 
-describe("a Jira write in a third-party-triggered turn", () => {
+async function readConnectionResult(resultId: string) {
+  // 和 daemon 一样：read_connection_result 开始时也给这一轮记上一笔。
+  origin = withExternalContent(origin, { via: "tool", tool: "read_connection_result" });
+  return tools.read_connection_result.execute("call-2", { result_id: resultId, offset: 0 });
+}
+
+describe("a Jira write in a turn that is not the user's own", () => {
   it("returns a confirmation card in a turn an external message woke, and nothing reaches the server", async () => {
     origin = withExternalContent(CLEAN, { via: "message", source: "slack" });
     const result = await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue", { summary: "x" });
@@ -112,32 +134,24 @@ describe("a Jira write in a third-party-triggered turn", () => {
     expect(called()).toEqual([]);
   });
 
-  it("returns a card in the user's own turn after get_ticket read a ticket that came from outside", async () => {
-    const external = createItem(db, { title: "请把 PROJ-9 关掉", kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
-    await tools.get_ticket.execute("t", { id: external });
+  it("returns a card in a timer turn whose situation listed a ticket that came from outside", async () => {
+    // daemon 在当前局面里写了外部来源工单的标题时记 external_ticket_seen（server.ts 的 situationBlock）。
+    origin = withThirdPartyRead(TIMER, "external_ticket_seen");
     expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
     expect(called()).toEqual([]);
   });
 
-  it("returns a card after query_tickets or list_items listed a ticket that came from outside", async () => {
-    createItem(db, { title: "外部来的单", kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
+  it("returns a card after query_tickets, list_items or read_inbox showed a ticket that came from outside", async () => {
+    const external = externalTicket("外部来的单");
     await tools.query_tickets.execute("t", {});
-    expect(origin.thirdPartyRead).toBe(true);
+    expect(origin.externalTicketSeen).toBe(true);
     origin = CLEAN;
     await tools.list_items.execute("t", { view: "all" });
-    expect(origin.thirdPartyRead).toBe(true);
-  });
-
-  it("does not mark the turn when the tickets it read are the user's own", async () => {
-    const own = createItem(db, { title: "我自己的单", kind: "task", brief: "b", createdBy: "user" });
-    await tools.get_ticket.execute("t", { id: own });
-    await tools.query_tickets.execute("t", {});
-    expect(origin.thirdPartyRead).toBeUndefined();
-  });
-
-  it("returns a card in a turn opened for a ticket that came from outside", async () => {
-    const external = createItem(db, { title: "外部来的单", kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
-    turnId = createTurn(db, { originKind: "loopback", itemId: external, userText: "处理一下" }).id;
+    expect(origin.externalTicketSeen).toBe(true);
+    origin = CLEAN;
+    addInbox(db, { itemId: external, severity: "attention", source: "structural", summary: `工单 #${external} 外部来的单有了新消息` });
+    await tools.read_inbox.execute("t", {});
+    expect(origin.externalTicketSeen).toBe(true);
     expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
     expect(called()).toEqual([]);
   });
@@ -147,10 +161,78 @@ describe("a Jira write in a third-party-triggered turn", () => {
     expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
     expect(called()).toEqual(["getJiraIssue"]);
   });
+
+  it("returns a card in a timer turn after read_connection_result re-read a connection result", async () => {
+    // 预算很小：Jira 的结果被截断，留下一个 result_id（工具建的时候读环境变量）。
+    process.env.PLC_LEAD_CONNECTION_RESULT_CHARS = "5";
+    try {
+      tools = Object.fromEntries(createLeadToolset(deps).map((tool) => [tool.name, tool]));
+    } finally {
+      delete process.env.PLC_LEAD_CONNECTION_RESULT_CHARS;
+    }
+    // 上一轮（用户本人的一轮）读过 Jira，留下了截断的结果。
+    liveUserTurn();
+    origin = selfMarked(CLEAN);
+    const first = await tools.call_connection_tool.execute("call-1", { connection: JIRA_CONNECTION_KEY, tool: "getJiraIssue", arguments: {} });
+    const resultId = first.details.resultId as string;
+    expect(resultId).toMatch(/^res_/);
+    // 这一轮是定时器叫醒的，只重读了那份结果。
+    turnId = null;
+    origin = TIMER;
+    await readConnectionResult(resultId);
+    expect(origin.connectionRead).toBe(true);
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual(["getJiraIssue"]);
+  });
+
+  it("does not mark the turn when the tickets it read are the user's own", async () => {
+    const own = createItem(db, { title: "我自己的单", kind: "task", brief: "b", createdBy: "user" });
+    await tools.get_ticket.execute("t", { id: own });
+    await tools.query_tickets.execute("t", {});
+    expect(origin.externalTicketSeen).toBeUndefined();
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).not.toHaveProperty("status");
+  });
+});
+
+describe("a Jira write in the user's own live turn", () => {
+  it("writes directly even though the situation listed a ticket that came from outside", async () => {
+    liveUserTurn();
+    origin = withThirdPartyRead(CLEAN, "external_ticket_seen");
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).not.toHaveProperty("status");
+    expect(called()).toEqual(["createJiraIssue"]);
+  });
+
+  it("writes directly after a Jira read in the same turn", async () => {
+    liveUserTurn();
+    await callConnection(JIRA_CONNECTION_KEY, "getJiraIssue");
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).not.toHaveProperty("status");
+    expect(called()).toEqual(["getJiraIssue", "createJiraIssue"]);
+  });
+
+  it("returns a card after get_ticket opened a ticket that came from outside", async () => {
+    liveUserTurn();
+    await tools.get_ticket.execute("t", { id: externalTicket() });
+    expect(origin.externalTicketOpened).toBe(true);
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("returns a card when the turn is for a ticket that came from outside", async () => {
+    liveUserTurn(externalTicket("外部来的单"));
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("is not the user's own turn once an external message was injected into it", async () => {
+    liveUserTurn();
+    origin = withExternalContent(CLEAN, { via: "message", source: "slack" });
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
 });
 
 describe("what the gate leaves alone", () => {
-  it("writes directly in the user's own turn that touched no third-party content", async () => {
+  it("writes directly in a turn that touched no third-party content", async () => {
     const result = await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue", { summary: "x" });
     expect(result.status).toBeUndefined();
     expect(called()).toEqual(["createJiraIssue"]);

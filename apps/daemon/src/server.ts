@@ -15,7 +15,8 @@ import {
 } from "@pi-lead-child/lead";
 import {
   createLeadSession, DEFAULT_LOOKUP_ROOTS, findPullRequestRef, isExternalTextTool, LEAD_QUIET_TOOLS, leadSystemEvent, leadUserMessage,
-  listLookupCandidates, watchCommandRunner, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
+  listLookupCandidates, watchCommandRunner, withExternalContent, withThirdPartyRead, type LeadSystemEventKind, type LeadTurnOrigin,
+  type ThirdPartyRead,
 } from "@pi-lead-child/lead";
 import {
   assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
@@ -91,7 +92,7 @@ import {
   killIdleChildren, liveChildren, runWorkspaceFactsReady, setGitFactsLog, UiActionError, warmRunWorkspaceFacts, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
-import { appendBody, getBusyPlacement, getItem, transition } from "@pi-lead-child/store";
+import { appendBody, getBusyPlacement, getItem, isExternalOrigin, transition } from "@pi-lead-child/store";
 import { activeRun, getRun, updateRun } from "@pi-lead-child/store";
 import { repairNonBudgetRetryExhaustion } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
@@ -3039,6 +3040,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         contextUsage: usage ? contextUsageLine(usage) : null,
       });
       // 挂起的单元、子 agent 正在处理的对象（lead-scheduler spec H5、H10）。
+      // 当前局面里写了外部来源工单（external_origin=1）的标题：这一轮算看到过第三方写的标题（Jira 写入闸门，ruling R26）。
+      if (leadInput.situationTicketIds().some((id) => isExternalOrigin(db, id))) {
+        runOrigin = withThirdPartyRead(runOrigin, "external_ticket_seen");
+      }
       const handoffText = handoffs.situationText();
       const full = [text, handoffText].filter(Boolean).join("\n\n");
       return full ? leadSystemEvent("situation", full) : "";
@@ -3072,7 +3077,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     turnOrigin: () => runOrigin,
     // 这一轮读到了第三方写的文字（外部来源工单的标题或正文、连接只读工具的结果）：只给 Jira 写入闸门用（用户 2026-11-12）。
     // 每一轮开始和结束时 runOrigin 重算，这一笔跟着清掉。
-    markThirdPartyRead: () => { runOrigin = { ...runOrigin, thirdPartyRead: true }; },
+    markThirdPartyRead: (what: ThirdPartyRead) => { runOrigin = withThirdPartyRead(runOrigin, what); },
     toolGate: () => handoffGate(sched.state, RED_LINE_TOOLS),
     // 调度器（lead-scheduler spec D13）：extension 和 daemon 共用这一个实例。
     scheduler: sched,

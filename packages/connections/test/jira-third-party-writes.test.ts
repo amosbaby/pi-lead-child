@@ -7,8 +7,8 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { JIRA_CONNECTION_KEY } from "@pi-lead-child/protocol";
-import { openDb } from "@pi-lead-child/store";
+import { DEFAULT_INTENT_GRANT_BOUNDS, JIRA_CONNECTION_KEY, type RunGrant } from "@pi-lead-child/protocol";
+import { createItem, createRun, insertRunGrant, openDb, type Db } from "@pi-lead-child/store";
 import { ConnectionHub } from "../src/hub.js";
 import { Vault } from "../src/vault.js";
 import { FakeVendor } from "../testing/fake-vendor.js";
@@ -24,8 +24,9 @@ async function connect(mcpUrl: string, provider: "atlassian" | "custom") {
   const vendor = new FakeVendor(() => clock, {
     mcpUrl, issuer: new URL(mcpUrl).origin, tools: TOOLS, callResult: (name) => JSON.stringify({ tool: name, key: "PROJ-123" }),
   });
+  const db = openDb(join(tempDir("plc-jira-3p-"), "plc.db"));
   const hub = new ConnectionHub({
-    db: openDb(join(tempDir("plc-jira-3p-"), "plc.db")), vault: new Vault(randomBytes(32)), config: { clients: {} },
+    db, vault: new Vault(randomBytes(32)), config: { clients: {} },
     redirectUri: () => "http://127.0.0.1:47130/oauth/callback", fetch: vendor.fetch, now: () => clock,
     gh: { token: async () => null }, ghInstalled: () => false, newConnectionWritePolicy: "direct",
   });
@@ -34,7 +35,7 @@ async function connect(mcpUrl: string, provider: "atlassian" | "custom") {
   await hub.completeCallback({ ...vendor.approve(started.authorizeUrl), error: null, errorDescription: null });
   const key = provider === "atlassian" ? JIRA_CONNECTION_KEY : hub.list().find((item) => item.provider === "custom")!.key;
   const called = () => vendor.calls.filter((call) => call.method === "tools/call").map((call) => call.tool);
-  return { hub, key, called };
+  return { hub, key, called, db };
 }
 
 beforeEach(() => {
@@ -87,6 +88,54 @@ describe("a third-party-triggered write on another connection", () => {
     const { hub, key, called } = await connect("https://mcp.fake.test/mcp", "custom");
     expect(hub.needsConfirmation(key, "createJiraIssue", { thirdParty: true })).toBe(false);
     await hub.callTool(key, "createJiraIssue", {}, { role: "lead", thirdParty: true });
+    expect(called()).toEqual(["createJiraIssue"]);
+  });
+});
+
+// ruling R25：执行外部来源工单（external_origin=1）的 Run 不能直接写 Jira。子 agent 的调用带着 runId、角色 executor，
+// 没有 thirdParty；连接是 direct 时以前照样写得进去。现在连接中心拒绝，原因里告诉它用 hand_back 交回要写的内容。
+describe("an executor Run writing Jira", () => {
+  function runFor(db: Db, externalOrigin: boolean): number {
+    const itemId = createItem(db, { title: "PROJ-123 的单", brief: "b", createdBy: "system", externalOrigin });
+    return createRun(db, { itemId });
+  }
+  const jiraWriteGrant: RunGrant = {
+    version: 1, intent: "knowledge", localRepos: [],
+    rules: [{ id: "jira-write", connection: "atlassian", tools: ["createJiraIssue", "getJiraIssue"], label: "写 Jira" }],
+  };
+
+  it("is refused for a ticket that came from outside, and the server never receives the call", async () => {
+    const { hub, key, called, db } = await connect("https://mcp.atlassian.com/v2/mcp", "atlassian");
+    const runId = runFor(db, true);
+    const refusal = await hub.callTool(key, "createJiraIssue", { summary: "x" }, { role: "executor", runId }).catch((error) => error);
+    expect(refusal).toMatchObject({ code: "forbidden" });
+    expect(refusal.message).toContain("hand_back");
+    // 只读工具照旧。
+    await hub.callTool(key, "getJiraIssue", {}, { role: "executor", runId });
+    expect(called()).toEqual(["getJiraIssue"]);
+  });
+
+  it("is refused for a ticket that came from outside even when the Run's grant allows the write", async () => {
+    const { hub, key, called, db } = await connect("https://mcp.atlassian.com/v2/mcp", "atlassian");
+    const runId = runFor(db, true);
+    const itemId = (db.prepare("SELECT item_id FROM runs WHERE id = ?").get(runId) as { item_id: number }).item_id;
+    insertRunGrant(db, { itemId, runId, grant: jiraWriteGrant, bound: DEFAULT_INTENT_GRANT_BOUNDS.knowledge, scope: {} });
+    const refusal = await hub.callTool(key, "createJiraIssue", {}, { role: "executor", runId }).catch((error) => error);
+    expect(refusal.message).toContain("hand_back");
+    await hub.callTool(key, "getJiraIssue", {}, { role: "executor", runId });
+    expect(called()).toEqual(["getJiraIssue"]);
+  });
+
+  it("still writes for the user's own ticket", async () => {
+    const { hub, key, called, db } = await connect("https://mcp.atlassian.com/v2/mcp", "atlassian");
+    const runId = runFor(db, false);
+    await hub.callTool(key, "createJiraIssue", {}, { role: "executor", runId });
+    expect(called()).toEqual(["createJiraIssue"]);
+  });
+
+  it("leaves another connection's writes alone", async () => {
+    const { hub, key, called, db } = await connect("https://mcp.fake.test/mcp", "custom");
+    await hub.callTool(key, "createJiraIssue", {}, { role: "executor", runId: runFor(db, true) });
     expect(called()).toEqual(["createJiraIssue"]);
   });
 });
