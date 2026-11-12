@@ -8,7 +8,7 @@ import type {
   FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
-  SchedulerSnapshot, SetFastChainRequest, TimerOrigin, UiActionTargetType, UserActionRequest,
+  SchedulerSnapshot, SetFastChainRequest, SignalSourceDto, TimerOrigin, UiActionTargetType, UserActionRequest,
 } from "@pi-lead-child/protocol";
 import type { Db, OwnerActionInput } from "@pi-lead-child/store";
 import type {
@@ -20,6 +20,7 @@ import type { TicketActionHost } from "../ticket-actions/lifecycle.js";
 import type { PullRequestRunner } from "../coordinator/delivery.js";
 import type { NotesMemory } from "../memory/notes-memory.js";
 import type { WidgetCommandRunner } from "../pipeline/widget-source-runner.js";
+import type { SignalCollectResult } from "../pipeline/signal-source-runner.js";
 import type { ExternalContentSource, RuleChangeConfirm } from "./external-content.js";
 import {
   TicketActionError,
@@ -87,6 +88,16 @@ export interface UiActionServices {
   installs?: InstallServices;
   // 来源的连接方式（daemon 的通道设置，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道接好以后才有。
   channelConnections?: ChannelConnectionService;
+  // 信号源（daemon 的 signal-source-runner，用户 2026-11-12）：试跑一次、马上跑一次。连接中心和 Lead 的沙箱接好以后才有；
+  // 没有时（测试、没接沙箱）建、试跑、改命令、马上跑被拒绝，暂停、恢复、删除照常。
+  signalSources?: SignalSourceService;
+}
+
+export interface SignalSourceService {
+  // 调连接、跑命令、解析条目，不写事件。
+  collect(source: Pick<SignalSourceDto, "name" | "fetch" | "command">): Promise<SignalCollectResult>;
+  // 马上跑一次（写事件）。
+  runNow(name: string): Promise<{ ok: true; emitted: number } | { ok: false; error: string }>;
 }
 
 /** 一个来源的连接方式现在的样子（没有密钥）。 */

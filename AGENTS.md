@@ -66,6 +66,12 @@ Every UI control that calls the backend is one operation with two entry points: 
   - The daemon does git for sandboxed runs: it fetches origin before each run, cuts new worktrees from origin's default branch, pushes after delivery, and clones a ticket's repository when it is missing (`packages/engine/src/coordinator/workspace-remote.ts`, `repository-checkout.ts`).
   - A new guard must say what Lead does next. If no tool or card exists for that path, add one before adding the guard.
 - Lead's bash, edit and write are refused only in a turn that an external message woke. A turn that only read connection results, and the user's own live turn, keep them: the sandbox is the boundary (`packages/lead/src/hands.ts`).
+- Signal sources connect a connection (mail, calendar, any MCP) to the event log through conversation with Lead (user, 2026-11-12: 「我期望的接入方式不是说我去代码层面 hardcode 这段逻辑」). A signal source is data in `kv`, not code: the system holds no logic for one kind of source.
+  - On schedule the daemon calls the source's read-only connection tools without a model, runs the source's command in Lead's sandbox, and writes one `signal.received` event for each new item. The first good run is a baseline. The cheap model picks the level from the user's own sentences.
+  - Create, update, pause, resume and delete are rule changes: refused in a turn that carries external content, without a confirm card; the user's own live turn is exempt.
+  - The words of an item are external content. They appear only inside the external tag (`leadSignalEventBlock`, `read_signal_items`), never in an event summary, the situation or a `perform_action` result.
+  - Acting for the user follows what the user said when the source was created; the default is to ask first. In a turn that a signal woke, or that read signal items, a connection write waits for the user's confirm card unless the source has `actForUser` (`packages/lead/src/signal-write-floor.ts`).
+  - See `packages/protocol/src/signal-sources.ts`, `packages/engine/src/pipeline/signal-source-runner.ts`, `packages/engine/src/ui-actions/signal-sources.ts` and the skill `signal-sources`.
 - Follow the shape of `packages/engine/src/ticket-actions/`.
 
 ## Agent skills

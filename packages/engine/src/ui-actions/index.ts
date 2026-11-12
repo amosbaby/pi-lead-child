@@ -39,6 +39,7 @@ export * from "./timers.js";
 export * from "./types.js";
 export * from "./card-actions.js";
 export * from "./widgets.js";
+export * from "./signal-sources.js";
 export { BUSY_PLACEMENT_WHERE, type BusyPlacementChange } from "./busy-placement.js";
 export * from "./forms.js";
 export { CONNECTIONS_WHERE, installConfirmedLocalMcp, localMcpLaunchOf, type ConnectionTarget, type SkillTarget, type SkillsTarget } from "./installs.js";

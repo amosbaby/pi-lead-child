@@ -171,6 +171,8 @@ describe("the rule-change flag in the catalog", () => {
       "host_bypass.enable",
       // Lead 忙时你发的消息怎么放（2026-11-09）：设置页的选项。
       "busy_placement.set",
+      // 信号源（2026-11-12）：开、改、停、删一个订阅，以及能不能代用户处理。试跑和马上跑一次不改规则。
+      "signal_sources.create", "signal_source.update", "signal_source.pause", "signal_source.resume", "signal_source.delete",
     ]);
   });
 
@@ -195,6 +197,8 @@ describe("the rule-change flag in the catalog", () => {
       "memory_fact.invalidate", "memory_fact.restore",
       // 装 MCP 和 skill（2026-11-02）：只拒绝，但用户本人正在说话的一轮不受限制（liveUserTurnExempt）。
       "connections.add_remote", "connections.add_local", "connection.authorize", "connection.disconnect", "skills.install", "skill.uninstall",
+      // 信号源（2026-11-12）：同上，只拒绝，用户本人正在说话的一轮不受限制。
+      "signal_sources.create", "signal_source.update", "signal_source.pause", "signal_source.resume", "signal_source.delete",
     ]);
   });
 

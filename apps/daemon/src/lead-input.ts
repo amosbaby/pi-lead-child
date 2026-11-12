@@ -28,7 +28,7 @@ import {
 } from "@pi-lead-child/store";
 import {
   COMPONENT_CALL_KINDS, CONNECTION_STATUS_CHANGED_KIND, CORE_MEMORY_CHANGED_KIND, DAEMON_STARTED_KIND, EVENT_SOURCES, LEAD_SELF_EVENT_KINDS,
-  LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, USER_REQUEST_EXPIRED_KIND,
+  LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, SIGNAL_RECEIVED_KIND, USER_REQUEST_EXPIRED_KIND,
   OWNER_ACTION_DISOWNED_KIND, OWNER_ACTION_PERFORMED_KIND, PUSHED_SECURITY_ALERT_KINDS, REMINDER_PUSHED_KIND,
   REMINDER_UNACKNOWLEDGED_KIND, reminderNeedsCheck, SYSTEM_TURN_ORIGINS, ticketNeedsUser, ticketNeedsUserLabel,
   TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX, isSchedulerEventKind,
@@ -37,7 +37,7 @@ import {
 import { localIso } from "@pi-lead-child/core";
 import {
   DEFAULT_SITUATION_BUDGET_TOKENS, leadEventBlock, leadInboxEntryEvent, leadInboxEvents, leadMessageEventBlock, leadReminderEventBlock, leadSystemEvent,
-  leadWaitEventBlock, renderLeadSituation, ticketRunAnnotation,
+  leadSignalEventBlock, leadWaitEventBlock, renderLeadSituation, ticketRunAnnotation,
   type LeadReminderCardState, type SituationDigestGroup, type SituationRecordGroup,
 } from "@pi-lead-child/lead";
 
@@ -514,6 +514,9 @@ export class LeadInput {
         // 外部通道的消息事件（统一消息事件 spec D1，工单 03）：结构化的事实，加上外部标签里的原话。
         const contextIn = newestContext.get(queueKeyOf(event) ?? "");
         blocks.push(leadMessageEventBlock(event, contextIn === undefined ? {} : { contextIn }));
+      } else if (event.kind === SIGNAL_RECEIVED_KIND) {
+        // 信号源交来的新内容（2026-11-12）：系统的数据在系统事件里，别人写的话在外部标签里。
+        blocks.push(leadSignalEventBlock(event));
       } else if (event.kind === LEAD_WAIT_SATISFIED_KIND || event.kind === LEAD_WAIT_EXPIRED_KIND) {
         // 你在等的事（2026-10-19，store 的 lead-waits.ts）：写明当时的备注和发生了什么。
         blocks.push(leadWaitEventBlock(event, { clock: shortTime }));
@@ -1080,6 +1083,12 @@ function digestLines(event: EventRecord): string[] {
   // 提醒推满了次数还没确认（工单 07）：回来简报里说一句。
   if (event.kind === REMINDER_UNACKNOWLEDGED_KIND) {
     return [`提醒还没确认：${oneLine(String(payload.summary ?? payload.title ?? ""))}（「待你」托盘里也有它）`];
+  }
+  // 信号源的新内容（2026-11-12）：这里不写标题和正文（别人写的话）。要看内容用 read_signal_items，那一轮就算读过外部内容。
+  if (event.kind === SIGNAL_RECEIVED_KIND) {
+    const rule = isRecord(payload.rule) ? textOf(payload.rule.text) : null;
+    return [`事件 #${event.seq}：一条新内容${rule ? `（按用户的规则「${oneLine(rule, 60)}」进汇总）` : "（没有哪句规则说要马上告诉用户）"}。`
+      + `内容用 read_signal_items(source='${String(payload.signal ?? "")}') 看。`];
   }
   const summary = textOf(payload.summary) ?? textOf(payload.title) ?? textOf(payload.note);
   return [`${event.kind}${summary ? `：${oneLine(summary)}` : ""}`];

@@ -26,6 +26,7 @@ import { AddLocalMcpRequestSchema, AddRemoteMcpRequestSchema, InstallSkillReques
 import { ReminderRescheduleRequestSchema } from "./reminders.ts";
 import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from "./reply-style.ts";
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
+import { SignalSourceInputSchema, SignalSourceUpdateSchema } from "./signal-sources.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
@@ -94,12 +95,14 @@ export const ActionPermissionSchema = Type.Union([
 //   skill  PLC 装的一个 skill：卸载。编号是 skill 的名字。
 //   host_bypass  「用户本人发话时免沙箱」开关（设置 → 免沙箱，工单 #246，host-bypass.ts）。编号只有 lead。
 //   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
+//   signal_sources  信号源的清单（用户 2026-11-12，signal-sources.ts）：通过对话把一个连接接进事件体系。建、试跑。编号只有 signals。
+//   signal_source  一个信号源：改（规则、策略、间隔、命令）、暂停、恢复、马上跑一次、删。编号是信号源的名字。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement",
+  "busy_placement", "signal_sources", "signal_source",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -389,6 +392,24 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   busy_placement: {
     // 选 Lead 忙时你发的消息怎么放：followUp（排队，缺省）或 steer（插话）。改规则：读过外部内容的一轮里不能做。
     set: SetBusyPlacementRequestSchema,
+  },
+  signal_sources: {
+    // 建一个信号源：先试跑一次，跑通了才建。第一次定时运行只记基线，以后每条新内容一个事件。
+    create: SignalSourceInputSchema,
+    // 试跑一次：调连接、跑命令、看输出合不合格。什么都不写。
+    test: SignalSourceInputSchema,
+  },
+  signal_source: {
+    // 改规则、策略、间隔、名字、命令、调哪些连接工具，至少一样。
+    update: SignalSourceUpdateSchema,
+    // 暂停：不再定时跑。
+    pause: Empty,
+    // 恢复：接着定时跑，连续出错的次数清零。
+    resume: Empty,
+    // 马上跑一次，不等到点。
+    run: Empty,
+    // 删掉这个信号源。它以前交来的事件留着。
+    delete: Empty,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

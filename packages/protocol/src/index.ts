@@ -1292,6 +1292,7 @@ export * from "./design-preferences.ts";
 export * from "./i18n.ts";
 export * from "./reply-style.ts";
 export * from "./host-bypass.ts";
+export * from "./signal-sources.ts";
 export * from "./busy-placement.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";

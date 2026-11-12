@@ -105,6 +105,7 @@ import { leadCapabilityNotice, recordLeadCapabilities } from "./lead-capabilitie
 import { agentConnectionHost, setAgentConnectionHost, type AgentConnectionHost } from "@pi-lead-child/engine";
 import { createScheduler } from "@pi-lead-child/engine";
 import {
+  collectSignalItems, createSignalGrader, createSignalSourceRunner, sandboxSignalCommand,
   createWatchRunner, createWidgetSourceRunner, sandboxedBashOperations, sandboxWatchCommand, sandboxWidgetCommand,
 } from "@pi-lead-child/engine";
 import { createWatchLightTask, leadSandboxPolicyAsync, leadScratchDir } from "@pi-lead-child/lead";
@@ -4698,6 +4699,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let tickWatches: (() => void) | null = null;
   // 控件的数据源（.scratch/custom-views/spec.md D3）：执行器建好以后才有（见下面 createWidgetSourceRunner）。轮询每一拍调一次。
   let tickWidgetSources: (() => void) | null = null;
+  // 信号源（用户 2026-11-12，engine 的 signal-source-runner）：执行器建好以后才有。轮询每一拍调一次。
+  let tickSignalSources: (() => void) | null = null;
   // 推一次提醒（scheduler 的 onReminderPush，常设指令 reminder.fire）：scheduler 已经在事务里记下这一次（reminder.pushed）。
   // 推送路径和主人操作的提醒一样：Slack 总是推（手机上看得到）；没人在看会话，或者提醒是 interrupt 级的，再弹桌面通知。
   // 然后让客户端重取通知（「待你」托盘）。会话里的到点卡由「Lead 动态」的投影推（到点事件写进日志时马上 sync）。
@@ -4976,6 +4979,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 后台检查：开始到点的检查，不等它们跑完（命令最多跑 120 秒，子代理检查交回时由 Run 结束的说明叫醒 Lead）。
     pollStep("watches", () => tickWatches?.());
     pollStep("widget sources", () => tickWidgetSources?.());
+    // 信号源：开始到点的那些，不等它们跑完。新内容写成事件，下面的 lead-input 一步按级别交给 Lead。
+    pollStep("signal sources", () => tickSignalSources?.());
     // 在等自动重试的用户的那一轮：先于系统的唤醒，用户在等它。
     pollStep("user-retry", () => retryWaitingUserTurn(pollNow));
     // 高风险的主人操作（工单 15 第一步）：网关记下操作时写了推送用的通知。这里马上推，不经过 Lead：
@@ -5781,6 +5786,29 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   });
   widgetSourceRunner.recover();
   tickWidgetSources = () => { void widgetSourceRunner.tick(); };
+  // 信号源：到点时 daemon 自己调连接的只读工具（不经过模型），整理的命令在 Lead 的 bash 沙箱里跑，输入文件放在 Lead 的临时目录里。
+  // 每条新内容的级别由便宜的模型按用户的规则定。操作层的试跑和「马上跑一次」用同一个执行器。
+  const signalDeps = {
+    connections: {
+      isReadOnly: (connection: string, tool: string) => connections.isReadOnlyTool(connection, tool),
+      call: async (connection: string, tool: string, args: Record<string, unknown>) => {
+        const result = await connections.callTool(connection, tool, args, { role: "lead" });
+        return { text: result.text, isError: result.isError };
+      },
+    },
+    runCommand: sandboxSignalCommand(sandboxedBashOperations(() => leadSandboxPolicyAsync(db, opts.dataDir)), leadScratch),
+    inputDir: join(leadScratch, "signals"),
+  };
+  const signalSourceRunner = createSignalSourceRunner(db, {
+    ...signalDeps,
+    grade: createSignalGrader(() => leadSmartModel ?? null),
+    onError: (step, error: any) => log(`[signal source] ${step} failed: ${error?.message ?? error}`),
+  });
+  uiActionServices.signalSources = {
+    collect: (source) => collectSignalItems(source, signalDeps),
+    runNow: (name) => signalSourceRunner.runNow(name),
+  };
+  tickSignalSources = () => { void signalSourceRunner.tick(); };
   const schedTimer = setNodeInterval(() => {
     try { scheduler.tick(); } catch (e: any) { log(`[scheduler] tick error: ${e.message}`); }
   }, Number(process.env.PLC_SCHEDULER_MS ?? 60_000)) as unknown as NodeJS.Timeout;

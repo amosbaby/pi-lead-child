@@ -61,6 +61,8 @@ export * from "./pipeline/run-stop-repair.js";
 export * from "./pipeline/scheduler.js";
 export * from "./pipeline/watch-runner.js";
 export * from "./pipeline/widget-source-runner.js";
+export * from "./pipeline/signal-source-runner.js";
+export * from "./pipeline/signal-grade.js";
 export * from "./pipeline/terminal-handoff.js";
 export * from "./pipeline/transient-retry.js";
 export * from "./pipeline/watchdog.js";

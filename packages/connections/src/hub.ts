@@ -1714,13 +1714,16 @@ export class ConnectionHub {
   // ——— 写入确认 ———
 
   // 存下一次会写入的调用（参数原样），返回确认号。只在写入策略是「先问我」时需要。
-  requestWrite(key: string, toolName: string, args: Record<string, unknown>, summary: string): ConnectionConfirmationDto {
+  // options.force：写入策略是直接写时也存（调用方有自己的理由先问用户，例如信号源的策略是先问用户，lead 的 signal-write-floor.ts）。
+  requestWrite(
+    key: string, toolName: string, args: Record<string, unknown>, summary: string, options: { force?: boolean } = {},
+  ): ConnectionConfirmationDto {
     this.#sweepWrites();
     const row = this.#liveRow(key);
     this.#assertRole(row, key, "lead");
     const tool = this.#rowTools(row).find((entry) => entry.name === toolName);
     if (!tool) throw new ConnectionError("unknown_tool", `${row.label} 没有工具 ${toolName}`, key);
-    if (tool.readOnly || row.write_policy !== "confirm") {
+    if (tool.readOnly || (row.write_policy !== "confirm" && !options.force)) {
       throw new ConnectionError("invalid_request", `${toolName} 不需要确认，直接调用即可`, key);
     }
     const now = this.#now();

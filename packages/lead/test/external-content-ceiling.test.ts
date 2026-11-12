@@ -66,7 +66,8 @@ describe("each tool declares whether its output is external content", () => {
   // 挂到工单上的附件（read_ticket_attachment，工单 #231）可能是外部消息里的文件，照旧算。
   it("counts only reading cards and conversations and connection results", () => {
     expect([...EXTERNAL_TEXT_TOOLS].sort()).toEqual(
-      ["call_connection_tool", "read_channel_conversation", "read_channel_file", "read_connection_result", "read_ticket_attachment"],
+      // 信号源交来的内容（read_signal_items，2026-11-12）：邮件、日历里别人写的话，也算。
+      ["call_connection_tool", "read_channel_conversation", "read_channel_file", "read_connection_result", "read_signal_items", "read_ticket_attachment"],
     );
     for (const name of [
       // 笔记、文件、按页读回。

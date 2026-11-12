@@ -33,7 +33,7 @@ const INSTANT_READS = [
   "get_delegation_policy", "list_standing_orders", "get_standing_order", "preflight_delegation",
   // 账本、收件箱、通知、以前的回合、笔记、设置。
   "query_events", "read_inbox", "read_notifications", "get_triage_shadow_report", "read_lead_turns", "search_notes",
-  "get_system_usage", "get_environment", "suggest_route", "list_connections", "read_connection_result",
+  "get_system_usage", "get_environment", "suggest_route", "list_connections", "read_connection_result", "read_signal_items",
 ] as const;
 
 const INSTANT_WRITES = [

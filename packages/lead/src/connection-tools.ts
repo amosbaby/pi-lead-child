@@ -128,7 +128,8 @@ function failure(hub: ConnectionHub, error: unknown) {
 
 export function createConnectionTools(
   hub: ConnectionHub | undefined,
-  options: { resultBudget?: ConnectionResultBudget } = {},
+  // askFirst：这一轮里写入要先问用户时，返回原因（例如信号源的策略是先问用户，signal-write-floor.ts）；不用时为 null。
+  options: { resultBudget?: ConnectionResultBudget; askFirst?: () => { name: string; label: string } | null } = {},
 ): ToolDefinition<any>[] {
   if (!hub) return [];
   const budget = options.resultBudget ?? connectionResultBudget();
@@ -206,8 +207,12 @@ export function createConnectionTools(
       execute: async (_id, params: { connection: string; tool: string; arguments?: Record<string, unknown>; summary?: string; full?: boolean }, signal?: AbortSignal) => {
         const args = params.arguments ?? {};
         try {
-          if (hub.needsConfirmation(params.connection, params.tool)) {
-            const confirmation = hub.requestWrite(params.connection, params.tool, args, params.summary ?? "");
+          // 信号源叫醒的一轮（或者读过信号内容的一轮），用户没有说可以代他处理：写入先存下来，等用户确认。
+          // 先看这一轮受不受限，受限时才查工具是不是只读：只读的照常直接执行。
+          const asked = options.askFirst?.() ?? null;
+          const signal_ = asked && !hub.isReadOnlyTool(params.connection, params.tool) ? asked : null;
+          if (signal_ || hub.needsConfirmation(params.connection, params.tool)) {
+            const confirmation = hub.requestWrite(params.connection, params.tool, args, params.summary ?? "", { force: signal_ !== null });
             const action = userActionRequest({
               kind: "confirm_write",
               target: `connection_confirmation:${confirmation.id}`,
@@ -216,6 +221,10 @@ export function createConnectionTools(
             });
             return json({
               ok: false, status: "confirmation_required", confirmation_id: confirmation.id,
+              ...(signal_ ? {
+                why: `这一轮带着信号源「${signal_.label}」（${signal_.name}）的内容，它的策略是先问用户：用户没有说过可以代他处理。`
+                  + "用户确认以后系统执行这一次调用。用户想以后都由你处理时，请他在会话里说，你再改这个信号源的策略。",
+              } : {}),
               next: "用 render_ui 发一张卡请用户确认：把 user_action 原样放进 UserAction 节点（或者用 ConnectionConfirm，confirmation 填 confirmation_id），"
                 + "正文一两句说明要写什么。用户确认后你会收到结果。",
               user_action: action,
