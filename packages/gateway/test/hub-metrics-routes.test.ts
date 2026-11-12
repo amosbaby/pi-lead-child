@@ -55,7 +55,8 @@ describe("GET /v1/hub/metrics", () => {
   it("reads with tickets:view, defaults to 7 days, and counts only the window", async () => {
     const { call, reader } = await start();
     const recent = createItem(db, { title: "recent", brief: "b", createdBy: "lead" });
-    addTicketSource(db, { itemId: recent, kind: "slack", conversation: "slack:C0TEAM:1" });
+    // 来源要带链接才算（裁定 R32）。
+    addTicketSource(db, { itemId: recent, kind: "slack", url: "https://acme.example.com/archives/C0TEAM/p1", conversation: "slack:C0TEAM:1" });
     createItem(db, { title: "no source", brief: "b", createdBy: "lead" });
     const old = createItem(db, { title: "old", brief: "b", createdBy: "lead" });
     db.prepare("UPDATE items SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 10 * 86_400_000).toISOString(), old);

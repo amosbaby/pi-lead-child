@@ -70,7 +70,8 @@ describe("GET /v1/tickets/meta", () => {
     const { get } = await start();
     const claimed = ticket("claimed");
     addTicketSource(db, { itemId: claimed, kind: "jira", url: "https://acme.example.com/browse/PROJ-123", externalKey: "PROJ-123" });
-    setHandling(db, claimed, { handling: "needs_user", reason: "外部来源，有副作用，交给你判断", complexity: "medium" });
+    // 领取会撤掉 needs_user 的判断（裁定 R31），auto 留着。
+    setHandling(db, claimed, { handling: "auto", reason: "只读查询", complexity: "medium" });
     claim(claimed, "ethan-cc");
     claimedHoursAgo(claimed, 5);
     const plain = ticket("plain");
@@ -82,7 +83,7 @@ describe("GET /v1/tickets/meta", () => {
     expect(reply.body).toEqual([
       { id: plain, handling: null, complexity: null, claimedBy: null, claimMode: null, idleHours: null, sourceLabel: "Slack", needsYou: false },
       {
-        id: claimed, handling: "needs_user", complexity: "medium", claimedBy: "ethan-cc", claimMode: "manual", idleHours: 5,
+        id: claimed, handling: "auto", complexity: "medium", claimedBy: "ethan-cc", claimMode: "manual", idleHours: 5,
         sourceLabel: "PROJ-123", needsYou: false,
       },
     ]);
@@ -135,7 +136,8 @@ describe("GET /v1/tickets/:id/links", () => {
     const id = ticket();
     addTicketSource(db, { itemId: id, kind: "slack", url: "https://acme.example.com/archives/C1/p1", conversation: "slack:C1" });
     addTicketSource(db, { itemId: id, kind: "slack", url: null, conversation: "slack:dm:alice" });
-    setHandling(db, id, { handling: "needs_user", reason: "外部来源，有副作用，交给你判断" });
+    // 领取会撤掉 needs_user 的判断（裁定 R31），auto 和它的理由留着。
+    setHandling(db, id, { handling: "auto", reason: "只读查询，没有副作用" });
     const bindingId = claim(id);
     attachSession(db, { itemId: id, bindingId, workerName: "ethan-cc", url: "claude://resume?session=abc" });
     attachSession(db, { itemId: id, bindingId, workerName: "ethan-cc", sessionId: "4f2a-session" });
@@ -151,7 +153,7 @@ describe("GET /v1/tickets/:id/links", () => {
       { url: "claude://resume?session=abc", sessionId: null },
       { url: null, sessionId: "4f2a-session" },
     ]);
-    expect(reply.body.handlingReason).toBe("外部来源，有副作用，交给你判断");
+    expect(reply.body.handlingReason).toBe("只读查询，没有副作用");
   });
 
   it("gives the root ticket's sources to a child ticket that has none, also in the list's label", async () => {
