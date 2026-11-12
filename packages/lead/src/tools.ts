@@ -1879,7 +1879,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "last_failure 是最近一次失败的根因（code、scope、needs、retry、error_code、error_message、evidence，"
         + "以及那次失败的 blocker 写的 impact 和 next_step）；dispatch_requests 是还在路上的派发请求和挂起原因"
         + "（suspended_reason；waiting_backoff 表示在等退避重试，这时没有 Run 在跑）；latest_checkpoint 是最新的 checkpoint"
-        + "（含 next_step 和 key_facts）。回答「#N 现在怎样了」「为什么卡住」之前先调它，不要凭会话记忆。",
+        + "（含 next_step 和 key_facts）。回答「#N 现在怎样了」「为什么卡住」之前先调它，不要凭会话记忆。"
+        + "要看几张工单时，在同一条回复里对每张各发一个调用（并行执行），不要看完一张再调下一张。",
       parameters: Type.Object({ ticket_id: Type.Integer({ minimum: 1 }) }),
       execute: async (_id, params: { ticket_id: number }) => {
         if (!deps.ticketSummary) throw new Error("工单摘要还不可用（daemon 没有提供）");
