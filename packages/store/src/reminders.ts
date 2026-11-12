@@ -284,7 +284,8 @@ const PAST_TOLERANCE_MS = 60_000;
  * 发一条 ticket.updated。返回改完的提醒。
  */
 export function rescheduleReminder(
-  db: Db, id: number, remindAt: Date, args: { by: "user" | "lead"; now?: Date },
+  // by=system: the system moved the time for an external agenda entry (agenda-feeds.ts); reason says why.
+  db: Db, id: number, remindAt: Date, args: { by: "user" | "lead" | "system"; now?: Date; reason?: string },
 ): Item {
   return db.transaction((): Item => {
     const now = args.now ?? new Date();
@@ -305,8 +306,8 @@ export function rescheduleReminder(
     if (item.stage === "fired") {
       db.prepare("UPDATE items SET remind_at = ?, updated_at = ? WHERE id = ?").run(iso, now.toISOString(), id);
       transition(db, {
-        itemId: id, to: "scheduled", actor: "system", requestedBy: args.by,
-        reason: `rescheduled by ${args.by} to ${iso}`, now,
+        itemId: id, to: "scheduled", actor: "system", ...(args.by !== "system" ? { requestedBy: args.by } : {}),
+        reason: args.reason ? `${args.reason}: rescheduled to ${iso}` : `rescheduled by ${args.by} to ${iso}`, now,
       });
     } else {
       setItemTime(db, id, { remindAt: iso });
@@ -328,7 +329,7 @@ export type ReminderTimeSetter = "user" | "lead";
 /** 记下这条提醒的时间是谁定的。sourceTurnId：你在哪一轮里让 Lead 定的。origin：谁要求的（不给时按 setBy 算）。 */
 export function recordReminderTimeSetter(
   db: Db, itemId: number,
-  input: { remindAt: string; setBy: ReminderTimeSetter; actor: "user" | "lead"; sourceTurnId?: string | null; origin?: TimerOrigin | null },
+  input: { remindAt: string; setBy: ReminderTimeSetter; actor: "user" | "lead" | "system"; sourceTurnId?: string | null; origin?: TimerOrigin | null },
 ): void {
   addActivity(db, {
     itemId, actor: input.actor, kind: "decision",
