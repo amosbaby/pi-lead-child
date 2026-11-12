@@ -16,7 +16,7 @@ import {
   addLeadFollowUp, addTicketSource, completeTurn, createItem, createLoopbackBinding, createTurn, getTicketPush, getTicketPushSetting, openDb, rememberOwnerConversation, setHandling, type Db,
 } from "@pi-lead-child/store";
 import {
-  createTicketPusher, ensureTicketPushBaseline, listLeadUiActions, runTicketAction, runUiAction, syncTicketPush, ticketsToPush, UI_ACTIONS,
+  createTicketPusher, ensureTicketPushBaseline, listLeadUiActions, runTicketAction, runUiAction, syncTicketPush, ticketNeedsMe, ticketPushState, ticketsToPush, UI_ACTIONS,
   type TicketActionCaller, type TicketPushSlack,
 } from "../src/index.js";
 
@@ -131,6 +131,36 @@ describe("pushing tickets that need you to your own Slack DM", () => {
     expect(desktop).toHaveLength(2);
     await second.sync();
     expect(edits).toHaveLength(3);
+  });
+
+  it("does not count a handed-back ticket as needing you again after a worker re-claims and completes it", async () => {
+    ownerDm();
+    const itemId = needsYou();
+    const { slack, posts, edits } = fakeSlack();
+    const desktop: string[] = [];
+    const push = pusher(slack, desktop);
+    await push.sync();
+    expect(posts).toHaveLength(1);
+    expect(desktop).toHaveLength(1);
+
+    const ethan = worker("Ethan's Claude Code");
+    await runTicketAction(db, { itemId, action: "worker.claim", input: {}, caller: ethan });
+    await push.sync();
+    await runTicketAction(db, { itemId, action: "worker.hand_back", input: { reason: "要你在 Slack 里问一下 Nina" }, caller: ethan });
+    await push.sync();
+    expect(ticketPushState(db, itemId)).toBe("handed_back");
+    expect(desktop).toHaveLength(2);
+
+    // 你回答了，工人再领、做完交付：单在 review，不再「待你处理」，也不再推（裁定 R31）。
+    await runTicketAction(db, { itemId, action: "worker.claim", input: {}, caller: ethan });
+    await runTicketAction(db, { itemId, action: "worker.complete", input: { summary: "上限 5 次", evidence: "config/retry.ts" }, caller: ethan });
+    await push.sync();
+    expect(ticketNeedsMe(db, itemId)).toBe(false);
+    expect(ticketPushState(db, itemId)).toBe("in_review");
+    expect(posts).toHaveLength(1);
+    expect(edits.at(-1)!.text).not.toContain("要你在 Slack 里问一下 Nina");
+    expect(desktop).toHaveLength(2);
+    expect(ticketsToPush(db, new Date())).toEqual([]);
   });
 
   it("does not push auto-handled tickets one by one", async () => {

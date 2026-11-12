@@ -107,6 +107,7 @@ describe("worker.track", () => {
   it("claims and attaches the existing ticket when the link is already the source of one", async () => {
     const existing = createItem(db, { title: "PROJ-123 from the Jira pull", brief: "b", createdBy: "system" });
     addTicketSource(db, { itemId: existing, kind: "jira", externalKey: "PROJ-123" });
+    setHandling(db, existing, { handling: "needs_user", reason: "要你定发版时间" });
     const before = itemCount();
     const ethan = worker("Ethan's Claude Code");
     const outcome = await track(ethan, { title: "retry", sourceUrl: "https://acme.atlassian.net/browse/PROJ-123", sessionId: "s1" });
@@ -115,6 +116,9 @@ describe("worker.track", () => {
     expect(ticketSources(db, existing)).toHaveLength(1);
     expect(getItem(db, existing)!.stage).toBe("active");
     expect(workerTicket(db, existing, ethan.bindingId).claim.sessions).toMatchObject([{ sessionId: "s1" }]);
+
+    // 这次领取是新的领取：撤掉以前的处理方式判断（裁定 R31）。
+    expect(judgment(existing)).toMatchObject({ handling: null, handling_reason: null });
 
     // 自己已经领着：只挂会话，不报错。
     const again = await track(ethan, { title: "retry", sourceUrl: "https://acme.atlassian.net/browse/PROJ-123", sessionId: "s2" });

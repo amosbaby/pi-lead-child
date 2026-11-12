@@ -246,9 +246,22 @@ describe("writing back", () => {
       stage: "blocked", handling: "needs_user", handling_reason: "needs a product decision on the retry limit", complexity: "medium",
     });
     expect(listRuns(db, itemId)).toMatchObject([{ id: runId, state: "stopped" }]);
-    // 交回的单可以再领。
+    // 交回的单可以再领。再领时撤掉交回的判断（裁定 R31），复杂度留着；理由还在活动记录里。
     await claimed(worker("Nina's Codex"), itemId);
     expect(getItem(db, itemId)!.stage).toBe("active");
+    expect(db.prepare("SELECT handling, handling_reason, complexity FROM items WHERE id=?").get(itemId))
+      .toEqual({ handling: null, handling_reason: null, complexity: "medium" });
+    expect(decisions(itemId).map((entry) => entry.payload))
+      .toContainEqual(expect.objectContaining({ decision: "worker_handed_back", reason: "needs a product decision on the retry limit" }));
+  });
+
+  it("a new claim clears a needs_user judgment, so the claimed ticket no longer needs you", async () => {
+    const itemId = ticket();
+    setHandling(db, itemId, { handling: "needs_user", reason: "要你定发版时间", complexity: "simple" });
+    const ethan = worker("Ethan's Claude Code");
+    await claimed(ethan, itemId);
+    expect(db.prepare("SELECT handling, handling_reason, complexity FROM items WHERE id=?").get(itemId))
+      .toEqual({ handling: null, handling_reason: null, complexity: "simple" });
   });
 
   it("attach_session rejects javascript: and file: urls", async () => {

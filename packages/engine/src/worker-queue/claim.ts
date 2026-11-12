@@ -10,7 +10,7 @@ import {
   type WorkerClaimMode, type WorkerSession, type WorkerUsage,
 } from "@pi-lead-child/protocol";
 import {
-  addActivity, createRun, createRunUsageLedger, getBinding, getItem, getRun, markRunStopped, transition, updateRun, type Db,
+  addActivity, clearHandling, createRun, createRunUsageLedger, getBinding, getItem, getRun, markRunStopped, transition, updateRun, type Db,
 } from "@pi-lead-child/store";
 import { ExecutionDeferredError, getExecutionMode } from "../execution-mode.js";
 import { parseMetadata } from "../pipeline/run-registration.js";
@@ -145,6 +145,11 @@ export function claimTicket(db: Db, input: ClaimTicketInput): ClaimTicketResult 
     }
     const claimMode: WorkerClaimMode = "manual";
     updateRun(db, runId, { state: "running", metadata: { bindingId: input.bindingId, claimMode, sessions: [] } });
+    // 新的领取撤掉「要你处理」的判断（handling、handling_reason；复杂度留着），裁定 R31：交回或 Lead 记的 needs_user
+    // 不能跟着再领、再交付的单走，否则它又算「待你处理」、又推一次。理由还在活动记录里；再交回时重新记。
+    // handling=auto 留着：工人读单时要看到 Lead 的判断，放回去以后 S4 的 claim_next 也按它挑。
+    const { handling } = db.prepare("SELECT handling FROM items WHERE id=?").get(item.id) as { handling: string | null };
+    if (handling === "needs_user") clearHandling(db, item.id);
     if (item.stage === "ready" || item.stage === "blocked") {
       transition(db, {
         itemId: item.id, to: "active", actor: "system", runId,
