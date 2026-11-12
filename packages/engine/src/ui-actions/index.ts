@@ -40,6 +40,7 @@ export * from "./types.js";
 export * from "./card-actions.js";
 export * from "./widgets.js";
 export { BUSY_PLACEMENT_WHERE, type BusyPlacementChange } from "./busy-placement.js";
+export { JIRA_INTAKE_WHERE, type JiraIntakeChange } from "./jira-intake.js";
 export * from "./forms.js";
 export { CONNECTIONS_WHERE, installConfirmedLocalMcp, localMcpLaunchOf, type ConnectionTarget, type SkillTarget, type SkillsTarget } from "./installs.js";
 export { UI_ACTIONS, UI_ACTION_TARGETS, runtimeEnablePermission, type RuntimeTarget } from "./catalog.js";

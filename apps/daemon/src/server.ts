@@ -73,7 +73,7 @@ import {
   slackEmojiPreview,
 } from "@pi-lead-child/engine";
 import { deferIfExternal, ExecutionDeferredError, executionModeMessages } from "@pi-lead-child/engine";
-import { createTicketPusher, type TicketPusher } from "@pi-lead-child/engine";
+import { createJiraPuller, createTicketPusher, type JiraPuller, type TicketPusher } from "@pi-lead-child/engine";
 import { outageStart, outageStep, restoreOutages, type OpenOutage, type OutageItem } from "./lead-outage.js";
 import { DEFAULT_WAKE_RETRY_MAX_FAILURES, nextWakeRetry as nextCappedRetry, wakeRetryBlocks, type WakeRetry } from "./lead-wake-retry.js";
 import type { LeadDaemonEnvironment, LeadEngine, LeadEngineFactoryResult } from "@pi-lead-child/lead";
@@ -5397,6 +5397,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     });
     // 要用户拿主意的工单推到他自己的私信、弹桌面通知，状态变了改写那条消息（计划 Task 12）。没有消息通道时也跑（只弹桌面通知）。
     pollStep("ticket-pushes", () => { void ticketPusher.sync(); });
+    // 指派给用户的 Jira 单拉进台账（计划 Task 13）。设置每一拍现读：没开（缺省）时这一拍什么都不做，也不碰 Atlassian 连接。
+    pollStep("jira-pull", () => { void jiraPuller.tick(); });
     // 记忆沉淀（工单 07）：整理攒够了的对话。在后台跑，不阻塞这一拍。
     pollStep("channel-memory", () => { void channelMemory?.tick(); });
   }
@@ -6478,6 +6480,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         const edited = await channelHub.editOwnerReply(conversation, ref, text, key);
         return edited.targetGone ? { gone: true } : {};
       },
+    },
+  });
+
+  // Jira 最小拉取（engine 的 intake/jira-pull.ts，计划 Task 13）：经 Atlassian 连接按 JQL 查指派给用户的单，在台账里建单，不经过任何模型。
+  // 连接用 Lead 的角色调（和 Lead 自己读 Jira 同一个权限），工具名和站点来自用户的设置；失败（没连接、授权失效）只记一行，下个间隔再来。
+  const jiraPuller: JiraPuller = createJiraPuller({
+    db, log,
+    call: async (tool, args) => {
+      const result = await connections.callTool("atlassian", tool, args as Record<string, unknown>, { role: "lead" });
+      if (result.isError) throw new Error("the Atlassian connection returned an error");
+      if (result.truncated) throw new Error("the Atlassian connection result was cut short");
+      return result.text;
     },
   });
 

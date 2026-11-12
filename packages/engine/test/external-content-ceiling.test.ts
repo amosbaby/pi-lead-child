@@ -177,6 +177,8 @@ describe("the rule-change flag in the catalog", () => {
       "owner_dm_sync.enable", "owner_dm_sync.disable",
       // 「待你处理」推送的两个开关（计划 Task 12）：设置页的选项。
       "ticket_push.enable", "ticket_push.disable",
+      // Jira 最小拉取的设置（计划 Task 13）：项目白名单、开关、间隔，设置页一类的选项。
+      "jira_intake.set",
     ]);
   });
 

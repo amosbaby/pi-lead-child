@@ -85,6 +85,7 @@ export * from "./design-preferences.js";
 export * from "./reply-style.js";
 export * from "./host-bypass.js";
 export * from "./busy-placement.js";
+export * from "./jira-intake.js";
 export * from "./channel-connections.js";
 export * from "./channel-catch-up.js";
 export * from "./security-alerts.js";
