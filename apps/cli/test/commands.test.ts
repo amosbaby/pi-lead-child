@@ -455,7 +455,7 @@ describe("plc miss", () => {
 
 describe("plc hub metrics", () => {
   const metrics = {
-    tickets: 12, withSource: 11, withSession: 9, sourceCoverage: 11 / 12, sessionCoverage: 0.75, medianClaimMinutes: 14.54, misses: 2,
+    tickets: 12, withSource: 11, withSession: 9, sourceCoverage: 11 / 12, sessionCoverage: 0.75, medianClaimMinutes: 14.54, misses: 2, leadMisses: 3,
   };
 
   it("reads 7 days by default and prints only numbers and percentages", async () => {
@@ -469,7 +469,9 @@ describe("plc hub metrics", () => {
     expect(text).toContain("9/12");
     expect(text).toContain("75.0%");
     expect(text).toContain("14.5");
-    expect(text).toMatch(/2/);
+    // 用户自己说的次数和 Lead 记的次数各一行，分开写。
+    expect(text).toContain("找不到：2 次");
+    expect(text).toContain("Lead 记的找不到：3 次");
     expect(h.exitCode()).toBe(0);
   });
 
@@ -483,7 +485,7 @@ describe("plc hub metrics", () => {
   });
 
   it("says there is no data instead of 0% when no ticket was created in the window", async () => {
-    const empty = { tickets: 0, withSource: 0, withSession: 0, sourceCoverage: 0, sessionCoverage: 0, medianClaimMinutes: null, misses: 1 };
+    const empty = { tickets: 0, withSource: 0, withSession: 0, sourceCoverage: 0, sessionCoverage: 0, medianClaimMinutes: null, misses: 1, leadMisses: 0 };
     const h = harness({ getHubMetrics: async () => ({ since: "7d", metrics: empty }) });
     await h.run("hub", "metrics");
     const text = h.out.join("\n");

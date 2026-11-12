@@ -148,15 +148,22 @@ export function setHandling(
   if (result.changes !== 1) throw new Error(`setHandling: item ${itemId} does not exist`);
 }
 
-/** 记一次「没找到」（用户的原话）。 */
-export function recordMiss(db: Db, text: string, now: Date = new Date()): void {
+export const TICKET_MISS_BY = ["user", "lead"] as const;
+export type TicketMissBy = (typeof TICKET_MISS_BY)[number];
+
+/** 记一次「没找到」（用户的原话）。by 是谁记的：user 是用户自己，lead 是 Lead 调操作记的。 */
+export function recordMiss(db: Db, text: string, by: TicketMissBy, now: Date = new Date()): void {
   if (text.trim() === "") throw new Error("miss text must not be blank");
-  db.prepare("INSERT INTO ticket_misses (text, created_at) VALUES (?, ?)").run(text, now.toISOString());
+  if (!(TICKET_MISS_BY as readonly string[]).includes(by)) throw new Error(`miss by ${String(by)} is not one of ${TICKET_MISS_BY.join(", ")}`);
+  db.prepare("INSERT INTO ticket_misses (text, by, created_at) VALUES (?, ?, ?)").run(text, by, now.toISOString());
 }
 
-/** 从 since 起（含）记了几次「没找到」。 */
-export function missesSince(db: Db, since: Date): number {
-  return (db.prepare("SELECT COUNT(*) AS n FROM ticket_misses WHERE created_at >= ?").get(since.toISOString()) as { n: number }).n;
+/** 从 since 起（含）记了几次「没找到」。给 by 时只数那一方记的，不给时都数。 */
+export function missesSince(db: Db, since: Date, by?: TicketMissBy): number {
+  const row = by === undefined
+    ? db.prepare("SELECT COUNT(*) AS n FROM ticket_misses WHERE created_at >= ?").get(since.toISOString())
+    : db.prepare("SELECT COUNT(*) AS n FROM ticket_misses WHERE created_at >= ? AND by = ?").get(since.toISOString(), by);
+  return (row as { n: number }).n;
 }
 
 // ── 待你处理推送（ticket_pushes，engine 的 worker-queue/pushes.ts）────────────────────────────

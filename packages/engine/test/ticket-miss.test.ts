@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { TICKET_MISS_TEXT_MAX, UI_ACTION_PERFORMED_KIND } from "@pi-lead-child/protocol";
-import { createLoopbackBinding, missesSince, openDb, type Db } from "@pi-lead-child/store";
+import { createLoopbackBinding, hubMetrics, missesSince, openDb, type Db } from "@pi-lead-child/store";
 import { listLeadUiActions, runUiAction, UI_ACTIONS } from "../src/index.js";
 
 let db: Db;
@@ -22,7 +22,7 @@ const user = () => {
   } as never;
 };
 
-const rows = () => db.prepare("SELECT text FROM ticket_misses ORDER BY id").all() as Array<{ text: string }>;
+const rows = () => db.prepare("SELECT text, by FROM ticket_misses ORDER BY id").all() as Array<{ text: string; by: string }>;
 function ledger() {
   return db.prepare("SELECT entity_key, payload FROM events WHERE kind = ? ORDER BY seq").all(UI_ACTION_PERFORMED_KIND)
     .map((row: any) => ({ entityKey: row.entity_key, ...JSON.parse(row.payload) }));
@@ -32,7 +32,7 @@ describe("ticket_miss.record", () => {
   it("is Lead-allowed, does not change rules, and writes a trimmed row plus a ledger entry", async () => {
     expect(UI_ACTIONS.ticket_miss.record).toMatchObject({ permission: "lead_allowed", changesRules: false, external: false, irreversible: false });
     const outcome = await runUiAction(db, { target: TARGET, action: "record", input: { text: "  the Jira ticket from Nina  " }, caller: user() });
-    expect(rows()).toEqual([{ text: "the Jira ticket from Nina" }]);
+    expect(rows()).toEqual([{ text: "the Jira ticket from Nina", by: "user" }]);
     expect(missesSince(db, EPOCH)).toBe(1);
     expect(outcome.by).toEqual({ actor: "user" });
     expect(ledger()).toMatchObject([{ entityKey: "ticket_miss:hub", actor: "user", action: "record" }]);
@@ -44,8 +44,20 @@ describe("ticket_miss.record", () => {
       target: TARGET, action: "record", input: { text: "another one" }, reason: "用户说没找到",
       caller: { kind: "lead", turnId: null, externalContent: [{ via: "message", source: "slack" }] },
     });
-    expect(rows().map((row) => row.text)).toEqual(["the report ticket", "another one"]);
+    expect(rows()).toEqual([{ text: "the report ticket", by: "lead" }, { text: "another one", by: "lead" }]);
     expect(ledger().map((entry) => entry.actor)).toEqual(["lead", "lead"]);
+  });
+
+  it("R27: a Lead record, also one from a turn an external message woke, does not change the user's count", async () => {
+    await runUiAction(db, { target: TARGET, action: "record", input: { text: "the user said so" }, caller: user() });
+    await runUiAction(db, {
+      target: TARGET, action: "record", input: { text: "an external message hinted at it" }, reason: "外部消息说的",
+      caller: { kind: "lead", turnId: null, externalContent: [{ via: "message", source: "slack" }] },
+    });
+    // Lead 在用户本人这一轮里代他记的，也是 Lead 记的（by 看谁调的，不看代谁）。
+    const metrics = hubMetrics(db, EPOCH);
+    expect(metrics.misses).toBe(1);
+    expect(metrics.leadMisses).toBe(1);
   });
 
   it("refuses a blank text, a text over the cap, and a missing text; nothing is written", async () => {

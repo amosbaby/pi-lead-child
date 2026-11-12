@@ -4,12 +4,15 @@
 //   - 领取中位时长：工单建好到第一次被外部工人领走，分钟。
 //   - 「找不到」次数：用户说过几次没找到东西（ticket_misses）。
 //
-// 口径（只数根工单，每张单看它自己）：
+// 口径（ruling R27）：分母只数根工单，会话和领取看整棵树：
 //   - 分母是窗口内（created_at >= since）建的 kind='task'、没有 parent_item_id 的工单。提醒不是工单；子单的来源是从根单继承的
 //     （Task 7b），数子单会把同一个来源算多次，还把 Lead 自己拆出来的活算进「用户找不到」的分母。
-//   - 来源：这张单自己有 ticket_sources 行。会话：这张单自己有 runtime=external 的 Run，其中有一条会话带 url 或 sessionId。
-//   - 领取时长：这张单第一次外部 Run 的 started_at（Run 的创建时间）减去 items.created_at；没被领过的不进中位数；
+//   - 来源：这张根单自己有 ticket_sources 行（子单继承它的，不看子单）。
+//   - 会话：这张根单或它的任何后代有 runtime=external 的 Run，其中有一条会话带 url 或 sessionId。工人可以领 Lead 拆出的子单
+//     （claim 和队列不过滤 parent），只看根单自己会让这样的根永远是「没会话」「没被领」。
+//   - 领取时长：整棵树里最早的外部 Run 的 started_at（Run 的创建时间）减去根单的 created_at；整棵树都没被领过的不进中位数；
 //     时钟回拨造成的负数按 0 算。
+//   - 「找不到」：misses 只数用户自己说的（by='user'），Lead 调操作记的单独成 leadMisses，不进 misses。
 //   - 没有工单时覆盖率是 0、中位数是 null，不是 1：调用方（plc hub metrics）按 tickets=0 写「没有数据」。
 // 时间两种写法都认：SQLite 的 datetime('now')（YYYY-MM-DD HH:MM:SS，UTC）和 ISO。
 import { EXTERNAL_RUNTIME_ID } from "@pi-lead-child/protocol";
@@ -25,10 +28,11 @@ export interface HubMetrics {
   sessionCoverage: number;
   medianClaimMinutes: number | null;
   misses: number;
+  leadMisses: number;
 }
 
 interface RootRow { id: number; created_at: string; has_source: number }
-interface ExternalRunRow { item_id: number; started_at: string; metadata: string }
+interface ExternalRunRow { root_id: number; started_at: string; metadata: string }
 
 function hasSessionLink(metadata: string): boolean {
   let parsed: unknown;
@@ -59,27 +63,35 @@ export function hubMetrics(db: Db, since: Date): HubMetrics {
        FROM items i
       WHERE i.kind = 'task' AND i.parent_item_id IS NULL AND datetime(i.created_at) >= datetime(?)`,
   ).all(since.toISOString()) as RootRow[];
+  // 每张窗口内的根单，连同它的所有后代；这棵树上的外部 Run。
   const runs = db.prepare(
-    `SELECT r.item_id AS item_id, r.started_at AS started_at, r.metadata AS metadata
-       FROM runs r JOIN items i ON i.id = r.item_id
-      WHERE r.runtime = ? AND i.kind = 'task' AND i.parent_item_id IS NULL AND datetime(i.created_at) >= datetime(?)
+    `WITH RECURSIVE tree(root_id, item_id) AS (
+       SELECT id, id FROM items WHERE kind = 'task' AND parent_item_id IS NULL AND datetime(created_at) >= datetime(?)
+       UNION ALL
+       SELECT tree.root_id, i.id FROM items i JOIN tree ON i.parent_item_id = tree.item_id
+     )
+     SELECT tree.root_id AS root_id, r.started_at AS started_at, r.metadata AS metadata
+       FROM tree JOIN runs r ON r.item_id = tree.item_id
+      WHERE r.runtime = ?
       ORDER BY r.id`,
-  ).all(EXTERNAL_RUNTIME_ID, since.toISOString()) as ExternalRunRow[];
+  ).all(since.toISOString(), EXTERNAL_RUNTIME_ID) as ExternalRunRow[];
 
-  const firstClaim = new Map<number, string>();
+  const firstClaim = new Map<number, number>();
   const withSessionIds = new Set<number>();
   for (const run of runs) {
-    if (!firstClaim.has(run.item_id)) firstClaim.set(run.item_id, run.started_at);
-    if (hasSessionLink(run.metadata)) withSessionIds.add(run.item_id);
+    const startedAt = timestampEpoch(run.started_at);
+    if (startedAt !== null) {
+      const earliest = firstClaim.get(run.root_id);
+      if (earliest === undefined || startedAt < earliest) firstClaim.set(run.root_id, startedAt);
+    }
+    if (hasSessionLink(run.metadata)) withSessionIds.add(run.root_id);
   }
 
   const claimMinutes: number[] = [];
   for (const root of roots) {
-    const claimedAt = firstClaim.get(root.id);
-    if (claimedAt === undefined) continue;
+    const to = firstClaim.get(root.id);
     const from = timestampEpoch(root.created_at);
-    const to = timestampEpoch(claimedAt);
-    if (from === null || to === null) continue;
+    if (to === undefined || from === null) continue;
     claimMinutes.push(Math.max(0, to - from) / 60_000);
   }
 
@@ -91,6 +103,7 @@ export function hubMetrics(db: Db, since: Date): HubMetrics {
     sourceCoverage: tickets === 0 ? 0 : withSource / tickets,
     sessionCoverage: tickets === 0 ? 0 : withSession / tickets,
     medianClaimMinutes: median(claimMinutes),
-    misses: missesSince(db, since),
+    misses: missesSince(db, since, "user"),
+    leadMisses: missesSince(db, since, "lead"),
   };
 }

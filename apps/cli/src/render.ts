@@ -104,5 +104,6 @@ export function hubMetricsText(since: string, metrics: HubMetricsDto): string {
     `会话链接覆盖：${percent(metrics.withSession, metrics.sessionCoverage)}`,
     `领取中位时长：${metrics.medianClaimMinutes === null ? "-" : `${metrics.medianClaimMinutes.toFixed(1)} 分钟`}`,
     `找不到：${metrics.misses} 次`,
+    `Lead 记的找不到：${metrics.leadMisses} 次`,
   ].join("\n");
 }

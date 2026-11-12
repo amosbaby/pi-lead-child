@@ -165,13 +165,16 @@ describe("handling", () => {
 describe("misses", () => {
   it("counts only the misses since the given time", () => {
     const d = db();
-    recordMiss(d, "could not find the Jira ticket for the refund bug", new Date("2026-11-01T00:00:00.000Z"));
-    recordMiss(d, "second", new Date("2026-11-08T00:00:00.000Z"));
-    recordMiss(d, "third", new Date("2026-11-09T12:00:00.000Z"));
+    recordMiss(d, "could not find the Jira ticket for the refund bug", "user", new Date("2026-11-01T00:00:00.000Z"));
+    recordMiss(d, "second", "lead", new Date("2026-11-08T00:00:00.000Z"));
+    recordMiss(d, "third", "user", new Date("2026-11-09T12:00:00.000Z"));
     expect(missesSince(d, new Date("2026-11-08T00:00:00.000Z"))).toBe(2);
     expect(missesSince(d, new Date("2026-11-10T00:00:00.000Z"))).toBe(0);
     expect(missesSince(d, new Date(0))).toBe(3);
-    expect(() => recordMiss(d, "   ")).toThrow(/text/);
+    expect(missesSince(d, new Date(0), "user")).toBe(2);
+    expect(missesSince(d, new Date(0), "lead")).toBe(1);
+    expect(() => recordMiss(d, "   ", "user")).toThrow(/text/);
+    expect(() => recordMiss(d, "x", "child" as never)).toThrow(/by/);
     d.close();
   });
 });

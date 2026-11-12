@@ -59,15 +59,16 @@ describe("GET /v1/hub/metrics", () => {
     createItem(db, { title: "no source", brief: "b", createdBy: "lead" });
     const old = createItem(db, { title: "old", brief: "b", createdBy: "lead" });
     db.prepare("UPDATE items SET created_at = ? WHERE id = ?").run(new Date(Date.now() - 10 * 86_400_000).toISOString(), old);
-    recordMiss(db, "in the window");
-    recordMiss(db, "before the window", new Date(Date.now() - 10 * 86_400_000));
+    recordMiss(db, "in the window", "user");
+    recordMiss(db, "lead guess", "lead");
+    recordMiss(db, "before the window", "user", new Date(Date.now() - 10 * 86_400_000));
 
     const week = await call("GET", "/v1/hub/metrics", undefined, reader.accessToken);
     expect(week).toEqual({
       status: 200,
       body: {
         since: "7d",
-        metrics: { tickets: 2, withSource: 1, withSession: 0, sourceCoverage: 0.5, sessionCoverage: 0, medianClaimMinutes: null, misses: 1 },
+        metrics: { tickets: 2, withSource: 1, withSession: 0, sourceCoverage: 0.5, sessionCoverage: 0, medianClaimMinutes: null, misses: 1, leadMisses: 1 },
       },
     });
     const longer = await call("GET", "/v1/hub/metrics?since=30d");
@@ -91,7 +92,7 @@ describe("POST /v1/actions/ticket_miss/hub/record", () => {
     expect(missRows()).toBe(0);
 
     expect((await call("POST", path, { input: { text: "  the Jira ticket  " } })).status).toBe(200);
-    expect(db.prepare("SELECT text FROM ticket_misses").all()).toEqual([{ text: "the Jira ticket" }]);
+    expect(db.prepare("SELECT text, by FROM ticket_misses").all()).toEqual([{ text: "the Jira ticket", by: "user" }]);
     expect(ledger()).toEqual([expect.objectContaining({ target: { type: "ticket_miss", id: "hub" }, action: "record", actor: "user" })]);
     expect((await call("GET", "/v1/hub/metrics")).body.metrics.misses).toBe(1);
   });

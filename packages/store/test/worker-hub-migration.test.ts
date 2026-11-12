@@ -43,7 +43,7 @@ describe("the v68 worker hub migration", () => {
     expect(tables(db)).toEqual(expect.arrayContaining(["ticket_sources", "ticket_pushes", "ticket_misses"]));
     expect(columns(db, "ticket_sources")).toEqual(["id", "item_id", "kind", "url", "external_key", "conversation", "message_ts", "card_id", "created_at"]);
     expect(columns(db, "ticket_pushes")).toEqual(["item_id", "reason", "conversation", "message_ref", "shown_state", "created_at", "updated_at"]);
-    expect(columns(db, "ticket_misses")).toEqual(["id", "text", "created_at"]);
+    expect(columns(db, "ticket_misses")).toEqual(["id", "text", "by", "created_at"]);
     for (const column of NEW_ITEM_COLUMNS) expect(columns(db, "items")).toContain(column);
     expect(db.prepare("SELECT name FROM schema_migrations WHERE version = 68").get()).toEqual({ name: "worker-hub-v1" });
     expect(LATEST_SCHEMA_VERSION).toBeGreaterThanOrEqual(68);

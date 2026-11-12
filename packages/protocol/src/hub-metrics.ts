@@ -39,7 +39,10 @@ export const HubMetricsSchema = StrictObject({
   sourceCoverage: Type.Number({ minimum: 0, maximum: 1 }),
   sessionCoverage: Type.Number({ minimum: 0, maximum: 1 }),
   medianClaimMinutes: Type.Union([Type.Number({ minimum: 0 }), Type.Null()]),
+  // 用户自己说的「找不到」（按钮、plc miss）。止损看这一个。
   misses: Type.Integer({ minimum: 0 }),
+  // Lead 调操作记的（ruling R27）：单独数，不进 misses。
+  leadMisses: Type.Integer({ minimum: 0 }),
 });
 export type HubMetricsDto = Static<typeof HubMetricsSchema>;
 

@@ -1420,7 +1420,7 @@ CREATE TABLE IF NOT EXISTS channel_ticket_origins (
 // 同一个 (kind, external_key) 只能属于一张工单（部分唯一索引）：同一个 Jira 单第二次进来时归到已有的工单。没有 external_key 的来源不去重。
 // ticket_pushes：每张工单最多一条推给用户私信的消息（item_id 是主键），状态变了就改写那条消息（shown_state 是消息上现在显示的状态，
 // message_ref 是那条消息在来源里的位置，发出去以后才有）。
-// ticket_misses：用户说「没找到」的记录，只记数和原话。
+// ticket_misses：用户说「没找到」的记录，只记数、原话和谁记的。
 export const WORKER_HUB_SCHEMA = `
 CREATE TABLE IF NOT EXISTS ticket_sources (
   id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1447,6 +1447,9 @@ CREATE TABLE IF NOT EXISTS ticket_pushes (
 CREATE TABLE IF NOT EXISTS ticket_misses (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   text        TEXT NOT NULL,
+  -- 谁记的：user 是用户自己（按钮、plc miss），lead 是 Lead 调操作记的（包括外部消息叫醒的一轮）。hub 指标的 misses 只数 user
+  -- （ruling R27）。v68 还没有发布过，原地加在表定义里，没有给旧的 v68 库补列的路径（和 ticket_sources.card_id 同一条，ruling R19）。
+  by          TEXT CHECK (by IS NULL OR by IN ('user','lead')),
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ticket_misses_created ON ticket_misses(created_at);
