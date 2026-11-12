@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { TICKET_MISS_TEXT_MAX, UI_ACTION_PERFORMED_KIND } from "@pi-lead-child/protocol";
-import { createLoopbackBinding, hubMetrics, missesSince, openDb, type Db } from "@pi-lead-child/store";
+import { addLeadFollowUp, completeTurn, createLoopbackBinding, createTurn, hubMetrics, missesSince, openDb, type Db } from "@pi-lead-child/store";
 import { listLeadUiActions, runUiAction, UI_ACTIONS } from "../src/index.js";
 
 let db: Db;
@@ -54,10 +54,43 @@ describe("ticket_miss.record", () => {
       target: TARGET, action: "record", input: { text: "an external message hinted at it" }, reason: "外部消息说的",
       caller: { kind: "lead", turnId: null, externalContent: [{ via: "message", source: "slack" }] },
     });
-    // Lead 在用户本人这一轮里代他记的，也是 Lead 记的（by 看谁调的，不看代谁）。
     const metrics = hubMetrics(db, EPOCH);
     expect(metrics.misses).toBe(1);
     expect(metrics.leadMisses).toBe(1);
+  });
+
+  it("R28: Lead in the user's own live turn records for the user; a timer turn and a turn with no user stay Lead's", async () => {
+    const owner = createLoopbackBinding(db, { name: "Mac 网页" }).binding;
+    createTurn(db, { id: "turn-live", originBindingId: owner.id, originKind: "paired:companion", userText: "我找不到 Nina 说的那张单", state: "streaming" });
+    await runUiAction(db, {
+      target: TARGET, action: "record", input: { text: "the ticket Nina mentioned" }, reason: "用户说没找到",
+      caller: { kind: "lead", turnId: "turn-live" },
+    });
+    // 用户设的跟进到点叫醒的一轮：不是用户本人在说话。
+    createTurn(db, { id: "turn-set", originBindingId: owner.id, originKind: "paired:companion", userText: "明天提醒我", state: "streaming" });
+    const followUp = addLeadFollowUp(db, {
+      at: new Date(Date.now() - 1_000), note: "到点记一下", setBy: { turnId: "turn-set", bindingId: owner.id, startedAt: new Date().toISOString() },
+    });
+    completeTurn(db, "turn-set");
+    await runUiAction(db, {
+      target: TARGET, action: "record", input: { text: "from the timer turn" }, reason: "到点了", caller: { kind: "lead", turnId: `timer:${followUp}` },
+    });
+    // 这一轮已经结束：也不再算用户本人正在说话。
+    completeTurn(db, "turn-live");
+    await runUiAction(db, {
+      target: TARGET, action: "record", input: { text: "from a finished turn" }, reason: "用户说没找到", caller: { kind: "lead", turnId: "turn-live" },
+    });
+    await runUiAction(db, { target: TARGET, action: "record", input: { text: "no turn" }, reason: "x", caller: { kind: "lead", turnId: null } });
+
+    expect(rows()).toEqual([
+      { text: "the ticket Nina mentioned", by: "user" },
+      { text: "from the timer turn", by: "lead" },
+      { text: "from a finished turn", by: "lead" },
+      { text: "no turn", by: "lead" },
+    ]);
+    expect(hubMetrics(db, EPOCH)).toMatchObject({ misses: 1, leadMisses: 3 });
+    // 账本照旧写 actor=lead：by 只决定记成谁的「找不到」。
+    expect(ledger().map((entry) => entry.actor)).toEqual(["lead", "lead", "lead", "lead"]);
   });
 
   it("refuses a blank text, a text over the cap, and a missing text; nothing is written", async () => {
