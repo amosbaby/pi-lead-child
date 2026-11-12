@@ -5,7 +5,9 @@
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { addTicketSource, createItem, hubMetrics, missesSince, openDb, recordMiss, type Db } from "../src/index.js";
+import {
+  addActivity, addTicketSource, createItem, hubMetrics, markLightTask, missesSince, openDb, recordMiss, type Db,
+} from "../src/index.js";
 
 const SINCE = new Date("2026-11-05T00:00:00.000Z");
 
@@ -33,7 +35,9 @@ describe("hubMetrics", () => {
   it("10 tickets, 9 with a source, 8 with a session: coverage 0.9 and 0.8, median claim time, misses", () => {
     const d = db();
     const ids = Array.from({ length: 10 }, (_, i) => ticket(d, `2026-11-06 0${i}:00:00`));
-    ids.slice(0, 9).forEach((id) => addTicketSource(d, { itemId: id, kind: "slack", conversation: "slack:C0TEAM:1", messageTs: `1.${id}` }));
+    ids.slice(0, 9).forEach((id) => addTicketSource(d, {
+      itemId: id, kind: "slack", url: `https://acme.example.com/archives/C0TEAM/p${id}`, conversation: "slack:C0TEAM:1", messageTs: `1.${id}`,
+    }));
     // 8 张有会话：url 的、只有 sessionId 的都算。第 9、10 张领了但没挂会话链接。
     ids.slice(0, 5).forEach((id, i) => externalRun(d, id, `2026-11-06 0${i}:10:00`, [{ url: "https://claude.ai/code/session_abc", sessionId: null }]));
     ids.slice(5, 8).forEach((id, i) => externalRun(d, id, `2026-11-06 0${i + 5}:30:00`, [{ url: null, sessionId: "sess-1" }]));
@@ -119,7 +123,7 @@ describe("hubMetrics", () => {
     externalRun(d, child, "2026-11-06 00:20:00", []);
     // 没有任何 Run 的另一棵树：没覆盖、没被领。
     const other = ticket(d, "2026-11-06 00:00:00");
-    addTicketSource(d, { itemId: other, kind: "slack", conversation: "slack:C0TEAM:3" });
+    addTicketSource(d, { itemId: other, kind: "slack", url: "https://acme.example.com/archives/C0TEAM/p3", conversation: "slack:C0TEAM:3" });
     ticket(d, "2026-11-06 00:01:00", { parentItemId: other });
 
     const metrics = hubMetrics(d, SINCE);
@@ -170,6 +174,77 @@ describe("hubMetrics", () => {
     const id = ticket(d, "2026-11-06 00:10:00");
     externalRun(d, id, "2026-11-06 00:09:00", []);
     expect(hubMetrics(d, SINCE).medianClaimMinutes).toBe(0);
+    d.close();
+  });
+});
+
+// 裁定 R32（最终审阅 I4）：分母只数「该有来源的单」，来源只数带链接或外部编号的。
+describe("hubMetrics: who is in the denominator and what counts as a source link (R32)", () => {
+  function withSessionAndLink(d: Db, id: number): void {
+    addTicketSource(d, { itemId: id, kind: "jira", externalKey: `PROJ-${id}`, url: `https://acme.example.com/browse/PROJ-${id}` });
+    externalRun(d, id, "2026-11-06 00:10:00", [{ url: null, sessionId: `sess-${id}` }]);
+  }
+
+  it("leaves light tasks out, and the light tasks a watch check opened", () => {
+    const d = db();
+    const counted = ticket(d, "2026-11-06 00:00:00");
+    const light = ticket(d, "2026-11-06 00:00:00");
+    markLightTask(d, light, "lead");
+    const watch = ticket(d, "2026-11-06 00:00:00");
+    addActivity(d, { itemId: watch, actor: "system", kind: "decision", payload: { decision: "watch_check", watch: 3 } });
+    for (const id of [light, watch]) withSessionAndLink(d, id);
+    expect(hubMetrics(d, SINCE)).toMatchObject({ tickets: 1, withSource: 0, withSession: 0, sourceCoverage: 0, sessionCoverage: 0 });
+    expect(counted).toBeGreaterThan(0);
+    d.close();
+  });
+
+  it("leaves tickets a trigger made out", () => {
+    const d = db();
+    ticket(d, "2026-11-06 00:00:00");
+    const fromTrigger = ticket(d, "2026-11-06 00:00:00");
+    addActivity(d, { itemId: fromTrigger, actor: "system", kind: "comment", payload: { from_trigger: 4, occurrence_at: "2026-11-06T00:00:00.000Z" } });
+    withSessionAndLink(d, fromTrigger);
+    expect(hubMetrics(d, SINCE)).toMatchObject({ tickets: 1, withSource: 0, withSession: 0, medianClaimMinutes: null });
+    d.close();
+  });
+
+  it("leaves tickets a continuation made out", () => {
+    const d = db();
+    const parent = ticket(d, "2026-11-04 00:00:00");
+    ticket(d, "2026-11-06 00:00:00");
+    const fromContinuation = ticket(d, "2026-11-06 00:00:00");
+    d.prepare(
+      "INSERT INTO continuations (item_id, trigger_event, action_sequence, context, idempotency_key) VALUES (?, 'review_passed', '[]', ?, 'k1')",
+    ).run(parent, JSON.stringify({ createdTickets: { followup: fromContinuation }, "step:0": { ticketId: fromContinuation } }));
+    withSessionAndLink(d, fromContinuation);
+    expect(hubMetrics(d, SINCE)).toMatchObject({ tickets: 1, withSource: 0, withSession: 0 });
+    d.close();
+  });
+
+  it("leaves tickets the user made on the page out, but keeps the ones a worker tracked from its session", () => {
+    const d = db();
+    ticket(d, "2026-11-06 00:00:00");
+    const typed = createItem(d, { title: "typed in the app", brief: "b", createdBy: "user" });
+    d.prepare("UPDATE items SET created_at = ? WHERE id = ?").run("2026-11-06 00:00:00", typed);
+    const tracked = createItem(d, { title: "tracked by a worker", brief: "b", createdBy: "user" });
+    d.prepare("UPDATE items SET created_at = ? WHERE id = ?").run("2026-11-06 00:00:00", tracked);
+    addActivity(d, { itemId: tracked, actor: "system", kind: "decision", payload: { decision: "worker_tracked", bindingId: 1, workerName: "Ethan's Claude Code" } });
+    withSessionAndLink(d, tracked);
+    expect(hubMetrics(d, SINCE)).toMatchObject({ tickets: 2, withSource: 1, withSession: 1, sourceCoverage: 0.5, sessionCoverage: 0.5 });
+    d.close();
+  });
+
+  it("counts a source only when it has a url or an external key", () => {
+    const d = db();
+    const linked = ticket(d, "2026-11-06 00:00:00");
+    addTicketSource(d, { itemId: linked, kind: "slack", url: "https://acme.example.com/archives/C1/p1", conversation: "slack:C1", messageTs: "1.1" });
+    const keyed = ticket(d, "2026-11-06 00:00:00");
+    addTicketSource(d, { itemId: keyed, kind: "jira", externalKey: "PROJ-123" });
+    // 回填的 Slack 来源、私信里的来源：没有链接，找不回去，不算。
+    const bare = ticket(d, "2026-11-06 00:00:00");
+    addTicketSource(d, { itemId: bare, kind: "slack", conversation: "slack:D0SELF", messageTs: "1.2" });
+    ticket(d, "2026-11-06 00:00:00");
+    expect(hubMetrics(d, SINCE)).toMatchObject({ tickets: 4, withSource: 2, sourceCoverage: 0.5 });
     d.close();
   });
 });
