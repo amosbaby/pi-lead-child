@@ -1,8 +1,11 @@
 // 迁移行按名字对齐：hub 分支打开 integration/latest 已经迁移过的库。
 // 两条分支的 v64–v67 号码相同、内容不同；对齐只改 schema_migrations 里的号码，不碰业务表和生命周期字段。
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
+import { defaultDataDir, preRenameDataDir } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createItem, openDb, transition, type Db } from "../src/index.js";
 import { HUB_MIGRATION_NAMES, KNOWN_FOREIGN_MIGRATIONS, reconcileMigrationRows } from "../src/migration-reconcile.js";
@@ -200,5 +203,65 @@ describe("reconcileMigrationRows", () => {
     expect(check.prepare("SELECT version, name, applied_at FROM schema_migrations ORDER BY version").all()).toEqual(before);
     expect(tableNames(check)).not.toContain("schema_migrations_foreign");
     check.close();
+  });
+});
+
+// 裁定 R33（最终审阅 I5）：没设 PLC_DATA_DIR 时，hub 不在原来的缺省数据目录里对齐、迁移 integration/latest 的库。
+// 原地迁移以后 latest 的降级守卫就不认这个库了，回滚（切回旧目录）没了。停下，告诉用户用 plc hub import-db 导入。
+describe("the legacy default data dir", () => {
+  const saved = { home: process.env.HOME, dataDir: process.env.PLC_DATA_DIR };
+  afterEach(() => {
+    process.env.HOME = saved.home;
+    if (saved.dataDir === undefined) delete process.env.PLC_DATA_DIR;
+    else process.env.PLC_DATA_DIR = saved.dataDir;
+  });
+  const sha = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
+
+  for (const [label, dirOf] of [["default", defaultDataDir], ["pre-rename", preRenameDataDir]] as const) {
+    it(`refuses a latest-branch database in the ${label} dir without PLC_DATA_DIR, and leaves the file as it was`, () => {
+      const home = tempDir("plc-legacy-home-");
+      const dir = dirOf(home);
+      mkdirSync(dir, { recursive: true });
+      const path = join(dir, "plc.db");
+      latestShapedDb(path);
+      const before = sha(path);
+      process.env.HOME = home;
+      delete process.env.PLC_DATA_DIR;
+
+      expect(() => openDb(path)).toThrow(/plc hub import-db --from/);
+      expect(sha(path)).toBe(before);
+      const check = new Database(path, { readonly: true });
+      expect(versions(check)).toEqual(LATEST_ROWS);
+      expect(tableNames(check)).not.toContain("schema_migrations_foreign");
+      check.close();
+    });
+  }
+
+  it("reconciles as before when PLC_DATA_DIR names the dir", () => {
+    const home = tempDir("plc-legacy-home-");
+    const dir = defaultDataDir(home);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "plc.db");
+    latestShapedDb(path);
+    process.env.HOME = home;
+    process.env.PLC_DATA_DIR = dir;
+
+    const db = openDb(path);
+    expect(foreignNames(db)).toEqual(["claude-memory-sync-v1", "token-usage-resume-recompute-v1"]);
+    expect(versions(db)).toEqual([...HUB_MIGRATION_NAMES].map(([name, version]) => [version, name]));
+    db.close();
+  });
+
+  it("opens the hub's own database in the default dir", () => {
+    const home = tempDir("plc-legacy-home-");
+    const dir = defaultDataDir(home);
+    mkdirSync(dir, { recursive: true });
+    const path = join(dir, "plc.db");
+    process.env.HOME = home;
+    delete process.env.PLC_DATA_DIR;
+    openDb(path).close();
+    const again = openDb(path);
+    expect(versions(again)).toEqual([...HUB_MIGRATION_NAMES].map(([name, version]) => [version, name]));
+    again.close();
   });
 });

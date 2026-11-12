@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
-import { schedLine } from "@pi-lead-child/core";
-import { basename } from "node:path";
+import { defaultDataDir, preRenameDataDir, schedLine } from "@pi-lead-child/core";
+import { homedir } from "node:os";
+import { basename, dirname, resolve } from "node:path";
 import {
   CHECKPOINT_CONTROL_PLANE_SCHEMA,
   CHECKPOINT_FIDELITY_STORAGE_SCHEMA,
@@ -33,7 +34,7 @@ import {
   migrateSpuriousOutcomeRecords,
   migrateTicketAgentTurnText,
 } from "./data-corrections.js";
-import { reconcileMigrationRows, type ReconcileReport } from "./migration-reconcile.js";
+import { latestBranchMigrationRows, reconcileMigrationRows, type ReconcileReport } from "./migration-reconcile.js";
 import { syncSystemStandingOrders } from "./standing-orders.js";
 import { migrateAuthorityToHandbook } from "./channel-handbook.js";
 import { dropLedgerGuards, installLedgerGuards, ledgerGuardsEnabled, registerLedgerWriter } from "./ledger-guard.js";
@@ -192,10 +193,35 @@ export function cacheStatements(db: Db, size = STATEMENT_CACHE_SIZE): Db {
   return db;
 }
 
+/** 没设 PLC_DATA_DIR 时打开了原来缺省数据目录里 integration/latest 的库：hub 不在原地对齐、迁移它（裁定 R33）。 */
+export class LegacyLedgerRefusedError extends Error {
+  constructor(readonly path: string, readonly dir: string, readonly rows: string[]) {
+    super(
+      `${path} is integration/latest's ledger (${rows.join(", ")}). Migrating it in place would leave ` +
+      "integration/latest unable to open it, so this build will not open it. Set PLC_DATA_DIR to the hub's own data dir " +
+      `and import a copy: plc hub import-db --from "${dir}"`,
+    );
+    this.name = "LegacyLedgerRefusedError";
+  }
+}
+
+// 原来的缺省数据目录（integration/latest 不设 PLC_DATA_DIR 时用的：新名字的，或还没迁移的开发机上改名以前的）里放着
+// latest 迁移过的库、这次也没设 PLC_DATA_DIR：停下，库原样不动。在任何写库的 pragma 和迁移之前检查。
+// 设了 PLC_DATA_DIR 是用户自己选的目录（hub 的导入就在那里），照常对齐。
+function refuseLatestLedgerInLegacyDir(db: Db, path: string): void {
+  if (process.env.PLC_DATA_DIR) return;
+  const home = homedir();
+  const dir = resolve(dirname(path));
+  if (dir !== resolve(defaultDataDir(home)) && dir !== resolve(preRenameDataDir(home))) return;
+  const rows = latestBranchMigrationRows(db);
+  if (rows.length) throw new LegacyLedgerRefusedError(resolve(path), dir, rows);
+}
+
 // onReconcile 给要报告「对齐改了什么」的调用方（hub 导入旧库）；其他调用方不传。
 export function openDb(path: string, options: { onReconcile?: (report: ReconcileReport) => void } = {}): Db {
   const db = cacheStatements(new Database(path));
   try {
+    refuseLatestLedgerInLegacyDir(db, path);
     db.pragma("journal_mode = WAL");
     db.pragma("foreign_keys = ON");
     db.pragma("busy_timeout = 5000"); // child extension 跨进程写同一 DB

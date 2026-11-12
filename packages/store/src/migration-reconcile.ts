@@ -28,16 +28,33 @@ export type ReconcileReport = {
   foreign: string[];
 };
 
+type MigrationRow = { version: number; name: string };
+
+// 只读：v64 起的迁移行，和其中对齐要动的两类（latest 独有的、hub 的名字记在别的号码上的）。全新的库还没有
+// schema_migrations 表（它由随后的 exec(SCHEMA) 建）时是 null。
+function divergedRows(db: Db): { rows: MigrationRow[]; foreign: MigrationRow[]; moved: MigrationRow[] } | null {
+  const hasTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
+  if (!hasTable) return null;
+  const rows = db.prepare("SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version")
+    .all(FIRST_DIVERGED_VERSION) as MigrationRow[];
+  return {
+    rows,
+    foreign: rows.filter((row) => KNOWN_FOREIGN_MIGRATIONS.includes(row.name)),
+    moved: rows.filter((row) => HUB_MIGRATION_NAMES.has(row.name) && HUB_MIGRATION_NAMES.get(row.name) !== row.version),
+  };
+}
+
+/** 这个库里 integration/latest 记下的迁移行（对齐会挪走或改号的），写成「v<号码> <名字>」。不写库。 */
+export function latestBranchMigrationRows(db: Db): string[] {
+  const diverged = divergedRows(db);
+  return diverged ? [...diverged.foreign, ...diverged.moved].map((row) => `v${row.version} ${row.name}`) : [];
+}
+
 export function reconcileMigrationRows(db: Db): ReconcileReport {
   const report: ReconcileReport = { renumbered: [], foreign: [] };
-  // 全新的库还没有 schema_migrations 表（它由随后的 exec(SCHEMA) 建），没有东西可对齐。
-  const hasTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'").get();
-  if (!hasTable) return report;
-
-  const rows = db.prepare("SELECT version, name FROM schema_migrations WHERE version >= ? ORDER BY version")
-    .all(FIRST_DIVERGED_VERSION) as Array<{ version: number; name: string }>;
-  const foreign = rows.filter((row) => KNOWN_FOREIGN_MIGRATIONS.includes(row.name));
-  const moved = rows.filter((row) => HUB_MIGRATION_NAMES.has(row.name) && HUB_MIGRATION_NAMES.get(row.name) !== row.version);
+  const diverged = divergedRows(db);
+  if (!diverged) return report;
+  const { rows, foreign, moved } = diverged;
   // 不认识的名字一律停下：它可能是 latest 之后又加的迁移，替它猜号码会让 hub 的迁移链错过或重做某一步。
   // 先检查再动手，库保持原样。
   const unknown = rows.filter((row) => !KNOWN_FOREIGN_MIGRATIONS.includes(row.name) && !HUB_MIGRATION_NAMES.has(row.name));

@@ -4,6 +4,7 @@ import { dataDir, dbPath, loadEnvConfig, loginShellEnv, mergeLoginShellEnv, read
 import { runtimeSearchPath } from "@pi-lead-child/runtime";
 import { solPiPackage } from "@pi-lead-child/engine";
 import { userSkillDirs } from "@pi-lead-child/lead";
+import { LegacyLedgerRefusedError } from "@pi-lead-child/store";
 import { DaemonAlreadyRunningError, startDaemon } from "./server.js";
 
 // 桌面版安装时记下的登录 shell PATH（login-shell-path.json）和已知的用户目录。下面现读的登录 shell 环境读不到时，靠它找到执行器。
@@ -51,5 +52,7 @@ try {
   // launchd KeepAlive={SuccessfulExit:false}：只有非零退出才拉起。已有实例在跑时正常退出，避免 30s 循环重试。
   // 用 instanceof 而非正则匹配 message——message 是人话文案，不该是控制流契约。
   if (e instanceof DaemonAlreadyRunningError) { console.log(e.message); process.exit(0); }
+  // 原来的缺省数据目录里是 integration/latest 的库（store 的 openDb，裁定 R33）：只说怎么导入，不打堆栈。
+  if (e instanceof LegacyLedgerRefusedError) { console.error(e.message); process.exit(1); }
   throw e;
 }
