@@ -283,6 +283,13 @@ export function bindingScopes(binding: Pick<Binding, "scopes" | "kind" | "origin
   return originMayDecide(bindingOriginOf(binding)) ? stored : stored.filter((scope) => scope !== "approvals:respond");
 }
 
+// 只带 worker 权限的凭证（外部工人的，createWorkerBinding 签的）：它只开 /v1/worker/mcp，网关别处一律拒绝（裁定 R30）。
+// 按有效 scope 判断，所以以后给工人凭证加了别的 scope，它就按那些 scope 走普通的检查。
+export function isWorkerOnlyBinding(binding: Pick<Binding, "scopes" | "kind" | "origin">): boolean {
+  const scopes = bindingScopes(binding);
+  return scopes.length > 0 && scopes.every((scope) => scope === "worker");
+}
+
 export function listBindings(db: Db): Binding[] {
   return db.prepare("SELECT * FROM bindings ORDER BY id").all() as Binding[];
 }

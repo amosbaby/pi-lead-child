@@ -163,6 +163,7 @@ import { toWireAttemptState } from "@pi-lead-child/core";
 import { listenOnce } from "@pi-lead-child/runtime";
 import {
   authenticateToken,
+  isWorkerOnlyBinding,
   bindingScopes,
   createLoopbackBinding,
   createPairing,
@@ -1033,9 +1034,19 @@ export async function startPairedServer(
     json(req, res, 500, { error: { code: "internal_error", message: "internal server error" } });
   }
 
+  // 网关里认凭证只有这一处（HTTP 的 requireAuth 和事件 WebSocket 都走它）。外部工人的凭证（scope 只有 worker）只开
+  // /v1/worker/mcp（worker-mcp.ts 自己认证，不经过这里），别处一律 403（裁定 R30）：事件流里有 Lead 的全部广播，
+  // 不要求 scope 的路由和配对邀请也不该给它。
+  function admitBinding(binding: Binding | null): Binding | null {
+    if (binding && isWorkerOnlyBinding(binding)) {
+      throw new HttpError(403, "forbidden", "a worker token only opens the worker MCP endpoint (/v1/worker/mcp)");
+    }
+    return binding;
+  }
+
   function requireAuth(req: IncomingMessage, scope?: Scope): { binding: Binding; scopes: Scope[] } {
     const token = bearerOf(req);
-    const binding = token ? authenticateToken(bridge.db, token) : null;
+    const binding = admitBinding(token ? authenticateToken(bridge.db, token) : null);
     if (!binding && token) {
       const admin = adminTokenBinding(token, scope);
       if (admin) return { binding: admin, scopes: [ADMIN_SCOPE] };
@@ -3238,16 +3249,24 @@ export async function startPairedServer(
       return;
     }
     let binding: Binding | null = null;
-    // 查询参数名是线上契约：companion 发的是 ?ticket=…，不随内部改名走。
-    const oneTime = url.searchParams.get("ticket");
-    if (oneTime) {
-      const issued = wsTickets.get(oneTime);
-      wsTickets.delete(oneTime);
-      if (issued && issued.expiresAt > Date.now()) binding = getBinding(bridge.db, issued.bindingId);
-      if (binding?.status !== "active") binding = null;
-    } else {
-      const token = bearerOf(req);
-      binding = token ? authenticateToken(bridge.db, token) : null;
+    try {
+      // 查询参数名是线上契约：companion 发的是 ?ticket=…，不随内部改名走。
+      const oneTime = url.searchParams.get("ticket");
+      if (oneTime) {
+        const issued = wsTickets.get(oneTime);
+        wsTickets.delete(oneTime);
+        if (issued && issued.expiresAt > Date.now()) binding = getBinding(bridge.db, issued.bindingId);
+        if (binding?.status !== "active") binding = null;
+      } else {
+        const token = bearerOf(req);
+        binding = token ? authenticateToken(bridge.db, token) : null;
+      }
+      binding = admitBinding(binding);
+    } catch (err) {
+      if (!(err instanceof HttpError) || err.status !== 403) throw err;
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
     }
     if (!binding) {
       socket.write("HTTP/1.1 401 Unauthorized\r\n\r\n");
