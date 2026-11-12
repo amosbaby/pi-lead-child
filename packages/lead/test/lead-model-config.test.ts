@@ -6,6 +6,7 @@ import {
   DEFAULT_LEAD_MODEL,
   assertConfiguredLeadModel,
   discoverOpenAICompatibleModels,
+  knownContextWindow,
   listConfiguredLeadModelSpecs,
   loadLeadModelConfig,
   normalizeLeadModelConfig,
@@ -166,5 +167,37 @@ describe("lead model config", () => {
         models: ["vibeproxy/gemini-3.7-flash-high"],
       }),
     )).rejects.toThrow(/vibeproxy\/claude-sonnet-5/);
+  });
+  // 2026-11-12 回归：网关目录没写 DeepSeek 的窗口，Lead 按 128K 注册，压缩反复触发，提示缓存几乎打不中。
+  it("uses the documented window for DeepSeek V4 models when neither config nor catalog gives one", async () => {
+    const registered: Array<{ id: string; contextWindow: number }> = [];
+    await registerLeadProviders(
+      {
+        registerProvider(_name: string, input: { models?: Array<{ id: string; contextWindow: number }> }) {
+          registered.push(...(input.models ?? []).map(({ id, contextWindow }) => ({ id, contextWindow })));
+        },
+      } as never,
+      normalizeLeadModelConfig({
+        providers: {
+          gateway: { baseUrl: "http://127.0.0.1:8317/v1", apiKey: { value: "test" }, discover: true },
+        },
+      }),
+      {},
+      async () => new Response(JSON.stringify({
+        data: [{ id: "deepseek-v4.1-flash" }, { id: "deepseek-flash(high)" }, { id: "some-other-model" }],
+      })),
+    );
+    expect(registered).toEqual([
+      { id: "deepseek-v4.1-flash", contextWindow: 500_000 },
+      { id: "deepseek-flash(high)", contextWindow: 500_000 },
+      { id: "some-other-model", contextWindow: 128_000 },
+    ]);
+  });
+
+  it("knows the DeepSeek V4 family but not the older 128K models", () => {
+    expect(knownContextWindow("deepseek-flash")).toBe(1_000_000);
+    expect(knownContextWindow("deepseek-v4-pro")).toBe(1_000_000);
+    expect(knownContextWindow("deepseek-chat")).toBeNull();
+    expect(knownContextWindow("gpt-4.1-mini")).toBeNull();
   });
 });

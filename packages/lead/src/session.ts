@@ -59,6 +59,7 @@ import { toolSoftLimitMs, type BackgroundJobRegistry, type ForegroundWaits, type
 import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
 import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
+import { prefixDiagnosticsEnabled, prefixDiagnosticsExtension } from "./prefix-diagnostics.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
 export { parseModelName } from "./model-config.js";
@@ -495,6 +496,10 @@ export async function createLeadSession(opts: {
           pi.on("before_agent_start", (event) => hideHomeInPrompt(event.systemPromptOptions, homedir()));
         },
       },
+      // 提示缓存的前缀诊断（prefix-diagnostics.ts）：每次请求和上一次比，日志里记前缀第一处不同在哪。只记位置，不改请求。
+      ...(prefixDiagnosticsEnabled()
+        ? [{ name: "plc-prefix-diagnostics", hidden: true, factory: prefixDiagnosticsExtension() }]
+        : []),
     ],
     // Lead 自带的 skill（2026-10-19）：pi 把名字和说明列进系统提示词，Lead 要用时用 read 读全文。
     // genui-cards 讲怎样组合 render_ui 的组件（设计规范见 docs/genui-design.md）。

@@ -210,6 +210,20 @@ export interface LeadCatalogModel {
 // 就有 122K，pi 把回答的长度压到 1 个 token，回答以 stopReason length 结束（2026-10-26，as4/claude-sonnet-5-5）。
 export const LEAD_CONTEXT_WINDOW_LIMIT = 500_000;
 const DEFAULT_CONTEXT_WINDOW = 128_000;
+
+// config.json 和目录都没写窗口时，按官方文档认几个常见模型的窗口，不落到 128K（2026-11-12）。
+// 那次 OpenAI 兼容网关的目录没写 DeepSeek 的窗口，Lead 按 128K 注册：系统提示词和工具定义就占约 64K，
+// 压缩阈值约 107K，压缩完还在阈值上面，马上又压，提示缓存几乎每次都打不中。
+// DeepSeek V4 系列（deepseek-flash、deepseek-v4-pro、旧名 deepseek-v4-flash）是 1M：
+// https://api-docs.deepseek.com/quick_start/pricing 。
+const KNOWN_CONTEXT_WINDOWS: ReadonlyArray<{ pattern: RegExp; window: number }> = [
+  { pattern: /^deepseek-(flash|v4)/i, window: 1_000_000 },
+];
+
+/** 已知模型的上下文窗口。id 不带 provider 前缀和推理强度后缀；认不出时返回 null。 */
+export function knownContextWindow(id: string): number | null {
+  return KNOWN_CONTEXT_WINDOWS.find((entry) => entry.pattern.test(id))?.window ?? null;
+}
 const ANTHROPIC_VERSION = "2023-06-01";
 const ANTHROPIC_HOST = "api.anthropic.com";
 const DEFAULT_MAX_TOKENS = 16_384;
@@ -702,8 +716,12 @@ function toProviderConfigInput(
         reasoning: extra?.reasoning ?? false,
         input: extra?.input ?? known?.input ?? ["text"],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        // config.json 写了窗口时以它为准，没写时用目录的；都没有时按 128K。都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
-        contextWindow: Math.min(LEAD_CONTEXT_WINDOW_LIMIT, extra?.contextWindow ?? known?.contextWindow ?? DEFAULT_CONTEXT_WINDOW),
+        // config.json 写了窗口时以它为准，没写时用目录的，再没有时用已知模型的（knownContextWindow）；
+        // 都没有时按 128K。都不超过 LEAD_CONTEXT_WINDOW_LIMIT。
+        contextWindow: Math.min(
+          LEAD_CONTEXT_WINDOW_LIMIT,
+          extra?.contextWindow ?? known?.contextWindow ?? knownContextWindow(base) ?? DEFAULT_CONTEXT_WINDOW,
+        ),
         // 最大输出按调用方要的（Lead 是 16384），只有目录说的更小时用目录的。
         maxTokens: extra?.maxTokens ?? Math.min(maxOutputTokens, known?.maxTokens ?? DEFAULT_MAX_TOKENS),
         ...(provider.compat ? { compat: provider.compat as never } : {}),
