@@ -207,7 +207,8 @@ import { createConnectionTools } from "./connection-tools.js";
 import { createChannelActionTools, createReplyToSourceTool, createUiActionTools, performLeadUiAction } from "./ui-action-tools.js";
 import { createHandOffTools, type LeadHandoffDeps } from "./hand-off-tool.js";
 import {
-  authorityTurnId, authorizationCardResult, coreMemoryRefusal, setTimerInTurn, turnOriginOf, type CoreMemoryRefusal, type LeadTurnOrigin,
+  authorityTurnId, authorizationCardResult, coreMemoryRefusal, jiraWriteThirdParty, setTimerInTurn, turnOriginOf,
+  type CoreMemoryRefusal, type LeadTurnOrigin,
 } from "./turn-origin.js";
 import { decideWatchCommand, type WatchSetDecision } from "./watch-commands.js";
 import { deliverySnapshotLines } from "./delivery-snapshot-lines.js";
@@ -243,6 +244,9 @@ export interface LeadDeps {
   currentTurnId?: () => string | null;
   // 这一轮的来历（turn-origin.ts）：读进了外部来源的原文没有，是不是用户本人设的跟进到点的一轮。daemon 给；缺省时都不是。
   turnOrigin?: () => LeadTurnOrigin;
+  // 这一轮读到了第三方写的文字（外部来源工单的标题或正文、连接只读工具的结果）：daemon 记进这一轮的 thirdPartyRead。
+  // 只给第三方触发的 Jira 写入闸门用（turn-origin.ts 的 jiraWriteThirdParty，用户 2026-11-12）。缺省时（测试）不记。
+  markThirdPartyRead?: () => void;
   // 批量取消闸门的计数桶：最近一次用户发起的轮次。lead 自己发起的回合（blocker、通知、心跳）
   // 不是用户回了话，不能重置预算。给出它时闸门按它计数，否则按 currentTurnId。
   cancelBudgetTurnId?: () => string | null;
@@ -1271,6 +1275,20 @@ export function spawnClaimedItem(deps: LeadDeps, claim: DispatchClaim): string {
   return `claimed child spawned for item #${item.id} (runtime=${claim.runtime}, purpose=${claim.purpose})`;
 }
 
+/**
+ * 工单工具读到的工单里有外部来源的（external_origin=1）时，记下这一轮读到了第三方写的标题或正文（用户 2026-11-12）。
+ * 只给 Jira 写入闸门用：规则 1–4 照旧把工单状态当内部内容（AGENTS.md）。
+ */
+function noteTicketsRead(deps: Pick<LeadDeps, "db" | "markThirdPartyRead">, ids: Iterable<number>): void {
+  if (!deps.markThirdPartyRead) return;
+  for (const id of ids) {
+    if (isExternalOrigin(deps.db, id)) {
+      deps.markThirdPartyRead();
+      return;
+    }
+  }
+}
+
 function text(t: string) {
   return { content: [{ type: "text" as const, text: t }], details: {} };
 }
@@ -1767,6 +1785,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           ...(params.text ? { text: params.text } : {}),
         });
         if (!rows.length) return text("（无匹配工单）");
+        noteTicketsRead(deps, rows.map((t) => t.id));
         return text(rows.map((t) =>
           `#${t.id} [${t.stage}] (${t.priority}${t.project ? `, ${t.project}` : ""}) `
           + `${t.title}${relationAnnotation(db, t.id)} tokens=${t.total_tokens} last_activity=${t.last_activity_at ?? "-"}`
@@ -1785,6 +1804,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       execute: async (_id, params: { id: number }) => {
         const t = getItem(db, params.id);
         if (!t) throw new Error(`item #${params.id} not found`);
+        noteTicketsRead(deps, [t.id]);
         // 最近的 20 条（工单 03）。以前取最早 1000 条里的最后 20 条，活动多的工单显示的是旧记录。
         // 打开文件的记录（工单 07）不算：每次打开都写一条，会把工单上真正发生的事挤出这 20 条。
         const acts = listRecentActivities(db, t.id, 20, { skipDecisions: ["delivery_file_opened"] })
@@ -1860,6 +1880,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (!deps.ticketSummary) throw new Error("工单摘要还不可用（daemon 没有提供）");
         const ticket = deps.ticketSummary(params.ticket_id);
         if (!ticket) throw new Error(`item #${params.ticket_id} not found`);
+        noteTicketsRead(deps, [ticket.id]);
         return text(JSON.stringify(ticketStatusReport(db, ticket), null, 2));
       },
     }),
@@ -2670,6 +2691,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (!getItem(db, params.ticket_id)) throw new Error(`item #${params.ticket_id} not found`);
         const descendants = coordinator.listDescendants(params.ticket_id);
         const dependencies = coordinator.listDependencies(params.ticket_id);
+        noteTicketsRead(deps, descendants.map((item) => item.id));
         return text(JSON.stringify({
           descendants: descendants.map((item) => ({
             id: item.id, parent: item.parent_item_id, status: item.stage,
@@ -3665,6 +3687,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
           return reason === null ? [] : [{ ticket, reason }];
         });
         if (!rows.length) return text("（现在没有需要用户处理的工单）");
+        noteTicketsRead(deps, rows.map(({ ticket }) => ticket.id));
         return text([
           `需要用户处理的工单共 ${rows.length} 张（和 App 的「需要我」是同一组）：`,
           ...rows.map(({ ticket, reason }) => {
@@ -3692,6 +3715,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       execute: async (_id, params: { view: ItemView }) => {
         const rows = listItems(db, { view: params.view });
         if (!rows.length) return text("（无匹配事项）");
+        noteTicketsRead(deps, rows.map((t) => t.id));
         return text(rows.map((t) => t.kind === "reminder"
           ? `提醒 #${t.id} [${t.stage}] ${t.title} — 提醒时刻 ${t.remind_at ?? "-"}`
           : `#${t.id} [${t.stage}] (${t.priority}${t.project ? `, ${t.project}` : ""}) ${t.title}`
@@ -3838,6 +3862,9 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
             + `${t.remind_at! < nowIso ? "(已过)" : ""}`,
           );
         }
+        noteTicketsRead(deps, items.filter((x) => (x.kind === "task" && x.due_at && x.due_at <= until)
+          || (x.kind === "reminder" && x.stage !== "acked" && x.stage !== "cancelled" && x.remind_at && x.remind_at <= until))
+          .map((x) => x.id));
         const scheds = listTriggers(db, { enabledOnly: true })
           .filter((t: Trigger) => t.next_fire_at !== null && t.next_fire_at <= until);
         for (const s of scheds) lines.push(`例行 #${s.id} "${s.label}" 下次 ${s.next_fire_at}`);
@@ -5031,7 +5058,13 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
  */
 export function createLeadToolset(deps: LeadDeps): ToolDefinition<any>[] {
   return applyLeadToolExposure(withUserActionWaits(deps, [
-    ...createLeadTools(deps), ...createGrantedLeadTools(deps), ...createConnectionTools(deps.connections), ...createSkillTools(deps),
+    ...createLeadTools(deps), ...createGrantedLeadTools(deps),
+    // 第三方触发的 Jira 写入要用户确认（用户 2026-11-12）：连接工具按这一轮的来历判断，读到第三方内容时记一笔。
+    ...createConnectionTools(deps.connections, {
+      thirdParty: () => jiraWriteThirdParty(deps),
+      ...(deps.markThirdPartyRead ? { onThirdPartyRead: deps.markThirdPartyRead } : {}),
+    }),
+    ...createSkillTools(deps),
   ]));
 }
 

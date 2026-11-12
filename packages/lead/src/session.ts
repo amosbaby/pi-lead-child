@@ -214,6 +214,7 @@ export async function createLeadSession(opts: {
   runtimeRegistry?: LeadDeps["runtimeRegistry"];
   currentTurnId?: LeadDeps["currentTurnId"];
   turnOrigin?: LeadDeps["turnOrigin"];
+  markThirdPartyRead?: LeadDeps["markThirdPartyRead"];
   cancelBudgetTurnId?: LeadDeps["cancelBudgetTurnId"];
   announceLeadStatus?: LeadDeps["announceLeadStatus"];
   scheduleLeadModelRestart?: LeadDeps["scheduleLeadModelRestart"];
@@ -528,6 +529,7 @@ export async function createLeadSession(opts: {
     ...(opts.runtimeRegistry ? { runtimeRegistry: opts.runtimeRegistry } : {}),
     ...(opts.currentTurnId ? { currentTurnId: opts.currentTurnId } : {}),
     ...(opts.turnOrigin ? { turnOrigin: opts.turnOrigin } : {}),
+    ...(opts.markThirdPartyRead ? { markThirdPartyRead: opts.markThirdPartyRead } : {}),
     ...(opts.cancelBudgetTurnId ? { cancelBudgetTurnId: opts.cancelBudgetTurnId } : {}),
     ...(opts.announceLeadStatus ? { announceLeadStatus: opts.announceLeadStatus } : {}),
     ...(opts.scheduleLeadModelRestart ? { scheduleLeadModelRestart: opts.scheduleLeadModelRestart } : {}),

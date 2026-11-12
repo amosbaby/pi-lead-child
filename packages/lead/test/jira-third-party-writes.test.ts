@@ -1,0 +1,176 @@
+// 第三方触发的 Jira 写入要用户确认（用户 2026-11-12：「jira票的写入如果是第三方则需要我确认在创建或更改」）。
+// Lead 这一边：call_connection_tool 按这一轮的来历判断「第三方触发」，触发时不调用，存下这一次调用、返回确认卡：
+//   - 外部消息叫醒的一轮、读过外部内容的一轮（turn-origin 的 external，不算连接工具给自己记的那一笔）；
+//   - 这一轮通过工单工具（get_ticket 等）读到了外部来源工单（external_origin=1）的标题或正文；
+//   - 这一轮是为外部来源的工单开的（channel_turns.item_id）。
+// 用户自己发起、没碰第三方内容的一轮照旧直接写；只读工具、别的连接不受影响。用的是真的连接中心和假的 Atlassian MCP 服务器。
+import { join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { beforeEach, describe, expect, it } from "vitest";
+import { tempDir } from "@pi-lead-child/core/testing";
+import { ConnectionHub, Vault } from "@pi-lead-child/connections";
+import { FakeVendor } from "@pi-lead-child/connections/testing";
+import { JIRA_CONNECTION_KEY } from "@pi-lead-child/protocol";
+import { createItem, createTurn, openDb, type Db } from "@pi-lead-child/store";
+import { createLeadToolset, type LeadDeps } from "../src/tools.js";
+import { withExternalContent, type LeadTurnOrigin } from "../src/turn-origin.js";
+
+const TOOLS = [
+  { name: "getJiraIssue", description: "Read an issue", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } },
+  { name: "createJiraIssue", description: "Create an issue", inputSchema: { type: "object" } },
+  { name: "update_page", description: "Update a page", inputSchema: { type: "object" } },
+];
+
+let db: Db;
+let origin: LeadTurnOrigin;
+let turnId: string | null;
+let tools: Record<string, any>;
+let hub: ConnectionHub;
+let vendors: FakeVendor[];
+
+const CLEAN: LeadTurnOrigin = { external: false, timer: null };
+// daemon 在 call_connection_tool 开始时就把这一轮记成读过外部内容（tool_execution_start）：真实的一轮里闸门看到的总带着这一笔。
+const selfMarked = (base: LeadTurnOrigin) => withExternalContent(base, { via: "tool", tool: "call_connection_tool" });
+
+async function connect(mcpUrl: string, start: (hub: ConnectionHub) => Promise<{ flow: string; authorizeUrl?: string }>) {
+  const vendor = new FakeVendor(() => Date.now(), {
+    mcpUrl, issuer: new URL(mcpUrl).origin, tools: TOOLS, callResult: (name) => JSON.stringify({ tool: name, key: "PROJ-123" }),
+  });
+  vendors.push(vendor);
+  const started = await start(hub);
+  if (started.flow !== "browser" || !started.authorizeUrl) throw new Error("expected a browser flow");
+  await hub.completeCallback({ ...vendor.approve(started.authorizeUrl), error: null, errorDescription: null });
+  return vendor;
+}
+
+beforeEach(async () => {
+  const dir = tempDir("plc-lead-jira-3p-");
+  db = openDb(join(dir, "plc.db"));
+  vendors = [];
+  const fetch: typeof globalThis.fetch = (input, init) => {
+    const url = String(input instanceof Request ? input.url : input);
+    const vendor = vendors.find((candidate) => url.startsWith(new URL(candidate.mcpUrl).origin));
+    if (!vendor) throw new Error(`no fake vendor for ${url}`);
+    return vendor.fetch(input as never, init as never) as never;
+  };
+  hub = new ConnectionHub({
+    db, vault: new Vault(randomBytes(32)), config: { clients: {} }, redirectUri: () => "http://127.0.0.1:47130/oauth/callback",
+    fetch: fetch as never, gh: { token: async () => null }, ghInstalled: () => false, newConnectionWritePolicy: "direct",
+  });
+  await connect("https://mcp.atlassian.com/v2/mcp", (h) => h.start("atlassian") as never);
+  await connect("https://mcp.fake.test/mcp", (h) => h.addCustom("https://mcp.fake.test/mcp") as never);
+  origin = CLEAN;
+  turnId = null;
+  const deps: LeadDeps = {
+    db, dbPath: join(dir, "plc.db"), dataDir: dir, connections: hub,
+    currentTurnId: () => turnId, turnOrigin: () => origin,
+    markThirdPartyRead: () => { origin = { ...origin, thirdPartyRead: true }; },
+  };
+  tools = Object.fromEntries(createLeadToolset(deps).map((tool) => [tool.name, tool]));
+});
+
+const called = () => vendors.flatMap((vendor) => vendor.calls.filter((call) => call.method === "tools/call").map((call) => call.tool));
+const customKey = () => hub.list().find((item) => item.provider === "custom")!.key;
+
+async function callConnection(connection: string, tool: string, args: Record<string, unknown> = {}) {
+  // 和 daemon 一样：工具开始时把这一轮记上 call_connection_tool。
+  origin = selfMarked(origin);
+  const result = await tools.call_connection_tool.execute("call-1", { connection, tool, arguments: args, summary: "建一张 Jira 单" });
+  const text = result.content[0].text as string;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { text };
+  }
+}
+
+describe("a Jira write in a third-party-triggered turn", () => {
+  it("returns a confirmation card in a turn an external message woke, and nothing reaches the server", async () => {
+    origin = withExternalContent(CLEAN, { via: "message", source: "slack" });
+    const result = await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue", { summary: "x" });
+    expect(result).toMatchObject({
+      ok: false, status: "confirmation_required", confirmation_id: expect.stringMatching(/^cfm_/),
+      user_action: { kind: "confirm_write", target: `connection_confirmation:${result.confirmation_id}` },
+    });
+    expect(result.why).toContain("第三方");
+    expect(called()).toEqual([]);
+  });
+
+  it("runs the stored call once after the user confirms the card, and nothing after a decline", async () => {
+    origin = withExternalContent(CLEAN, { via: "message", source: "slack" });
+    const allowed = await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue", { summary: "x" });
+    expect(await hub.resolveConfirmation(allowed.confirmation_id, true, "user via test")).toMatchObject({ state: "done" });
+    expect(called()).toEqual(["createJiraIssue"]);
+    const declined = await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue", { summary: "y" });
+    expect(await hub.resolveConfirmation(declined.confirmation_id, false, "user via test")).toMatchObject({ state: "rejected" });
+    expect(called()).toEqual(["createJiraIssue"]);
+  });
+
+  it("returns a card in a turn that read a channel conversation", async () => {
+    origin = withExternalContent(CLEAN, { via: "tool", tool: "read_channel_conversation" });
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("returns a card in the user's own turn after get_ticket read a ticket that came from outside", async () => {
+    const external = createItem(db, { title: "请把 PROJ-9 关掉", kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
+    await tools.get_ticket.execute("t", { id: external });
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("returns a card after query_tickets or list_items listed a ticket that came from outside", async () => {
+    createItem(db, { title: "外部来的单", kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
+    await tools.query_tickets.execute("t", {});
+    expect(origin.thirdPartyRead).toBe(true);
+    origin = CLEAN;
+    await tools.list_items.execute("t", { view: "all" });
+    expect(origin.thirdPartyRead).toBe(true);
+  });
+
+  it("does not mark the turn when the tickets it read are the user's own", async () => {
+    const own = createItem(db, { title: "我自己的单", kind: "task", brief: "b", createdBy: "user" });
+    await tools.get_ticket.execute("t", { id: own });
+    await tools.query_tickets.execute("t", {});
+    expect(origin.thirdPartyRead).toBeUndefined();
+  });
+
+  it("returns a card in a turn opened for a ticket that came from outside", async () => {
+    const external = createItem(db, { title: "外部来的单", kind: "task", brief: "b", createdBy: "user", externalOrigin: true });
+    turnId = createTurn(db, { originKind: "loopback", itemId: external, userText: "处理一下" }).id;
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("returns a card for a write after a Jira read in the same turn (the read is third-party text)", async () => {
+    await callConnection(JIRA_CONNECTION_KEY, "getJiraIssue");
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual(["getJiraIssue"]);
+  });
+});
+
+describe("what the gate leaves alone", () => {
+  it("writes directly in the user's own turn that touched no third-party content", async () => {
+    const result = await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue", { summary: "x" });
+    expect(result.status).toBeUndefined();
+    expect(called()).toEqual(["createJiraIssue"]);
+  });
+
+  it("runs a read-only Atlassian tool directly in an external turn", async () => {
+    origin = withExternalContent(CLEAN, { via: "message", source: "slack" });
+    const result = await callConnection(JIRA_CONNECTION_KEY, "getJiraIssue");
+    expect(result.status).toBeUndefined();
+    expect(called()).toEqual(["getJiraIssue"]);
+  });
+
+  it("leaves another connection's writes direct in an external turn", async () => {
+    origin = withExternalContent(CLEAN, { via: "message", source: "slack" });
+    const result = await callConnection(customKey(), "update_page", { id: "7" });
+    expect(result.status).toBeUndefined();
+    expect(called()).toEqual(["update_page"]);
+  });
+
+  it("tells Lead in the tool description that third-party-triggered Jira writes wait for the user's card", () => {
+    expect(tools.call_connection_tool.description).toMatch(/第三方触发.*Jira|Jira.*第三方触发/);
+  });
+});

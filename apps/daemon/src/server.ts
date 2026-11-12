@@ -3070,6 +3070,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // lead 往往先动工具再说话，那时出水口还没改接过来。
     currentTurnId: () => pendingSteerSink?.turn.id ?? activeChannelTurn?.turn.id ?? null,
     turnOrigin: () => runOrigin,
+    // 这一轮读到了第三方写的文字（外部来源工单的标题或正文、连接只读工具的结果）：只给 Jira 写入闸门用（用户 2026-11-12）。
+    // 每一轮开始和结束时 runOrigin 重算，这一笔跟着清掉。
+    markThirdPartyRead: () => { runOrigin = { ...runOrigin, thirdPartyRead: true }; },
     toolGate: () => handoffGate(sched.state, RED_LINE_TOOLS),
     // 调度器（lead-scheduler spec D13）：extension 和 daemon 共用这一个实例。
     scheduler: sched,

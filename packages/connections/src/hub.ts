@@ -388,6 +388,19 @@ export function connectionKey(row: Pick<ConnectionRow, "id" | "provider">): stri
   return row.provider === "custom" ? `custom-${row.id}` : row.provider;
 }
 
+// 第三方触发的写入要先问用户的连接（用户 2026-11-12：「jira票的写入如果是第三方则需要我确认在创建或更改」）：Atlassian
+// （Jira、Confluence）。预设的 atlassian 连接，加上指向 Atlassian 托管 MCP 的自定义连接：换一个入口不能绕过。
+// 「第三方触发」由调用方判断（Lead 的 turn-origin.ts 的 jiraWriteThirdParty），这里只管哪个连接、哪个工具。
+function confirmsThirdPartyWrites(row: Pick<ConnectionRow, "provider" | "server_url">): boolean {
+  if (row.provider === "atlassian") return true;
+  try {
+    const host = new URL(row.server_url).hostname.toLowerCase();
+    return host === "atlassian.com" || host.endsWith(".atlassian.com") || host.endsWith(".atlassian.net");
+  } catch {
+    return false;
+  }
+}
+
 export class ConnectionHub {
   readonly #db: Db;
   readonly #vault: SecretVault;
@@ -1528,10 +1541,16 @@ export class ConnectionHub {
     }
   }
 
-  needsConfirmation(key: string, tool: string): boolean {
+  // thirdParty：这次调用是第三方触发的（调用方判断）。Atlassian 的写工具这时也要先问用户，即使写入策略是 direct。
+  needsConfirmation(key: string, tool: string, options: { thirdParty?: boolean } = {}): boolean {
     const row = this.#liveRow(key);
     const found = this.#rowTools(row).find((entry) => entry.name === tool);
-    return Boolean(found && !found.readOnly && row.write_policy === "confirm");
+    return Boolean(found && this.#writeNeedsConfirmation(row, found, options.thirdParty === true));
+  }
+
+  #writeNeedsConfirmation(row: ConnectionRow, tool: CachedTool, thirdParty: boolean): boolean {
+    if (tool.readOnly) return false;
+    return row.write_policy === "confirm" || (thirdParty && confirmsThirdPartyWrites(row));
   }
 
   #assertRole(row: ConnectionRow, key: string, role: ConnectionRole): void {
@@ -1544,7 +1563,11 @@ export class ConnectionHub {
   // 它只能收窄：带清单的 Run 还要过库里的清单。
   async callTool(
     key: string, toolName: string, args: Record<string, unknown>,
-    options: { role: ConnectionRole; confirmed?: boolean; signal?: AbortSignal; runId?: number | null; grant?: RunGrant },
+    options: {
+      role: ConnectionRole; confirmed?: boolean; signal?: AbortSignal; runId?: number | null; grant?: RunGrant;
+      // 第三方触发的调用（needsConfirmation 的 thirdParty）：Atlassian 的写工具不执行，要先经用户确认（requestWrite）。
+      thirdParty?: boolean;
+    },
   ): Promise<ConnectionCallResult> {
     const grant = options.runId ? getRunGrant(this.#db, options.runId) : null;
     if (options.grant) this.#checkCallerGrant(options.grant, key, toolName, args);
@@ -1558,8 +1581,9 @@ export class ConnectionHub {
     if (!this.#toolVisible(row, tool, options.role)) {
       throw new ConnectionError("forbidden", `${toolName} 会写入 ${row.label}，这个角色不能用它`, key);
     }
-    if (!tool.readOnly && row.write_policy === "confirm" && !options.confirmed) {
-      throw new ConnectionError("confirmation_required", `${toolName} 会写入 ${row.label}，要先得到用户确认`, key);
+    if (!options.confirmed && this.#writeNeedsConfirmation(row, tool, options.thirdParty === true)) {
+      const why = row.write_policy === "confirm" ? "" : "这次是第三方触发的，";
+      throw new ConnectionError("confirmation_required", `${toolName} 会写入 ${row.label}，${why}要先得到用户确认`, key);
     }
     const context = this.#callContext(row, key, tool, args, options, null);
     const problem = await this.#guardProblem(context);
@@ -1732,14 +1756,18 @@ export class ConnectionHub {
 
   // ——— 写入确认 ———
 
-  // 存下一次会写入的调用（参数原样），返回确认号。只在写入策略是「先问我」时需要。
-  requestWrite(key: string, toolName: string, args: Record<string, unknown>, summary: string): ConnectionConfirmationDto {
+  // 存下一次会写入的调用（参数原样），返回确认号。只在写入策略是「先问我」、或者第三方触发的 Atlassian 写入
+  // （options.thirdParty，用户 2026-11-12）时需要。
+  requestWrite(
+    key: string, toolName: string, args: Record<string, unknown>, summary: string, options: { thirdParty?: boolean } = {},
+  ): ConnectionConfirmationDto {
     this.#sweepWrites();
     const row = this.#liveRow(key);
     this.#assertRole(row, key, "lead");
     const tool = this.#rowTools(row).find((entry) => entry.name === toolName);
     if (!tool) throw new ConnectionError("unknown_tool", `${row.label} 没有工具 ${toolName}`, key);
-    if (tool.readOnly || row.write_policy !== "confirm") {
+    const thirdParty = options.thirdParty === true;
+    if (!this.#writeNeedsConfirmation(row, tool, thirdParty)) {
       throw new ConnectionError("invalid_request", `${toolName} 不需要确认，直接调用即可`, key);
     }
     const now = this.#now();
@@ -1749,7 +1777,9 @@ export class ConnectionHub {
       state: "pending", resolvedBy: null, resultPreview: null,
     };
     this.#writes.set(write.id, write);
-    addConnectionEvent(this.#db, row.id, "write_requested", `${write.id} ${toolName}`, iso(now));
+    // 账本里写明为什么要问：third_party 是第三方触发的 Atlassian 写入，不是连接的写入策略。
+    const why = row.write_policy === "confirm" ? "" : " third_party";
+    addConnectionEvent(this.#db, row.id, "write_requested", `${write.id} ${toolName}${why}`, iso(now));
     return this.#confirmationDto(write);
   }
 

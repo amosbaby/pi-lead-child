@@ -25,7 +25,8 @@
 //      操作，结果里带着确认卡的 user_action：用户在卡上点「确认这一次」以后，系统只执行这一个操作
 //      （engine 的 rule-change-confirmations.ts，工单 09）。
 import {
-  activePairedUserTurn, bindingScopes, CORE_KINDS, getBinding, getHostBypass, getTurn, type Db, type NoteKind, type PairedUserTurn,
+  activePairedUserTurn, bindingScopes, CORE_KINDS, getBinding, getHostBypass, getTurn, isExternalOrigin,
+  type Db, type NoteKind, type PairedUserTurn,
 } from "@pi-lead-child/store";
 import { bindingOriginOf, isSystemTurnOrigin, type HostCommandTurnOrigin, type Scope, type TimerOrigin } from "@pi-lead-child/protocol";
 import {
@@ -41,6 +42,10 @@ export interface LeadTurnOrigin {
   externalBy?: readonly ExternalContentSource[];
   // 交给这一轮的外部事件（消息事件、外部来源的定时器到点）的编号。daemon 记，Lead 改不了。
   externalEvents?: readonly number[];
+  // 这一轮读到了第三方写的文字：外部来源工单（external_origin=1）的标题或正文（工单工具读到的），或者连接只读工具的结果
+  // （结果返回以后才记）。只给第三方触发的 Jira 写入闸门用（jiraWriteThirdParty，用户 2026-11-12），规则 1–4 不看它。
+  // daemon 每一轮开始时清掉，一轮之内只加不减。
+  thirdPartyRead?: boolean;
 }
 
 export interface TurnOriginDeps {
@@ -121,6 +126,33 @@ export function withExternalContent(origin: LeadTurnOrigin, source: ExternalCont
     || (item.via === "tool" && source.via === "tool" && item.tool === source.tool));
   const sourceText = source.via === "message" || EXTERNAL_TEXT_TOOLS.has(source.tool);
   return { ...origin, external: origin.external || sourceText, externalBy: seen ? known : [...known, source] };
+}
+
+// 连接工具的这一笔：daemon 在 call_connection_tool、read_connection_result 开始时就把这一轮记成外部的一轮。Jira 写入闸门不看
+// 这一笔，否则每一次 Jira 写入都被它自己标成第三方触发；连接读到的内容在结果返回以后记进 thirdPartyRead（connection-tools.ts）。
+const CONNECTION_RESULT_TOOLS: ReadonlySet<string> = new Set(["call_connection_tool", "read_connection_result"]);
+
+/**
+ * 第三方触发的 Jira 写入要用户确认（用户 2026-11-12：「jira票的写入如果是第三方则需要我确认在创建或更改」，
+ * .scratch/external-worker-hub/spec.md §6）。这一轮算第三方触发，当：
+ *   - 外部消息叫醒了这一轮，或者这一轮读过外部内容（external；连接工具开始时给自己记的那一笔不算，见上）；
+ *   - 这一轮读到了第三方写的文字（thirdPartyRead：外部来源工单的标题或正文、连接只读工具的结果）；
+ *   - 这一轮是为外部来源的工单（external_origin=1）开的（channel_turns.item_id）。
+ * 只给 Atlassian 的写工具用（连接中心的 thirdParty），不改规则 1–4。用户本人的一轮也一样：读过第三方的文字就要确认。
+ */
+export function jiraWriteThirdParty(deps: TurnOriginDeps): boolean {
+  const origin = turnOriginOf(deps);
+  if (origin.thirdPartyRead) return true;
+  if (origin.external) {
+    const sources = origin.externalBy ?? [];
+    const counts = (source: ExternalContentSource) => source.via === "message"
+      || (EXTERNAL_TEXT_TOOLS.has(source.tool) && !CONNECTION_RESULT_TOOLS.has(source.tool));
+    // external 而没有记来源（daemon 直接标的）：按第三方算。
+    if (!sources.length || sources.some(counts)) return true;
+  }
+  const current = deps.currentTurnId?.() ?? null;
+  if (!deps.db || !current) return false;
+  return isExternalOrigin(deps.db, getTurn(deps.db, current)?.item_id ?? null);
 }
 
 /** 这一轮带着的外部内容（给操作层，规则 4）。没有时为 null。 */
