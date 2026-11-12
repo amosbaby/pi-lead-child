@@ -1977,6 +1977,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         if (!a.session_path || !existsSync(a.session_path)) {
           throw new Error(`run #${params.attempt_id} 无可读 session 文件`);
         }
+        // 子 agent 的会话里有工单的原文：外部来源的工单照 get_ticket 记一笔（最终审阅 I3）。
+        noteTicketsRead(deps, [a.item_id]);
         // 只从文件末尾往前读要的那几行：子 agent 的会话文件有几十 MB（2026-11-03 以前整个同步读进来）。
         const tail = await readTailLines(a.session_path, params.limit ?? 30);
         const out: string[] = [];
@@ -2594,6 +2596,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       execute: async (_id, params: { ticket_id: number }) => {
         const milestones = listMilestones(db, { itemId: params.ticket_id });
         if (milestones.length === 0) return text(`#${params.ticket_id} 没有节点`);
+        // 节点带着出处的原话：外部来源的工单照 get_ticket 记一笔（最终审阅 I3）。
+        noteTicketsRead(deps, [params.ticket_id]);
         return text(milestones.map((milestone) => [
           `milestone #${milestone.id}`, milestone.label ?? MILESTONE_KIND_LABELS[milestone.kind], milestone.at,
           milestone.state, `由 ${milestone.source_actor} 记下`,
@@ -4291,6 +4295,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       execute: async (_id, params: { run_id: number; since_seq?: number; limit?: number }) => {
         const run = getRun(db, params.run_id);
         if (!run) throw new Error(`Run #${params.run_id} 不存在`);
+        // Run 的事件里有子 agent 读到、说出的工单文字：外部来源的工单照 get_ticket 记一笔（最终审阅 I3）。
+        noteTicketsRead(deps, [run.item_id]);
         const { total, steps } = listRunEventSteps(db, params.run_id, {
           ...(params.since_seq !== undefined ? { sinceSeq: params.since_seq } : {}),
           ...(params.limit !== undefined ? { limit: params.limit } : {}),

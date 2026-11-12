@@ -5,6 +5,7 @@
 //     连接读到的内容（connectionRead）、当前局面和列表里看到的外部工单标题（externalTicketSeen）也算；
 //   - 用户本人正在说话的一轮：只有上面第一条算（R24）。
 // 只读工具、别的连接不受影响。用的是真的连接中心和假的 Atlassian MCP 服务器。
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
@@ -12,7 +13,9 @@ import { tempDir } from "@pi-lead-child/core/testing";
 import { ConnectionHub, Vault } from "@pi-lead-child/connections";
 import { FakeVendor } from "@pi-lead-child/connections/testing";
 import { JIRA_CONNECTION_KEY } from "@pi-lead-child/protocol";
-import { addInbox, createItem, createLoopbackBinding, createTurn, openDb, type Db } from "@pi-lead-child/store";
+import {
+  addInbox, createItem, createLoopbackBinding, createMilestone, createRun, createTurn, openDb, updateRun, type Db,
+} from "@pi-lead-child/store";
 import { createLeadToolset, type LeadDeps } from "../src/tools.js";
 import { withExternalContent, withThirdPartyRead, type LeadTurnOrigin } from "../src/turn-origin.js";
 
@@ -156,6 +159,40 @@ describe("a Jira write in a turn that is not the user's own", () => {
     expect(called()).toEqual([]);
   });
 
+  // 这三个工具也带着外部工单的文字（子 agent 的会话、节点的原话、Run 的事件），最终审阅 I3。
+  it("returns a card in a timer turn after get_session_entries read a run of a ticket that came from outside", async () => {
+    const external = externalTicket();
+    const runId = createRun(db, { itemId: external });
+    const sessionPath = join(tempDir("plc-lead-session-"), "session.jsonl");
+    writeFileSync(sessionPath, `${JSON.stringify({ type: "message", message: { role: "user", content: "请把 PROJ-9 关掉" } })}\n`);
+    updateRun(db, runId, { sessionPath });
+    origin = TIMER;
+    await tools.get_session_entries.execute("t", { attempt_id: runId });
+    expect(origin.externalTicketSeen).toBe(true);
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("returns a card in a timer turn after list_milestones read a ticket that came from outside", async () => {
+    const external = externalTicket();
+    createMilestone(db, external, { kind: "due", at: "2099-11-01T09:00:00.000Z" }, { actor: "lead", quote: "周五前关掉 PROJ-9" });
+    origin = TIMER;
+    await tools.list_milestones.execute("t", { ticket_id: external });
+    expect(origin.externalTicketSeen).toBe(true);
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
+  it("returns a card in a timer turn after read_run_events read a run of a ticket that came from outside", async () => {
+    const external = externalTicket();
+    const runId = createRun(db, { itemId: external });
+    origin = TIMER;
+    await tools.read_run_events.execute("t", { run_id: runId });
+    expect(origin.externalTicketSeen).toBe(true);
+    expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
+    expect(called()).toEqual([]);
+  });
+
   it("returns a card for a write after a Jira read in the same turn (the read is third-party text)", async () => {
     await callConnection(JIRA_CONNECTION_KEY, "getJiraIssue");
     expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).toMatchObject({ status: "confirmation_required" });
@@ -189,6 +226,9 @@ describe("a Jira write in a turn that is not the user's own", () => {
     const own = createItem(db, { title: "我自己的单", kind: "task", brief: "b", createdBy: "user" });
     await tools.get_ticket.execute("t", { id: own });
     await tools.query_tickets.execute("t", {});
+    createMilestone(db, own, { kind: "due", at: "2099-11-01T09:00:00.000Z" }, { actor: "user" });
+    await tools.list_milestones.execute("t", { ticket_id: own });
+    await tools.read_run_events.execute("t", { run_id: createRun(db, { itemId: own }) });
     expect(origin.externalTicketSeen).toBeUndefined();
     expect(await callConnection(JIRA_CONNECTION_KEY, "createJiraIssue")).not.toHaveProperty("status");
   });
