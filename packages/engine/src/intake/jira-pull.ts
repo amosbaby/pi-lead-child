@@ -1,6 +1,7 @@
 // Jira 最小拉取（.scratch/external-worker-hub/spec.md S1，计划 Task 13）：按设置里的间隔经现有的 Atlassian 连接查指派给用户、
 // 近一天更新的单，在台账里各建一张工单。不经过任何模型：deps 里只有库、查单的函数、时钟和设置。
-//   - 查单的函数（call）由 daemon 注入（连接 hub 的 callTool，角色 lead，读结果文本）；测试里是替身。
+//   - 查单的函数（call）由 daemon 注入（连接 hub 的 callTool，角色 lead，带只读的收窄清单 JIRA_INTAKE_GRANT（protocol 的 jira-intake.ts），读结果文本）；测试里是替身。
+//   - 工具名是常量（DEFAULT_JIRA_SEARCH_TOOL），不在设置里（ruling R23）。
 //   - JQL 里只有过了 JIRA_PROJECT_KEY 校验的项目 key；设置、查询、读结果每一层都不信上一层。
 //   - 一张单一笔事务：建单、记来源（kind=jira，external_key=单号，按 (kind, key) 去重，store 的 addTicketSource）、记一条活动。
 //     哪一步抛错这一张单什么都不留；call 抛错时一张都不建，下一个间隔再来。
@@ -119,7 +120,7 @@ export async function pullJira(deps: JiraPullDeps): Promise<JiraPullResult> {
 
   let entries: unknown[];
   try {
-    entries = issuesOf(await call(settings.tool || DEFAULT_JIRA_SEARCH_TOOL, {
+    entries = issuesOf(await call(DEFAULT_JIRA_SEARCH_TOOL, {
       cloudId, jql, fields: ["summary"], maxResults: JIRA_PULL_MAX_RESULTS,
     }));
   } catch (error) {
@@ -171,21 +172,27 @@ export function createJiraPuller(deps: { db: Db; call: JiraPullDeps["call"]; log
   let lastAttempt: number | null = null;
   let running = false;
   return {
+    // 从不抛错：daemon 用 void 调它，抛出来就是没人接的 rejection（会让 Node 退出）。读设置出错（库的错）也在这里接住，只记错误的名字。
     async tick(at = deps.now?.() ?? new Date()): Promise<boolean> {
-      const settings = getJiraIntake(deps.db);
-      if (!settings.enabled || running) return false;
-      if (lastAttempt !== null && at.getTime() - lastAttempt < settings.everyMinutes * 60_000) return false;
-      lastAttempt = at.getTime();
+      if (running) return false;
       running = true;
+      let pulling = false;
       try {
+        const settings = getJiraIntake(deps.db);
+        if (!settings.enabled) return false;
+        if (lastAttempt !== null && at.getTime() - lastAttempt < settings.everyMinutes * 60_000) return false;
+        lastAttempt = at.getTime();
+        pulling = true;
         const result = await pullJira({ db: deps.db, call: deps.call, now: at, settings, ...(deps.log ? { log: deps.log } : {}) });
         if (result.created > 0) deps.log?.(`jira pull: ${result.created} created, ${result.skipped} skipped`);
-      } catch {
-        // pullJira 已经记了一行失败（只有错误的名字）；下一个间隔再来。
+        return true;
+      } catch (error) {
+        // pullJira 失败时它已经记了一行（只有错误的名字）；这里只记读设置失败。拉失败也算一次尝试，下一个间隔再来。
+        if (!pulling) deps.log?.(`jira pull could not read its settings: ${errorLabel(error)}`);
+        return pulling;
       } finally {
         running = false;
       }
-      return true;
     },
   };
 }

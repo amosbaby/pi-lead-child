@@ -59,6 +59,7 @@ import {
 import {
   DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch, type UserActionRequest,
 } from "@pi-lead-child/protocol";
+import { JIRA_CONNECTION_KEY, JIRA_INTAKE_GRANT } from "@pi-lead-child/protocol";
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
 import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
 import { loadDecisionModels } from "./decision-models.js";
@@ -6484,11 +6485,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   });
 
   // Jira 最小拉取（engine 的 intake/jira-pull.ts，计划 Task 13）：经 Atlassian 连接按 JQL 查指派给用户的单，在台账里建单，不经过任何模型。
-  // 连接用 Lead 的角色调（和 Lead 自己读 Jira 同一个权限），工具名和站点来自用户的设置；失败（没连接、授权失效）只记一行，下个间隔再来。
+  // 连接用 Lead 的角色调，带只读的收窄清单（连接中心拒绝写工具，ruling R23）；工具名是常量，站点来自用户的设置；失败（没连接、授权失效）只记一行，下个间隔再来。
   const jiraPuller: JiraPuller = createJiraPuller({
     db, log,
     call: async (tool, args) => {
-      const result = await connections.callTool("atlassian", tool, args as Record<string, unknown>, { role: "lead" });
+      const result = await connections.callTool(JIRA_CONNECTION_KEY, tool, args as Record<string, unknown>, { role: "lead", grant: JIRA_INTAKE_GRANT });
       if (result.isError) throw new Error("the Atlassian connection returned an error");
       if (result.truncated) throw new Error("the Atlassian connection result was cut short");
       return result.text;

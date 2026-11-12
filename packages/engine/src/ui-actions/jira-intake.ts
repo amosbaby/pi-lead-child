@@ -48,7 +48,6 @@ export const JIRA_INTAKE_ACTIONS = {
         projects: input.projects ? [...new Set(input.projects)] : before.projects,
         everyMinutes: input.everyMinutes ?? before.everyMinutes,
         cloudId: input.cloudId === undefined ? before.cloudId : input.cloudId,
-        tool: input.tool ?? before.tool,
       };
       if (JSON.stringify(merged) === JSON.stringify(before)) return { changed: false, settings: before };
       return { changed: true, settings: writeJiraIntake(run.db, merged) };
@@ -56,14 +55,17 @@ export const JIRA_INTAKE_ACTIONS = {
     forLead: (_run, result) => {
       const change = result as JiraIntakeChange;
       return change.changed
-        ? { result: "updated", enabled: change.settings.enabled, projects: change.settings.projects, next: "已经保存。用一句话告诉用户改了什么；daemon 下一拍起按新的设置拉。" }
+        ? { result: "updated", enabled: change.settings.enabled, projects: change.settings.projects, site: change.settings.cloudId !== null, next: "已经保存。用一句话告诉用户改了什么；daemon 下一拍起按新的设置拉。" }
         : { result: "unchanged", enabled: change.settings.enabled, projects: change.settings.projects };
     },
     detail: (run, result) => {
       const change = result as JiraIntakeChange;
       return {
-        before: { enabled: run.target.enabled, projects: run.target.projects, everyMinutes: run.target.everyMinutes },
-        after: { enabled: change.settings.enabled, projects: change.settings.projects, everyMinutes: change.settings.everyMinutes },
+        before: { enabled: run.target.enabled, projects: run.target.projects, everyMinutes: run.target.everyMinutes, cloudId: run.target.cloudId },
+        after: {
+          enabled: change.settings.enabled, projects: change.settings.projects, everyMinutes: change.settings.everyMinutes,
+          cloudId: change.settings.cloudId,
+        },
       };
     },
   },

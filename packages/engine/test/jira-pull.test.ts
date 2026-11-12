@@ -9,9 +9,9 @@
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { DEFAULT_JIRA_INTAKE, DEFAULT_JIRA_SEARCH_TOOL, type JiraIntakeSettings } from "@pi-lead-child/protocol";
+import { DEFAULT_JIRA_INTAKE, DEFAULT_JIRA_SEARCH_TOOL, UI_ACTION_PERFORMED_KIND, type JiraIntakeSettings } from "@pi-lead-child/protocol";
 import {
-  addTicketSource, createItem, createLoopbackBinding, findItemByExternalKey, getItem, getJiraIntake, JIRA_INTAKE_KEY, listActivities, openDb,
+  addTicketSource, createItem, createLoopbackBinding, findItemByExternalKey, getItem, getJiraIntake, JIRA_INTAKE_KEY, listActivities, listEvents, openDb,
   ticketSources, writeJiraIntake, type Db,
 } from "@pi-lead-child/store";
 import { createJiraPuller, jiraSearchQuery, pullJira, runUiAction, UI_ACTIONS } from "../src/index.js";
@@ -211,7 +211,7 @@ describe("the settings", () => {
   };
 
   it("is off, with no projects and no site, until the user sets it", () => {
-    expect(getJiraIntake(db)).toEqual({ enabled: false, projects: [], everyMinutes: 15, cloudId: null, tool: DEFAULT_JIRA_SEARCH_TOOL });
+    expect(getJiraIntake(db)).toEqual({ enabled: false, projects: [], everyMinutes: 15, cloudId: null });
   });
 
   it("is a rule change: set declares changesRules, and a turn that read external content is refused", async () => {
@@ -226,24 +226,39 @@ describe("the settings", () => {
   it("saves the fields it is given and keeps the others", async () => {
     await asUser({ projects: ["PROJ", "ACME"], cloudId: "acme.example.com" });
     await asUser({ enabled: true, everyMinutes: 30 });
-    expect(getJiraIntake(db)).toEqual({ enabled: true, projects: ["PROJ", "ACME"], everyMinutes: 30, cloudId: "acme.example.com", tool: DEFAULT_JIRA_SEARCH_TOOL });
+    expect(getJiraIntake(db)).toEqual({ enabled: true, projects: ["PROJ", "ACME"], everyMinutes: 30, cloudId: "acme.example.com" });
   });
 
   it("refuses project keys that are not Jira project keys, and intervals out of range", async () => {
     for (const input of [
       { projects: ["proj"] }, { projects: ["PROJ) OR 1=1"] }, { projects: ["A"] }, { projects: [1] }, { everyMinutes: 1 }, { everyMinutes: 99999 },
-      { tool: "bad tool;" }, { extra: true },
+      // 查单的工具是常量：设置里没有工具名，给了就是多余的字段（ruling R23）。
+      { tool: "createJiraIssue" }, { tool: DEFAULT_JIRA_SEARCH_TOOL }, { extra: true },
     ]) {
       await expect(asUser(input)).rejects.toMatchObject({ code: "invalid_input" });
     }
     expect(getJiraIntake(db).projects).toEqual([]);
   });
 
+  it("shows a cloudId-only change as before and after, to the ledger and to Lead", async () => {
+    await asUser({ cloudId: "old.example.com" });
+    const outcome = await runUiAction(db, {
+      target, action: "set", input: { cloudId: "new.example.com" }, reason: "the site moved", caller: { kind: "lead", turnId: null },
+    });
+    expect(outcome.forLead).toMatchObject({ result: "updated", site: true });
+    const detail = listEvents(db, { kind: UI_ACTION_PERFORMED_KIND, limit: 10 }).at(-1)!.payload.detail as { before: unknown; after: unknown };
+    expect(detail.before).toMatchObject({ cloudId: "old.example.com" });
+    expect(detail.after).toMatchObject({ cloudId: "new.example.com" });
+  });
+
   it("drops bad values it finds in the database instead of using them", () => {
     db.prepare("INSERT INTO kv (key, value, updated_at) VALUES (?, ?, datetime('now'))").run(JIRA_INTAKE_KEY, JSON.stringify({
-      enabled: true, projects: ["PROJ", "x y", 5, "PROJ", "ACME"], everyMinutes: 0, cloudId: "  ", tool: "bad tool",
+      enabled: true, projects: ["PROJ", "x y", 5, "PROJ", "ACME"], everyMinutes: 0, cloudId: "  ", tool: "createJiraIssue",
     }));
-    expect(getJiraIntake(db)).toEqual({ enabled: true, projects: ["PROJ", "ACME"], everyMinutes: 5, cloudId: null, tool: DEFAULT_JIRA_SEARCH_TOOL });
+    expect(getJiraIntake(db)).toEqual({ enabled: true, projects: ["PROJ", "ACME"], everyMinutes: 5, cloudId: null });
+    // 库里留着的 tool 字段不读，也不会再被写回去。
+    expect(writeJiraIntake(db, getJiraIntake(db))).not.toHaveProperty("tool");
+    expect(JSON.parse((db.prepare("SELECT value FROM kv WHERE key = ?").get(JIRA_INTAKE_KEY) as { value: string }).value)).not.toHaveProperty("tool");
     db.prepare("UPDATE kv SET value = '{ broken' WHERE key = ?").run(JIRA_INTAKE_KEY);
     expect(getJiraIntake(db).enabled).toBe(false);
   });
@@ -295,5 +310,28 @@ describe("the puller the daemon ticks", () => {
     release({ issues: [] });
     await first;
     expect(calls).toHaveLength(1);
+  });
+
+  it("never rejects, even when reading the settings throws, and logs only the error name", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const lines: string[] = [];
+      const { call, calls } = fakeCall({ issues: [] });
+      const puller = createJiraPuller({ db, call, log: (line) => lines.push(line) });
+      enable();
+      db.exec("DROP TABLE kv");
+      // daemon 的写法：void 调用，没人接 rejection。
+      void puller.tick(NOW);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      await expect(puller.tick(minutes(1))).resolves.toBe(false);
+      expect(unhandled).toEqual([]);
+      expect(calls).toHaveLength(0);
+      expect(lines.join("\n")).toContain("could not read its settings");
+      expect(lines.join("\n")).not.toContain("kv");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
