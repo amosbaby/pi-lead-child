@@ -35,6 +35,7 @@ import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel
 import { OWNER_DM_SYNC_ACTIONS, OWNER_DM_SYNC_TARGET } from "./owner-dm-sync.js";
 import { TICKET_PUSH_ACTIONS, TICKET_PUSH_TARGET } from "./ticket-push.js";
 import { JIRA_INTAKE_ACTIONS, JIRA_INTAKE_TARGET } from "./jira-intake.js";
+import { TICKET_MISS_ACTIONS, TICKET_MISS_TARGET } from "./ticket-miss.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
 import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.js";
@@ -1236,6 +1237,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   owner_dm_sync: OWNER_DM_SYNC_TARGET,
   ticket_push: TICKET_PUSH_TARGET,
   jira_intake: JIRA_INTAKE_TARGET,
+  ticket_miss: TICKET_MISS_TARGET,
   pull_request: PULL_REQUEST_TARGET,
 };
 
@@ -1294,6 +1296,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   ticket_push: TICKET_PUSH_ACTIONS,
   // Jira 最小拉取的设置（计划 Task 13）：开关、项目白名单、间隔。改规则，Lead 也能改。定义在 jira-intake.ts。
   jira_intake: JIRA_INTAKE_ACTIONS,
+  // 「找不到」记录（计划 Task 14）：工单列表页的按钮、plc miss、Lead 记一行。不改规则，Lead 也能做。定义在 ticket-miss.ts。
+  ticket_miss: TICKET_MISS_ACTIONS,
   // 「我的未合并 PR」控件里 CI 失败那一行的「Auto fix」（2026-11-06，工单 #99）。定义在 pull-requests.ts。
   pull_request: PULL_REQUEST_ACTIONS,
 };

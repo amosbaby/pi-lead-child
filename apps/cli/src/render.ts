@@ -1,7 +1,7 @@
 // plc 的输出格式。只依赖线上契约的 DTO，不认识账本的行。
 import type {
   ActivityDto, AdminBinding, AishCredentialStatus, AishForgetResponse, CreatePairingResponse, LeadTrustStatus,
-  LeadTrustUpdate, RuntimeRecheckResponse, TicketDetail, TicketSummary,
+  HubMetricsDto, LeadTrustUpdate, RuntimeRecheckResponse, TicketDetail, TicketSummary,
 } from "@pi-lead-child/protocol";
 
 export function ticketRow(ticket: TicketSummary): string {
@@ -92,4 +92,17 @@ export function aishForgotten(result: AishForgetResponse): string {
     lines.push('运行中的 daemon 在重启前保留当前连接。要立即断开，运行 plc daemon restart --reason "forget aish token"。');
   }
   return lines.join("\n");
+}
+
+// plc hub metrics 的输出：只有数字和百分比（没有工单标题、「找不到」的原话）。没有工单时覆盖率写「-」，不写 0%：那是没有数据，不是都没覆盖。
+export function hubMetricsText(since: string, metrics: HubMetricsDto): string {
+  const percent = (part: number, ratio: number) => (metrics.tickets === 0 ? `${part}/${metrics.tickets} (-)` : `${part}/${metrics.tickets} (${(ratio * 100).toFixed(1)}%)`);
+  return [
+    `窗口：最近 ${since}`,
+    `工单：${metrics.tickets}`,
+    `来源链接覆盖：${percent(metrics.withSource, metrics.sourceCoverage)}`,
+    `会话链接覆盖：${percent(metrics.withSession, metrics.sessionCoverage)}`,
+    `领取中位时长：${metrics.medianClaimMinutes === null ? "-" : `${metrics.medianClaimMinutes.toFixed(1)} 分钟`}`,
+    `找不到：${metrics.misses} 次`,
+  ].join("\n");
 }

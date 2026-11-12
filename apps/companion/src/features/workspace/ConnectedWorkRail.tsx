@@ -213,6 +213,8 @@ export function ConnectedWorkRail({
       ticketMeta={ticketMeta}
       // 手动领的单很久没动静：放掉外部工人的领取（ticket.release，和 Lead 的 ticket_action 同一个函数），工单回到待领。
       onReleaseTicket={(ticket) => runtime.runTicketAction(Number(ticket.id), 'ticket.release')}
+      // 「找不到」：记一行（ticket_miss.record，和 plc miss、Lead 的 perform_action 同一个函数）。
+      onReportMiss={(text) => runtime.performUiAction('ticket_miss', 'hub', 'record', { input: { text } })}
       notices={notices}
       upcomingReminders={upcomingReminders}
       onCancelTimer={cancelTimer}

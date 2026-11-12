@@ -91,6 +91,7 @@ import {
   DesignPreferencesResponseSchema,
   RuntimeSettingsResponseSchema,
   ExecutionModeResponseSchema,
+  HubMetricsResponseSchema,
   MemoryResponseSchema,
   MemorySwitchConfirmResponseSchema,
   MemorySwitchResponseSchema,
@@ -115,6 +116,7 @@ import {
   type ExecutionMode,
   type ExecutionModeDto,
   type ExecutionModeResponse,
+  type HubMetricsResponse,
   type RuntimeSettingsRequest,
   type DecisionModelSettingsRequest,
   type MemorySettingsDto,
@@ -2020,6 +2022,12 @@ export class ControlPlaneClient {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ mode }), ...(signal ? { signal } : {}),
     });
     return payload.executionMode;
+  }
+
+  // 外部工人 hub 的指标（计划 Task 14）：since 是 Nd 或 Nh（缺省 7d）。口径在 store 的 hub-metrics.ts。
+  async getHubMetrics(since?: string, signal?: AbortSignal): Promise<HubMetricsResponse> {
+    const query = since === undefined ? '' : `?${new URLSearchParams({ since }).toString()}`;
+    return this.request<HubMetricsResponse>(`/v1/hub/metrics${query}`, HubMetricsResponseSchema, { signal });
   }
 
   // 首次启动引导（.scratch/onboarding）：7 项关键设置配没配好。daemon 还没算过时 setup 是 null。

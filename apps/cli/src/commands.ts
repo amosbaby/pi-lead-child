@@ -7,7 +7,8 @@
 import { Command } from "commander";
 import { ControlPlaneClientError, type ControlPlaneClient } from "@pi-lead-child/client";
 import {
-  EXECUTION_MODES, KERNEL_RUNTIME_IDS, TICKET_LIST_VIEWS, WORKER_NAME_PATTERN,
+  EXECUTION_MODES, HUB_METRICS_DEFAULT_SINCE, KERNEL_RUNTIME_IDS, TICKET_LIST_VIEWS, TICKET_MISS_TEXT_MAX, WORKER_NAME_PATTERN,
+  hubMetricsWindowMs,
   type BindingDto, type DaemonLocalStatus, type ExecutionMode, type KernelRuntimeId, type MaintenanceAction, type SupervisorCommand,
   type TicketListView, type UserItemActionId, type WorkerPairResponse,
 } from "@pi-lead-child/protocol";
@@ -21,7 +22,7 @@ export type GatewayClient = Pick<ControlPlaneClient,
   | "createTicket" | "listTickets" | "getTicket" | "getActivities" | "performTicketAction" | "performAttemptAction" | "runTicketAction"
   | "getLeadTrust" | "setLeadTrust" | "getLeadDelegation" | "setLeadDelegation" | "recheckRuntimes"
   | "createPairing" | "listBindings" | "revokeBinding" | "getAishStatus" | "forgetAish" | "getOwnBinding"
-  | "getExecutionMode" | "setExecutionMode">;
+  | "getExecutionMode" | "setExecutionMode" | "performUiAction" | "getHubMetrics">;
 
 export interface GatewaySession {
   client: GatewayClient;
@@ -344,6 +345,19 @@ export function buildProgram(deps: CliDeps): Command {
       deps.out(`${mode === undefined ? "执行模式" : "执行模式已设为"}：${current.mode}（${modeWords[current.mode]}）`);
     }));
 
+  // 「找不到」记录（计划 Task 14）：和工单列表页的「找不到」按钮是同一个操作（ticket_miss.record，lead_allowed，写账本）。
+  // 用 plc 自己的凭证（tickets:create）。原话去掉首尾空白，空的、超过 500 个字符的在这里先拒绝；操作层也会再查一次。
+  program.command("miss [text...]")
+    .description(`记一次「找不到」：说你没找到什么（原话，最多 ${TICKET_MISS_TEXT_MAX} 个字符）。和工单列表页的「找不到」按钮是同一个操作`)
+    .action(run(async (words: string[] = []) => {
+      const text = words.join(" ").trim();
+      if (text === "") throw new CliError("usage: plc miss <你没找到的东西，原话>");
+      if (text.length > TICKET_MISS_TEXT_MAX) throw new CliError(`原话太长：最多 ${TICKET_MISS_TEXT_MAX} 个字符，现在 ${text.length} 个`);
+      const { client } = await deps.gateway();
+      await client.performUiAction("ticket_miss", "hub", "record", { input: { text } });
+      deps.out("已记下这次「找不到」。");
+    }));
+
   // aish（Slack 网关）的上游凭证，要 admin 权限。token 只从环境变量 PLC_AISH_TOKEN 进 daemon，
   // 这里故意不提供 --token：命令行参数会留在 shell 历史里。
   const aishCmd = program.command("aish")
@@ -457,11 +471,21 @@ export function buildProgram(deps: CliDeps): Command {
     .action((action: string) => ops(["ledger-guard", action])());
 
   // hub 数据目录：旧库只读复制进来（hub 不和旧 daemon 共用数据目录）。要打开账本，所以在 daemon 一侧的运维入口里做。
-  const hubCmd = program.command("hub").description("ticket hub：把旧数据目录里的账本复制进当前数据目录");
+  const hubCmd = program.command("hub").description("ticket hub：把旧数据目录里的账本复制进当前数据目录；看 hub 的指标");
   hubCmd.command("import-db")
     .description("把旧数据目录的 plc.db 复制进当前 PLC_DATA_DIR（WAL 安全，原库不动；目标已有账本时拒绝），并在副本上执行迁移；只打印表名和行数")
     .requiredOption("--from <dir>", "旧数据目录（里面有 plc.db）")
     .action((opts: { from: string }) => ops(["hub-import-db", "--from", opts.from])());
+  // hub 的指标（计划 Task 14）：S1 成不成功看的几个数。读 GET /v1/hub/metrics，口径在 store 的 hub-metrics.ts。只打印数字和百分比。
+  hubCmd.command("metrics")
+    .description("来源链接覆盖率、会话链接覆盖率、领取中位时长、「找不到」次数（只有数字和百分比）")
+    .option("--since <window>", "统计窗口：Nd 或 Nh，例如 7d、36h", HUB_METRICS_DEFAULT_SINCE)
+    .action(run(async (opts: { since: string }) => {
+      if (hubMetricsWindowMs(opts.since) === null) throw new CliError(`--since 要写 Nd 或 Nh（N 是 1 到 9999 的整数），例如 7d、36h；收到 '${opts.since}'`);
+      const { client } = await deps.gateway();
+      const response = await client.getHubMetrics(opts.since);
+      deps.out(render.hubMetricsText(response.since, response.metrics));
+    }));
 
   program.command("doctor").description("只读诊断：只读打开账本，不执行迁移，不修改账本和配置").action(ops(["doctor"]));
 

@@ -29,6 +29,7 @@ import {
 import { ProjectList } from './ProjectList';
 import { railMessages } from './rail.messages';
 import { TicketList } from './TicketList';
+import { TicketMissRow } from './TicketMissRow';
 
 const RAIL_VIEWS: readonly RailView[] = ['inbox', 'tickets', 'projects', 'agenda'];
 
@@ -65,6 +66,8 @@ type WorkRailProps = {
   ticketMeta?: TicketHubFacts | null;
   // 手动领的单超过 4 小时没动静时在行上释放（ticket.release）。
   onReleaseTicket?: (ticket: Ticket) => Promise<unknown>;
+  // 工单列表页的「找不到」（ticket_miss.record，和 plc miss 同一个操作）。不给时列表上没有这个按钮。
+  onReportMiss?: (text: string) => Promise<unknown>;
   showViewTabs?: boolean;
   // 收件箱里单独露出来的通知（protocol 的 inboxNotices）。只在收件箱渲染。
   notices?: InboxNotices;
@@ -117,6 +120,7 @@ export function WorkRail({
   onCancelTicket,
   ticketMeta = null,
   onReleaseTicket,
+  onReportMiss,
   showViewTabs = true,
   notices = EMPTY_NOTICES,
   onAckNotification,
@@ -279,6 +283,9 @@ export function WorkRail({
               ))}
             </Row>
           </ScrollArea>
+        ) : null}
+        {view === 'tickets' && onReportMiss ? (
+          <Box mt="card-row"><TicketMissRow onReport={onReportMiss} /></Box>
         ) : null}
       </Column>
       <SwitchTransition transitionKey={view} direction={viewDirection}>

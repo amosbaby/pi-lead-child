@@ -1320,6 +1320,7 @@ export * from "./execution-mode.ts";
 export * from "./worker.ts";
 export * from "./busy-placement.ts";
 export * from "./jira-intake.ts";
+export * from "./hub-metrics.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";
 export * from "./delivery-snapshots.ts";

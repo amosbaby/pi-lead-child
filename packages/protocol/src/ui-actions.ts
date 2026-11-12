@@ -28,6 +28,7 @@ import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from ".
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { SetJiraIntakeRequestSchema } from "./jira-intake.ts";
+import { RecordTicketMissRequestSchema } from "./hub-metrics.ts";
 import { SetExecutionModeRequestSchema } from "./execution-mode.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
@@ -103,12 +104,14 @@ export const ActionPermissionSchema = Type.Union([
 //   execution_mode  执行模式：self、external（外部工人领单）、paused（总闸）（execution-mode.ts）。编号只有 daemon。
 //   ticket_push  「待你处理」推送的开关（设置 → 消息通道，计划 Task 12）。编号是 slack_dm（推到 Slack 私信）或 desktop（桌面通知）。
 //   jira_intake  Jira 最小拉取的设置：开关、项目白名单、间隔（计划 Task 13，jira-intake.ts）。编号只有 user。
+//   ticket_miss  「找不到」记录（工单列表页的按钮、plc miss，计划 Task 14，hub-metrics.ts）。编号只有 hub。
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
   "busy_placement", "owner_dm_sync", "pull_request", "execution_mode", "ticket_push", "jira_intake",
+  "ticket_miss",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -448,6 +451,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   jira_intake: {
     // 改 Jira 最小拉取的设置：给哪些字段改哪些。改规则：读过外部内容的一轮里不能做。
     set: SetJiraIntakeRequestSchema,
+  },
+  ticket_miss: {
+    // 记一次「找不到」：用户的原话（去掉首尾空白，最多 500 个字符）。只写一行记录，不改规则。
+    record: RecordTicketMissRequestSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

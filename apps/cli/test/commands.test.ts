@@ -408,6 +408,108 @@ describe("plc execution-mode", () => {
   });
 });
 
+// 「找不到」记录和 hub 指标（计划 Task 14）：plc miss 是通用的 ticket_miss.record（和工单列表页的按钮同一个操作），
+// plc hub metrics 读 GET /v1/hub/metrics。都走 plc 自己的凭证（tickets:create、tickets:view）。输出只有数字和百分比。
+describe("plc miss", () => {
+  it("records the trimmed text through ticket_miss.record", async () => {
+    const h = harness({ performUiAction: async () => ({}) as never });
+    await h.run("miss", "  the Jira ticket from Nina  ");
+    expect(h.calls).toEqual([["performUiAction", "ticket_miss", "hub", "record", { input: { text: "the Jira ticket from Nina" } }]]);
+    expect(h.exitCode()).toBe(0);
+    expect(h.out).toHaveLength(1);
+  });
+
+  it("joins an unquoted text", async () => {
+    const h = harness({ performUiAction: async () => ({}) as never });
+    await h.run("miss", "the", "report", "ticket");
+    expect(h.calls).toEqual([["performUiAction", "ticket_miss", "hub", "record", { input: { text: "the report ticket" } }]]);
+  });
+
+  it("refuses an empty text, a blank text and a text over 500 characters before calling the gateway", async () => {
+    for (const args of [[], [""], ["   "], ["x".repeat(501)], [` ${"x".repeat(501)} `]]) {
+      const h = harness({ performUiAction: async () => ({}) as never });
+      await h.run("miss", ...args);
+      expect(h.exitCode(), JSON.stringify(args).slice(0, 20)).toBe(1);
+      expect(h.err.length).toBeGreaterThan(0);
+      expect(h.gatewayCalls()).toBe(0);
+      expect(h.calls).toEqual([]);
+    }
+  });
+
+  it("accepts exactly 500 characters", async () => {
+    const h = harness({ performUiAction: async () => ({}) as never });
+    await h.run("miss", "x".repeat(500));
+    expect(h.exitCode()).toBe(0);
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("shows a refusal from the gateway as an error and exits 1", async () => {
+    const h = harness({
+      performUiAction: async () => { throw new ControlPlaneClientError("missing scope: tickets:create", "forbidden", 403); },
+    });
+    await h.run("miss", "something");
+    expect(h.exitCode()).toBe(1);
+    expect(h.err).toEqual(["missing scope: tickets:create"]);
+  });
+});
+
+describe("plc hub metrics", () => {
+  const metrics = {
+    tickets: 12, withSource: 11, withSession: 9, sourceCoverage: 11 / 12, sessionCoverage: 0.75, medianClaimMinutes: 14.54, misses: 2,
+  };
+
+  it("reads 7 days by default and prints only numbers and percentages", async () => {
+    const h = harness({ getHubMetrics: async (since) => ({ since: since ?? "7d", metrics }) });
+    await h.run("hub", "metrics");
+    expect(h.calls).toEqual([["getHubMetrics", "7d"]]);
+    const text = h.out.join("\n");
+    expect(text).toContain("7d");
+    expect(text).toContain("11/12");
+    expect(text).toContain("91.7%");
+    expect(text).toContain("9/12");
+    expect(text).toContain("75.0%");
+    expect(text).toContain("14.5");
+    expect(text).toMatch(/2/);
+    expect(h.exitCode()).toBe(0);
+  });
+
+  it("passes --since through, for days and hours", async () => {
+    for (const since of ["30d", "36h"]) {
+      const h = harness({ getHubMetrics: async (value) => ({ since: value ?? "7d", metrics }) });
+      await h.run("hub", "metrics", "--since", since);
+      expect(h.calls, since).toEqual([["getHubMetrics", since]]);
+      expect(h.out.join("\n"), since).toContain(since);
+    }
+  });
+
+  it("says there is no data instead of 0% when no ticket was created in the window", async () => {
+    const empty = { tickets: 0, withSource: 0, withSession: 0, sourceCoverage: 0, sessionCoverage: 0, medianClaimMinutes: null, misses: 1 };
+    const h = harness({ getHubMetrics: async () => ({ since: "7d", metrics: empty }) });
+    await h.run("hub", "metrics");
+    const text = h.out.join("\n");
+    expect(text).not.toContain("0.0%");
+    expect(text).toContain("0/0");
+    expect(text).toContain("-");
+  });
+
+  it("prints a dash for a median that does not exist", async () => {
+    const h = harness({ getHubMetrics: async () => ({ since: "7d", metrics: { ...metrics, medianClaimMinutes: null } }) });
+    await h.run("hub", "metrics");
+    expect(h.out.join("\n")).toMatch(/-/);
+    expect(h.out.join("\n")).not.toContain("null");
+  });
+
+  it("refuses a --since that is not Nd or Nh before calling the gateway", async () => {
+    for (const since of ["7", "0d", "7w", "abc", "1.5d", "-2d"]) {
+      const h = harness({ getHubMetrics: async () => ({ since: "7d", metrics }) });
+      await h.run("hub", "metrics", `--since=${since}`);
+      expect(h.exitCode(), since).toBe(1);
+      expect(h.err.join("\n"), since).toContain("--since");
+      expect(h.gatewayCalls(), since).toBe(0);
+    }
+  });
+});
+
 describe("auth", () => {
   it("shows the binding of the stored credential without the token", async () => {
     const h = harness();

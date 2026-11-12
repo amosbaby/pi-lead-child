@@ -135,6 +135,7 @@ import { handleHandbookRoute } from "./handbook-routes.js";
 import { handleReplyStyleRoute } from "./reply-style-routes.js";
 import { handleHostBypassRoute } from "./host-bypass-routes.js";
 import { handleExecutionModeRoute } from "./execution-mode-routes.js";
+import { handleHubMetricsRoute } from "./hub-metrics-routes.js";
 import { handleTicketLinksRoute } from "./ticket-links-routes.js";
 import { handleRuleChangeRoute } from "./rule-change-routes.js";
 import { handleTimerRoute } from "./timer-routes.js";
@@ -2126,6 +2127,14 @@ export async function startPairedServer(
         perform: async (input, scope) => (await performUiActionAsUser(req, requireAuth(req, scope), {
           target: { type: "execution_mode", id: "daemon" }, action: "set", input,
         })).result,
+      })) return;
+
+      // 外部工人 hub 的指标（计划 Task 14）：只读，tickets:view。「找不到」是通用的 /v1/actions/ticket_miss/hub/record。
+      if (await handleHubMetricsRoute({
+        req, url, db: bridge.db,
+        now: () => new Date(),
+        json: (status, value) => json(req, res, status, value),
+        requireAuth: (scope) => { requireAuth(req, scope); },
       })) return;
 
       // 改规则被拦下以后的确认卡（工单 09）：读卡要 tickets:view，「确认这一次」「不改」是操作层的 rule_change.resolve
