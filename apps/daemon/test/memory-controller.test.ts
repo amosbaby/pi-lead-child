@@ -18,7 +18,6 @@ import {
   DEFAULT_LOCAL_EMBEDDING, DEFAULT_LOCAL_RERANKER, HINDSIGHT_SECRETS_AAD, hindsightSecretsPath, isUsableDatabasePassword,
   MemoryController, newDatabasePassword, PINNED_MODEL_REVISIONS, type MemoryControllerHooks,
 } from "../src/memory-controller.js";
-import { SealedSecrets } from "../src/sealed-secrets.js";
 import type { SummaryModels } from "../src/memory-backend.js";
 import { memoryHarness, type MemoryHarness } from "./memory-fakes.js";
 
@@ -194,7 +193,7 @@ describe("pg0 database password", () => {
   it("replaces it when the upgraded daemon reconnects, restarts Hindsight once, and logs no password", async () => {
     const { t, old } = await installWithDashPassword();
     const version = readServiceFile(t.dataDir)!.secretsVersion;
-    const before = t.harness.launchctl.length;
+    const before = t.harness.service.length;
 
     const again = setup({ dataDir: t.dataDir, db: t.db, vault: t.vault, harness: t.harness });
     await again.controller.start();
@@ -202,7 +201,7 @@ describe("pg0 database password", () => {
     expect(replaced).toMatch(/^[0-9a-f]{48}$/);
     expect(storedPassword(again)).toBe(replaced);
     expect(readServiceFile(t.dataDir)!.secretsVersion).toBe(version + 1);
-    expect(t.harness.launchctl.slice(before)).toEqual(["print", "bootout", "print", "bootstrap"]);
+    expect(t.harness.service.slice(before)).toEqual(["restart"]);
     expect(again.logs.join("\n")).toMatch(/replaced the stored hindsight\.databasePassword/);
     expect(again.logs.join("\n")).not.toContain(old);
     expect(again.logs.join("\n")).not.toContain(replaced);
@@ -210,10 +209,10 @@ describe("pg0 database password", () => {
 
     // 再重启 daemon：不再换密码，也不再重启 Hindsight。
     const third = setup({ dataDir: t.dataDir, db: t.db, vault: t.vault, harness: t.harness });
-    const mark = t.harness.launchctl.length;
+    const mark = t.harness.service.length;
     await third.controller.start();
     expect(third.sealed().databasePassword).toBe(replaced);
-    expect(t.harness.launchctl.slice(mark)).toEqual(["print"]);
+    expect(t.harness.service.slice(mark)).toEqual([]);
   });
 
   // 换了密码、但重启 Hindsight 失败（launchctl 出错）：健康检查接着重试，用的还是换好的那一个。
