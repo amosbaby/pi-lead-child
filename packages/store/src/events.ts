@@ -317,9 +317,17 @@ function eventsWhere(query: Omit<ListEventsQuery, "limit" | "order">): { sql: st
   };
   if (query.kind !== undefined) inList("kind", query.kind);
   if (query.level !== undefined) inList("level", query.level);
-  for (const [from, to] of query.excludeRanges ?? []) {
-    where.push("seq NOT BETWEEN ? AND ?");
-    values.push(from, to);
+  // 所有区间作为一个 JSON 参数传进去，查询的形状和区间的条数无关。以前每个区间一条 AND seq NOT BETWEEN，
+  // 区间多到上千时 SQLite 报 Expression tree is too large (maximum depth 1000)，daemon 启动读游标就崩（2026-11-15）。
+  // 子查询不引用外层的行：SQLite 只算一次，按主键逐个区间取出序号，放进临时索引。
+  // 写成和外层相关的 NOT EXISTS 时，每一行都要重新解析一次 JSON，1200 个区间、2400 行要半秒多。
+  const ranges = query.excludeRanges ?? [];
+  if (ranges.length) {
+    where.push(
+      "seq NOT IN (SELECT excluded.seq FROM json_each(?) AS r JOIN events AS excluded"
+      + " ON excluded.seq BETWEEN r.value ->> 0 AND r.value ->> 1)",
+    );
+    values.push(JSON.stringify(ranges.map(([from, to]) => [from, to])));
   }
   return { sql: where.length ? ` WHERE ${where.join(" AND ")}` : "", values };
 }

@@ -6,7 +6,8 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import {
-  addInbox, createItem, createPairing, createTurn, listEvents, listInbox, openDb, redeemPairing, type Db,
+  addInbox, appendEvent, createItem, createPairing, createTurn, listEvents, listInbox, openDb, redeemPairing,
+  saveLeadEventCursor, type Db,
 } from "@pi-lead-child/store";
 import { LEAD_RESTART_INTERRUPTED_ERROR } from "@pi-lead-child/protocol";
 import { tempDir } from "@pi-lead-child/core/testing";
@@ -153,6 +154,30 @@ describe("scenario 8: a daemon restart in the middle of a round", () => {
     expect(callsWith(second.calls, "崩溃前的问题")).toBe(1);
     expect(callsWith(second.calls, "迁移脚本卡住了")).toBe(1);
     expect(firstCallWith(second.calls, "崩溃前的问题")).toBeLessThan(firstCallWith(second.calls, "迁移脚本卡住了"));
+  });
+
+  // 2026-11-15：模型一直失败，一件事挡着游标，处理完的事件收紧成 998 个区间存进游标。daemon 重启时按区间读事件，
+  // 每个区间一条 AND，SQLite 报 Expression tree is too large，daemon 起来就崩，一直重启。区间再多，daemon 也要起得来、照常交事件。
+  it("starts with a saved cursor that holds more ranges than SQLite's expression depth, and still hands over the event", async () => {
+    const first = fakePiLead(answers);
+    await start(first);
+    await stop();
+    const before = cursorSeq()!;
+    // 游标后面是 Lead 不看的事件（每一轮的结果）；每隔一条记成处理完的区间：1200 个不相接的区间。
+    const seqs = db.transaction(() => Array.from({ length: 2_400 }, (_, index) => appendEvent(db, {
+      source: "lead", kind: "lead.turn_completed", entityKey: "chat:main", payload: { turnId: `t-${index}`, originKind: "paired:companion" },
+    }).event.seq))();
+    saveLeadEventCursor(db, {
+      seq: before, settled: [],
+      ranges: seqs.filter((_, index) => index % 2 === 1).map((seq): [number, number] => [seq, seq]),
+    });
+    tellEvent("迁移脚本卡住了");
+    const second = fakePiLead(answers);
+    const { send } = await start(second);
+    // 间隔里的 1200 条占满了 Lead 一次读的窗口（1000 条）；一轮成功以后游标越过它们（advance 也按这些区间读）。
+    await send("问题 A");
+    await vi.waitFor(() => expect(callsWith(second.calls, "迁移脚本卡住了")).toBe(1), { timeout: 5_000 });
+    await vi.waitFor(() => expect(listInbox(db).map((row) => row.state)).toEqual(["consumed"]));
   });
 
   it("does not move the cursor past an event when the round that carried it fails", async () => {

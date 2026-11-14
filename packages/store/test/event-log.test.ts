@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import type { EventEnvelope } from "@pi-lead-child/protocol";
 import {
-  appendEvent, appendEventGuarded, getEvent, listEvents, listUndisposedEvents, openDb, setEventDisposition, setEventLevel,
+  appendEvent, appendEventGuarded, countEvents, getEvent, listEvents, listUndisposedEvents, openDb, setEventDisposition, setEventLevel,
   setEventTriage, UNDISPOSED_EVENT_DEADLINE_MS, type Db,
 } from "../src/index.js";
 
@@ -120,6 +120,21 @@ describe("listEvents", () => {
     expect(listEvents(db, { level: "tell" }).map((event) => event.seq)).toEqual([c.seq]);
     expect(listEvents(db, { order: "desc", limit: 2 }).map((event) => event.seq)).toEqual([d.seq, c.seq]);
     expect(getEvent(db, c.seq)?.rootCause).toEqual({ code: "process_exit", message: "exit 1" });
+  });
+
+  // 2026-11-15 daemon 起不来：Lead 的游标存了 998 个处理完的区间，每个区间以前是一条 AND seq NOT BETWEEN，
+  // SQLite 报 Expression tree is too large (maximum depth 1000)，daemon 每次启动读游标就崩。区间再多，查询也要能跑。
+  it("skips any number of excluded ranges without hitting SQLite's expression depth limit", () => {
+    const seqs = db.transaction(() => Array.from({ length: 2_400 }, (_, index) => appendEvent(db, stageChanged(1, index + 1)).event.seq))();
+    // 每隔一条排除一条：1200 个不相接的区间，整理以后也并不起来。
+    const ranges = seqs.filter((_, index) => index % 2 === 1).map((seq): [number, number] => [seq, seq]);
+    expect(ranges).toHaveLength(1_200);
+    const kept = seqs.filter((_, index) => index % 2 === 0);
+    expect(listEvents(db, { excludeRanges: ranges, limit: 1_000 }).map((event) => event.seq)).toEqual(kept.slice(0, 1_000));
+    expect(listEvents(db, { sinceSeq: kept[1_000]! - 1, excludeRanges: ranges, limit: 1_000 }).map((event) => event.seq)).toEqual(kept.slice(1_000));
+    expect(countEvents(db, { excludeRanges: ranges })).toBe(1_200);
+    // 一个区间的两头都含。
+    expect(countEvents(db, { excludeRanges: [[seqs[0]!, seqs[9]!]] })).toBe(2_390);
   });
 });
 
