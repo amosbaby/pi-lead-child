@@ -104,7 +104,7 @@ describe('the chat list on Legend List', () => {
       alignItemsAtEnd: false,
       extraData: { latest: 'b' },
     });
-    expect(props.recycleItems).toBeUndefined();
+    expect(props.recycleItems).toBe(false);
     expect(props.keyExtractor(block('x'))).toBe('x');
     props.onStartReached({ distanceFromStart: 10 });
     expect(onStartReached).toHaveBeenCalledTimes(1);

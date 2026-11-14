@@ -10,7 +10,7 @@ import { fullWidthModifiers } from './nativeModifiers';
 
 export type { ButtonProps, ButtonSize, ButtonTone, ButtonVariant, IconButtonProps } from './Button.types';
 
-// 原生实现：iOS 上是 SwiftUI Button，Android 上是 Jetpack Compose Button（Expo UI）。
+// iOS 实现：SwiftUI Button（Expo UI）。Android 用 Tamagui 实现（Button.android.tsx）。
 // 尺寸和颜色来自和 web 同一份 buttonSpec。
 
 const EXPO_VARIANT: Record<ButtonVariant, ExpoVariant> = {

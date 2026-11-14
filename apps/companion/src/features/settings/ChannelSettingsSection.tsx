@@ -356,7 +356,7 @@ function SecretField({ sourceId, secret, value, onChange }: {
       <Row items="center" gap="inline-item" flexWrap="wrap">
         <Text size="label" weight="semibold">{secret.label}</Text>
         <Text size="code" mono tone="muted">{secret.name}</Text>
-        <Text flex={1} minW={0} size="label" align="right" tone={secret.present ? 'success-dark' : 'muted'}>{secretStateText(secret, locale)}</Text>
+        <Text ml="auto" size="label" align="right" tone={secret.present ? 'success-dark' : 'muted'}>{secretStateText(secret, locale)}</Text>
       </Row>
       {secret.hint ? <Text size="note" tone="secondary">{secret.hint}</Text> : null}
       <TextField

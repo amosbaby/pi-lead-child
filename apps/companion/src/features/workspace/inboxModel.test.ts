@@ -2,7 +2,8 @@
 import type { InboxTicketFact, LeadHandledEntry, TicketReviewState, TicketSummary } from '@pi-lead-child/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { buildInboxCards, splitLeadHandled, waitedText } from './inboxModel';
+import { buildInboxCards, splitLeadHandled } from './inboxModel';
+import { waitedText } from './waitedText';
 import { ticketSummaryToTicket } from './model';
 
 const now = new Date('2026-10-15T07:46:00.000Z');

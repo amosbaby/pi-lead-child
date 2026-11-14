@@ -34,8 +34,10 @@ export { Pressable } from './primitives/Pressable';
 export type { PressableProps } from './primitives/Pressable';
 export { ScrollArea } from './primitives/ScrollArea';
 export type { ScrollAreaHandle, ScrollAreaProps, ScrollEvent } from './primitives/ScrollArea';
-export { KeyboardArea, Screen } from './primitives/Screen';
-export type { KeyboardAreaProps, ScreenProps } from './primitives/Screen';
+export { KeyboardArea } from './primitives/KeyboardArea';
+export type { KeyboardAreaProps } from './primitives/KeyboardArea';
+export { Screen } from './primitives/Screen';
+export type { ScreenProps } from './primitives/Screen';
 
 // 展示
 export { ChatList, useKeepChatBlockInPlace } from './display/ChatList';

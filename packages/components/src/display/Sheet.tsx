@@ -1,5 +1,5 @@
 import { useEffect, type ReactNode } from 'react';
-import { BackHandler, Platform, ScrollView, StyleSheet, View } from 'react-native';
+import { Platform, ScrollView, StyleSheet, View } from 'react-native';
 import Animated, { Easing, FadeIn, FadeOut, ReduceMotion, SlideInDown, SlideOutDown } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -10,11 +10,12 @@ import { Text } from '../primitives/Text';
 import { zIndex } from '../theme/tokens';
 import { useMessages } from '../i18n';
 import { displayMessages } from './display.messages';
+import { NativeSheet } from './NativeSheet';
 
 export type SheetProps = {
   /** 是否打开。组件不存这个状态。 */
   open: boolean;
-  /** 点遮罩、关闭按钮，按 Esc（web）或返回键（Android）时调用。 */
+  /** 点遮罩、关闭按钮、按 Esc（web），或者下拉面板、按返回键（原生）时调用。 */
   onClose: () => void;
   title: string;
   /** 标题下面的一句说明，例如「Claude Code · 现在是 sonnet · 推理强度 high」。 */
@@ -33,10 +34,58 @@ const scrimOut = FadeOut.duration(160).reduceMotion(ReduceMotion.System);
 const panelIn = SlideInDown.duration(260).easing(easing).reduceMotion(ReduceMotion.System);
 const panelOut = SlideOutDown.duration(200).easing(easing).reduceMotion(ReduceMotion.System);
 
-// 从底部升起的面板（第四轮画板的换模型和强度）。盖住最近的父容器：桌面上是工单详情的侧滑栏，手机上是整屏。
-// 父容器要能给它定位（React Native 的 View 默认就是）。关着时只留一个不挡点按的空层，
-// 面板和遮罩卸载时还能播退出动画。
-export function Sheet({ open, onClose, title, subtitle, closeLabel: closeLabelProp, children, footer, testID }: SheetProps) {
+// 从底部升起的面板（第四轮画板的换模型和强度）。
+// iOS 和 Android 上是系统的底部面板（NativeSheet，2026-11-12）。web 上盖住最近的父容器：
+// 桌面上是工单详情的侧滑栏，手机上是整屏。父容器要能给它定位（React Native 的 View 默认就是）。
+export function Sheet(props: SheetProps) {
+  return Platform.OS === 'web' ? <WebSheet {...props} /> : <SystemSheet {...props} />;
+}
+
+function SystemSheet({ open, onClose, title, subtitle, closeLabel: closeLabelProp, children, footer, testID }: SheetProps) {
+  const m = useMessages(displayMessages);
+  const closeLabel = closeLabelProp ?? m.close;
+  return (
+    <NativeSheet
+      open={open}
+      onClose={onClose}
+      label={title}
+      testID={testID}
+      header={<SheetTitle title={title} subtitle={subtitle} closeLabel={closeLabel} onClose={onClose} testID={testID} />}
+      // spacing-exempt: 面板底栏的规格
+      footer={footer ? <Box px={20} pt={16} pb={16}>{footer}</Box> : undefined}
+    >
+      <View style={styles.bodyContent}>{children}</View>
+    </NativeSheet>
+  );
+}
+
+// 标题栏：标题、说明和关闭按钮。web 和系统面板共用。
+function SheetTitle({ title, subtitle, closeLabel, onClose, testID }: {
+  title: string; subtitle?: string; closeLabel: string; onClose: () => void; testID?: string;
+}) {
+  return (
+    // spacing-exempt: 面板标题栏的规格
+    <Row items="flex-start" gap="inline-item" px={20} pt={10}>
+      <Column flex={1} minW={0}>
+        <Text size="section-title" weight="extrabold">{title}</Text>
+        {subtitle ? <Text mt="text-stack" size="secondary" tone="strong">{subtitle}</Text> : null}
+      </Column>
+      <IconButton
+        icon="close"
+        label={closeLabel}
+        onPress={onClose}
+        variant="soft"
+        size="xs"
+        rounded="sm"
+        iconColor="text-secondary"
+        testID={testID ? `${testID}-close` : undefined}
+      />
+    </Row>
+  );
+}
+
+// web 的面板：关着时只留一个不挡点按的空层，面板和遮罩卸载时还能播退出动画。
+function WebSheet({ open, onClose, title, subtitle, closeLabel: closeLabelProp, children, footer, testID }: SheetProps) {
   const m = useMessages(displayMessages);
   const closeLabel = closeLabelProp ?? m.close;
   const insets = useSafeAreaInsets();
@@ -47,15 +96,6 @@ export function Sheet({ open, onClose, title, subtitle, closeLabel: closeLabelPr
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [open, onClose]);
-  // 返回键只有 Android 有。react-native-web 的 BackHandler 一调用就报错，所以只在 Android 上监听。
-  useEffect(() => {
-    if (!open || Platform.OS !== 'android') return undefined;
-    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      onClose();
-      return true;
-    });
-    return () => subscription.remove();
   }, [open, onClose]);
   return (
     <View style={styles.layer} pointerEvents="box-none">
@@ -95,23 +135,7 @@ export function Sheet({ open, onClose, title, subtitle, closeLabel: closeLabelPr
           >
             {/* spacing-exempt: 拖动把手上方留白 */}
             <Box self="center" mt={7} w={38} h={5} rounded="full" bg="border-strong" />
-            {/* spacing-exempt: 面板标题栏的规格 */}
-            <Row items="flex-start" gap="inline-item" px={20} pt={10}>
-              <Column flex={1} minW={0}>
-                <Text size="section-title" weight="extrabold">{title}</Text>
-                {subtitle ? <Text mt="text-stack" size="secondary" tone="strong">{subtitle}</Text> : null}
-              </Column>
-              <IconButton
-                icon="close"
-                label={closeLabel}
-                onPress={onClose}
-                variant="soft"
-                size="xs"
-                rounded="sm"
-                iconColor="text-secondary"
-                testID={testID ? `${testID}-close` : undefined}
-              />
-            </Row>
+            <SheetTitle title={title} subtitle={subtitle} closeLabel={closeLabel} onClose={onClose} testID={testID} />
             <ScrollView testID={testID ? `${testID}-body` : undefined} style={styles.body} contentContainerStyle={styles.bodyContent}>
               {children}
             </ScrollView>

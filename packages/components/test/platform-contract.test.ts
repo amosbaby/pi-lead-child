@@ -57,8 +57,35 @@ describe('one API on web, iOS and Android', () => {
     }
   });
 
-  // 原生控件（controls/、lists/）在 iOS 和 Android 上是 SwiftUI / Compose 控件。
+  // 原生控件（controls/、lists/）在 iOS 上是 SwiftUI 控件（Expo UI）。
   // 展示类组件（display/）三端都由 Tamagui 渲染，原生实现只换掉无障碍相关的部分（例如 TaskCard 的展开按钮）。
+  // Android 上只有 Switch 用 Compose（2026-11-12、11-13）：Compose 控件的默认内边距、最小尺寸压不掉，也不认 style 里的高度，
+  // 图标按钮里的图标被裁成空心圆，输入框的文字贴在顶上，和卡片的内边距对不齐。
+  // Android 实现（Xxx.android.tsx）走 Tamagui 和 React Native 的 TextInput，和 web 同一份。
+  it('renders the controls with Tamagui and React Native on Android', () => {
+    for (const name of ['controls/Button', 'controls/SegmentedControl', 'controls/TextField', 'lists/ListItem']) {
+      const android = join(SRC, `${name}.android.tsx`);
+      expect.soft(existsSync(android), android).toBe(true);
+      const source = readFileSync(android, 'utf8');
+      expect.soft(source, android).not.toMatch(/from '@expo\/ui/);
+      expect.soft(source, android).toContain(`from './${name.split('/').pop()}.tamagui'`);
+      expect.soft(exportedComponents(android), android).toEqual(exportedComponents(join(SRC, `${name}.native.tsx`)));
+    }
+    const chatInput = join(SRC, 'controls/ChatInput.android.tsx');
+    expect.soft(readFileSync(chatInput, 'utf8'), chatInput).not.toMatch(/from '@expo\/ui/);
+    expect.soft(exportedComponents(chatInput), chatInput).toEqual(exportedComponents(join(SRC, 'controls/ChatInput.native.tsx')));
+  });
+
+  // Expo UI 57.0.25 带标签的 Compose Switch 传 width(IntrinsicSize.Max)，原生只收整数，app 直接退出（2026-11-14）。
+  it('never hands the label to the Compose Switch on Android', () => {
+    const android = join(SRC, 'controls/Switch.android.tsx');
+    const source = readFileSync(android, 'utf8');
+    const expoSwitch = /<ExpoSwitch\b[^>]*>/.exec(source)?.[0] ?? '';
+    expect(expoSwitch, android).not.toBe('');
+    expect(expoSwitch, android).not.toMatch(/\blabel=/);
+    expect(exportedComponents(android)).toEqual(exportedComponents(join(SRC, 'controls/Switch.native.tsx')));
+  });
+
   it('renders the native controls with Expo UI', () => {
     for (const native of natives.filter((file) => /\/(?:controls|lists)\//.test(file))) {
       expect.soft(readFileSync(native, 'utf8'), native).toMatch(/from '@expo\/ui(?:\/[\w/-]+)?'/);

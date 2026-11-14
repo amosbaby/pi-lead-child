@@ -3,7 +3,7 @@ import type { TimerRequestDecision, TimerRequestDto } from '@pi-lead-child/proto
 import { useCallback, useEffect, useState } from 'react';
 
 import { shortTime, standingOrderErrorText } from '@/features/settings/standingOrderModel';
-import { waitedText } from '@/features/workspace/inboxModel';
+import { waitedText } from '@/features/workspace/waitedText';
 import { useLocale, useMessages } from '@/i18n';
 import { useCompanionRuntime } from '@/state/CompanionStateProvider';
 import { useConnectionPhase, useLeadName } from '@/state/hooks';

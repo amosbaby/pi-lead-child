@@ -5,7 +5,7 @@ import type { SwitchProps } from './Switch.types';
 
 export type { SwitchProps } from './Switch.types';
 
-// 原生实现：iOS 上是 SwiftUI Toggle，Android 上是 Compose Switch（Expo UI）。
+// iOS 实现：SwiftUI Toggle（Expo UI）。Android 见 Switch.android.tsx：标签不能交给 Expo UI。
 export function Switch({ value, onValueChange, label, disabled = false, testID }: SwitchProps) {
   return (
     <Host matchContents seedColor={palette.accent}>

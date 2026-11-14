@@ -5,7 +5,7 @@ import type { SegmentedControlProps } from './SegmentedControl.types';
 
 export type { SegmentedControlProps, SegmentedOption } from './SegmentedControl.types';
 
-// 原生实现：iOS 上是 UISegmentedControl，Android 上是 Compose SegmentedButton（Expo UI）。
+// iOS 实现：UISegmentedControl（Expo UI）。Android 用 Tamagui 实现（SegmentedControl.android.tsx）。
 export function SegmentedControl<T extends string>({
   options, value, onChange, size = 'md', testID,
 }: SegmentedControlProps<T>) {

@@ -9,6 +9,7 @@ import { Text } from '../primitives/Text';
 import { palette } from '../theme/tokens';
 import { useMessages } from '../i18n';
 import { displayMessages } from './display.messages';
+import { NativeSheet } from './NativeSheet';
 
 export type PopoverProps = {
   /** 触发按钮给读屏的说法，例如「依据：系统通知，查看来源」。 */
@@ -102,6 +103,23 @@ export function PopoverPanel({ anchor, onClose, label, title, children, width = 
       ? { position: 'absolute' as const, left, top: anchor.y + anchor.height + GAP, width: panelWidth }
       : { position: 'absolute' as const, left, bottom: breakpoint.height - anchor.y + GAP, width: panelWidth };
 
+  const body = typeof children === 'function' ? children(close) : children;
+  const titleRow = (
+    <Row items="center" gap="inline-item" pl="card" pr="card" py="card" borderBottomWidth={1} borderBottomColor="border-soft">
+      <Text flex={1} minW={0} size="section-title" weight="extrabold" numberOfLines={1} pt={sheet && Platform.OS === 'web' ? 6 : 0}>{title ?? label}</Text>
+      <IconButton icon="close" label={m.close} onPress={close} size="sm" />
+    </Row>
+  );
+
+  // 手机宽度的原生端：系统的底部面板（2026-11-12）。它自带遮罩、把手、下拉关闭和跟手的动画。
+  if (sheet && Platform.OS !== 'web') {
+    return (
+      <NativeSheet open={open} onClose={close} label={title ?? label} header={titleRow} testID={testID ? `${testID}-panel` : undefined}>
+        <View style={styles.bodyContent}>{body}</View>
+      </NativeSheet>
+    );
+  }
+
   return (
     <>
       {/* web 上不播动画：浮层点开就出现（react-native-web 的 Modal 要等动画结束事件才卸载）。 */}
@@ -132,14 +150,9 @@ export function PopoverPanel({ anchor, onClose, label, title, children, width = 
             overflow="hidden"
             maxH={sheet ? breakpoint.height * 0.7 : maxHeight}
           >
-            <Row items="center" gap="inline-item" pl="card" pr="card" py="card" borderBottomWidth={1} borderBottomColor="border-soft">
-              {sheet ? <Box position="absolute" t={5} l={0} r={0} items="center"><Box w={36} h={4} rounded="full" bg="border-strong" /></Box> : null}
-              <Text flex={1} minW={0} size="section-title" weight="extrabold" numberOfLines={1} pt={sheet ? 6 : 0}>{title ?? label}</Text>
-              <IconButton icon="close" label={m.close} onPress={close} size="sm" />
-            </Row>
-            <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>
-              {typeof children === 'function' ? children(close) : children}
-            </ScrollView>
+            {titleRow}
+            {sheet ? <Box position="absolute" t={5} l={0} r={0} items="center"><Box w={36} h={4} rounded="full" bg="border-strong" /></Box> : null}
+            <ScrollView style={styles.body} contentContainerStyle={styles.bodyContent}>{body}</ScrollView>
           </Column>
         </View>
       </Modal>

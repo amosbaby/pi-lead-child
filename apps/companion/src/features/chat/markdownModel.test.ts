@@ -67,4 +67,32 @@ describe('parseMarkdownMessage', () => {
       { kind: 'paragraph', inlines: [{ text: '安全 强调 文本' }] },
     ]);
   });
+
+  // 2026-11-12：Lead 的回复里「**不发 `prompt_cache_key` 导致的稳态损失（8.6%）**与」原样露出星号。
+  // CommonMark 规定收尾的 ** 前面是标点、后面紧跟字母时不算收尾；汉字算字母，所以中文里很常见。
+  it('bolds ** runs that end on CJK punctuation next to a CJK letter', () => {
+    const [block] = parseMarkdownMessage('则叠加了**不发`prompt_cache_key`导致的稳态损失（8.6%）**与空闲淘汰。');
+    expect(block).toEqual({
+      kind: 'paragraph',
+      inlines: [
+        { text: '则叠加了' },
+        { text: '不发', strong: true },
+        { text: 'prompt_cache_key', strong: true, code: true },
+        { text: '导致的稳态损失（8.6%）', strong: true },
+        { text: '与空闲淘汰。' },
+      ],
+    });
+  });
+
+  it('leaves a single stray ** and ** inside code alone', () => {
+    const [block] = parseMarkdownMessage('乘方写成 `2**3`，单独一个 ** 不加粗。');
+    expect(block).toEqual({
+      kind: 'paragraph',
+      inlines: [
+        { text: '乘方写成 ' },
+        { text: '2**3', code: true },
+        { text: '，单独一个 ** 不加粗。' },
+      ],
+    });
+  });
 });

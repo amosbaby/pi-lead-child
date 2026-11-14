@@ -300,8 +300,8 @@ function SummaryModels({ hindsight }: { hindsight: MemoryHindsightDto }) {
     <Column testID="memory-summary-models" p="page-card" gap="card-section">
       <Row items="baseline" gap="inline-item" flexWrap="wrap">
         <Text size="card-title" weight="semibold">{m.summaryModels}</Text>
-        <Text flex={1} size="meta" tone="muted">{m.summaryModelsHint}</Text>
-        <Text size="meta" tone="muted">{hindsight.enabled ? m.effectNow : m.effectAfterHindsight}</Text>
+        <Text size="meta" tone="muted">{m.summaryModelsHint}</Text>
+        <Text ml="auto" size="meta" tone="muted">{hindsight.enabled ? m.effectNow : m.effectAfterHindsight}</Text>
       </Row>
       {hindsight.enabled ? null : <Text testID="memory-hindsight-off" size="secondary" tone="secondary">{m.hindsightOffNote}</Text>}
       <SlotGrid>{slots}</SlotGrid>

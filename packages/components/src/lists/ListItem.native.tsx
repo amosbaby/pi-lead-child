@@ -7,7 +7,7 @@ import type { ListItemProps, ListProps } from './ListItem.types';
 
 export type { ListItemProps, ListProps } from './ListItem.types';
 
-// 原生实现：iOS 上是 SwiftUI List，Android 上是 Compose 的列表项（Expo UI）。
+// iOS 实现：SwiftUI List（Expo UI）。Android 用 Tamagui（ListItem.android.tsx）：Compose 列表项自带的内边距和卡片的对不齐。
 // 前导、尾随和额外内容是 React Native 视图，用 RNHostView 嵌进原生列表。
 // Expo UI 的控件必须放在 Host 里：在 List 里时由 List 提供，单独使用时 ListItem 自己包一层。
 const InsideList = createContext(false);

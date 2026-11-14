@@ -6,6 +6,7 @@ import { Pressable } from '../primitives/Pressable';
 import { Box, Column } from '../primitives/layout';
 import { useMessages } from '../i18n';
 import { displayMessages } from './display.messages';
+import { NativeSheet } from './NativeSheet';
 
 export type AnchoredPanelProps = {
   /** 收着时在页面里的内容（例如一张一行的卡片）。浮层打开时它留在原位，高度不变。 */
@@ -62,6 +63,24 @@ export function AnchoredPanel({ children, open, onClose, header, body, label, ma
     : upward
       ? { position: 'absolute' as const, left: anchor.x, width: anchor.width, bottom: breakpoint.height - anchor.y - anchor.height }
       : { position: 'absolute' as const, left: anchor.x, width: anchor.width, top: anchor.y };
+
+  // 手机宽度的原生端：系统的底部面板（2026-11-12）。它自带遮罩、把手、下拉关闭和跟手的动画。
+  if (sheet && Platform.OS !== 'web') {
+    return (
+      <View style={styles.anchor} testID={testID}>
+        {children}
+        <NativeSheet open={open} onClose={onClose} label={label} testID={testID ? `${testID}-panel` : undefined} header={body === undefined ? undefined : header}>
+          {body === undefined ? header : (
+            <>
+              {/* spacing-exempt: 分隔线内缩同面板内边距 */}
+              <Box h={1} mx={16} bg="border-soft" />
+              {body}
+            </>
+          )}
+        </NativeSheet>
+      </View>
+    );
+  }
 
   return (
     <View ref={anchorRef} collapsable={false} style={styles.anchor} testID={testID}>

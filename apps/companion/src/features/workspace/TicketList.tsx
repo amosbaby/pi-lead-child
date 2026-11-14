@@ -18,7 +18,7 @@ import {
   type TicketProjectScope,
   type TicketRailState,
 } from './model';
-import { waitedText } from './inboxModel';
+import { waitedText } from './waitedText';
 import { railMessages } from './rail.messages';
 import { milestoneChip } from './timelineModel';
 

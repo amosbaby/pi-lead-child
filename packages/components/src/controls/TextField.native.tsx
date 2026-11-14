@@ -7,7 +7,8 @@ import type { TextFieldProps } from './TextField.types';
 
 export type { TextFieldProps, TextFieldSize, TextFieldVariant } from './TextField.types';
 
-// 原生实现：iOS 上是 SwiftUI TextField，Android 上是 Compose TextField（Expo UI）。
+// iOS 实现：SwiftUI TextField（Expo UI）。Android 用 Tamagui 加 React Native 的 TextInput（TextField.android.tsx）：
+// Compose 的输入框不认 style 里的高度，文字贴在顶上，和 web 的规格对不齐（2026-11-13）。
 // Expo UI 的输入框用可观察状态（useNativeState）保存文字。这里把它和受控的 value 双向同步，
 // 调用方仍然只处理普通字符串，和 web 一样。
 export function TextField({

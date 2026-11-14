@@ -8,7 +8,7 @@ import { DEFAULT_LOCALE, type Locale } from '@/i18n';
 import { leadNameNow } from '@/state/leadName';
 
 import { agendaMessages } from './agenda.messages';
-import { waitedText } from './inboxModel';
+import { waitedText } from './waitedText';
 import { localDateKey } from './model';
 
 export type TimelineTagTone = 'danger' | 'warning' | 'success' | 'accent' | 'neutral';

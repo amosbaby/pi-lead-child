@@ -173,7 +173,7 @@ function OrderDetail({ id, onChanged }: { id: string; onChanged: () => void }) {
           <Column key={version.version} testID={`standing-order-version-${id}-${version.version}`} gap="text-stack">
             <Row items="center" gap="inline-item" flexWrap="wrap">
               <Text size="label" weight="bold">{`v${version.version}`}</Text>
-              <Text flex={1} size="meta" tone="muted">
+              <Text size="meta" tone="muted">
                 {[m.writtenBy(version.author, leadName), version.approvedBy ? m.approvedBy(version.approvedBy) : null,
                   version.createdAt ? shortTime(version.createdAt) : null, version.status === 'disabled' ? m.disabled : null]
                   .filter(Boolean).join(' · ')}
@@ -193,7 +193,7 @@ function OrderDetail({ id, onChanged }: { id: string; onChanged: () => void }) {
             <Text size="secondary" tone="secondary">{orderReasonText(version, leadName)}</Text>
             {confirming === version.version ? (
               <Row testID={`standing-order-rollback-confirm-${id}`} items="center" gap="actions" flexWrap="wrap">
-                <Text flex={1} size="body" weight="semibold">{m.rollbackConfirm(order.version + 1, version.version)}</Text>
+                <Text size="body" weight="semibold">{m.rollbackConfirm(order.version + 1, version.version)}</Text>
                 <Button testID={`standing-order-rollback-yes-${id}`} label={m.rollback} size="sm" disabled={submitting} onPress={() => rollback(version.version)} />
                 <Button label={m.cancel} size="sm" variant="outline" tone="neutral" disabled={submitting} onPress={() => setConfirming(null)} />
               </Row>

@@ -1,4 +1,4 @@
-import { Button, Column, Screen, Text } from '@pi-lead-child/components';
+import { Button, Column, KeyboardArea, Screen, Text } from '@pi-lead-child/components';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { ConnectedTicketThread } from '@/features/tickets/ConnectedTicketThread';
@@ -19,6 +19,8 @@ export default function TicketDetailScreen() {
   const loading = phase === 'loading' || phase === 'connecting';
   return (
     <Screen edges={['top', 'bottom']}>
+      {/* 工单对话的输入框在底部：键盘弹出时整页顶上去（2026-11-12）。 */}
+      <KeyboardArea>
       {ticket ? (
         <ConnectedTicketThread
           ticket={ticket}
@@ -39,6 +41,7 @@ export default function TicketDetailScreen() {
           </Column>
         </Column>
       )}
+      </KeyboardArea>
     </Screen>
   );
 }

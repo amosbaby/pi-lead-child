@@ -19,6 +19,7 @@ import type { TicketOptionId, TicketOptionPresentation } from '@/features/ticket
 import { inboxMessages } from './inbox.messages';
 import { ticketTitle, type Ticket } from './model';
 import { milestoneChip } from './timelineModel';
+import { waitedText } from './waitedText';
 
 export type InboxCardView = {
   ticketId: string;
@@ -37,19 +38,7 @@ export type InboxCardView = {
 // 能在收件箱里一键做的动作：后果在按钮上就说清了。返工要写原因、恢复要选范围、工作区动作要看状态，都去工单里做。
 const ONE_TAP_OPTIONS: ReadonlySet<TicketOptionId> = new Set(['request_review', 'confirm', 'start', 'complete', 'ack']);
 
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
-
-/** 等了多久，用最大的整单位：51 天、3 小时、12 分钟；不到一分钟是「刚刚」。 */
-export function waitedText(since: string, now: Date = new Date(), locale: Locale = DEFAULT_LOCALE): string {
-  const m = inboxMessages(locale);
-  const elapsed = now.getTime() - new Date(since).getTime();
-  if (!Number.isFinite(elapsed) || elapsed < MINUTE) return m.justNow;
-  if (elapsed >= DAY) return m.days(Math.floor(elapsed / DAY));
-  if (elapsed >= HOUR) return m.hours(Math.floor(elapsed / HOUR));
-  return m.minutes(Math.floor(elapsed / MINUTE));
-}
+const DAY = 24 * 60 * 60_000;
 
 // 审批会过期，排在最前；其余的等得越久越靠前。
 function urgency(reason: TicketNeedsUserReason): number {

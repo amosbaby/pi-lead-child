@@ -222,7 +222,7 @@ function OwnerActionNoticeRow({ notification, onBehalf, onItsMe, onNotMe }: {
       </Row>
       {confirming ? (
         <Row items="center" gap="side-item" flexWrap="wrap">
-          <Text size="secondary" tone="danger-dark" flex={1} minW={0}>{words.question}</Text>
+          <Text size="secondary" tone="danger-dark">{words.question}</Text>
           <Button
             testID={`${words.id}-confirm-${notification.id}`}
             label={words.confirm}

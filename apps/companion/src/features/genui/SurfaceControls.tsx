@@ -363,7 +363,7 @@ function ConfirmRow({ action, onCancel }: { action: ActionProps; onCancel: () =>
   return (
     <Column testID={`surface-action-${action.id}-confirm`} gap="text-stack">
       <Row items="center" gap="actions" justify="flex-end" flexWrap="wrap">
-        <Text flex={1} minW={0} size="secondary" tone="strong">{runner.confirmText ?? m.confirmTitle(runner.text)}</Text>
+        <Text size="secondary" tone="strong">{runner.confirmText ?? m.confirmTitle(runner.text)}</Text>
         <Button label={m.cancel} size="sm" variant="ghost" tone="neutral" onPress={onCancel} testID={`surface-action-${action.id}-confirm-cancel`} />
         <Button
           label={m.confirm(runner.text)}

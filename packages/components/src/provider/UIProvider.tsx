@@ -4,6 +4,7 @@ import { Appearance } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { config } from '../theme/config';
+import { KeyboardRoot } from './KeyboardRoot';
 
 // 应用固定用浅色外观：组件库只有 light 主题，原生控件（SwiftUI、Compose）也要跟着用浅色。
 if (typeof Appearance.setColorScheme === 'function') Appearance.setColorScheme('light');
@@ -23,9 +24,11 @@ if (typeof document !== 'undefined' && !document.getElementById('ui-font-synthes
 export function UIProvider({ children }: PropsWithChildren) {
   return (
     <SafeAreaProvider>
-      <TamaguiProvider config={config} defaultTheme="light">
-        {children}
-      </TamaguiProvider>
+      <KeyboardRoot>
+        <TamaguiProvider config={config} defaultTheme="light">
+          {children}
+        </TamaguiProvider>
+      </KeyboardRoot>
     </SafeAreaProvider>
   );
 }

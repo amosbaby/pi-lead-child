@@ -310,8 +310,8 @@ function Block({ title, hint, applies, testID, children }: { title: string; hint
     <Column testID={testID} p="page-card" gap="card-section">
       <Row items="baseline" gap="inline-item" flexWrap="wrap">
         <Text size="card-title" weight="bold">{title}</Text>
-        <Text flex={1} size="meta" tone="muted">{hint}</Text>
-        <Text size="meta" tone="muted">{applies}</Text>
+        <Text size="meta" tone="muted">{hint}</Text>
+        <Text ml="auto" size="meta" tone="muted">{applies}</Text>
       </Row>
       {children}
     </Column>

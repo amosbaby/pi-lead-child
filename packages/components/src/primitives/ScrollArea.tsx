@@ -1,6 +1,6 @@
 import { forwardRef, type ReactNode } from 'react';
 import {
-  ScrollView,
+  type ScrollView,
   type LayoutChangeEvent,
   type NativeScrollEvent,
   type NativeSyntheticEvent,
@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 
 import { palette, type ColorToken } from '../theme/tokens';
+import { KeyboardScrollView } from './KeyboardScrollView';
 
 export type ScrollEvent = NativeSyntheticEvent<NativeScrollEvent>;
 export type ScrollAreaHandle = ScrollView;
@@ -41,6 +42,7 @@ function flexStyle(flex: number): ViewStyle {
 }
 
 // 滚动区域。web 上是 react-native-web 的 ScrollView，原生上是系统滚动视图。
+// 原生上竖向滚动区会把获得焦点的输入框滚到键盘上面（KeyboardScrollView）。
 // 内容的内边距和间距由调用方放一个 Column 或 Row 来控制。
 // ref 是 ScrollView 实例，可以调用 scrollToEnd / scrollTo。
 export const ScrollArea = forwardRef<ScrollAreaHandle, ScrollAreaProps>(function ScrollArea({
@@ -48,7 +50,7 @@ export const ScrollArea = forwardRef<ScrollAreaHandle, ScrollAreaProps>(function
   onContentSizeChange, onLayout, testID,
 }, ref) {
   return (
-    <ScrollView
+    <KeyboardScrollView
       ref={ref}
       testID={testID}
       horizontal={horizontal}
@@ -64,6 +66,6 @@ export const ScrollArea = forwardRef<ScrollAreaHandle, ScrollAreaProps>(function
       onLayout={onLayout}
     >
       {children}
-    </ScrollView>
+    </KeyboardScrollView>
   );
 });

@@ -7,7 +7,7 @@ import { clockTimeLabel } from '@/features/tickets/timeLabels';
 import { DEFAULT_LOCALE, type Locale } from '@/i18n';
 import { leadNameNow } from '@/state/leadName';
 
-import { waitedText } from './inboxModel';
+import { waitedText } from './waitedText';
 import { projectsMessages } from './projects.messages';
 import { projectDisplayName, UNASSIGNED_PROJECT } from './model';
 import { milestoneChip } from './timelineModel';

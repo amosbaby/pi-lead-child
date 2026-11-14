@@ -113,13 +113,49 @@ function codeLanguageLabel(info: string | undefined) {
   return language ? Array.from(language).slice(0, 32).join('') : null;
 }
 
+// 补上 CommonMark 没认出来的加粗（2026-11-12）。CommonMark 规定：收尾的 ** 前面是标点、后面紧跟字母时不算收尾。
+// 汉字算字母，所以「**……（8.6%）**与」这种中文里很常见的写法会原样露出星号。
+// marked 认出来的加粗不受影响；这里只把它剩下的、成对的 ** 当成加粗。代码里的 ** 不算，落单的一个留着。
+function repairStrong(inlines: MarkdownInline[]): MarkdownInline[] {
+  const markers = inlines.reduce((count, inline) => (inline.code ? count : count + inline.text.split('**').length - 1), 0);
+  if (markers < 2) return inlines;
+  let pairable = markers - (markers % 2);
+  let strong = false;
+  const result: MarkdownInline[] = [];
+  for (const { text, ...style } of inlines) {
+    const styled = () => ({ ...style, strong: style.strong || strong || undefined });
+    if (style.code) {
+      appendInline(result, text, styled());
+      continue;
+    }
+    const parts = text.split('**');
+    parts.forEach((part, index) => {
+      if (index > 0) {
+        if (pairable > 0) {
+          pairable -= 1;
+          strong = !strong;
+        } else {
+          appendInline(result, '**', styled());
+        }
+      }
+      appendInline(result, part, styled());
+    });
+  }
+  // 去掉值是 undefined 的样式键，和 inlineTokens 的输出一样只带用到的键。
+  return result.map((inline) => Object.fromEntries(Object.entries(inline).filter(([, value]) => value !== undefined)) as MarkdownInline);
+}
+
+function inlines(tokens: Token[]): MarkdownInline[] {
+  return repairStrong(inlineTokens(tokens));
+}
+
 function blockTokens(tokens: Token[]): MarkdownBlock[] {
   const blocks: MarkdownBlock[] = [];
 
   for (const token of tokens) {
     if (token.type === 'heading') {
       const heading = token as Tokens.Heading;
-      blocks.push({ kind: 'heading', depth: heading.depth, inlines: inlineTokens(heading.tokens) });
+      blocks.push({ kind: 'heading', depth: heading.depth, inlines: inlines(heading.tokens) });
       continue;
     }
     if (token.type === 'paragraph' || token.type === 'text') {
@@ -127,7 +163,7 @@ function blockTokens(tokens: Token[]): MarkdownBlock[] {
       const children = paragraph.tokens?.length
         ? paragraph.tokens
         : marked.Lexer.lexInline(paragraph.text);
-      blocks.push({ kind: 'paragraph', inlines: inlineTokens(children) });
+      blocks.push({ kind: 'paragraph', inlines: inlines(children) });
       continue;
     }
     if (token.type === 'list') {
@@ -162,8 +198,8 @@ function blockTokens(tokens: Token[]): MarkdownBlock[] {
       blocks.push({
         kind: 'table',
         align: table.align.map((value) => value ?? null),
-        header: table.header.map((cell) => inlineTokens(cell.tokens)),
-        rows: table.rows.map((row) => row.map((cell) => inlineTokens(cell.tokens))),
+        header: table.header.map((cell) => inlines(cell.tokens)),
+        rows: table.rows.map((row) => row.map((cell) => inlines(cell.tokens))),
       });
       continue;
     }

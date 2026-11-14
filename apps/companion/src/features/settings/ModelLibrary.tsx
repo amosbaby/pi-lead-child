@@ -45,7 +45,7 @@ export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
     <Column testID="model-library" gap="group-label">
       <Row items="center" gap="inline-item" px="section-label-x" flexWrap="wrap">
         <Text size="eyebrow" weight="bold" tone="secondary">{m.library}</Text>
-        <Text flex={1} size="meta" tone="muted">{m.libraryHint}</Text>
+        <Text size="meta" tone="muted">{m.libraryHint}</Text>
         <Column w={tablet ? 220 : '100%'}>{/* spacing-exempt: 搜索框的宽度，组件规格 */}
           <TextField testID="model-library-search" value={search} onChangeText={setSearch} placeholder={m.searchModels} variant="filled" size="sm"
             autoCapitalize="none" autoCorrect={false} />
@@ -177,7 +177,7 @@ export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
         {editing?.kind === 'fast' && editing.id === null ? <FastModelForm dto={dto} model={null} onDone={() => setEditing(null)} /> : null}
         <Row items="center" gap="inline-item" px="row-x" py="row-y" borderTopWidth={dto.fast.models.length ? 1 : 0} borderTopColor="border-soft" flexWrap="wrap">
           <Button testID="model-fast-add-entry" label={m.addFast} icon="plus" variant="link" size="sm" onPress={() => setEditing({ kind: 'fast', id: null })} />
-          <Text flex={1} size="meta" tone="muted" align="right">{m.fastUses}</Text>
+          <Text ml="auto" size="meta" tone="muted" align="right">{m.fastUses}</Text>
         </Row>
       </Card>
     </Column>
@@ -212,7 +212,7 @@ function DeleteRow({ label, confirmText, blocked, busy, onDelete, testID }: {
   if (confirming) {
     return (
       <Row testID={`${testID}-confirm`} items="center" gap="actions" flexWrap="wrap">
-        <Text flex={1} size="body" tone="secondary">{confirmText}</Text>
+        <Text size="body" tone="secondary">{confirmText}</Text>
         <Button testID={`${testID}-yes`} label={m.delete} variant="outline" tone="danger" size="sm" disabled={busy} onPress={onDelete} />
         <Button label={m.cancel} variant="ghost" tone="neutral" size="sm" onPress={() => setConfirming(false)} />
       </Row>

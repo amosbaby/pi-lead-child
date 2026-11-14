@@ -1,6 +1,6 @@
 // 会话输入框里的多行文字输入。缺省一行高，内容多了自动长高，到上限以后在框里滚动。
 // web 上：Enter 调 onSubmit，Shift+Enter 换行，输入法正在组字时按 Enter 不调（确认候选词）；粘贴剪贴板里的图片调 onPasteFiles。
-// iOS 和 Android 上是 Expo UI 的多行输入框：键盘的回车换行，发送用旁边的按钮；没有粘贴图片。
+// iOS 上是 Expo UI 的多行输入框，Android 上是 React Native 的多行 TextInput：键盘的回车换行，发送用旁边的按钮；没有粘贴图片。
 // 外框（底色、描边、圆角）由调用方画，这里只有文字。
 import type { Ref } from 'react';
 
