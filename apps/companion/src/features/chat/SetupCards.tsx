@@ -98,7 +98,7 @@ export function SetupChecklistCardView({
     );
   }
   return (
-    <Card testID="setup-checklist" w="100%" rounded="xl" px="card" py="card" gap="card-row">
+    <Card testID="setup-checklist" w="100%" variant="float" px="card" py="card" gap="card-row">
       <Row items="center" gap="inline-item">
         <Text flex={1} size="card-title" weight="semibold">{m.checklistTitle}</Text>
         <Text testID="setup-checklist-count" size="meta" weight="semibold" tone="secondary" font="mono">{`${done}/${card.items.length}`}</Text>
@@ -140,7 +140,7 @@ export function SetupHintCardView({
     );
   }
   return (
-    <Card testID={`setup-hint-${card.hintId}`} w="100%" rounded="xl" px="card" py="card" gap="card-row">
+    <Card testID={`setup-hint-${card.hintId}`} w="100%" variant="float" px="card" py="card" gap="card-row">
       <Row items="center" gap="side-item">
         <Icon name="sparkle" size={16} color="text-secondary" />
         <Column flex={1} minW={0} gap="text-stack">

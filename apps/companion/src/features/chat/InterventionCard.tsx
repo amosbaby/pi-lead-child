@@ -1,4 +1,4 @@
-import { Box, Button, Card, Column, Icon, Pressable, Row, Text, TextField, type ButtonTone, type ButtonVariant } from '@pi-lead-child/components';
+import { Box, Button, Card, Column, ContentSwap, Icon, Pressable, Row, Spacer, Text, TextField, type ButtonTone, type ButtonVariant } from '@pi-lead-child/components';
 import { useState } from 'react';
 import type {
   KernelCheckpoint,
@@ -134,7 +134,16 @@ export function buildInterventionActionCommand(
 //   待决定：选项是单选行，代价写在同一行；操作是「就这样定」「自己写一句」「先不管」。
 //   已解决：收成一行（结束行：✓ 已解决、一句结果、时间、展开），点开从原位置撑开成浮层，看回答（通用 Markdown，表格在框里横向滚动）。
 // 不再用整片红底和左边的色条（主题 C-18）。命令原文只能引用（P8.3）：显示的就是请求里的 detail。
-export function InterventionCard({
+// 待处理和已处理之间原地过渡（主题 H-9，2026-11-14 方案 F）：卡片收成结束行，下面的内容平滑上移。
+export function InterventionCard(props: Parameters<typeof InterventionCardBody>[0]) {
+  const { intervention, checkpoint } = props;
+  const full = intervention && isFullIntervention(intervention) ? intervention : undefined;
+  const pending = full ? full.state === 'pending'
+    : intervention !== undefined && 'requiresAction' in intervention ? Boolean(intervention.requiresAction) : checkpoint === undefined;
+  return <ContentSwap swapKey={pending ? 'pending' : 'done'}><InterventionCardBody {...props} /></ContentSwap>;
+}
+
+function InterventionCardBody({
   checkpoint,
   commandState,
   compact = false,
@@ -186,7 +195,7 @@ export function InterventionCard({
   if (model && !model.pending) {
     const summary = resolvedSummary(model, full!, requestWords(full!, checkpoint), locale);
     return (
-      <Card w="100%" rounded="xl" overflow="hidden" borderWidth={1} borderColor="border" testID={`intervention-${full!.id}`}>
+      <Card w="100%" variant="float" overflow="hidden" testID={`intervention-${full!.id}`}>
         <DisclosureView
           id={`intervention-${full!.id}`}
           label={`${who} ${requestWords(full!, checkpoint)}`}
@@ -228,7 +237,7 @@ export function InterventionCard({
 
   if (!pending && ticketId !== undefined) {
     return (
-      <Card w="100%" rounded="xl" borderWidth={1} borderColor="border">
+      <Card w="100%" variant="float">
         <EndLine state={m.updated} tone="muted" subject={who} result={checkpoint?.title ?? m.ticket(ticketId)} at={null} />
         <Column px="card" pb="card" gap="card-row">
           <CheckpointEvidence checkpoint={checkpoint} />
@@ -247,17 +256,19 @@ export function InterventionCard({
   return (
     <Column w="100%" gap="group-label">
       {checkpoint && !full ? <SourceLabel>{checkpointSourceLabel(checkpoint)}</SourceLabel> : null}
-      <Card w="100%" rounded="xl" borderWidth={1} borderColor="border" p="card" gap="card-row" testID={full ? `intervention-${full.id}` : undefined}>
-        {/* 头部：琥珀点、「待审批」「待你决定」、child #160 要做什么，右边时间和等了多久（主题 11.4）。 */}
-        <Row items="center" gap="inline-item" minW={0}>
-          <Box w={6} h={6} rounded="full" bg="warning" />
-          <Text size="label" weight="bold" tone="warning-dark" shrink={0}>{model?.stateLabel ?? m.state.pending}</Text>
-          <Text flex={1} minW={0} size="card-title" numberOfLines={2}>
-            <Text size="card-title" weight="bold">{who}</Text>
-            {`${full && full.kind !== 'approval' ? m.colon : ' '}${full ? requestWords(full, checkpoint) : checkpoint?.title ?? ''}`}
-          </Text>
-          {full ? <Text size="meta" tone="secondary" shrink={0}>{[clock(full.createdAt), waited].filter(Boolean).join(' · ')}</Text> : null}
+      <Card w="100%" variant="float" p="card" gap="card-row" testID={full ? `intervention-${full.id}` : undefined}>
+        {/* 头部（主题 11.3、11.4，2026-11-14 方案 F）：左上角 7 的琥珀点和「待审批」「待你决定」，最右边时间和等了多久；
+            下一行是 child #160 要做什么。状态只写在这里，卡片没有琥珀色外框。 */}
+        <Row items="center" gap="icon-label" minW={0}>
+          <Box w={7} h={7} rounded="full" bg="warning" />
+          <Text size="label" weight="semibold" tone="warning-dark" shrink={0}>{model?.stateLabel ?? m.state.pending}</Text>
+          <Spacer />
+          {full ? <Text size="meta" mono tone="secondary" shrink={0}>{[clock(full.createdAt), waited].filter(Boolean).join(' · ')}</Text> : null}
         </Row>
+        <Text size="card-title" numberOfLines={2}>
+          <Text size="card-title" weight="bold">{who}</Text>
+          {`${full && full.kind !== 'approval' ? m.colon : ' '}${full ? requestWords(full, checkpoint) : checkpoint?.title ?? ''}`}
+        </Text>
         {full?.kind === 'approval' ? (
           // 要执行的命令原样引用：灰底、等宽（主题 11.4）；child 对这一步的说明（checkpoint 的摘要）跟在同一行。
           <Row items="center" gap="inline-item" flexWrap="wrap" minW={0}>

@@ -46,7 +46,10 @@ export type ChatListProps<T> = {
 const DRAW_DISTANCE = 1000;
 /** 最后这几块一直画着：正在流的回复、刚画的卡片和表单不因为滚动被卸掉。 */
 const ALWAYS_RENDER_LAST = 3;
-const ESTIMATED_ITEM_SIZE = 160;
+// 一块的估计高度。会话里多数块是一行（外部消息的一行、结束行、记录块的头），四五十到七十像素。
+// 以前写 160：估得太高，Legend List 准备的容器不够，滑动时临时现建（开发模式下报 No unused container available），
+// 打开时滚到底也要多算好几轮才收敛（2026-11-14 手机上量过）。
+const ESTIMATED_ITEM_SIZE = 72;
 // 不用 flex 简写：react-native-web 把 flex: 1 展开成 flex-basis 0%，Legend List 的 web 实现直接写 DOM 样式（见 ScrollArea）。
 const LIST_STYLE = { flexGrow: 1, flexShrink: 1, flexBasis: 0, minHeight: 0, minWidth: 0 } as const;
 

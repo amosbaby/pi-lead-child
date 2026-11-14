@@ -37,5 +37,5 @@ export default function SettingsLayout() {
     );
   }
 
-  return <Density zone="settings"><Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: palette['surface-muted'] } }} /></Density>;
+  return <Density zone="settings"><Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: palette.page } }} /></Density>;
 }

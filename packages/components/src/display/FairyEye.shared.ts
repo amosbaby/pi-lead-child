@@ -125,3 +125,15 @@ export function fairyTurnSpeed(state: FairyEyeState, moving: boolean): number {
 export function fairyDepth(size: number): number {
   return size <= fairyMotion.smallSize ? fairyMotion.smallDepth : 1;
 }
+
+// 方块转 90 度用多少毫秒（CSS 动画一圈只转 90 度：方块转 90 度和原来重合，循环时看不出接缝）。不动时是 0。
+export function fairyQuarterTurnMs(state: FairyEyeState, moving: boolean): number {
+  if (!moving) return 0;
+  return (state === 'thinking' ? fairyMotion.busyTurnMs : fairyMotion.idleTurnMs) / 4;
+}
+
+// 一层眼睛呼吸时缩放的两端：张开和缩到最小（按尺寸加深幅度）。CSS 动画在两者之间来回。
+export function fairyBreathRange(layer: FairyLayer, depth: number): { expanded: number; contracted: number } {
+  const spec = fairyLayers[layer];
+  return { expanded: spec.expanded, contracted: spec.expanded - (spec.expanded - spec.contracted) * depth };
+}

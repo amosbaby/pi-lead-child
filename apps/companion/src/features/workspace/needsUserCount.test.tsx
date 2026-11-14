@@ -12,7 +12,7 @@ import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '
 import Workbench from './Workbench.web';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }), useFocusEffect: () => {} }));
 
 const idle = { state: 'idle', lastActivityAt: null, activeAttemptId: null } as const;
 
@@ -106,8 +106,9 @@ describe('the needs-you count', () => {
     expect(screen.getByText('工单 75')).toBeTruthy();
     expect(screen.getByText('工单 66')).toBeTruthy();
 
+    // 手机上的会话页没有顶栏（主题 11.20，2026-11-14 方案 F）：右上角的「等你」圆钮写同一个数。
     act(() => runtime.workspace.getState().setCompactDestination('conversation'));
-    expect(screen.getByTestId('lead-running-count').getAttribute('aria-label')).toBe('Running 1');
+    expect(screen.getByTestId('home-waiting').getAttribute('aria-label')).toContain(String(NEEDS_YOU));
     expect(screen.queryByText(/需处理|需要处理/)).toBeNull();
   });
 

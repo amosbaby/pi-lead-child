@@ -14,7 +14,7 @@ import Workbench from '../workspace/Workbench.web';
 import { MessagePartView } from './MessagePartView';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }), useFocusEffect: () => {} }));
 
 const SESSION = 'lead-session';
 const ROUTED = 7;

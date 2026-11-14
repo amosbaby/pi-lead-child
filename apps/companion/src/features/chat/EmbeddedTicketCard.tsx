@@ -21,7 +21,7 @@ export function EmbeddedTicketCard({ ticket, onPress, compact = false, children 
   const now = ticketNowLine(ticket);
   const m = useMessages(ticketCardMessages);
   return (
-    <Card w="100%" rounded="xl" overflow="hidden">
+    <Card w="100%" variant="float" overflow="hidden">
       <Pressable
         testID={`open-ticket-${ticket.id}`}
         aria-label={m.openTicket(ticket.id, title)}

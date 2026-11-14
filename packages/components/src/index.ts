@@ -13,8 +13,8 @@ export { DesignPreferencesProvider } from './provider/DesignPreferencesProvider'
 export { DEFAULT_PREFERENCES as DEFAULT_DESIGN_PREFERENCES, contrastRatio, designColorOverrides, useColorValue, useDesignPreferences, useLocale } from './theme/preferences';
 export type { DensityZone, DesignPreferences, LineHeightLevel, Locale, PaletteRole, RadiusLevel, TextScaleLevel } from './theme/preferences';
 export { useUIFonts } from './theme/fonts';
-export { breakpoints, densities, fontFaces, fontSizes, measure, palette, radius, space, spacing, spacingByDensity, textLeading, textSizes, textSizesByDensity } from './theme/tokens';
-export type { ColorToken, Density as DensityName, FontFace, FontSizeToken, RadiusToken, SpacingToken } from './theme/tokens';
+export { breakpoints, densities, elevation, fontFaces, fontSizes, measure, palette, radius, space, spacing, spacingByDensity, textLeading, textSizes, textSizesByDensity } from './theme/tokens';
+export type { ColorToken, Density as DensityName, ElevationToken, FontFace, FontSizeToken, RadiusToken, SpacingToken } from './theme/tokens';
 
 // 平台
 export { ActivityBoundary, subscribeUserActivity } from './activity';
@@ -46,7 +46,7 @@ export { Avatar } from './display/Avatar';
 export type { AvatarProps, AvatarTone } from './display/Avatar';
 export { Badge } from './display/Badge';
 export type { BadgeProps, BadgeTone, BadgeVariant } from './display/Badge';
-export { Card, Skeleton } from './display/Card';
+export { Card, CardDefaults, Skeleton } from './display/Card';
 export { ChatDock } from './display/ChatDock';
 export type { ChatDockProps } from './display/ChatDock';
 export type { CardProps, SkeletonProps } from './display/Card';
@@ -105,6 +105,14 @@ export { Section } from './display/Section';
 export { DetailHeader } from './display/DetailHeader';
 export type { DetailHeaderProps } from './display/DetailHeader';
 export type { SectionProps } from './display/Section';
+export { Drawer } from './display/Drawer';
+export { ListGroup } from './display/ListGroup';
+export type { ListGroupProps } from './display/ListGroup';
+export { PageTopBar } from './display/PageTopBar';
+export type { PageTopBarProps } from './display/PageTopBar';
+export { FloatingSheet } from './display/FloatingSheet';
+export type { FloatingSheetProps } from './display/FloatingSheet';
+export type { DrawerProps } from './display/Drawer';
 export { Sheet } from './display/Sheet';
 export type { SheetProps } from './display/Sheet';
 export { ActionBar } from './display/ActionBar';
@@ -155,6 +163,8 @@ export type { ChecklistColumn, ChecklistItem, ChecklistProps, ChecklistVerdict }
 
 // 控件
 export { Button, IconButton } from './controls/Button';
+export { FloatingButton } from './controls/FloatingButton';
+export type { FloatingButtonProps } from './controls/FloatingButton';
 export type { ButtonProps, ButtonSize, ButtonTone, ButtonVariant, IconButtonProps } from './controls/Button';
 export { ChatInput } from './controls/ChatInput';
 export type { ChatInputHandle, ChatInputProps } from './controls/ChatInput';
@@ -178,5 +188,5 @@ export type { RecordRowProps } from './lists/RecordRow';
 // 动效
 export { Grow, growTimings } from './motion/Grow';
 export type { GrowProps } from './motion/Grow';
-export { LayoutTransition, SlidePanel, SwitchTransition } from './motion/Motion';
-export type { LayoutTransitionProps, MotionLayout, SlidePanelProps, SwitchTransitionProps } from './motion/Motion';
+export { Appear, ContentSwap, LayoutTransition, SlidePanel, SwitchTransition } from './motion/Motion';
+export type { ContentSwapProps, LayoutTransitionProps, MotionLayout, SlidePanelProps, SwitchTransitionProps } from './motion/Motion';

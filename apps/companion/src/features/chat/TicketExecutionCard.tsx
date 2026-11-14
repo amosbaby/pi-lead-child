@@ -58,7 +58,7 @@ export function TicketExecutionCard({
   const m = useMessages(ticketCardMessages);
   if (!ticket) {
     return (
-      <Card w="100%" rounded="xl" overflow="hidden">
+      <Card w="100%" variant="float" overflow="hidden">
         <Pressable testID={`open-ticket-${card.ticketId}`} onPress={() => onOpenTicket(card.ticketId)} feedback="highlight" px="card" py="card">
           <Row items="center" gap="side-item">
             <Column flex={1} minW={0} gap="text-stack">

@@ -134,12 +134,14 @@ describe('the health bar', () => {
     expect(within(consent).getByTestId('connect-continue').textContent).toBe('Continue to Notion');
   });
 
-  it('is also on the phone settings home', () => {
+  // 2026-11-14 方案 F（画板 FSettings）：手机设置首页不放健康条，要你处理的连接在「连接」那一行带琥珀点和件数。
+  it('marks the connections row on the phone settings home instead of a health bar', () => {
     setViewportWidth(390);
     const { runtime } = connectionsRuntime([jira, notion]);
     renderWithRuntime(<SettingsHome badges={{ connections: 1 }} connections={[jira, notion]} />, runtime);
-    expect(screen.getByTestId('connection-health-notion')).toBeTruthy();
-    expect(screen.getByTestId('settings-row-connections-badge').textContent).toBe('1');
+    expect(screen.queryByTestId('connection-health-notion')).toBeNull();
+    expect(screen.getByTestId('settings-row-connections-badge')).toBeTruthy();
+    expect(screen.getByTestId('settings-row-connections').textContent).toContain('1 needs you');
   });
 });
 

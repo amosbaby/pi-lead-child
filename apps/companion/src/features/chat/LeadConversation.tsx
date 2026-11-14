@@ -14,7 +14,9 @@ import {
   type TicketSummary,
   validateUiSurface,
 } from '@pi-lead-child/protocol';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useRouter } from 'expo-router';
+import { ticketsNeedingUser } from '@pi-lead-child/protocol';
 
 import { useLocale, type Locale } from '@/i18n';
 
@@ -24,6 +26,11 @@ import { assistantMessageHasContent } from './assistantContent';
 import { leadSenderLabel, systemNoticeLabel } from './senderLabel';
 import { splitMaintenanceNotice } from './maintenanceNotice';
 import { LeadIdentity } from '../../components/LeadIdentity';
+import { HomeDrawer } from '../home/HomeDrawer';
+import { HomeTopBar } from '../home/HomeTopBar';
+import { LeadPlusSheet } from '../home/LeadPlusSheet';
+import { homeMessages } from '../home/home.messages';
+import { canPickImages } from '@/data/chatImagePicker';
 import { useLeadAvatarSource } from '../../components/useLeadAvatarSource';
 import { WebUpdateNotice } from '../../components/WebUpdateNotice';
 import { ticketContextLabel, ticketSummaryToTicket } from '../workspace/model';
@@ -57,7 +64,7 @@ import { presentOutage } from './outagePresentation';
 import { failureActionLabels, presentTurnFailure, turnFailureGroupKey, type FailureAction } from './failurePresentation';
 import { InterventionCard } from './InterventionCard';
 import { LeadModelPicker, LeadModelResendLink } from './LeadModelPicker';
-import { MessageComposer } from './MessageComposer';
+import { MessageComposer, type MessageComposerHandle } from './MessageComposer';
 import { AssistantTurnView } from './AssistantTurnView';
 import { MessagePartView } from './MessagePartView';
 import { MarkdownMessage } from './MarkdownMessage';
@@ -103,6 +110,18 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const openTicketId = useWorkspaceStore((state) => state.selectedTicketId);
   const selectedTicketId = !compact && threadOpen ? openTicketId : null;
   const selectedTicket = selectedTicketId === null ? undefined : tickets.find((ticket) => ticket.id === selectedTicketId);
+  // 手机首页（主题 11.20）：抽屉开没开，和等你的工单（和角标、收件箱同一条规则，ticketNeedsUser）。
+  const router = useRouter();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [plusOpen, setPlusOpen] = useState(false);
+  const homeText = homeMessages(locale);
+  const composerRef = useRef<MessageComposerHandle>(null);
+  const waiting = useMemo(() => ticketsNeedingUser(tickets), [tickets]);
+  const setTicketFilter = useWorkspaceStore((state) => state.setTicketFilter);
+  const openWaiting = () => {
+    setTicketFilter('todo');
+    router.push('/tickets');
+  };
   const messageIds = useMessageIds(sessionId);
   const turnIds = useTurnIds(sessionId);
   const turnsById = useControlPlaneStore((state) => state.turnsById);
@@ -257,7 +276,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   // daemon 收图片时，输入框才有「+」和粘贴图片（protocol 的 chat-images.ts）。
   const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
   // 输入框右下角写 Lead 现在用的模型 id 和推理强度，点开换模型（LeadModelPicker）。
-  const leadModel = useOverview()?.model;
+  // 只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
+  const leadModel = useControlPlaneStore((state) => state.overview?.model);
   // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
@@ -352,7 +372,11 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
 
   // 会话按外观偏好里会话区域的密度（缺省标准）。
   return (
-    <Density zone="conversation"><KeyboardArea testID="lead-conversation" bg="surface">
+    <Density zone="conversation"><KeyboardArea testID="lead-conversation" bg={compact ? 'page' : 'surface'}>
+      {/* 手机上没有顶栏，是两颗悬浮圆钮（主题 11.20 H-2，2026-11-14 方案 F）。 */}
+      {compact ? (
+        <HomeTopBar waitingCount={waiting.length} onOpenMenu={() => setMenuOpen(true)} onOpenWaiting={openWaiting} />
+      ) : (
       <Row
         minH={compact ? 64 : 60}
         items="center"
@@ -409,6 +433,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           />
         ) : null}
       </Row>
+      )}
 
       {/* 会话流（ChatList，2026-11-04 换成 Legend List，只画看得见的块）：打开时落在最底下；贴底时跟随新消息和流式输出；
           你往上翻时不拽回来，只给「新消息 ↓」；你发了消息就回到底部；往上滚到头时取更早的消息。
@@ -438,7 +463,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         shrink={0}
         px="page-x"
         {...(compact
-          ? { pt: 'banner-y', borderTopWidth: 1, borderTopColor: 'border-soft', bg: 'surface' } as const
+          // 手机上输入框卡片悬浮在页面上（主题 H-6）：没有分隔线，四周留白。
+          ? { px: 'dock-x', py: 'float-row-y' } as const
           : { pt: 8, pb: 20 } as const)}
       >
         <ConversationColumn testID="conversation-footer-column" gap={compact ? 0 : 11}>
@@ -452,7 +478,10 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           placeholder={connected ? m.composer.placeholder(leadName) : m.composer.offline}
           onSend={send}
           attachImages={canSendImages}
-          modelControl={<LeadModelPicker current={leadModel} />}
+          // 手机上模型收进加号面板（主题 H-6、H-7），输入框上不显示。
+          {...(compact
+            ? { float: true, onPlus: () => setPlusOpen(true), ref: composerRef }
+            : { modelControl: <LeadModelPicker current={leadModel} /> })}
           // 新 daemon：排着的事在输入卡片上半截的状态栏里（主题 11.13）。
           // 旧 daemon（没有 Steer 和取消）：照旧在发送前选「插话/排队」，排着的外部消息在那一行的右边（工单 10）。
           {...(canSteerQueued
@@ -461,6 +490,23 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         />
         </ConversationColumn>
       </Column>
+      {compact ? (
+        <LeadPlusSheet
+          open={plusOpen}
+          onClose={() => setPlusOpen(false)}
+          // 只放现在能用的：daemon 收图片、这台设备能选图片时才有「图片」。拍照和文件还没有（主题 H-7）。
+          tiles={canSendImages && canPickImages ? [{ id: 'photos', icon: 'camera', label: homeText.photos, onPress: () => composerRef.current?.pickImages() }] : []}
+          currentModel={leadModel}
+        />
+      ) : null}
+      {compact ? (
+        <HomeDrawer
+          open={menuOpen}
+          onClose={() => setMenuOpen(false)}
+          waiting={waiting}
+          onOpenWaiting={openWaiting}
+        />
+      ) : null}
     </KeyboardArea></Density>
   );
 }
@@ -581,10 +627,12 @@ function ConversationMessage({
   const turnUserPart = useMessagePart(turn ? `${turn.userMessageId}:text` : '');
   // 这一轮你发的图片：「重发」时连图片一起发。
   const turnUserImages = useMessageParts(turn ? turn.userMessageId : '').filter(isImagePart);
-  const overview = useOverview();
-  const lead = overview?.lead;
+  // Lead 的状态和模型只在这一轮失败时用到（失败的说法、「换个模型重发」）。没失败的消息不订阅它们：
+  // Lead 降级重试时 overview 一直在变，订阅了就每条消息都跟着重画（2026-11-14）。
+  const failed = Boolean(message?.failure);
+  const lead = useControlPlaneStore((state) => (failed ? state.overview?.lead : undefined));
   // Lead 现在用的模型：没有回答的那一轮点开以后写它，后面是「换个模型重发」。
-  const leadModel = overview?.model;
+  const leadModel = useControlPlaneStore((state) => (failed ? state.overview?.model : undefined));
   const leadName = useLeadName();
   const locale = useLocale();
   const m = conversationMessages(locale);
@@ -1127,7 +1175,7 @@ function InterventionConversationCard({ card, compact }: { card: ConversationCar
 
 function CardSyncPlaceholder({ label }: { label: string }) {
   return (
-    <Card gap="text-stack" p="card" rounded="xl">
+    <Card gap="text-stack" p="card" variant="float">
       <Text size="card-title" weight="bold">{label}</Text>
       <Text size="secondary" tone="secondary">{conversationMessages(useLocale()).syncing}</Text>
     </Card>

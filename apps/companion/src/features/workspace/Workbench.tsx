@@ -15,7 +15,7 @@ export default function Workbench() {
   }
 
   return (
-    <Screen edges={['top', 'bottom']} bg="surface">
+    <Screen edges={['top', 'bottom']} bg="page">
       <LeadConversation
         compact
         onOpenAll={() => router.push('/tickets')}

@@ -13,5 +13,7 @@ export type NativeSheetProps = {
   children?: ReactNode;
   /** 面板底部，例如取消和应用按钮。不随正文滚动。 */
   footer?: ReactNode;
+  /** 高的一档（P13.2a）：长文类的内容（验收证据、日志、完整的差异说明）一打开就是这一档。 */
+  tall?: boolean;
   testID?: string;
 };

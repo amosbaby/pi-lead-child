@@ -1,7 +1,10 @@
-import type { PropsWithChildren } from 'react';
-import { StyleSheet, View, type ViewStyle } from 'react-native';
+import { useLayoutEffect, useRef, type PropsWithChildren } from 'react';
+import { StyleSheet, View, type LayoutChangeEvent, type ViewStyle } from 'react-native';
 import Animated, {
   Easing,
+  FadeIn,
+  FadeInDown,
+  FadeOut,
   FadeInLeft,
   FadeInRight,
   FadeOutLeft,
@@ -12,6 +15,10 @@ import Animated, {
   SlideInRight,
   SlideOutLeft,
   SlideOutRight,
+  useAnimatedStyle,
+  useReducedMotion,
+  useSharedValue,
+  withTiming,
 } from 'react-native-reanimated';
 
 import { Box, type BoxProps } from '../primitives/layout';
@@ -107,6 +114,71 @@ export function SwitchTransition({ transitionKey, direction, children }: SwitchT
       </Animated.View>
     </View>
   );
+}
+
+// 卡片原地换成另一种样子（主题 H-9，2026-11-14 方案 F）：例如决定卡做完以后收成一行结束行。
+//   旧内容用 130 淡出；外框的高度用 220 从旧高度过渡到新内容的高度，下面的内容跟着平滑移动，不跳（P1）；
+//   新内容延后 60，用 170 淡入、上移 4（Reveal）。减弱动态效果时高度直接到位，只留透明度变化。
+// 只在 swapKey 变了的那一次播：第一次挂上、内容自己变高变矮时都不动画。会话列表是虚拟列表，
+// 行高一直在动画里变，列表就一直重新排版、调整滚动位置（2026-11-14，用 Reanimated 的 layout 过渡时出现过）。
+const SWAP_MS = 220;
+const swapEntering = FadeInDown.duration(170).delay(60).withInitialValues({ transform: [{ translateY: 4 }] }).easing(contentEasing).reduceMotion(ReduceMotion.System);
+const swapExiting = FadeOut.duration(130).reduceMotion(ReduceMotion.System);
+const appearEntering = FadeIn.duration(170).delay(60).reduceMotion(ReduceMotion.System);
+const AUTO = -1;
+
+export type ContentSwapProps = PropsWithChildren<{
+  /** 内容的身份，例如卡片的状态（waiting、done）。它变了才播过渡。 */
+  swapKey: string;
+  testID?: string;
+}>;
+
+export function ContentSwap({ swapKey, children, testID }: ContentSwapProps) {
+  const reduced = useReducedMotion();
+  // 外框的高度：AUTO 时跟着内容走；过渡时是动画里的数值。
+  const height = useSharedValue(AUTO);
+  const measured = useRef(0);
+  const firstKey = useRef(swapKey);
+  const pending = useRef(false);
+  const swapped = firstKey.current !== swapKey;
+
+  useLayoutEffect(() => {
+    if (firstKey.current === swapKey && !pending.current) return;
+    // 换内容的这一刻把外框定在旧高度，等新内容量出高度再过渡过去。
+    pending.current = true;
+    if (!reduced) height.value = measured.current;
+  }, [swapKey, height, reduced]);
+
+  const onLayout = (event: LayoutChangeEvent) => {
+    const next = event.nativeEvent.layout.height;
+    measured.current = next;
+    if (!pending.current) return;
+    pending.current = false;
+    if (reduced) return;
+    height.value = withTiming(next, { duration: SWAP_MS, easing: panelEasing }, (finished) => {
+      if (finished) height.value = AUTO;
+    });
+  };
+
+  const frameStyle = useAnimatedStyle(() => (height.value === AUTO ? {} : { height: height.value, overflow: 'hidden' }));
+
+  return (
+    <Animated.View testID={testID} style={frameStyle}>
+      <Animated.View
+        key={swapKey}
+        onLayout={onLayout}
+        entering={swapped ? swapEntering : undefined}
+        exiting={swapExiting}
+      >
+        {children}
+      </Animated.View>
+    </Animated.View>
+  );
+}
+
+// 新内容出现时淡入（Reveal，170，延后 60）。例如新卡片进入会话。
+export function Appear({ children, testID }: PropsWithChildren<{ testID?: string }>) {
+  return <Animated.View testID={testID} entering={appearEntering}>{children}</Animated.View>;
 }
 
 const styles = StyleSheet.create({

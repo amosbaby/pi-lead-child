@@ -52,17 +52,19 @@ describe('shared Companion surfaces', () => {
     expect.soft(detail).toContain("pathname: '/ticket/[id]'");
   });
 
-  it('keeps independent ticket, project, and agenda pages dense instead of card based', () => {
+  // 2026-11-14 方案 F（画板 FTickets、FProjects、FAgenda）：三页都是二级页面的骨架（左上角返回、标题居中、底部输入框），
+  // 工单按「等你 / 在执行 / 最近结束」分组，项目一张卡一个，日程有一周的日期条。
+  it('builds the ticket, project and agenda pages on the shared secondary page', () => {
     const tickets = source('../app/(tabs)/tickets.tsx');
     const projects = source('../app/(tabs)/projects.tsx');
     const agenda = source('../app/(tabs)/agenda.tsx');
 
-    expect.soft(tickets).toContain('<TicketList items={items} onSelect=');
-    expect.soft(projects).toContain("overviews={phase === 'ready' ? overviews : null}");
+    expect.soft(tickets).toContain('<TicketGroups items={items} onSelect=');
+    expect.soft(projects).toContain("overviews={phase === 'ready' ? overviews ?? [] : []}");
     expect.soft(agenda).toContain("timeline={phase === 'ready' ? timeline : null}");
-
     for (const screen of [tickets, projects, agenda]) {
-      expect.soft(screen).not.toMatch(/\bcards(?:=|\s|\/>)/);
+      expect.soft(screen).toContain('<SecondaryScreen');
+      expect.soft(screen).toContain('composerPlaceholder=');
     }
   });
 });

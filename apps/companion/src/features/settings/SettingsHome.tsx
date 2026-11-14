@@ -1,142 +1,72 @@
-import {
-  Avatar, Badge, Box, Column, Icon, Pressable, Row, Screen, ScrollArea, Text, type ColorToken,
-} from '@pi-lead-child/components';
+import { Box, Column, Icon, ListGroup, Pressable, Row, Text } from '@pi-lead-child/components';
 import { useRouter, type Href } from 'expo-router';
-import { leadAvatarLabel, type ConnectionDto, type MemorySettingsDto } from '@pi-lead-child/protocol';
-import type { ReactNode } from 'react';
+import type { ConnectionDto, MemorySettingsDto } from '@pi-lead-child/protocol';
 
-import { leadSubtitleTone, useLeadPresence } from '@/components/LeadIdentity';
+import { SecondaryScreen } from '@/components/SecondaryScreen';
 import type { LeadPresence } from '@/components/leadPresence';
 import { useMessages } from '@/i18n';
 import { useConnectionPhase, useLeadName } from '@/state/hooks';
 
-import { ConnectionHealthBar } from './ConnectionHealthBar';
 import { PendingSwitchBanner } from './MemorySection';
 import { settingsMessages } from './settings.messages';
 import { isDevicePaired, SETTINGS_GROUPS, settingsGroupLabel, type SettingsBadges, type SettingsSectionId } from './settingsNav';
 
-// 每个分组图标的底色。
-const ICON_WELLS: Record<SettingsSectionId, ColorToken> = {
-  profile: 'accent-strong',
-  appearance: 'violet',
-  connections: 'accent',
-  channels: 'success-strong',
-  device: 'success',
-  devices: 'cyan',
-  model: 'text',
-  memory: 'violet',
-  'standing-orders': 'warning',
-  'host-bypass': 'warning',
-  runtimes: 'accent',
-};
-
-// 手机上的设置首页（方案 A）：iOS 式的分组列表。最上面是 Lead 的名字（设置 → 身份与风格），下面每一行推进一个分组的页面。
+// 手机上的设置首页（主题 11.20，画板 FSettings，2026-11-14 方案 F）：左上角返回、标题居中；
+// 四组，组名和条目用现有的文案（Lead 那一组的组名是 Lead 的名字）。一行高 48：条目名，右边是当前值的摘要和箭头。
+// 只有要你处理的条目在最左边带琥珀点（例如连接有一个要重新授权），旁边的摘要写有几个，不只靠颜色（P13.3）。
+// 摘要只写现在拿得到的值，没有的不写。底部是发给 Lead 的输入框。
 export function SettingsHome({ badges = {}, connections, memory }: {
   badges?: SettingsBadges;
   connections?: readonly ConnectionDto[] | null;
   memory?: MemorySettingsDto | null;
 }) {
   const router = useRouter();
-  const phase = useConnectionPhase();
-  const presence = useLeadPresence();
   const leadName = useLeadName();
+  const phase = useConnectionPhase();
   const m = useMessages(settingsMessages);
+  // 还没配对时，「本设备」一行打开配对页（以前设置首页最上面的 Lead 卡片也是这样）。
+  const hrefFor = (id: SettingsSectionId, href: string) => (id === 'device' && !isDevicePaired(phase) ? '/pair' : href);
+  const connected = connections?.filter((item) => item.state === 'connected').length ?? null;
+  const summary = (id: SettingsSectionId): string | null => {
+    const count = badges[id];
+    if (count) return m.needsYou(count);
+    if (id === 'profile') return leadName;
+    if (id === 'connections' && connected !== null) return m.connectedCount(connected);
+    return null;
+  };
 
   return (
-    <Screen edges={['top', 'bottom']} bg="surface-muted">
-      <Row h={44} px="page-x" items="center">
-        {/* 设置是从会话顶栏的 Lead 名字进来的；栈里没有会话时（直接打开地址）换成会话。 */}
-        <Pressable
-          testID="settings-close"
-          aria-label={m.backToConversation}
-          onPress={() => router.dismissTo('/' as Href)}
-          h={36}
-          px={6} // spacing-exempt: 返回链接点击区
-          justify="center"
-          rounded="sm"
-        >
-          {/* spacing-exempt: 链接字号 */}
-          <Text size="15" weight="semibold" tone="accent">{`‹ ${m.conversation}`}</Text>
-        </Pressable>
-      </Row>
-      <ScrollArea>
-        {/* spacing-exempt: 标题自带留白 */}
-        <Column testID="settings-home" px="page-x" pt={2} pb="page-bottom">
-          {/* spacing-exempt: 光学对齐 */}
-          <Text size="page-title" weight="extrabold" letterSpacing={-0.4} px={2} pb="page-section">{m.title}</Text>
-          {/* 有连接要你处理时，最上面先说（方案 B 的健康条）。 */}
-          <ConnectionHealthBar items={connections} />
-          {/* 记忆有要你确认的切换时，也在最上面。和设置 → 记忆、会话里的卡片是同一个确认。 */}
-          {memory ? <Column mb="page-section"><PendingSwitchBanner memory={memory} /></Column> : null}
-          <GroupCard>
-            <Pressable
-              testID="settings-paimon"
-              feedback="highlight"
-              onPress={() => router.push((isDevicePaired(phase) ? '/settings/device' : '/pair') as Href)}
-              flexDirection="row"
-              items="center"
-              gap="side-item"
-              h={66}
-              px="row-x"
-            >
-              <Avatar label={leadAvatarLabel(leadName)} size={36} rounded="xl" textSize="15" />
-              <Column flex={1} minW={0} gap="text-stack">
-                <Text testID="settings-paimon-name" size="card-title" weight="bold" numberOfLines={1}>{leadName}</Text>
-                <Text testID="settings-paimon-status" size="secondary" tone={leadSubtitleTone(presence)} numberOfLines={1}>
-                  {paimonCardSubtitle(presence, m)}
-                </Text>
-              </Column>
-              <Icon name="chevron-right" size={16} color="text-ghost" />
-            </Pressable>
-          </GroupCard>
-          {SETTINGS_GROUPS.map((group) => (
-            <Column key={group.id}>
-              {/* spacing-exempt: 和 ListItem 的 16 对齐 */}
-              <Text size="eyebrow" weight="semibold" tone="secondary" px={16} pt="section-label-top" pb="section-label-bottom">{settingsGroupLabel(group, leadName, m)}</Text>
-              <GroupCard>
-                {group.items.map((item, index) => {
-                  const count = badges[item.id];
-                  return (
-                    <Pressable
-                      key={item.id}
-                      testID={`settings-row-${item.id}`}
-                      feedback="highlight"
-                      onPress={() => router.push(item.href as Href)}
-                      flexDirection="row"
-                      items="center"
-                      gap="side-item"
-                      h={48}
-                      px="row-x"
-                      borderTopWidth={index === 0 ? 0 : 1}
-                      borderTopColor="border-soft"
-                    >
-                      <Box w={28} h={28} rounded="xs" bg={ICON_WELLS[item.id]} items="center" justify="center">
-                        <Icon name={item.icon} size={16} color="white" />
-                      </Box>
-                      <Text flex={1} minW={0} size="label" numberOfLines={1}>{m.items[item.id]}</Text>
-                      {count !== undefined && count > 0 ? (
-                        <Box testID={`settings-row-${item.id}-badge`}>
-                          <Badge label={String(Math.min(count, 99))} tone="warning" variant="solid" size="sm" />
-                        </Box>
-                      ) : null}
-                      <Icon name="chevron-right" size={16} color="text-ghost" />
-                    </Pressable>
-                  );
-                })}
-              </GroupCard>
-            </Column>
-          ))}
-        </Column>
-      </ScrollArea>
-    </Screen>
+    <SecondaryScreen testID="settings-home" zone="settings" title={m.title} composerPlaceholder={m.composer(leadName)}
+      onBack={() => router.dismissTo('/' as Href)}>
+      {/* 要你处理的连接只在「连接」那一行带琥珀点和件数（画板 FSettings），不再在最上面放健康条。
+          记忆有要你确认的切换时，最上面照旧先说：那是一个要你按的确认。 */}
+      {memory ? <PendingSwitchBanner memory={memory} /> : null}
+      {SETTINGS_GROUPS.map((group) => (
+        <ListGroup key={group.id} testID={`settings-group-${group.id}`} title={settingsGroupLabel(group, leadName, m)}>
+          {group.items.map((item) => {
+            const attention = (badges[item.id] ?? 0) > 0;
+            const value = summary(item.id);
+            return (
+              <Pressable key={item.id} testID={`settings-row-${item.id}`} feedback="highlight" onPress={() => router.push(hrefFor(item.id, item.href) as Href)} px="row-x" py="row-y">
+                <Row items="center" gap="inline-item" minH={32} // 组件规格：一行高 48（32 加上下各 8）
+                >
+                  {attention ? <Box testID={`settings-row-${item.id}-badge`} w={7} h={7} rounded="full" bg="warning" /> : null}
+                  <Text size="card-title" weight="semibold" numberOfLines={1}>{m.items[item.id]}</Text>
+                  <Column flex={1} minW={0} items="flex-end">
+                    {value ? <Text size="body" tone={attention ? 'warning-dark' : 'secondary'} numberOfLines={1}>{value}</Text> : null}
+                  </Column>
+                  <Icon name="chevron-right" size={16} color="text-secondary" />
+                </Row>
+              </Pressable>
+            );
+          })}
+        </ListGroup>
+      ))}
+    </SecondaryScreen>
   );
 }
 
-function GroupCard({ children }: { children: ReactNode }) {
-  return <Column bg="surface" rounded="xl" overflow="hidden">{children}</Column>;
-}
-
-// 名字下面的一行字：在线时写「在线」和最近一次巡检，别的状态和会话顶栏写的一样。
+// 名字下面的一行字：在线时写「在线」和最近一次巡检，别的状态和会话顶栏写的一样。设置的「身份与风格」页还在用。
 export function paimonCardSubtitle(presence: LeadPresence, m: { online: string; onlineWith: (detail: string) => string }): string {
   if (presence.state === 'online') return presence.subtitle ? m.onlineWith(presence.subtitle) : m.online;
   return presence.subtitle ?? presence.label;

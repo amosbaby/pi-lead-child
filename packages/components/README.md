@@ -29,7 +29,7 @@
 | --- | --- | --- |
 | 布局 | `Box` `Row` `Column` `Spacer` `Divider` | 三端 Tamagui |
 | 文字 | `Text` `Link` `Code` | 三端 Tamagui |
-| 容器 | `Pressable` `Card` `ScrollArea` `Screen` `KeyboardArea` | 三端 Tamagui 或 React Native |
+| 容器 | `Pressable` `Card`（`variant="float"`：会话里悬浮的卡片，主题 E-1）`ScrollArea` `Screen` `KeyboardArea` | 三端 Tamagui 或 React Native |
 | 展示 | `Icon` `Badge` `Dot` `Avatar` `ProgressBar` `Skeleton` `EmptyState` `ServiceMark`（第三方服务的标志，品牌色在组件里） | 三端 Tamagui |
 | 会话 | `TaskCard`（一轮回复的工作步骤）`MessageBubble`（你发的消息） | 三端 Tamagui；TaskCard 的展开按钮 web 是 `<button>`，原生是 Pressable |
 | 对话坞 | `ChatDock`（停在面板底部的对话：收起时露出最新一条和输入框，展开时占满）`DockedLayout`（主体在上、对话坞在下，同一时间只有一个滚动区） | 三端 Tamagui；ChatDock 的展开按钮 web 是 `<button>`（展开时按 Esc 收起），原生是 Pressable；把手和预览上滑展开、下滑收起（PanResponder）；展开和收起有动画：在 DockedLayout 里时，对话坞的上沿滑上去、滑下来，预览淡出、对话淡入（Reanimated，三端相同，系统减弱动态效果时不播） |
@@ -37,8 +37,9 @@
 | 数据 | `FactList` `Stats` `Steps`（含跳过、受阻）`Progress` `Timeline` `BarChart` `Checklist`（逐条对照：几列判定加勾选，不通过的那条标红带证据）。工单详情和聊天里的生成式界面（genui）共用，只收普通的 props；`Stats` `Steps` `Timeline` 的 `compact` 是工单详情的样子 | 三端 Tamagui |
 | 选择 | `ChoiceGroup`（cards：点了就提交的选项卡；radio：单选卡） | 三端 Tamagui |
 | 筛选 | `Chip` | 三端 Tamagui |
-| 原生控件 | `Button` `IconButton` `TextField` `Switch` `SegmentedControl` `List` `ListItem` | web：Tamagui；iOS/Android：Expo UI |
-| 动效 | `SlidePanel` `LayoutTransition` `SwitchTransition` | 三端 Reanimated |
+| 原生控件 | `Button` `IconButton` `TextField` `Switch` `SegmentedControl` `List` `ListItem` | web：Tamagui；iOS：Expo UI；Android：Switch 是 Expo UI，其余是 Tamagui 和 React Native 的 TextInput |
+| 手机首页和二级页面 | `FloatingButton`（48 的悬浮圆钮）`Drawer`（从左边滑出、贴边的抽屉）`FloatingSheet`（手机上统一的悬浮底部面板：三档高度，`tall` 直接到高的一档，`footer` 是钉在底部的操作条，P13.2）`PageTopBar`（二级页面的顶栏：返回、居中的标题、右边的内容）`ListGroup`（小标题加一张悬浮卡，行之间有细线）`CardDefaults`（一片区域里卡片的缺省样子，例如二级页面里缺省悬浮） | 三端相同：Tamagui、Reanimated、React Native 的 Modal 和 PanResponder；FloatingSheet 在原生上跟着键盘上移（react-native-keyboard-controller） |
+| 动效 | `SlidePanel` `LayoutTransition` `SwitchTransition` `ContentSwap`（卡片原地换成另一种样子，例如收成结束行）`Appear` | 三端 Reanimated |
 | 平台 | `useBreakpoint` `isWeb` `isIOS` `isAndroid` `platformOS` `openURL` `safeLink` | — |
 
 ## 样式属性
@@ -64,7 +65,7 @@ Tamagui 组件（`Box`、`Row`、`Column`、`Text`、`Card`、`Pressable` 等）
 ## 设计 token
 
 `src/theme/tokens.ts` 是唯一的来源：颜色（`palette`）、间距（`space`）、语义间距（`spacing`）、圆角（`radius`）、
-字号（`fontSizes`）、语义字号（`textSizes`）、字体文件（`fontFaces`）、正文行宽（`measure`）和断点（`breakpoints`）。需要原始色值时（例如传给第三方组件），从 `palette` 读。
+字号（`fontSizes`）、语义字号（`textSizes`）、字体文件（`fontFaces`）、正文行宽（`measure`）、断点（`breakpoints`）和两档阴影（`elevation`：`float` 给会话里悬浮的卡片、输入框和圆钮，`raised` 给浮层、底部面板和抽屉）。需要原始色值时（例如传给第三方组件），从 `palette` 读。
 
 ### 语义间距和语义字号
 
@@ -97,6 +98,11 @@ Tamagui 组件（`Box`、`Row`、`Column`、`Text`、`Card`、`Pressable` 等）
 | `px="row-x" py="row-y"` | 12 / 8 | 可点的列表行和菜单项 |
 | `pl="group-indent"` | 32 | 能折叠的一组下面的子项，左边让开折叠箭头和组的图标（设置 → 模型的模型库） |
 | `px="page-x"` | 16 | 页面和面板左右的留白 |
+| `py="float-row-y"` | 8 | 手机首页顶部悬浮圆钮那一行、输入框卡片外面的上下留白 |
+| `px="dock-x"` | 12 | 手机首页输入框卡片离屏幕左右边的距离 |
+| `p="float-composer"` | 8 | 手机首页悬浮输入框卡片的内边距 |
+| `mb="dock-bottom"` | 20 | 输入框卡片离屏幕底边（安全区之上）的距离 |
+| `px="page-title-gutter"` | 72 | 二级页面顶栏的标题左右让出的宽度 |
 | `size="message-body"` | 14 / 24 | 会话消息正文（行高固定，不随档位变） |
 | `size="page-title"` | 24 / 32 | 整页的大标题 |
 | `size="section-title"` | 14 / 20 | 面板和页面里一个区块的标题 |

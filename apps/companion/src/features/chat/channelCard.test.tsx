@@ -18,7 +18,7 @@ import { adaptGatewayEvent } from '../../state/control-plane/protocolAdapter';
 import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '../../state/runtime';
 import type { MessageEntity } from '../../state/types';
 import { channelCardView, channelDraftDisclosure, clockWords } from './channelCard';
-import { ChannelMessageCard, ChannelNewsLine } from './ChannelMessageCard';
+import { ChannelMessageCard, ChannelNewsLine, useLeadStuckDetail } from './ChannelMessageCard';
 import { buildLeadTimeline, groupChannelCardRuns, LeadConversation } from './LeadConversation';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
@@ -193,14 +193,44 @@ describe('the channel card component', () => {
       detail: 'Context overflow recovery failed: Summarization failed: generation hit the token cap and the summary is incomplete',
       nextAttemptAt: null, lastSuccessAt: null, lastPatrolAt: null,
     };
-    renderUI(<ChannelMessageCard card={waiting} onAction={vi.fn()} now={LOOKUP_NOW} lead={stuck} leadName="Fairy" />);
+    renderUI(<ChannelMessageCard card={waiting} onAction={vi.fn()} now={LOOKUP_NOW} leadStuckDetail={stuck.detail ?? ''} leadName="Fairy" />);
     const fairy = screen.getByTestId('channel-card-7-fairy').textContent ?? '';
     expect(fairy).toContain('Fairy is stuck');
     expect(fairy).toContain('Context full');
     expect(fairy).not.toContain('Queued');
     cleanup();
-    renderUI(<ChannelMessageCard card={waiting} onAction={vi.fn()} now={LOOKUP_NOW} lead={{ ...stuck, failures: 0 }} leadName="Fairy" />);
+    renderUI(<ChannelMessageCard card={waiting} onAction={vi.fn()} now={LOOKUP_NOW} leadStuckDetail={null} leadName="Fairy" />);
     expect(screen.getByTestId('channel-card-7-fairy').textContent).toContain('Queued. Waits for Fairy');
+  });
+
+  // 2026-11-14：Lead 降级时 daemon 一直重试，失败次数每次加一。卡片只订阅「卡住时的原因」这一句，
+  // 失败次数变了不重画（以前订阅整个 lead，空闲时每张外部消息卡每秒重画好几次）。
+  it('reads one stable stuck reason from the store, not the whole lead status', () => {
+    const runtime = createCompanionStateRuntime({
+      client: {} as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    const lead = (failures: number) => ({
+      state: 'degraded' as const, since: '2026-11-14T01:00:00.000Z', failures, reason: 'auth', detail: '401 Unauthorized',
+      nextAttemptAt: `2026-11-14T01:0${failures}:00.000Z`, lastSuccessAt: null, lastPatrolAt: null,
+    });
+    const setLead = (value: ReturnType<typeof lead>) => runtime.control.setState((state) => ({
+      overview: { ...(state.overview ?? {}), lead: value } as typeof state.overview,
+    }));
+    setLead(lead(1));
+    let renders = 0;
+    function Probe() {
+      renders += 1;
+      return <>{useLeadStuckDetail()}</>;
+    }
+    renderUI(<CompanionRuntimeProvider runtime={runtime}><Probe /></CompanionRuntimeProvider>);
+    expect(renders).toBe(1);
+    act(() => setLead(lead(2)));
+    act(() => setLead(lead(3)));
+    expect(renders).toBe(1);
+    act(() => setLead({ ...lead(4), detail: 'quota exceeded' }));
+    expect(renders).toBe(2);
   });
 
   it('keeps a digest card without buttons until the user opens it', async () => {

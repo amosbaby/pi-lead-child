@@ -17,17 +17,19 @@ export type LeadAvatarProps = {
   // 空闲还是思考中；color、muted、quiet 是 FairyEye 的色调，素材按它选淡彩和离线的图。
   state?: FairyEyeState;
   tone?: FairyEyeTone;
+  // 看不见时（例如所在的页面被别的页面盖住）传 true，FairyEye 的动画暂停。
+  paused?: boolean;
   // 无障碍标签：Lead 的名字，思考时加「在想」。
   name?: string;
   testID?: string;
 };
 
 // Lead 的形象（P12.8，主题 11.12）。调用方决定用哪个来源，这里只负责画。
-export function LeadAvatar({ source, size = 18, state = 'idle', tone = 'color', name = 'Fairy', testID }: LeadAvatarProps) {
+export function LeadAvatar({ source, size = 18, state = 'idle', tone = 'color', name = 'Fairy', paused = false, testID }: LeadAvatarProps) {
   const m = useMessages(displayMessages);
   const reduced = useReducedMotion();
   if (source.kind === 'fairy-eye') {
-    return <FairyEye testID={testID} size={size} name={name} state={state} tone={tone} />;
+    return <FairyEye testID={testID} size={size} name={name} state={state} tone={tone} paused={paused} />;
   }
   const thinking = state === 'thinking' && tone === 'color';
   const uri = reduced && source.stillUri ? source.stillUri : source.uri;

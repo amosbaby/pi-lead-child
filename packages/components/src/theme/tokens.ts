@@ -4,6 +4,8 @@
 // 语义色板。键名就是组件和样式属性里写的 token 名，例如 bg="surface"、color="text-muted"。
 export const palette = {
   canvas: '#EDEFF3',
+  // 页面和会话区的浅底（主题 S-1，2026-11-14 方案 F）。卡片、输入框是 surface，靠阴影浮在它上面。
+  page: '#FAFBFC',
   workspace: '#F5F6F8',
   surface: '#FFFFFF',
   'surface-muted': '#F2F4F7',
@@ -12,6 +14,8 @@ export const palette = {
   border: '#E8EAEF',
   'border-soft': '#EEF0F4',
   'border-strong': '#E1E4EA',
+  // 单选圆环没选中时的描边（主题 11.20，换模型面板）。
+  'border-radio': '#D0D5DD',
   'border-control': '#EAECF0',
   'border-input': '#E4E7EC',
   text: '#10131A',
@@ -191,6 +195,15 @@ export const spacingByDensity = {
   'composer-row': [4, 8, 12],
   // 并排的图片小图：输入框里待发的图片，会话里你发的图片。
   thumbnails: [6, 8, 12],
+  // 手机首页（主题 11.20，2026-11-14 方案 F）。float-row-y：顶部那一行悬浮圆钮的上下留白，也是输入框卡片外面的上下留白；
+  // dock-x：输入框卡片左右离屏幕边的距离；float-composer：输入框卡片的内边距。
+  'float-row-y': [6, 8, 12],
+  'dock-x': [8, 12, 16],
+  'float-composer': [6, 8, 12],
+  // 输入框卡片离屏幕底边（安全区之上）的距离；底部面板也停在同一个位置。
+  'dock-bottom': [16, 20, 24],
+  // 二级页面顶栏的标题左右让出的宽度：一颗 48 的圆钮加页面留白，长标题截断时不压到圆钮上。
+  'page-title-gutter': [64, 72, 80],
 } as const;
 
 export const spacing = {
@@ -217,10 +230,22 @@ export const radius = {
   '2xl': 14,
   '3xl': 16,
   '4xl': 22,
+  // 会话里的卡片（主题 R-1）和会话的输入框卡片（R-1a），2026-11-14 方案 F。
+  '5xl': 20,
+  '6xl': 28,
   full: 9999,
 } as const;
 
 export type RadiusToken = keyof typeof radius;
+
+// 两档阴影（主题第 8 节）。float：会话里的卡片、输入框、悬浮圆钮，不加边框（E-1）。
+// raised：锚定浮层、底部面板、抽屉（E-2）。不在组件里另写阴影。
+export const elevation = {
+  float: '0 4px 16px rgba(16,19,26,0.08), 0 1px 2px rgba(16,19,26,0.04)',
+  raised: '0 16px 40px rgba(16,19,26,0.14), 0 2px 6px rgba(16,19,26,0.06)',
+} as const;
+
+export type ElevationToken = keyof typeof elevation;
 
 // 行宽，都是 size token。
 // prose：一段正文的行宽上限，写法是 maxW="prose"。560 像素在 14 号字下约 40 个汉字。
@@ -283,6 +308,10 @@ export const textSizesByDensity = {
   'stat-value': [[14, 20], [16, 22], [20, 28]],
   // 图块（genui Tile）中间的大值：日期、比分、登机口。视觉稿是 22，按比例尺取 20（2026-10-27）。
   'tile-value': [[16, 22], [20, 28], [24, 32]],
+  // 手机首页（主题 11.20，2026-11-14 方案 F）：底部面板的标题（「模型」）、抽屉里 Lead 的名字、抽屉的导航行。
+  'sheet-title': [[14, 20], [16, 24], [16, 24]],
+  'drawer-title': [[16, 24], [20, 28], [24, 32]],
+  'nav-label': [[14, 20], [16, 24], [16, 24]],
 } as const;
 
 export const textSizes = {

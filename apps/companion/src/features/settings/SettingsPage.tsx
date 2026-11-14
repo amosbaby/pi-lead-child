@@ -1,4 +1,6 @@
-import { Column, Pressable, Row, Screen, ScrollArea, Text, useBreakpoint } from '@pi-lead-child/components';
+import { Column, Text, useBreakpoint } from '@pi-lead-child/components';
+
+import { SecondaryScreen } from '@/components/SecondaryScreen';
 import { useRouter, type Href } from 'expo-router';
 import type { ReactNode } from 'react';
 
@@ -18,7 +20,7 @@ type SettingsPageProps = {
 
 // 设置里一个分组的页面。
 // 桌面上侧栏和滚动区由 SettingsDesktopShell 提供，这里只画标题和内容。
-// 手机上是一整屏：左上角「‹ 设置」，下面是标题和可以滚动的内容。
+// 手机上是二级页面：左上角返回、标题居中（SecondaryScreen）。
 export function SettingsPage({ title, description, back: backTo, children }: SettingsPageProps) {
   const { desktop } = useBreakpoint();
   const m = useMessages(settingsMessages);
@@ -35,30 +37,12 @@ export function SettingsPage({ title, description, back: backTo, children }: Set
     return <Column testID="settings-page">{heading}{children}</Column>;
   }
 
+  // 手机：二级页面的骨架（主题 11.20 H-10，2026-11-14 方案 F）：左上角返回、标题居中、浅底、悬浮的卡片。
+  // 栈里有那一页时退回去；没有时（从别处直接打开这一页）换成那一页，不会退出设置。
   return (
-    <Screen edges={['top', 'bottom']} bg="surface-muted">
-      <Row h={44} px="page-x" items="center">
-        {/* 栈里有那一页时退回去；没有时（从别处直接打开这一页）换成那一页，不会退出设置。 */}
-        <Pressable
-          testID="settings-back"
-          aria-label={m.back(back.label)}
-          onPress={() => router.dismissTo(back.href as Href)}
-          h={36}
-          px={6} // spacing-exempt: 返回链接点击区
-          justify="center"
-          rounded="sm"
-        >
-          {/* spacing-exempt: 链接字号 */}
-          <Text size="15" weight="semibold" tone="accent">{`‹ ${back.label}`}</Text>
-        </Pressable>
-      </Row>
-      <ScrollArea>
-        {/* spacing-exempt: 标题自带留白 */}
-        <Column testID="settings-page" px="page-x" pt={2} pb="page-bottom">
-          {heading}
-          {children}
-        </Column>
-      </ScrollArea>
-    </Screen>
+    <SecondaryScreen testID="settings-page" zone="settings" title={title ?? back.label} onBack={() => router.dismissTo(back.href as Href)}>
+      {description ? <Text size="secondary" tone="secondary" px="section-label-x">{description}</Text> : null}
+      <Column gap="page-section">{children}</Column>
+    </SecondaryScreen>
   );
 }

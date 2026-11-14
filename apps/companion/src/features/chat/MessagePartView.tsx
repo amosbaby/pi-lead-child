@@ -136,7 +136,7 @@ function ApprovalMessagePart({ approvalId }: { approvalId: number }) {
   if (!pending) return <InfoRow icon="approval-request" label={m.approvalTool(approval.tool)} detail={approval.status} />;
 
   return (
-    <Card gap="card-section" p="card" borderColor="warning-line">
+    <Card gap="card-section" p="card" variant="float">
       <Row items="flex-start" gap="side-item">
         <Box w={30} h={30} rounded="md" bg="warning-soft" items="center" justify="center">
           <Icon name="approval" color="warning-dark" size={14} />

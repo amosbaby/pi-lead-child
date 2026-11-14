@@ -31,7 +31,7 @@ export function InterventionSlot({ kind, id, ticket, checkpoint }: {
   const found = held ?? checkpoints.find((item) => item.id === checkpoint);
   if (!intervention) {
     return (
-      <Card testID={`intervention-slot-${interventionId}`} w="100%" p="card" rounded="xl" borderWidth={1} borderColor="border">
+      <Card testID={`intervention-slot-${interventionId}`} w="100%" p="card" variant="float">
         <Text size="secondary" tone="secondary">{m.syncing(kind, id, ticket)}</Text>
       </Card>
     );

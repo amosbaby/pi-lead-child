@@ -11,7 +11,7 @@ import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '
 import { LeadConversation } from './LeadConversation';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }), useFocusEffect: () => {} }));
 
 const SESSION = 'lead-session';
 const reply: ConversationTurn = {
@@ -49,9 +49,17 @@ describe('the conversation top bar', () => {
     expect(screen.getByRole('button', { name: 'Open the work list' })).toBeTruthy();
   });
 
-  it('shows Fairy in the phone top bar, thinking while Lead is in a turn', () => {
+  // 手机上没有顶栏，左上角是悬浮圆钮里的 Lead 形象（主题 11.20 H-2，2026-11-14 方案 F）。正常状态不写名字和「在线」。
+  it('shows Fairy in the floating menu button on the phone, thinking while Lead is in a turn', () => {
     render({ compact: true }, { busy: true, entries: [] });
-    expect(within(screen.getByTestId('lead-identity')).getByRole('img', { name: 'Paimon is thinking' })).toBeTruthy();
+    expect(within(screen.getByTestId('home-menu')).getByRole('img', { name: 'Paimon is thinking' })).toBeTruthy();
+    expect(screen.queryByTestId('lead-identity')).toBeNull();
+    expect(within(screen.getByTestId('home-top-bar')).queryByText('Paimon')).toBeNull();
+  });
+
+  it('hides the waiting button on the phone when nothing waits for you', () => {
+    render({ compact: true }, { busy: false, entries: [] });
+    expect(screen.queryByTestId('home-waiting')).toBeNull();
   });
 
   it('drops the summary row above the composer', () => {

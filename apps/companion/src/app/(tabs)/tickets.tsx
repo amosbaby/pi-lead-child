@@ -1,77 +1,28 @@
-import { Chip, Row } from '@pi-lead-child/components';
 import { useRouter } from 'expo-router';
 
-import { CollectionScreen } from '@/components/CollectionScreen';
-import { TicketList } from '@/features/workspace/TicketList';
-import {
-  buildTicketRailPresentation,
-  resolveWorkspaceTickets,
-  ticketRailFilters,
-} from '@/features/workspace/model';
+import { SecondaryScreen } from '@/components/SecondaryScreen';
+import { TicketGroups } from '@/features/workspace/TicketGroups';
+import { resolveWorkspaceTickets } from '@/features/workspace/model';
+import { ticketsPageMessages } from '@/features/workspace/ticketsPage.messages';
 import { useLocale, useMessages } from '@/i18n';
 import { navigationMessages } from '@/navigation/navigation.messages';
-import { useWorkspaceStore } from '@/state/CompanionStateProvider';
 import { useConnectionPhase, useLeadName, useTickets, useWorkItems } from '@/state/hooks';
 
+// 工单页（主题 11.20，画板 FTickets，2026-11-14 方案 F）：顶栏左上角返回、标题居中；三组工单；底部一行发给 Lead 的输入框。
+// 点一行进入工单详情（整页，从右边推入，P13.2d）。
 export default function TicketsScreen() {
   const router = useRouter();
   const phase = useConnectionPhase();
   const leadName = useLeadName();
   const locale = useLocale();
-  const m = useMessages(navigationMessages);
+  const nav = useMessages(navigationMessages);
+  const m = useMessages(ticketsPageMessages);
   const tickets = useTickets();
   const { items: workItems } = useWorkItems();
-  const ticketFilter = useWorkspaceStore((state) => state.ticketFilter);
-  const ticketQuery = useWorkspaceStore((state) => state.ticketQuery);
-  const setTicketFilter = useWorkspaceStore((state) => state.setTicketFilter);
-  const setTicketQuery = useWorkspaceStore((state) => state.setTicketQuery);
-  const setComposerDraft = useWorkspaceStore((state) => state.setComposerDraft);
-  const setCompactDestination = useWorkspaceStore((state) => state.setCompactDestination);
-  const loading = phase === 'loading' || phase === 'connecting';
   const items = resolveWorkspaceTickets(phase === 'ready', tickets, workItems, locale);
-  const projection = buildTicketRailPresentation(items, {
-    filter: ticketFilter,
-    query: ticketQuery,
-    loading,
-    locale,
-  });
-
-  const clearFilters = () => {
-    setTicketFilter('all');
-    setTicketQuery('');
-  };
-
-  const openConversation = (draft = '') => {
-    setComposerDraft('lead', draft);
-    setCompactDestination('conversation');
-    router.push('/');
-  };
-
   return (
-    <CollectionScreen title={m.tickets} subtitle={m.ticketsSubtitle(leadName)}>
-      {/* spacing-exempt: 筛选条自己的规格；补齐筛选条和标题的对齐 */}
-      <Row role="tablist" items="center" gap="chips" mb="stacked-card" px={6} py={4}>
-        {ticketRailFilters(locale).map((filter) => (
-          <Chip
-            key={filter.id}
-            label={filter.label}
-            count={projection.filterCounts[filter.id]}
-            selected={ticketFilter === filter.id}
-            onPress={() => setTicketFilter(filter.id)}
-            size="md"
-            testID={`native-ticket-filter-${filter.id}`}
-          />
-        ))}
-      </Row>
-      <TicketList items={items} onSelect={(id) => router.push(`/ticket/${id}`)}
-        grouped
-        filter={ticketFilter}
-        query={ticketQuery}
-        loading={loading}
-        onCreateTask={openConversation}
-        onClearFilters={clearFilters}
-        onSeedTask={openConversation}
-      />
-    </CollectionScreen>
+    <SecondaryScreen testID="tickets-page" title={nav.tickets} composerPlaceholder={m.composer(leadName)}>
+      <TicketGroups items={items} onSelect={(id) => router.push(`/ticket/${id}`)} />
+    </SecondaryScreen>
   );
 }

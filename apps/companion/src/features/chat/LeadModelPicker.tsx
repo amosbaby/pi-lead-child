@@ -48,7 +48,7 @@ export function LeadModelPicker({ current }: { current: string | null | undefine
 
 // 目录里每个模型的账号（Lead 模型分组，2026-11-05）：前缀是不是账号由 daemon 按服务商的 accountPrefix 定，
 // 输入框右下角的模型名要靠它决定去不去掉前缀。挂上时读一次目录（daemon 缓存 30 秒），读不到时当作没有账号。
-function useModelAccounts(): Map<string, string | null> {
+export function useModelAccounts(): Map<string, string | null> {
   const runtime = useCompanionRuntime();
   const [accounts, setAccounts] = useState<Map<string, string | null>>(() => new Map());
   useEffect(() => {
@@ -90,7 +90,7 @@ export function LeadModelResendLink({ onSwitched }: { onSwitched: () => void }) 
   );
 }
 
-function LeadModelPanel({ close, onSwitched }: { close: () => void; onSwitched?: () => void }) {
+export function LeadModelPanel({ close, onSwitched }: { close: () => void; onSwitched?: () => void }) {
   const locale = useLocale();
   const m = leadModelMessages(locale);
   const runtime = useCompanionRuntime();

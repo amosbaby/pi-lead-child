@@ -96,11 +96,12 @@ function formatClock(value: string, locale: Locale): string {
 }
 
 // Fairy 表示 Lead 的整体状态（方案 C，主题 F-4、F-7）：左栏头部，和手机上、左栏收起时的会话顶栏。
-// Lead 在一轮里时在想。离线时是灰色、静止；离线和降级时下面一行写说明（presence 的 subtitle）。
+// Lead 在线、在一轮里时在想（呼吸加快转）。降级时（模型调用失败、在自动重试）卡住的那一轮还没结束，但它不是在想，
+// 只慢慢转（2026-11-14 用户：非思考状态用了思考的呼吸）。离线时是灰色、静止；离线和降级时下面一行写说明。
 export function leadFairy(presence: LeadPresence, busy: boolean): { state: 'idle' | 'thinking'; tone: 'color' | 'quiet'; note: string | null } {
   const offline = presence.state === 'offline' || presence.dotColor === 'text-muted';
   return {
-    state: busy && !offline ? 'thinking' : 'idle',
+    state: busy && presence.state === 'online' ? 'thinking' : 'idle',
     tone: offline ? 'quiet' : 'color',
     note: presence.state === 'online' ? null : presence.subtitle,
   };

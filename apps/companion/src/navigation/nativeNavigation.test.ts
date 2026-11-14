@@ -15,39 +15,32 @@ describe('native workspace navigation', () => {
     expect(platformFeatureFiles).toEqual(['workspace/Workbench.web.tsx']);
   });
 
-  it('renders the four persistent destinations with Expo Router Native Tabs', () => {
+  // 2026-11-14 方案 F（主题 11.20 H-1）：原生上没有底部标签栏。会话是首页，工单、项目、日程从抽屉进，用栈打开。
+  it('opens the destinations through a stack without a tab bar, entered from the home drawer', () => {
     const tabsLayout = source('../app/(tabs)/_layout.tsx');
     const rootTabs = source('./RootTabs.native.tsx');
+    const drawer = source('../features/home/HomeDrawer.tsx');
 
     expect(tabsLayout).toContain("import RootTabs from '@/navigation/RootTabs'");
-    expect(rootTabs).toContain("from 'expo-router/unstable-native-tabs'");
-    expect(rootTabs).toContain('<NativeTabs');
-    expect(rootTabs).not.toContain('<Slot');
-    expect(rootTabs).not.toContain('Platform.OS');
-    expect(rootTabs).not.toContain(' hidden');
-    expect(rootTabs).toContain('labelVisibilityMode="labeled"');
-    expect(rootTabs.match(/<NativeTabs\.Trigger name=/g)).toHaveLength(4);
+    expect(rootTabs).not.toContain('unstable-native-tabs');
+    expect(rootTabs).toContain('<Stack');
     for (const routeName of ['index', 'tickets', 'projects', 'agenda']) {
       expect(rootTabs).toContain(`name="${routeName}"`);
     }
-    expect(rootTabs.match(/<NativeTabs\.Trigger\.Icon\b/g)).toHaveLength(4);
-    expect(rootTabs.match(/\bmd=/g)).toHaveLength(4);
-    expect(rootTabs.match(/<NativeTabs\.Trigger\.Label>/g)).toHaveLength(4);
+    for (const href of ["'/tickets'", "'/projects'", "'/agenda'", "'/views'", "'/settings'"]) {
+      expect(drawer).toContain(href);
+    }
   });
 
-  it('uses the workspace ticket projection for native grouping, filters, and empty states', () => {
+  it('groups the native ticket page from the workspace ticket projection', () => {
     const ticketsRoute = source('../app/(tabs)/tickets.tsx');
+    const groups = source('../features/workspace/TicketGroups.tsx');
 
-    expect(ticketsRoute).toContain('ticketRailFilters(locale)');
-    expect(ticketsRoute).toContain('useWorkspaceStore');
-    expect(ticketsRoute).toContain('<TicketList items={items} onSelect=');
-    expect(ticketsRoute).toContain('grouped');
-    expect(ticketsRoute).toContain('filter={ticketFilter}');
-    expect(ticketsRoute).toContain("const loading = phase === 'loading' || phase === 'connecting'");
-    expect(ticketsRoute).toContain('loading={loading}');
-    expect(ticketsRoute).toContain('onCreateTask={openConversation}');
-    expect(ticketsRoute).toContain('onClearFilters={clearFilters}');
-    expect(ticketsRoute).toContain('onSeedTask={openConversation}');
+    expect(ticketsRoute).toContain('resolveWorkspaceTickets(');
+    expect(ticketsRoute).toContain('<TicketGroups items={items} onSelect=');
+    for (const group of ['ticket-group-waiting', 'ticket-group-running', 'ticket-group-ended']) {
+      expect(groups).toContain(group);
+    }
   });
 
   it('keeps native conversation in the Lead tab and opens work through native routes', () => {

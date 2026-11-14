@@ -16,7 +16,7 @@ const webOnly = { outlineStyle: 'none', resize: 'none' } as unknown as TextStyle
 
 // web 实现：react-native-web 的多行 TextInput（一个 textarea）。原生实现见 ChatInput.native.tsx。
 export function ChatInput({
-  value, onChangeText, placeholder, disabled = false, onSubmit, onPasteFiles, onBlur, autoFocus, testID, accessibilityLabel, ref,
+  value, onChangeText, placeholder, disabled = false, onSubmit, onPasteFiles, onBlur, autoFocus, large = false, testID, accessibilityLabel, ref,
 }: ChatInputProps) {
   const inputRef = useRef<TextInput>(null);
   useImperativeHandle(ref, () => ({ focus: () => inputRef.current?.focus() }), []);
@@ -100,7 +100,7 @@ export function ChatInput({
         ...webOnly,
         color: palette.text,
         fontFamily: fontFaces.regular,
-        fontSize: textSizes['message-body'],
+        fontSize: textSizes[large ? 'message-lead' : 'message-body'],
         lineHeight: LINE,
       }}
     />

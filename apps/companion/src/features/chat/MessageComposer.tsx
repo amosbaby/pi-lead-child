@@ -1,10 +1,10 @@
 import {
-  Box, ChatInput, Column, IconButton, ImageThumbnail, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
+  Box, ChatInput, Column, elevation, IconButton, ImageThumbnail, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
 } from '@pi-lead-child/components';
 import {
   CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, type ChatImageInput, type ChatPlacement,
 } from '@pi-lead-child/protocol';
-import { useRef, useState, type ReactNode } from 'react';
+import { useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
 import { useLocale, type Locale } from '@/i18n';
 import { canPickImages, ChatImageError, pickImageFiles, prepareChatImage, type ComposerImage } from '@/data/chatImagePicker';
@@ -32,7 +32,15 @@ type MessageComposerProps = {
   // 输入卡片上半截的状态栏（主题 11.13，2026-10-28）：排着的事。row 是卡片里的那一行；drawer 是展开时从这一行
   // 往上长出来的列表，盖在会话上，不推动会话。展开时卡片上面两个角变成直角，和列表接成一块。
   tray?: ComposerTray | null;
+  // 手机首页的悬浮输入框（主题 H-6，2026-11-14 方案 F）：圆角 28、一档阴影、没有边框；字大一号；
+  // 下面一行只有加号和发送两颗 44 的圆钮，不显示模型。点加号调 onPlus，由页面升起加号面板（H-7）。
+  float?: boolean;
+  onPlus?: () => void;
+  // 页面拿来从加号面板里选图片（选好的图片加进这张输入框）。
+  ref?: Ref<MessageComposerHandle>;
 };
+
+export type MessageComposerHandle = { pickImages: () => void; canAttach: boolean };
 
 export type ComposerTray = { row: ReactNode; drawer: ReactNode; open: boolean };
 
@@ -72,6 +80,7 @@ export function MessageComposer(props: MessageComposerProps) {
 // web 上 Enter 发送、Shift+Enter 换行；可以粘贴剪贴板里的图片。草稿按 contextKey 存在工作区里，失去焦点时保存（图片不存）。
 function MessageComposerField({
   contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, modelControl, tray,
+  float = false, onPlus, ref,
 }: MessageComposerProps) {
   const locale = useLocale();
   const m = composerMessages(locale);
@@ -107,6 +116,9 @@ function MessageComposerField({
     setAttachments((current) => appendImages(current.images, prepared, failed, m.tooManyImages(CHAT_IMAGE_MAX_COUNT)));
   };
 
+  const pickImages = () => void pickImageFiles().then(addFiles);
+  useImperativeHandle(ref, () => ({ pickImages, canAttach }));
+
   const removeImage = (key: string) => {
     setAttachments((current) => ({ images: current.images.filter((image) => image.key !== key), notice: null }));
   };
@@ -121,6 +133,7 @@ function MessageComposerField({
       onSubmit={send}
       {...(canAttach ? { onPasteFiles: (files: Blob[]) => void addFiles(files) } : {})}
       onBlur={() => workspace.getState().setComposerDraft(contextKey, text)}
+      large={float}
       testID="composer-input"
     />
   );
@@ -138,6 +151,68 @@ function MessageComposerField({
       onPress={send}
     />
   );
+
+  if (float) {
+    // 发送键：没有字时 surface-muted 底、text-secondary 图标；有字时 accent 底、白色图标（H-6）。
+    // 没有字时不用停用的样子（会整体变淡），按下也不发。
+    return (
+      <Column
+        testID="composer"
+        rounded="6xl"
+        bg="surface"
+        boxShadow={elevation.float}
+        p="float-composer"
+        gap="composer-row"
+        opacity={disabled ? 0.62 : 1}
+      >
+        {images.length ? (
+          <Row testID="composer-images" flexWrap="wrap" gap="thumbnails" px="inline-item">
+            {images.map((image, index) => (
+              <ImageThumbnail
+                key={image.key}
+                testID={`composer-image-${index}`}
+                uri={image.uri}
+                label={m.image(index + 1)}
+                removeLabel={m.removeImage(index + 1)}
+                onRemove={() => removeImage(image.key)}
+              />
+            ))}
+          </Row>
+        ) : null}
+        {notice ? <Text testID="composer-notice" size="note" tone="danger" px="inline-item">{notice}</Text> : null}
+        <Box px="inline-item" py="inline-item">{input}</Box>
+        <Row items="center" gap="inline-item">
+          {onPlus ? (
+            <IconButton
+              testID="composer-plus"
+              icon="plus"
+              label={m.plus}
+              variant="soft"
+              tone="neutral"
+              size="xl"
+              rounded="full"
+              iconColor="text"
+              disabled={disabled}
+              onPress={onPlus}
+            />
+          ) : null}
+          {preparing > 0 ? <Text testID="composer-preparing" size="note" tone="muted">{m.preparingImages}</Text> : null}
+          <Spacer />
+          <IconButton
+            testID="send-message"
+            icon="arrow-up"
+            label={m.send}
+            variant={ready ? 'solid' : 'soft'}
+            tone={ready ? 'accent' : 'neutral'}
+            size="xl"
+            rounded="full"
+            iconColor={ready ? 'surface' : 'text-secondary'}
+            onPress={send}
+          />
+        </Row>
+      </Column>
+    );
+  }
 
   if (minimal) {
     // 工单对话坞：文字和发送按钮在一行，发送按钮贴着底边，文字长高时它留在最后一行旁边。

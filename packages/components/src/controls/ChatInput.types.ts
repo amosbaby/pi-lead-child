@@ -17,6 +17,8 @@ export type ChatInputProps = {
   onPasteFiles?: (files: Blob[]) => void;
   onBlur?: () => void;
   autoFocus?: boolean;
+  // 大一号的字：手机首页悬浮的输入框（主题 H-6）用 message-lead（16/24），其余用 message-body（14/24）。
+  large?: boolean;
   testID?: string;
   accessibilityLabel?: string;
   ref?: Ref<ChatInputHandle>;

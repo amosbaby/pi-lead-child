@@ -2,7 +2,7 @@
 // 手机上的设置首页：最上面是 Lead 的名字（缺省 Paimon），下面是分组，Lead 分组排第一（2026-10-22）；
 // 每一行推进一个分组的页面；分组页左上角是「‹ 设置」。
 import type { LeadStatus, Overview } from '@pi-lead-child/protocol';
-import { act, fireEvent, screen } from '@testing-library/react';
+import { act, fireEvent, screen, within } from '@testing-library/react';
 import type { ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -58,19 +58,17 @@ beforeEach(() => {
 });
 afterEach(() => setViewportWidth(1024));
 
+// 2026-11-14 方案 F（画板 FSettings）：左上角返回、标题居中；组名和条目用现有文案，Lead 那一组的组名是 Lead 的名字；
+// 一行是条目名、当前值的摘要和箭头。最上面不再有 Lead 的卡片：「本设备」一行接手它（没配对时打开配对页）。
 describe('the phone settings home', () => {
-  it('shows Paimon first, then the groups as rows that push their section', () => {
+  it('shows the groups as rows that push their section, the Lead group first', () => {
     renderWith(<SettingsHome />);
-    expect(screen.getByTestId('settings-paimon-name').textContent).toBe('Paimon');
-    expect(screen.getByTestId('settings-paimon-status').textContent).toBe('Online');
     expect(screen.getByText('Account')).toBeTruthy();
     expect(screen.getByText('Devices')).toBeTruthy();
-    // Lead 分组（标题是它的名字）排在「账号」前面，第一行是「身份与风格」。
     const home = screen.getByTestId('settings-home').textContent ?? '';
     expect(home.indexOf('Identity & style')).toBeLessThan(home.indexOf('Account'));
     fireEvent.click(screen.getByTestId('settings-row-profile'));
     expect(router.push).toHaveBeenLastCalledWith('/settings/profile');
-
     fireEvent.click(screen.getByTestId('settings-row-connections'));
     expect(router.push).toHaveBeenLastCalledWith('/settings/connections');
     fireEvent.click(screen.getByTestId('settings-row-channels'));
@@ -82,46 +80,37 @@ describe('the phone settings home', () => {
     expect(screen.queryByTestId('settings-row-connections-badge')).toBeNull();
   });
 
-  it('uses the name the user gave Lead on the card, the avatar and the group title', () => {
+  it('uses the name the user gave Lead as the group title and the profile summary', () => {
     renderWith(<SettingsHome />, 'ready', 'jarvis');
-    expect(screen.getByTestId('settings-paimon-name').textContent).toBe('jarvis');
-    const home = screen.getByTestId('settings-home');
-    expect(home.textContent).toContain('J');
-    expect(home.textContent).not.toContain('Paimon');
+    expect(within(screen.getByTestId('settings-group-lead')).getAllByText('jarvis').length).toBeGreaterThan(0);
+    expect(screen.getByTestId('settings-home').textContent).not.toContain('Paimon');
   });
 
-  it('opens This device from the Paimon card when paired', () => {
-    renderWith(<SettingsHome />);
-    fireEvent.click(screen.getByTestId('settings-paimon'));
-    expect(router.push).toHaveBeenLastCalledWith('/settings/device');
-  });
-
-  it('opens the pairing page from the Paimon card when the device is not paired', () => {
+  it('opens the pairing page from This device when the device is not paired', () => {
     renderWith(<SettingsHome />, 'unpaired');
-    fireEvent.click(screen.getByTestId('settings-paimon'));
+    fireEvent.click(screen.getByTestId('settings-row-device'));
     expect(router.push).toHaveBeenLastCalledWith('/pair');
   });
 
-  it('goes back to the conversation', () => {
+  it('goes back to the conversation from the top-left button', () => {
     renderWith(<SettingsHome />);
-    fireEvent.click(screen.getByTestId('settings-close'));
+    fireEvent.click(screen.getByTestId('settings-home-top-bar-back'));
     expect(router.dismissTo).toHaveBeenCalledWith('/');
   });
 });
 
 describe('a phone settings section', () => {
-  it('has a back button to settings', () => {
+  it('has a back button to settings and the title in the middle', () => {
     renderWith(<SettingsPage title="This device" />);
-    expect(screen.getByTestId('settings-back').textContent).toBe('‹ Settings');
-    expect(screen.getByTestId('settings-page-title').textContent).toBe('This device');
-    fireEvent.click(screen.getByTestId('settings-back'));
+    expect(within(screen.getByTestId('settings-page-top-bar')).getByText('This device')).toBeTruthy();
+    fireEvent.click(screen.getByTestId('settings-page-top-bar-back'));
     expect(router.dismissTo).toHaveBeenCalledWith('/settings');
   });
 
   it('has no back button on desktop, where the sidebar stays', () => {
     setViewportWidth(1280);
     renderWith(<SettingsPage title="This device" />);
-    expect(screen.queryByTestId('settings-back')).toBeNull();
+    expect(screen.queryByTestId('settings-page-top-bar-back')).toBeNull();
     expect(screen.getByTestId('settings-page-title').textContent).toBe('This device');
   });
 });

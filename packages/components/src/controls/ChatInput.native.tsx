@@ -9,7 +9,7 @@ export type { ChatInputHandle, ChatInputProps } from './ChatInput.types';
 // 原生实现：Expo UI 的多行输入框（iOS 是 SwiftUI TextField，Android 是 Compose TextField）。multiline 的输入框随内容长高。
 // 键盘的回车换行，发送用旁边的按钮，所以不接 onSubmit；原生上也没有粘贴图片（onPasteFiles 不调）。
 // 和 TextField.native.tsx 一样，用可观察状态保存文字，和受控的 value 双向同步。
-export function ChatInput({ value, onChangeText, placeholder, disabled = false, onBlur, autoFocus, testID }: ChatInputProps) {
+export function ChatInput({ value, onChangeText, placeholder, disabled = false, onBlur, autoFocus, large = false, testID }: ChatInputProps) {
   const text = useNativeState(value);
 
   // 调用方改了 value（例如发送后清空）时，把它写回原生输入框。
@@ -32,8 +32,8 @@ export function ChatInput({ value, onChangeText, placeholder, disabled = false, 
         style={{ padding: 0, backgroundColor: 'transparent' }}
         textStyle={{
           fontFamily: fontFaces.regular,
-          fontSize: textSizes['message-body'],
-          lineHeight: textLeading['message-body'],
+          fontSize: textSizes[large ? 'message-lead' : 'message-body'],
+          lineHeight: textLeading[large ? 'message-lead' : 'message-body'],
           color: palette.text,
         }}
       />

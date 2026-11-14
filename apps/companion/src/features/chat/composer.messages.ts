@@ -9,6 +9,7 @@ export const composerMessages = defineMessages({
     image: (n: number) => `Image ${n}`,
     removeImage: (n: number) => `Remove image ${n}`,
     addImage: 'Add image',
+    plus: 'Add images, or change the model',
     preparingImages: 'Processing images…',
     tooManyImages: (max: number) => `A message can have at most ${max} images. The extra images were not added.`,
     queue: {
@@ -45,6 +46,7 @@ export const composerMessages = defineMessages({
     image: (n) => `图片 ${n}`,
     removeImage: (n) => `移除图片 ${n}`,
     addImage: '添加图片',
+    plus: '添加图片，或者换模型',
     preparingImages: '正在处理图片…',
     tooManyImages: (max) => `一条消息最多带 ${max} 张图片，多出来的没有加上`,
     queue: {

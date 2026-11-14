@@ -100,7 +100,7 @@ export function ReminderCard({ view }: { view: ReminderCardView }) {
     </MediaRow>
   );
   return (
-    <Card testID={`reminder-card-${id}`} w="100%" rounded="xl" overflow="visible" borderWidth={1} borderColor="border">
+    <Card testID={`reminder-card-${id}`} w="100%" variant="float" overflow="visible">
       <DisclosureView
         id={`reminder-${id}`}
         label={m.cardLabel(title)}

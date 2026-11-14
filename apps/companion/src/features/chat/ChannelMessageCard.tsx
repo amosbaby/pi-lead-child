@@ -253,15 +253,16 @@ function LookupSection({ id, lookup, reply, onOpenTicket }: {
 //   改一下再发：草稿框原地变成输入框。已发出：框里是发出的原文，加「已发出」。撤回窗口里只剩「撤回 还剩 4:32」。
 //   结束、也没有按钮的卡收成一行（模式「结束行」），点开看全部。
 // 不再用卡片左边的色条（主题 C-18）。数据和按钮的判断还是 channelCard.ts。
-export function ChannelMessageCard({ card, onAction, onOpenTicket, now, lead, leadName: leadNameProp, inPanel }: {
+export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuckDetail = null, leadName: leadNameProp, inPanel }: {
   card: ChannelCardDto;
   // text：「改一下再发」时用户写的文字（send_edited）。别的动作不带。
   onAction: (action: ChannelCardAction, text?: string) => Promise<void>;
   // 点工单号时打开代查工单。没有时工单号只是文字。
   onOpenTicket?: (ticketId: number) => void;
   now?: Date;
-  // Lead 的健康状态（概览里的 lead，顶栏的状态点读同一份）。Lead 不能工作时，排着的卡写它卡住了。
-  lead?: LeadStatus;
+  // Lead 卡住时模型调用失败的原因（概览里的 lead 是降级、失败次数大于 0）；没卡住时是 null。排着的卡写它卡住了。
+  // 只传这一句，不传整个 lead：失败次数每重试一次就变，传整个对象时每张卡都跟着重画（2026-11-14，手机上空闲时也在重画）。
+  leadStuckDetail?: string | null;
   // Lead 的名字（useLeadName）。不给时读最近一次取到的名字（leadNameNow）。
   leadName?: string;
   // 卡画在别人的锚定浮层里（「张三 来了新消息」那一行点开）：只画撑开的样子，收起由浮层管；操作做完调 onDone 收起浮层。
@@ -308,7 +309,7 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, lead, le
     act(action);
   };
   const status = statusOf(card, view, m);
-  const fairy = fairyLine(card, view, m, leadName, locale, lead);
+  const fairy = fairyLine(card, view, m, leadName, locale, leadStuckDetail);
   const score = scoreOf(card, view, m);
   const header = (
     <Row items="center" gap="inline-item" minW={0}>
@@ -482,7 +483,7 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, lead, le
 
   if (inPanel) return panel;
   return (
-    <Card w="100%" rounded="xl" overflow="hidden" borderWidth={view.folded ? 0 : 1} borderColor="border" bg={view.folded ? 'transparent' : 'surface'} testID={`channel-card-${card.id}`}>
+    <Card w="100%" variant={view.folded ? 'flat' : 'float'} {...(view.folded ? { rounded: 'xl' } : {})} overflow="hidden" bg={view.folded ? 'transparent' : 'surface'} testID={`channel-card-${card.id}`}>
       <DisclosureView
         id={`channel-card-${card.id}`}
         label={m.messagesOf(card.sender.name)}
@@ -533,7 +534,7 @@ type FairyLineView = { lead: string; rest: string | null; progress: number | nul
 
 // Fairy 的那一行：600 的一句结论，后面是草稿、进度或者一句说明（主题 11.2 第 3 条）。
 function fairyLine(
-  card: ChannelCardDto, view: ReturnType<typeof channelCardView>, m: CardMessages, name: string, locale: Locale, lead?: LeadStatus,
+  card: ChannelCardDto, view: ReturnType<typeof channelCardView>, m: CardMessages, name: string, locale: Locale, stuckDetail: string | null,
 ): FairyLineView {
   const words = m.line;
   const lookup = card.lookup;
@@ -563,8 +564,8 @@ function fairyLine(
   if (handling && handling.decision === null) {
     // Lead 的模型调用在失败（顶栏是降级，失败次数大于 0）：卡不是在排队，是 Lead 卡住了，写原因（2026-10-28：上下文满了的
     // 40 分钟里卡上一直写「排队中」，用户以为 Lead 在忙别的）。只是压缩失败、模型调用还好时 Lead 照常工作，照旧写排队中。
-    if (lead?.state === 'degraded' && lead.failures > 0) {
-      return { lead: words.stuck(name), rest: leadModelFailureShortLabel(classifyLeadModelError(lead.detail ?? ''), locale), progress: null };
+    if (stuckDetail !== null) {
+      return { lead: words.stuck(name), rest: leadModelFailureShortLabel(classifyLeadModelError(stuckDetail), locale), progress: null };
     }
     const intent = card.handling?.authority?.intent;
     return { lead: words.queued(name), rest: intent ? words.intentSeen(channelPolicyLabels(locale).intent[intent]) : null, progress: null };
@@ -741,7 +742,7 @@ export function ChannelNewsLine({ cardId, at }: { cardId: number; at: number }) 
   const runtime = useCompanionRuntime();
   const openTicket = useOpenTicket();
   const card = useControlPlaneStore((state) => state.channelCards.find((candidate) => candidate.id === cardId));
-  const lead = useControlPlaneStore((state) => state.overview?.lead);
+  const leadStuckDetail = useLeadStuckDetail();
   const leadName = useLeadName();
   const m = useMessages(channelCardMessages).card;
   if (!card) return null;
@@ -757,7 +758,7 @@ export function ChannelNewsLine({ cardId, at }: { cardId: number; at: number }) 
       details={(close) => (
         <ChannelMessageCard
           card={card}
-          lead={lead}
+          leadStuckDetail={leadStuckDetail}
           leadName={leadName}
           onAction={(action, text) => runtime.actOnChannelCard(card.id, action, text)}
           onOpenTicket={openTicket}
@@ -772,18 +773,27 @@ export function ChannelCardSlot({ cardId }: { cardId: number }) {
   const runtime = useCompanionRuntime();
   const openTicket = useOpenTicket();
   const card = useControlPlaneStore((state) => state.channelCards.find((candidate) => candidate.id === cardId));
-  const lead = useControlPlaneStore((state) => state.overview?.lead);
+  const leadStuckDetail = useLeadStuckDetail();
   const leadName = useLeadName();
   if (!card) return null;
   return (
     <Box w="100%">
       <ChannelMessageCard
         card={card}
-        lead={lead}
+        leadStuckDetail={leadStuckDetail}
         leadName={leadName}
         onAction={(action, text) => runtime.actOnChannelCard(card.id, action, text)}
         onOpenTicket={openTicket}
       />
     </Box>
   );
+}
+
+// Lead 卡住时的失败原因（降级、失败次数大于 0），没卡住时是 null。选出来的是一个字符串：失败次数变了、
+// 下一次重试的时间变了，它不变，订阅它的卡片不重画。
+export function useLeadStuckDetail(): string | null {
+  return useControlPlaneStore((state) => {
+    const lead = state.overview?.lead;
+    return lead?.state === 'degraded' && lead.failures > 0 ? lead.detail ?? '' : null;
+  });
 }

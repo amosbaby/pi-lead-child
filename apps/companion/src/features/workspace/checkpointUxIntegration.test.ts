@@ -716,7 +716,7 @@ describe('checkpoint control-plane UX integration', () => {
     expect.soft(nativeWorkbench).toContain("router.push('/tickets')");
     expect.soft(nativeWorkbench).not.toContain('ConnectedWorkRail');
     expect.soft(nativeWorkbench).not.toContain('ConnectedTicketThread');
-    expect.soft(ticketsRoute).toContain('TicketList');
+    expect.soft(ticketsRoute).toContain('TicketGroups');
     expect.soft(ticketRoute).toContain('ConnectedTicketThread');
     for (const source of [nativeWorkbench, webWorkbench, ticketsRoute, ticketRoute]) {
       expect.soft(source).not.toContain('ControlPlaneClient');

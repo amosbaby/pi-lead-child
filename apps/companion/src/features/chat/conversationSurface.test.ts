@@ -27,6 +27,8 @@ describe('conversation surface', () => {
   it('keeps body and meta text at WCAG AA (4.5:1) on every surface in the conversation', () => {
     const pairs: Array<[string, ColorToken, ColorToken]> = [
       ['Lead 的回复', 'text', 'surface'],
+      ['手机上 Lead 的回复（浅底页面，主题 S-1）', 'text', 'page'],
+      ['手机上的发送者和时间', 'text-secondary', 'page'],
       ['你的消息', 'text', 'surface-muted'],
       ['系统通知', 'text', 'accent-wash'],
       ['发送者和时间', 'text-secondary', 'surface'],
@@ -54,8 +56,9 @@ describe('conversation surface', () => {
     expect(source('../../components/LeadIdentity.tsx')).not.toMatch(/'muted'|"muted"/);
   });
 
-  it('puts both chats on the white surface, on desktop and on the phone', () => {
-    expect(source('./LeadConversation.tsx')).toContain('<KeyboardArea testID="lead-conversation" bg="surface">');
+  // 2026-11-14 方案 F（主题 S-1、11.20）：手机上会话页是浅底 page，卡片和输入框是白底，靠阴影浮起；桌面上还是白底。
+  it('puts the desktop chat on the white surface and the phone chat on the light page', () => {
+    expect(source('./LeadConversation.tsx')).toContain(`<KeyboardArea testID="lead-conversation" bg={compact ? 'page' : 'surface'}>`);
     // 手机上单独打开的工单详情以前是灰底，浅灰气泡在上面看不出来。
     expect(source('../tickets/TicketThread.tsx')).toContain('<Column testID="ticket-thread" flex={1} minW={0} bg="surface">');
   });
