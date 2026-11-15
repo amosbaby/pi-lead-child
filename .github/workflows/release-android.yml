@@ -148,7 +148,9 @@ jobs:
           apk="apps/companion/android/app/build/outputs/apk/release/app-release.apk"
           apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
           "$apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/apksigner.txt"
-          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | tr -d ':' | tr 'A-F' 'a-f')"
+          # 版本不同的 apksigner 写法不同：「Signer #1 certificate SHA-256 digest: …」或「V2 Signer: certificate SHA-256 digest: …」。
+          # 只有一个签名者（key rotation 不用），取第一行。
+          actual="$(sed -n -E 's/^.*[Ss]igner.*certificate SHA-256 digest: ([0-9A-Fa-f:]+).*$/\1/p' "$RUNNER_TEMP/apksigner.txt" | head -1 | tr -d ':' | tr 'A-F' 'a-f')"
           if [[ -z "$actual" ]]; then
             echo "apksigner printed no certificate digest." >&2
             exit 1
