@@ -75,7 +75,8 @@ export function Checklist({
                 <Text size="11" leading={15} weight="bold" tone="strong">{String(index + 1)}</Text>
               </Box>
             ) : null}
-            <Text flex={1} minW={0} size="card-title" weight="semibold">{item.label}</Text>
+            {/* 和执行计划的步骤同一个字重（主题 T-3 正文）：一条标准是正文，不是标题（2026-11-15）。 */}
+            <Text flex={1} minW={0} size="body">{item.label}</Text>
             {columns.map((column, cell) => (
               <VerdictCell key={cell} column={column} verdict={item.verdicts?.[cell] ?? null} />
             ))}

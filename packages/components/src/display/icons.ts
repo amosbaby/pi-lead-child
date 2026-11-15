@@ -30,6 +30,8 @@ export const icons = {
   // 数据来源（会话里回复下面的「依据」标签）。
   database: { ios: 'cylinder', android: 'database' },
   exclamation: { ios: 'exclamationmark', android: 'priority_high' },
+  // 圆圈里的 i：点了看明细（工单属性里 Token 一行，画板 M3Token）。
+  info: { ios: 'info.circle', android: 'info' },
   approval: { ios: 'exclamationmark', android: 'approval' },
   warning: { ios: 'exclamationmark.triangle.fill', android: 'warning' },
   error: { ios: 'exclamationmark.octagon.fill', android: 'error' },

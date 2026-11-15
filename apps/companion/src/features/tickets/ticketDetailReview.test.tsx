@@ -5,7 +5,7 @@ import type { TicketSummary } from '@pi-lead-child/protocol';
 import { cleanup, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { delivery, renderThread, summary } from '../../../test/ticketDetail';
+import { delivery, openHistory, renderThread, summary } from '../../../test/ticketDetail';
 import { setViewportWidth, ticketAction } from '../../../test/workbench';
 import type { TicketThreadProps } from './TicketThread';
 import { resetRememberedSectionsForTesting } from './useRememberedSections';
@@ -39,9 +39,15 @@ describe('the ticket detail after the review', () => {
     ticketAction('cancel', { label: 'Cancel ticket' }),
   ];
 
+  // 有决定卡时「更多」在卡片的操作条里；没有时并进顶栏的「⋯」（主题 11.21，2026-11-15）。两处的行标识一样。
   async function openMore(thread: HTMLElement) {
-    fireEvent.click(within(thread).getByTestId('ticket-bar-more'));
-    return screen.findByTestId('ticket-bar-menu');
+    const inCard = within(thread).queryByTestId('ticket-bar-more');
+    if (inCard) {
+      fireEvent.click(inCard);
+      return screen.findByTestId('ticket-bar-menu');
+    }
+    fireEvent.click(within(thread).getByTestId('ticket-header-more'));
+    return screen.findByTestId('ticket-header-more-panel');
   }
 
   it('fix 1: a failed review puts 打回返工 on the main button, and 验收 behind 更多 with a confirmation', async () => {
@@ -123,6 +129,8 @@ describe('the ticket detail after the review', () => {
       actions: [ticketAction('delegate', { label: 'Delegate' })],
       onRunAction,
     });
+    // 验收方式在「经过与记录」里的工单信息（画布 M3）：执行中默认收着。
+    openHistory(thread);
     fireEvent.click(within(thread).getByTestId('lead-delegation-grant'));
     expect(onRunAction).toHaveBeenCalledWith('delegate', { input: { maxReworkCycles: 1 } });
     cleanup();
@@ -131,6 +139,7 @@ describe('the ticket detail after the review', () => {
       actions: [ticketAction('delegate', { label: 'Delegate', available: false, reason: '核查员都不能用，托管不起作用。' })],
       onRunAction,
     });
+    openHistory(locked);
     expect(within(locked).getByTestId('lead-delegation-grant').getAttribute('aria-disabled')).toBe('true');
     expect(within(locked).getByTestId('ticket-section-info').textContent).toContain('核查员都不能用，托管不起作用。');
   });
@@ -139,6 +148,7 @@ describe('the ticket detail after the review', () => {
     const onSetLeadDelegation = vi.fn();
     const thread = renderThread(summary({ stage: 'active', status: 'active' }), { onSetLeadDelegation });
 
+    openHistory(thread);
     fireEvent.click(within(thread).getByTestId('lead-delegation-grant'));
 
     expect(onSetLeadDelegation).toHaveBeenCalledWith(true);
@@ -152,10 +162,11 @@ describe('the ticket detail after the review', () => {
         kind: 'execution', state: 'failed', label: '派发失败', dispatchRequestId: 3, attemptId: null, reason: 'claude 没有配置。',
       } as TicketSummary['executionState'],
     }));
-    const bar = within(thread).getByTestId('ticket-action-bar');
+    // 派发失败是要你处理的事：出决定卡，结论写在卡片的大字里（主题 11.21 T-7，2026-11-15）。
+    const card = within(thread).getByTestId('ticket-decision-card');
 
-    expect(bar.textContent).toContain('派发失败');
-    expect(bar.textContent).not.toContain('You do not need to do anything');
+    expect(card.textContent).toContain('派发失败');
+    expect(card.textContent).not.toContain('You do not need to do anything');
   });
 
   it('fix 4: unlinks a related ticket from its row, as the action list allows', () => {
@@ -204,8 +215,9 @@ describe('the ticket detail after the review', () => {
   });
 
   it('says when the action list is still loading, and offers to retry when it cannot be read', () => {
+    // 还在读的时候没有要你做的事，不出决定卡（主题 11.21，2026-11-15）：读完了才知道要不要出。
     const loading = renderThread(summary({ stage: 'active', status: 'active' }), { actions: [], actionsStatus: 'loading' });
-    expect(within(loading).getByTestId('ticket-action-bar').textContent).toContain('Reading the actions for this ticket.');
+    expect(within(loading).queryByTestId('ticket-decision-card')).toBeNull();
     cleanup();
 
     const onRetryActions = vi.fn();

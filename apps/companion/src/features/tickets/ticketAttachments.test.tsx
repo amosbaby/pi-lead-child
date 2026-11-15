@@ -97,9 +97,10 @@ describe('ticket attachments in the ticket detail', () => {
     await waitFor(() => expect(within(viewer).getByText('第一步：打开退货页')).toBeTruthy());
   });
 
-  it('counts the attachments in the folded task line, and draws nothing without attachments', () => {
+  // 任务说明不再折叠（主题 11.21，2026-11-15）：附件条一直在任务说明下面，不再写进折叠行的摘要。
+  it('shows the attachments under the task, and draws nothing without attachments', () => {
     const review = renderThread(summary({ stage: 'review', status: 'review' }), { attachments: [shot, note], onLoadAttachment: load });
-    expect(within(within(review).getByTestId('ticket-section-task')).getByText('看截图里的报错。 · 2 attachments')).toBeTruthy();
+    expect(within(within(review).getByTestId('ticket-section-task')).getByTestId('ticket-attachments')).toBeTruthy();
     cleanup();
     const plain = renderThread(summary({ stage: 'active', status: 'active' }));
     expect(within(plain).queryByTestId('ticket-attachments')).toBeNull();

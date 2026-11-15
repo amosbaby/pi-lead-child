@@ -6,6 +6,8 @@ import { Text } from '../primitives/Text';
 import { buttonSpec, iconButtonSpec } from './Button.shared';
 import type { ButtonProps, IconButtonProps } from './Button.types';
 
+const LABEL_CENTERED = { includeFontPadding: false, textAlignVertical: 'center' } as const;
+
 // Tamagui 实现：web 上渲染成 <button>，Android 上是普通的可点视图。
 // web（Button.tsx）和 Android（Button.android.tsx）都用它；iOS 用 SwiftUI（Button.native.tsx）。
 // Android 不用 Compose Button（2026-11-12）：它自带的内边距、最小尺寸和外观压不掉，图标按钮里的图标被裁掉，
@@ -51,7 +53,9 @@ export function TamaguiButton({
       self={fullWidth ? 'stretch' : undefined}
     >
       {iconPosition === 'start' ? iconNode : null}
-      <Text fontFamily={spec.fontFace} size={spec.fontSize} color={spec.text} numberOfLines={1}>{label}</Text>
+      {/* Android 默认在字的上下留出字体自带的内边距（includeFontPadding），Plus Jakarta 的上边距大，英文字母整体偏下
+          （2026-11-15，决定卡的 Accept 低了约 2dp）。关掉它，再让字在行高里竖直居中。网页上没有这两个属性。 */}
+      <Text fontFamily={spec.fontFace} size={spec.fontSize} color={spec.text} numberOfLines={1} style={LABEL_CENTERED}>{label}</Text>
       {iconPosition === 'end' ? iconNode : null}
     </Frame>
   );

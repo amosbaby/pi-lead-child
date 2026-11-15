@@ -15,11 +15,14 @@ describe('the ticket header', () => {
   it('shows the number, the full title, the stage, the priority and the project', () => {
     const title = '[E2E #51 T48-E2E-51-20260817061106] FINAL #45 implementation - outcome snapshot and registry mechanism';
     renderWorkbenchWithTicket(ticket66({ title }));
-    const header = within(screen.getByTestId('ticket-thread')).getByTestId('ticket-thread-header');
+    const thread = screen.getByTestId('ticket-thread');
+    const header = within(thread).getByTestId('ticket-thread-header');
 
-    expect(within(header).getByTestId('ticket-thread-header-title').textContent).toBe(title);
+    // 主题 11.21（2026-11-15）：顶栏是面包屑「项目 › 工单 #N」；完整标题在顶栏下面，属性表里有状态、项目。
+    expect(within(thread).getByTestId('ticket-detail-title-text').textContent).toBe(title);
     expect(header.textContent).toContain('#66');
-    expect(within(header).getByTestId('ticket-thread-header-meta').textContent).toContain('pi-lead-child');
+    expect(header.textContent).toContain('pi-lead-child');
+    expect(within(thread).getByTestId('ticket-attribute-status')).toBeTruthy();
     // 去掉了「这张工单」这一层标题。
     expect(within(screen.getByTestId('ticket-thread')).queryByText('这张工单')).toBeNull();
   });

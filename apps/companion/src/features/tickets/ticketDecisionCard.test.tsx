@@ -46,14 +46,15 @@ describe('the bottom action bar', () => {
   it('names the delivery by its number from the delivery list, never by the run number', async () => {
     renderWorkbenchWithTicket(waitingForReview(), { actions: reviewActions(), deliveries: [{ attemptId: 49, sequence: 2 }] });
 
-    await waitFor(() => expect(bar().textContent).toContain('Delivery 2 has no independent review yet.'));
+    // 结论写在决定卡的大字里，操作条不再重复（主题 11.21 T-7，2026-11-15）。
+    await waitFor(() => expect(screen.getByTestId('ticket-decision-card').textContent).toContain('Delivery 2 has no independent review yet.'));
     expect(screen.getByTestId('ticket-thread').textContent).not.toMatch(/Run #\d|#49\b/);
   });
 
   it('says the latest delivery when the connection cannot read the delivery list', () => {
     renderWorkbenchWithTicket(waitingForReview(), { actions: reviewActions() });
 
-    expect(bar().textContent).toContain('The latest delivery has no independent review yet.');
+    expect(screen.getByTestId('ticket-decision-card').textContent).toContain('The latest delivery has no independent review yet.');
   });
 
   it('places the review actions and takes their availability from the action list', () => {
@@ -94,7 +95,7 @@ describe('the bottom action bar', () => {
     expect(run).not.toHaveBeenCalled();
     expect(within(bar()).getByTestId('ticket-confirm').textContent).toContain('Push to GitHub and open a draft PR?');
 
-    fireEvent.click(within(within(bar()).getByTestId('ticket-confirm')).getByText('开草稿 PR'));
+    fireEvent.click(within(within(bar()).getByTestId('ticket-confirm')).getByText('Open draft PR'));
     expect(run).toHaveBeenCalledWith(TICKET, 'open_pr', { input: { expectedHead: 'a'.repeat(40), expectedTarget: 'main' } });
   });
 

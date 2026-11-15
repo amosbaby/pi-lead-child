@@ -25,8 +25,9 @@ export type RecordBlockProps = {
 export function RecordBlock({ title, meta, toggle, children, testID }: RecordBlockProps) {
   const m = useMessages(displayMessages);
   return (
-    <Row testID={testID} w="100%" gap="inline-item">
-      <Column items="center" shrink={0} self="stretch">
+    // 和系统信息行同一个格子：18 宽的标记列，同样的间距，后面的字和别的一行对在同一条竖线上（2026-11-15）。
+    <Row testID={testID} w="100%" gap="icon-label">
+      <Column w={18} items="center" shrink={0} self="stretch">
         <FairyMark quiet size={14} />
         <Box flex={1} w={1} bg="border" />
       </Column>

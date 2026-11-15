@@ -56,6 +56,7 @@ import { latestUserAction, liveRunProgress } from './ticketChatStatus';
 import { useNow } from './useNow';
 import type { CheckpointFeedPagination } from './CheckpointFeed';
 import { ticketThreadMessages } from './ticketThread.messages';
+import { localizeTicketActions } from './ticketActionLabels.messages';
 
 // 一张工单详情需要的全部数据和动作：读 hooks、算视图模型、包好动作的进行中和出错状态。
 // 工单面板（TicketThread）和「证据与记录」都读它，谁都不再自己推导（AGENTS.md：每个界面从同一个 TicketSummary 推导当前状态）。
@@ -83,7 +84,9 @@ export function useTicketDetailModel(
   const { artifacts, resource: artifactResource } = useTicketArtifacts(ticketId);
   const { interventions, resource: interventionResource } = useTicketInterventions(ticketId);
   // 工单详情的新数据走单独的接口（工单 03–06），不往 TicketSummary 里加字段。
-  const { actions, resource: actionsResource } = useTicketActions(ticketId);
+  const { actions: rawActions, resource: actionsResource } = useTicketActions(ticketId);
+  // daemon 的清单只给中文名：按界面语言换掉，按钮和页面上别的文字用同一种语言。
+  const actions = useMemo(() => localizeTicketActions(rawActions, locale), [rawActions, locale]);
   // 清单读到了没有：读取中、读不到时底部操作栏要说出来，不能只是没有按钮。
   const actionsStatus = actionsResource?.state === 'error'
     ? 'error' as const

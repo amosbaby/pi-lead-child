@@ -119,18 +119,17 @@ export function ChatDockFrame({
       {...(motion ? SIZE.docked : expanded ? SIZE.expanded : SIZE.collapsed)}
       minH={0}
       bg="surface"
-      borderTopWidth={1}
-      borderTopColor="border"
-      borderTopLeftRadius={16}
-      borderTopRightRadius={16}
-      boxShadow="0 -8px 20px rgba(16,24,40,0.07)"
+      // 贴边的卡片（主题 11.21，2026-11-14）：左右和底部没有边距，只有顶部两个角是 28 的圆角，没有描边。
+      borderTopLeftRadius={28}
+      borderTopRightRadius={28}
+      boxShadow="0 -2px 20px rgba(16,19,26,0.10), 0 0 0 1px rgba(16,19,26,0.05)"
     >
       <View testID={testID ? `${testID}-grab` : undefined} style={styles.grab} {...swipe.panHandlers}>
         {bar ? (
           // 有操作栏时把手在最上面，操作栏在把手和标题行之间。操作栏里的按钮照常能点：只有竖向拖动才交给对话坞。
           // spacing-exempt: 拖动把手上方留白
           <Column testID={testID ? `${testID}-bar` : undefined} pt={7} borderBottomWidth={1} borderBottomColor="border-soft">
-            <Box self="center" w={38} h={5} rounded="full" bg="border-strong" />
+            <Box self="center" w={36} h={4} rounded="full" bg="border-strong" />
             {bar}
           </Column>
         ) : null}
@@ -141,8 +140,16 @@ export function ChatDockFrame({
           controls={bodyId}
           testID={testID ? `${testID}-toggle` : undefined}
         >
-          <Column w="100%" pt={bar ? 10 : 7} pb={phase === 'expanded' ? 8 : 2}>
-            {bar ? null : <Box self="center" w={38} h={5} rounded="full" bg="border-strong" />}
+          <Column w="100%" pt={bar ? 10 : 8} pb={phase === 'expanded' ? 8 : 2}>
+            {bar ? null : <Box self="center" w={36} h={4} rounded="full" bg="border-strong" />}
+            {/* 收着的时候只有小横杠、最后一条回复和输入框（画板 M3Wait）；标题行在展开以后才出现。
+                有新回复时，小横杠下面照样写蓝点和「新回复」：收着的时候也知道有人回了。 */}
+            {phase === 'collapsed' ? (showUnread ? (
+              <Row w="100%" items="center" justify="center" gap="icon-label" pt="text-stack">
+                <Dot color="accent" size={6} />
+                {unreadLabel ? <Text size="meta" weight="bold" tone="accent">{unreadLabel}</Text> : null}
+              </Row>
+            ) : null) : (
             <Row w="100%" items="center" gap="inline-item" px="card" pt={bar ? 0 : 6}>
               <Text size="section-title" weight="extrabold" align="left">{title}</Text>
               {count ? <Text size="meta" mono tone="secondary">{count}</Text> : null}
@@ -161,6 +168,7 @@ export function ChatDockFrame({
                 />
               </Row>
             </Row>
+            )}
           </Column>
         </Toggle>
         {phase !== 'expanded' && preview ? (
@@ -185,7 +193,7 @@ export function ChatDockFrame({
           <Column id={bodyId} testID={testID ? `${testID}-body` : undefined} flex={1} minH={0}>{children}</Column>
         </Animated.View>
       ) : null}
-      {composer ? <Box borderTopWidth={1} borderTopColor="border-soft">{composer}</Box> : null}
+      {composer ? <Box>{composer}</Box> : null}
     </Column>
   );
 }

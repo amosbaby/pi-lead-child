@@ -204,6 +204,8 @@ export const spacingByDensity = {
   'dock-bottom': [16, 20, 24],
   // 二级页面顶栏的标题左右让出的宽度：一颗 48 的圆钮加页面留白，长标题截断时不压到圆钮上。
   'page-title-gutter': [64, 72, 80],
+  // 工单详情里两个分区之间：一条细线加上下的留白（主题 11.21，2026-11-14）。
+  'detail-section': [16, 20, 24],
 } as const;
 
 export const spacing = {

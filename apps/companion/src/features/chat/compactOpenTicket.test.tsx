@@ -95,7 +95,8 @@ function expectThreadOpenOn(runtime: ReturnType<typeof runtimeOnConversation>, t
   expect(workspace.compactDestination).not.toBe('conversation');
   expect(workspace.compactPanel).toBe('thread');
   const thread = screen.getByTestId('ticket-thread');
-  expect(within(thread).getByTestId('ticket-thread-header-id').textContent).toBe(`#${ticketId}`);
+  // 手机上工单号写在标题下面那行（主题 11.21，2026-11-15）。
+  expect(within(thread).getByTestId('ticket-detail-meta').textContent).toMatch(new RegExp(`#${ticketId}(?!\\d)`));
 }
 
 function closeThreadBackToConversation(runtime: ReturnType<typeof runtimeOnConversation>) {

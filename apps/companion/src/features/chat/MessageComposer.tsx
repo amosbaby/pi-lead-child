@@ -217,16 +217,15 @@ function MessageComposerField({
   if (minimal) {
     // 工单对话坞：文字和发送按钮在一行，发送按钮贴着底边，文字长高时它留在最后一行旁边。
     return (
+      // 工单对话坞的输入框（主题 11.21）：灰底的胶囊，没有描边，贴在对话卡片的底部。
       <Row
         testID="composer"
         items="flex-end"
         gap="side-item"
         px="composer-x"
         py="composer-y"
-        rounded="3xl"
-        borderWidth={1}
-        borderColor="border-input"
-        bg="surface"
+        rounded="full"
+        bg="surface-muted"
         opacity={disabled ? 0.62 : 1}
       >
         {/* spacing-exempt: 文字一行高 24，发送按钮 34，上下各留 5 让一行字和按钮居中对齐 */}

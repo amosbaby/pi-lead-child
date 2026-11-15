@@ -70,9 +70,18 @@ describe('the ticket chat dock', () => {
   it('shows the latest reply as plain text while collapsed, with the composer', () => {
     renderDock();
     const preview = screen.getByTestId('ticket-chat-preview');
-    expect(preview.textContent).toContain('Executor · ');
+    // 收着时是一行：谁、说了什么、时间（主题 11.21 T-13，2026-11-15）。
+    expect(within(preview).getByText('Executor')).toBeTruthy();
     expect(preview.textContent).toContain('我建议派一次新的核查，把 typecheck / build 补齐。');
     expect(within(screen.getByTestId('ticket-chat-dock')).getByRole('textbox')).toBeTruthy();
+    // 收着时只有预览和一行输入框（画布 M3Wait）：去向的说明展开以后才写。
+    expect(screen.queryByTestId('ticket-chat-identity')).toBeNull();
+    expect(within(screen.getByTestId('ticket-chat-dock')).getByRole('textbox').getAttribute('placeholder'))
+      .toBe("Ask this ticket's agent…");
+  });
+
+  it('says where the message goes once expanded', () => {
+    renderDock({ expanded: true });
     // 2026-10-15 方案 A：说明写清楚消息会去哪里。没有 Run 在跑时开一个对话 Run。
     // （以前写「发给 #66 的执行 agent · child #87 · 每条消息开一次对话 Run」：#87 其实是核查 agent，运行中也不会开对话 Run。）
     expect(screen.getByTestId('ticket-chat-identity').textContent)
@@ -274,7 +283,7 @@ describe('the ticket chat composer', () => {
   );
 
   it('sends a progress question to the agent, with no answerer and no switch', () => {
-    const { onSendMessage } = renderDock({ chatResume: resume });
+    const { onSendMessage } = renderDock({ chatResume: resume, expanded: true });
     type('现在进展怎么样');
     expect(screen.getByTestId('ticket-chat-identity').textContent).toBe('To the reviewer of #66 · Continues the last session. The ticket state does not change.');
     expect(screen.queryByText(/由 Lead 回答/)).toBeNull();
@@ -285,23 +294,23 @@ describe('the ticket chat composer', () => {
   });
 
   it('shows the estimated cost of resuming an ended session', () => {
-    renderDock({ chatResume: resume });
+    renderDock({ chatResume: resume, expanded: true });
     expect(screen.getByTestId('ticket-chat-cost').textContent).toBe('Estimated cost: about 456K tokens (from the last usage of this session)');
   });
 
   it('says it cannot estimate the cost when the last run reported no usage', () => {
-    renderDock({ chatResume: { ...resume, lastTokens: null } });
+    renderDock({ chatResume: { ...resume, lastTokens: null }, expanded: true });
     expect(screen.getByTestId('ticket-chat-cost').textContent).toBe('Estimated cost: unknown');
   });
 
   it('shows no cost when nothing is resumed', () => {
-    renderDock();
+    renderDock({ expanded: true });
     expect(screen.queryByTestId('ticket-chat-cost')).toBeNull();
   });
 
   // 2026-10-19 以前，工单对话里的一些消息由 Lead 回答（工单 08 的第一版）。这些旧轮次照样写 Lead。
   it('labels an older reply from Lead in the ticket conversation', () => {
     renderDock({}, [turn({ originKind: 'paired:companion', assistantText: '#77 现在是 done。' })]);
-    expect(screen.getByTestId('ticket-chat-preview').textContent).toContain('Paimon · ');
+    expect(within(screen.getByTestId('ticket-chat-preview')).getByText('Paimon')).toBeTruthy();
   });
 });

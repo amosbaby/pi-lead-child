@@ -1,4 +1,4 @@
-import { Badge, Box, Button, Card, Column, Icon, Row, Text } from '@pi-lead-child/components';
+import { Badge, Box, Button, Card, Column, Icon, Row, SystemLine, Text } from '@pi-lead-child/components';
 import type { ReminderCard } from '@pi-lead-child/protocol';
 import { useState } from 'react';
 
@@ -81,13 +81,8 @@ export function ReminderFireCardView({
   if (card.state !== 'fired') {
     return (
       <Column testID={`reminder-fire-${card.reminderId}`} w="100%" gap="card-row">
-        {/* spacing-exempt: 一行按压区的小留白 */}
-        <Row items="center" gap="icon-label" px={4}>
-          <Icon name={card.state === 'acked' ? 'check' : 'clock'} size={13} color="text-muted" />
-          <Text testID="reminder-fire-line" flex={1} minW={0} size="secondary" tone="secondary" numberOfLines={1}>
-            {reminderClosedLine(card, locale)}
-          </Text>
-        </Row>
+        {/* 结束了的提醒是一行系统信息（主题 11.9）：和别的系统信息行同一个格子，图标列对齐。 */}
+        <SystemLine testID="reminder-fire-line" icon={card.state === 'acked' ? 'check' : 'clock'} text={reminderClosedLine(card, locale)} />
         {leadWords ? <LeadWords text={leadWords} leadName={leadName} /> : null}
       </Column>
     );

@@ -81,8 +81,27 @@ function ChatBlockScope({ blockKey, keep, children }: { blockKey: string; keep: 
 // 量不出行高的地方（测试的 DOM 环境里没有 ResizeObserver；没有它的浏览器也一样）不虚拟化，每一块都画出来（ChatListAll）。
 export function ChatList<T>(props: ChatListProps<T>) {
   const measurable = Platform.OS !== 'web' || typeof ResizeObserver !== 'undefined';
-  return measurable ? <VirtualChatList {...props} /> : <ChatListAll {...props} />;
+  if (!measurable) return <ChatListAll {...props} />;
+  // 原生上先量高度（SizedVirtualChatList）；web 上 ResizeObserver 一开始就量得到，直接挂。
+  return Platform.OS === 'web' ? <VirtualChatList {...props} /> : <SizedVirtualChatList {...props} />;
 }
+
+// 先量出高度，再挂上虚拟列表（2026-11-15）。对话坞展开的第一帧、藏起来的页面里，列表的外框高度是 0：
+// legend-list 在开发模式下为此弹一条「List height is 0」的 LogBox。初始滚到底、跟随底部也要一个真实的高度。
+// 量到一次大于 0 就一直挂着：VirtualChatList 里只在挂上时跑一次的 effect 都要列表已经在。
+function SizedVirtualChatList<T>(props: ChatListProps<T>) {
+  const [sized, setSized] = useState(false);
+  return (
+    <View
+      style={SIZED_STYLE}
+      onLayout={sized ? undefined : (event) => { if (event.nativeEvent.layout.height > 0) setSized(true); }}
+    >
+      {sized ? <VirtualChatList {...props} /> : null}
+    </View>
+  );
+}
+
+const SIZED_STYLE = { flex: 1, minHeight: 0 } as const;
 
 // web 上块的外层写 data-chat-key：按下时认出是哪一块（anchorVisibleContent）。dataSet 是 react-native-web 的属性，
 // 不在 react-native 的类型里；原生上不认识，忽略。

@@ -3,7 +3,7 @@
 import type {
   TicketAcceptanceCriteria, TicketDelivery, TicketExecutionPlan, TicketSummary,
 } from '@pi-lead-child/protocol';
-import { screen, within } from '@testing-library/react';
+import { fireEvent, screen, within } from '@testing-library/react';
 
 import { DesignPreferencesProvider } from '@pi-lead-child/components';
 
@@ -112,4 +112,10 @@ export function sectionOrder(thread: HTMLElement): string[] {
 
 export function expanded(thread: HTMLElement, kind: string): boolean {
   return within(thread).getByTestId(`ticket-section-${kind}-toggle`).getAttribute('aria-expanded') === 'true';
+}
+
+/** 打开「经过与记录」（画布 M3：工单信息、交付摘要、完整记录的入口都在它里面）。已经开着时不动。 */
+export function openHistory(thread: HTMLElement): HTMLElement {
+  if (!expanded(thread, 'history')) fireEvent.click(within(thread).getByTestId('ticket-section-history-toggle'));
+  return within(thread).getByTestId('ticket-section-history');
 }

@@ -35,9 +35,9 @@ describe('ChatDock', () => {
     const toggle = screen.getByTestId('dock-toggle');
     expect(toggle.getAttribute('aria-expanded')).toBe('false');
     expect(toggle.getAttribute('aria-controls')).toBeNull();
-    expect(toggle.textContent).toContain('工单对话');
-    expect(toggle.textContent).toContain('8');
-    expect(toggle.textContent).toContain('Expand');
+    // 收着的时候没有标题行（主题 11.21，画板 M3Wait，2026-11-15）：只有小横杠、最后一条回复和输入框。读屏说法里照样有标题。
+    expect(toggle.textContent).not.toContain('Expand');
+    expect(toggle.getAttribute('aria-label')).toContain('工单对话');
   });
 
   it('keeps its content height while collapsed instead of collapsing to a line', () => {

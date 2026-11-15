@@ -9,7 +9,9 @@ import {
   ActionButton, ActionGroup, DisclosureView, FieldView, remainingWords, shortTimeWords, usePendingValue, type ActionProps,
 } from '../genui/SurfaceControls';
 import { ticketDisplayTitle, ticketSummaryToTicket } from '../workspace/model';
+import { EndRow } from './EndRow';
 import { reminderMessages } from './reminder.messages';
+import { useOpenAgenda } from './useOpenAgenda';
 
 const pad = (value: number) => String(value).padStart(2, '0');
 
@@ -62,6 +64,7 @@ export function ReminderCard({ view }: { view: ReminderCardView }) {
   const locale = useLocale();
   const m = reminderMessages(locale);
   const listed = useTicketSummary(view.reminderId);
+  const openAgenda = useOpenAgenda();
   const { detail } = useConversationItemDetail(view.reminderId, true);
   const summary = listed ?? detail?.ticket ?? null;
   const stage = summary?.stage ?? view.stage;
@@ -86,6 +89,26 @@ export function ReminderCard({ view }: { view: ReminderCardView }) {
   // 到点了还没确认（覆盖表「到点」：对象 Reminder 的到点态）：模式「事项」右边一个按钮「知道了」；
   // 「10 分钟后」是点开以后改时间的第一个选项。视觉稿没有单画这一态，色带和等待中的「重要」一样是琥珀。
   const fired = stage === 'fired';
+  // 结束了的提醒（已确认、已取消）收成一行结束行（patterns P4.4）：和会话里别的一行对齐，不再占一张卡（2026-11-15 用户截图）。
+  if (ended) {
+    const clock = (date: Date) => `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    const day = (date: Date) => `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+    const meta = changedAt
+      ? (stage === 'cancelled' ? m.endedCancelled(day(changedAt)) : m.endedAcked(clock(changedAt)))
+      : (stage === 'cancelled' ? m.cancelled : m.acked);
+    return (
+      <EndRow
+        testID={`reminder-card-${id}`}
+        label={m.cardLabel(title)}
+        icon={stage === 'cancelled' ? 'close' : 'check'}
+        iconColor={stage === 'cancelled' ? 'text-muted' : 'success'}
+        title={title}
+        struck={stage === 'cancelled'}
+        meta={meta}
+        onPress={openAgenda}
+      />
+    );
+  }
   const summaryRow = (
     <MediaRow attach bleed testID={`reminder-card-${id}-stub`} lead={<ReminderPage at={at} tone={tone} stage={stage} />}>
       <Row items="center" gap="side-item">
@@ -220,7 +243,8 @@ function ReminderLines({ reminderId, title, at, stage, level, changedAt, note = 
         weight="bold"
         tone={stage === 'cancelled' ? 'muted' : 'default'}
         {...(stage === 'cancelled' ? { textDecorationLine: 'line-through' as const } : {})}
-        numberOfLines={2}
+        // 收着时两行（主题 11.1）：标题一行，下面一行状态。
+        numberOfLines={1}
       >
         {title}
       </Text>

@@ -30,8 +30,15 @@ const SURFACE_PROPS = /\b(?:bg|rounded|boxShadow|borderWidth)=/;
 
 describe('chat prototype density', () => {
   it('builds chat text and interactions from the shared components package', () => {
+    // 会话的界面不直接画 react-native 的视图：用组件库，或者只拼别的会话组件（例如 TicketExecutionCard 只拼
+    // EmbeddedTicketCard 和 EndRow，2026-11-15）。
     for (const file of chatFiles) {
-      expect(source(file), `${file} must use the components package`).toContain("from '@pi-lead-child/components'");
+      const text = source(file);
+      expect(text, `${file} must not draw react-native views itself`).not.toMatch(/from 'react-native'/);
+      expect(
+        text.includes("from '@pi-lead-child/components'") || /from '\.\/[A-Z]\w*'/.test(text),
+        `${file} must use the components package or compose other chat components`,
+      ).toBe(true);
     }
     expect(source('MessageComposer.tsx')).toMatch(/import\s*\{[^}]*\bChatInput\b[^}]*\bIconButton\b[^}]*\}\s*from\s*'@pi-lead-child\/components'/s);
     expect(source('ToolCallRow.tsx')).toContain('<Pressable');
@@ -109,8 +116,8 @@ describe('chat prototype density', () => {
     expect(composer).toMatch(/testID="send-message"[^]*?rounded="full"/);
     // 模型名和推理强度由 LeadModelPicker 画（点开换模型），输入框只给它留位置。
     expect(composer).toContain('{modelControl}');
-    // 工单对话坞的输入框：文字和发送按钮在一行，也是白底描边。
-    expect(composer).toMatch(/if \(minimal\) \{[^]*?<Row\s+testID="composer"[^>]*borderWidth=\{1\}/);
+    // 工单对话坞的输入框：文字和发送按钮在一行，灰底胶囊、没有描边（主题 11.21，画板 M3Wait，2026-11-15）。
+    expect(composer).toMatch(/if \(minimal\) \{[^]*?<Row\s+testID="composer"[^>]*rounded="full"[^>]*bg="surface-muted"/);
   });
 
   it('keeps the typed draft local while the user is typing', () => {

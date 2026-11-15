@@ -118,9 +118,10 @@ export function TicketChatDock({
       unreadLabel={m.newReply}
       bar={bar}
       preview={(
+        // 收着时只有一行最后的回复（主题 11.21 T-13，画板 M3Wait）。Run 的状态在属性表和执行详情里；只有 Run 可能卡住时才在这里提醒。
         <Column gap="card-row">
           <DockPreview ticketId={ticketId} lastId={lastId} receipt={receipt} />
-          {liveRun ? <LiveRunRow progress={liveRun} /> : null}
+          {liveRun?.stalled ? <LiveRunRow progress={liveRun} /> : null}
         </Column>
       )}
       composer={(
@@ -131,16 +132,24 @@ export function TicketChatDock({
           {/* 收起时按钮放在预览下面。预览本身可以点开，按钮不能放进它里面。 */}
           {/* spacing-exempt: 光学对齐 */}
           {!expanded && replyActionRow ? <Column pb={2}>{replyActionRow}</Column> : null}
-          <Column gap="text-stack">
-            <Text testID="ticket-chat-identity" size="note" tone="secondary" numberOfLines={1}>
-              {destination.hint}
+          {/* 收着时一行小字说消息会去哪里（主题 T-13，2026-10-15 用户定的），续接时带上预估成本；展开以后写完整的说明。 */}
+          {!expanded ? (
+            <Text testID="ticket-chat-brief" size="note" tone={destination.cost ? 'warning-dark' : 'secondary'} numberOfLines={1}>
+              {destination.brief}
             </Text>
-            {destination.cost ? (
-              <Text testID="ticket-chat-cost" size="note" weight="semibold" tone="warning-dark" numberOfLines={1}>
-                {destination.cost}
+          ) : null}
+          {expanded ? (
+            <Column gap="text-stack">
+              <Text testID="ticket-chat-identity" size="note" tone="secondary" numberOfLines={1}>
+                {destination.hint}
               </Text>
-            ) : null}
-          </Column>
+              {destination.cost ? (
+                <Text testID="ticket-chat-cost" size="note" weight="semibold" tone="warning-dark" numberOfLines={1}>
+                  {destination.cost}
+                </Text>
+              ) : null}
+            </Column>
+          ) : null}
           <MessageComposer
             key={composerRevision}
             contextKey={`ticket:${ticketId}`}
@@ -186,7 +195,7 @@ function DockPreview({ ticketId, lastId, receipt }: { ticketId: number; lastId: 
     );
   }
   if (!message) {
-    return <Text size="secondary" tone="secondary">{m.empty}</Text>;
+    return <Text size="secondary" tone="secondary" numberOfLines={1}>{m.emptyShort}</Text>;
   }
   const user = message.role === 'user';
   const who = user ? m.you : ticketConversationSenderLabel(turn?.originKind, leadName, locale);
@@ -208,10 +217,12 @@ function DockPreview({ ticketId, lastId, receipt }: { ticketId: number; lastId: 
     ? failure.actions.includes('resend') ? m.noAnswerResend : failure.headline
     : text || (message.state === 'streaming' ? m.answeringNow : m.noText);
   return (
-    <Column testID="ticket-chat-preview" gap="text-stack">
-      <Text size="meta" weight="semibold" tone="secondary">{`${who} · ${when}`}</Text>
-      <Text size="body" tone={message.failure ? 'danger-dark' : 'default'} numberOfLines={2}>{body}</Text>
-    </Column>
+    // 一行：谁、说了什么、什么时候（T-13，行高 40）。
+    <Row testID="ticket-chat-preview" items="center" gap="icon-label" minH={40}>
+      <Text size="meta" weight="semibold" tone="secondary" numberOfLines={1}>{who}</Text>
+      <Text flex={1} minW={0} size="body" tone={message.failure ? 'danger-dark' : 'default'} numberOfLines={1}>{body}</Text>
+      <Text size="meta" mono tone="muted" numberOfLines={1}>{when}</Text>
+    </Row>
   );
 }
 

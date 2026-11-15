@@ -4,6 +4,7 @@
 import { act, fireEvent, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { openHistory } from '../../../test/ticketDetail';
 import { renderWorkbenchWithTicket, setViewportWidth, ticket66 } from '../../../test/workbench';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
@@ -22,7 +23,8 @@ describe('the evidence and records of a ticket', () => {
     const runtime = renderWorkbench(1280);
     const thread = screen.getByTestId('ticket-thread');
 
-    fireEvent.click(within(thread).getByTestId('ticket-records-open'));
+    // 完整记录的入口在「经过与记录」里（画布 M3），执行中默认收着。
+    fireEvent.click(within(openHistory(thread)).getByTestId('ticket-records-open'));
 
     expect(runtime.workspace.getState()).toMatchObject({ ticketRecordsOpenId: TICKET, ticketChatExpandedId: TICKET });
     const session = screen.getByTestId('workspace-session');
@@ -43,7 +45,8 @@ describe('the evidence and records of a ticket', () => {
     act(() => runtime.workspace.getState().openCompactPanel('thread'));
     const thread = screen.getByTestId('ticket-thread');
 
-    fireEvent.click(within(thread).getByTestId('ticket-records-open'));
+    // 完整记录的入口在「经过与记录」里（画布 M3），执行中默认收着。
+    fireEvent.click(within(openHistory(thread)).getByTestId('ticket-records-open'));
 
     expect(runtime.workspace.getState().ticketRecordsOpenId).toBe(TICKET);
     expect(within(thread).getByTestId('ticket-records')).toBeTruthy();
@@ -60,7 +63,7 @@ describe('the evidence and records of a ticket', () => {
   it('shows one tab at a time with a single scroll area', () => {
     const runtime = renderWorkbench(390);
     act(() => runtime.workspace.getState().openCompactPanel('thread'));
-    fireEvent.click(screen.getByTestId('ticket-records-open'));
+    fireEvent.click(within(openHistory(screen.getByTestId('ticket-thread'))).getByTestId('ticket-records-open'));
     const records = screen.getByTestId('ticket-records');
 
     expect(within(records).getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Acceptance', 'Progress', 'Executions', 'Lifecycle', 'Artifacts']);
@@ -83,7 +86,7 @@ describe('the evidence and records of a ticket', () => {
       runtime: 'codex', purpose: 'review', exitCode: 0, errorCode: null, errorMessage: null,
       startedAt: '2026-10-15T02:00:00.000Z', endedAt: '2026-10-15T02:10:00.000Z',
     }]));
-    fireEvent.click(within(screen.getByTestId('ticket-thread')).getByTestId('ticket-records-open'));
+    fireEvent.click(within(openHistory(screen.getByTestId('ticket-thread'))).getByTestId('ticket-records-open'));
     const records = screen.getByTestId('ticket-records');
     fireEvent.click(within(records).getByTestId('ticket-records-tab-runs'));
 

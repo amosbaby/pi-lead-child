@@ -68,6 +68,7 @@ export function TicketChip({ ticket, onPress }: { ticket: Ticket; onPress: () =>
         borderWidth={1}
         borderColor="border-soft"
         bg="surface"
+        maxW="100%"
         pl="pill-x"
         pr="pill-x"
         minH={32}
@@ -77,7 +78,9 @@ export function TicketChip({ ticket, onPress }: { ticket: Ticket; onPress: () =>
           {/* spacing-exempt: 状态标签字号 */}
           <Text size="12.5" mono tone="secondary" shrink={0}>{`#${ticket.id}`}</Text>
           {/* spacing-exempt: 状态标签字号 */}
-          <Text size="12.5" minW={0} numberOfLines={1}>{title}</Text>
+          {/* 标题能缩：React Native 缺省不缩，长标题会把整个胶囊撑出屏幕右边（2026-11-15 真机）。 */}
+          {/* spacing-exempt: 状态标签字号 */}
+          <Text size="12.5" shrink={1} minW={0} numberOfLines={1}>{title}</Text>
           {/* spacing-exempt: 状态标签字号 */}
           <Text size="12.5" weight="semibold" tone="secondary" shrink={0}>{ticket.statusLabel}</Text>
           <Box w={22} h={22} rounded="full" bg="surface-muted" items="center" justify="center" shrink={0}>

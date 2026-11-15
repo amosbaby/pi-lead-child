@@ -35,13 +35,18 @@ export type ActionBarProps = {
    * auto：窗口比平板窄时用 stacked。
    */
   layout?: 'auto' | 'inline' | 'stacked';
+  /**
+   * stacked 里按钮的样子。fill：排满一行、44 高（缺省）。compact：工单决定卡里（主题 T-7）的胶囊按钮，按文字的宽度，
+   * 38 高，靠左，主按钮在前，「更多」在最后。
+   */
+  buttons?: 'fill' | 'compact';
   testID?: string;
 };
 
 // 底部操作栏（第四轮画板，和对话坞放在同一个外框里：ChatDock 的 bar）：左边是下一步和一行小字，右边是更多、次要和主按钮。
 // 按钮能不能点由调用方给：组件不判断。
 export function ActionBar({
-  next, nextLabel: nextLabelProp, caption, more, secondary, primary, confirm, layout = 'auto', testID,
+  next, nextLabel: nextLabelProp, caption, more, secondary, primary, confirm, layout = 'auto', buttons = 'fill', testID,
 }: ActionBarProps) {
   const m = useMessages(displayMessages);
   const nextLabel = nextLabelProp ?? m.nextLabel;
@@ -58,6 +63,26 @@ export function ActionBar({
       {caption ? <Text mt="text-stack" size="note" tone="secondary" numberOfLines={1}>{caption}</Text> : null}
     </>
   );
+  if ((layout === 'stacked' || (layout === 'auto' && !tablet)) && buttons === 'compact') {
+    return (
+      <Column testID={testID} px="card" pt="card" pb="card">
+        {text}
+        {more || secondary || primary ? (
+          <Row mt="card-section" gap="actions" items="center" flexWrap="wrap">
+            {primary ? (
+              <Button label={primary.label} onPress={primary.onPress} disabled={primary.disabled} variant="solid"
+                tone={primary.tone ?? 'accent'} size="md" shape="pill" testID={primary.testID} />
+            ) : null}
+            {secondary ? (
+              <Button label={secondary.label} onPress={secondary.onPress} disabled={secondary.disabled} variant="outline"
+                tone={secondary.tone ?? 'neutral'} size="md" shape="pill" testID={secondary.testID} />
+            ) : null}
+            {more ? <IconButton icon="more" label={more.label} onPress={more.onPress} variant="outline" size="md" rounded="full" testID={more.testID} /> : null}
+          </Row>
+        ) : null}
+      </Column>
+    );
+  }
   if (layout === 'stacked' || (layout === 'auto' && !tablet)) {
     // 手机上按钮排满一行：主按钮比次要按钮宽一些。
     return (

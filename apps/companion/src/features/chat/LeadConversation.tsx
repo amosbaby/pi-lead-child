@@ -568,6 +568,8 @@ function ConversationRowView({ item, context }: { item: LeadConversationRow; con
   if (item.kind === 'setup-checklist') return <SetupChecklistCardItem />;
   if (item.kind === 'setup-hint') return <SetupHintCardItem cardKey={item.hintKey} />;
   const card = cardsById[item.cardId];
+  // 单独成行的工单卡没有回复可以标：同一天已经完整画过的，折叠以后就不再画（见上面消息里的同一条规则）。
+  if (collapsedCardIds.has(item.cardId)) return null;
   return card ? (
     <Box w="100%">
       <ConversationCardView
@@ -814,7 +816,9 @@ function ConversationMessage({
       {/* Three or more same-kind cards of this turn (reminders, new tickets) show as one line (P9.10, turnCardGroups.ts). */}
       {!user && cardSlots.map((slot) => slot.kind === 'group' ? (
         <TurnCardGroupView key={slot.group.key} group={slot.group} />
-      ) : cardsById[slot.cardId] ? (
+      ) : cardsById[slot.cardId] && !(collapsedCardIds.has(slot.cardId) && !rawText.trim()) ? (
+        // 折叠成小标签的工单卡说的是「这一段回复也动了这张工单」：回复一个字也没有时，标签没有可以标的，不画
+        // （2026-11-15 用户截图：#367 的整卡下面紧跟着一个孤零零的 #367 小标签）。
         <ConversationCardView
           key={slot.cardId}
           card={cardsById[slot.cardId]!}

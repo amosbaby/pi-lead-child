@@ -1,4 +1,3 @@
-import { Card, Column, Icon, Pressable, Row, Text } from '@pi-lead-child/components';
 import type { TicketOperationProjection } from '@pi-lead-child/protocol';
 
 import { useMessages, type Locale } from '@/i18n';
@@ -6,6 +5,7 @@ import { useMessages, type Locale } from '@/i18n';
 import type { ConversationCardEntity } from '../../state/types';
 import type { Ticket } from '../workspace/model';
 import { EmbeddedTicketCard } from './EmbeddedTicketCard';
+import { EndRow } from './EndRow';
 import { ticketCardMessages } from './ticketCard.messages';
 
 const MAX_VISIBLE_OPERATIONS = 16;
@@ -57,18 +57,17 @@ export function TicketExecutionCard({
 }) {
   const m = useMessages(ticketCardMessages);
   if (!ticket) {
+    // 还没取到是什么（刚建好、或者不在工单列表里，正在按编号取）：一行结束行，和会话里别的一行对齐；
+    // 取到以后换成工单卡或者提醒卡（2026-11-15 用户截图：这里原来是一张写着「打开这张工单看看」的空卡片）。
     return (
-      <Card w="100%" variant="float" overflow="hidden">
-        <Pressable testID={`open-ticket-${card.ticketId}`} onPress={() => onOpenTicket(card.ticketId)} feedback="highlight" px="card" py="card">
-          <Row items="center" gap="side-item">
-            <Column flex={1} minW={0} gap="text-stack">
-              <Text size="meta" mono tone="secondary">{`#${card.ticketId}`}</Text>
-              <Text size="secondary" tone="secondary">{fallback ?? m.openToSee}</Text>
-            </Column>
-            <Icon name="chevron-right" size={12} color="text-secondary" weight="semibold" />
-          </Row>
-        </Pressable>
-      </Card>
+      <EndRow
+        testID={`open-ticket-${card.ticketId}`}
+        label={m.openTicket(card.ticketId, fallback ?? m.openToSee)}
+        icon="tickets"
+        title={`#${card.ticketId}`}
+        line={fallback ?? m.openToSee}
+        onPress={() => onOpenTicket(card.ticketId)}
+      />
     );
   }
   return <EmbeddedTicketCard compact={compact} onPress={() => onOpenTicket(card.ticketId)} ticket={ticket} />;

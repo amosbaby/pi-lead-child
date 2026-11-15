@@ -1,6 +1,6 @@
 import {
-  ActionBar, Button, canCopyText, Card, Checklist, ChoiceGroup, Column, ConfirmBar, copyText, Density, DetailHeader, DockedLayout, FactList, Icon,
-  Popover, RecordRow, Row, ScrollArea, Section, Sheet, Stats, Steps, Text, TextField, Timeline, type FactItem,
+  ActionBar, Box, Button, canCopyText, Card, Checklist, ChoiceGroup, Column, ConfirmBar, copyText, Density, DockedLayout, FactList, FloatingSheet, Icon,
+  Popover, Pressable, RecordRow, Row, ScrollArea, Section, Sheet, Steps, Text, TextField, Timeline, type FactItem,
   type ScrollEvent,
 } from '@pi-lead-child/components';
 import type {
@@ -12,8 +12,6 @@ import { useState, type ReactNode } from 'react';
 
 import { useLocale, useMessages, type Locale } from '@/i18n';
 
-import { StatusBadge } from '@/components/StatusBadge';
-import { MarkdownMessage } from '@/features/chat/MarkdownMessage';
 import { useLeadName } from '@/state/hooks';
 import type { ArtifactDownloadState, InterventionCommandState, ResourceLoadState } from '@/state/types';
 import {
@@ -34,15 +32,18 @@ import { InterventionPanel } from './InterventionPanel';
 import type { LegacyTicketAction, LegacyTicketActionId } from './legacyTicketActions';
 import type { TicketLogRunPresentation } from './LogTimeline';
 import { TicketAttachmentStrip, TicketAttachmentViewer, type TicketAttachmentLoader } from './TicketAttachments';
-import { ticketAttachmentsMessages } from './ticketAttachments.messages';
 import { TicketChatDock, type TicketChatAction } from './TicketChatDock';
+import {
+  DetailAttributes, DetailSection, DetailTitle, DetailTopBar, FoldRow, MoreTrigger, PlaceholderLines, RelationRows, TaskBrief, TaskBriefSheetContent, TokenAttribute, TokenBreakdown, type TokenPart,
+  type AttributeItem, type RelationRowItem,
+} from './TicketDetailParts';
+import { ticketDetailLayoutMessages } from './ticketDetailLayout.messages';
 import type { TicketActionReceipt, TicketRunProgress } from './ticketChatStatus';
 import { isTicketBlockedForActions, ticketDecision } from './ticketDecision';
 import {
   DELIVERY_OPERATIONS,
   barCaption,
   briefPreview,
-  briefSummary,
   childBadge,
   clockText,
   criteriaPresentation,
@@ -51,28 +52,25 @@ import {
   detailSectionTitles,
   detailStage,
   durationText,
-  executionSummary,
   findAction,
   headerMoreActions,
-  historyItems,
   integrationBadge,
+  historyItems,
   nextStepText,
   planSteps,
-  planSummary,
   reviewWentAgainst,
   reviewerStatusLabels,
   sectionCollapsed,
   sourceLabels,
   splitRequestText,
-  usageCaption,
+  tokenText,
+  costText,
+  tokenSummary,
   usagePartsCaption,
-  usagePartsStats,
-  usageStats,
   writerLabel,
   type ChildStage,
   type DetailSectionKind,
   type DetailStage,
-  type RememberedSections,
   type ReviewerStatus,
   type UsageParts,
 } from './ticketDetailSections';
@@ -82,6 +80,7 @@ import { TicketRecords } from './TicketRecords';
 import type { TicketStoryEntry } from './ticketStory';
 import { ticketStateMessages } from './ticketState.messages';
 import { ticketThreadMessages } from './ticketThread.messages';
+import { ticketDetailMessages } from './ticketDetail.messages';
 import { useRememberedSections } from './useRememberedSections';
 
 export type { TicketLogPresentation } from './ticketLogs';
@@ -314,7 +313,7 @@ export function TicketThread({
   const leadName = useLeadName();
   const locale = useLocale();
   const m = useMessages(ticketThreadMessages);
-  const attachmentText = useMessages(ticketAttachmentsMessages);
+  const layout = useMessages(ticketDetailLayoutMessages);
   const sources = sourceLabels(leadName, locale);
   const titles = detailSectionTitles(locale);
   const [remembered, remember] = useRememberedSections();
@@ -322,6 +321,8 @@ export function TicketThread({
   const [briefOpen, setBriefOpen] = useState(false);
   const [linkFormOpen, setLinkFormOpen] = useState(false);
   const [barMenuOpen, setBarMenuOpen] = useState(false);
+  // 手机上从页面根上升起的面板：Token 明细、任务说明全文（面板不能画在滚动区里，见 TokenAttribute）。
+  const [rootSheet, setRootSheet] = useState<'token' | 'brief' | null>(null);
   const [openAttachment, setOpenAttachment] = useState<TicketAttachment | null>(null);
   const [confirming, setConfirming] = useState<TicketAction | null>(null);
   // 恢复已取消的工单：先确认，有已取消的子工单时选恢复范围（旧接口，legacyTicketActions.ts）。
@@ -337,7 +338,6 @@ export function TicketThread({
   const titleText = ticket.title;
 
   const collapsed = (kind: DetailSectionKind) => sectionCollapsed(stage, kind, remembered);
-  const toggle = (kind: DetailSectionKind) => (next: boolean) => remember(kind, next);
 
   // 「下一步」：等你验收、受阻时用 ticketDecision 的那一句，和收件箱同一句话。
   const blockerCheckpoint = ticket.status === 'blocked' ? latestBlockedCheckpoint(checkpoints) : undefined;
@@ -435,35 +435,60 @@ export function TicketThread({
     });
   };
 
-  // ── 头部 ──
+  // ── 头部（主题 11.21）──
   const headerActions = headerMoreActions(actions);
+  // 要你处理的事：等你验收、受阻、草稿待确认、有等你回答的决定、有子工单等你，或者你正在确认一个操作。
+  // 有的时候标题下面出决定卡；没有的时候不出卡片，工单的操作并进顶栏的「⋯」。
+  const childrenWaiting = childTickets.filter((child) => child.state === 'review' || child.state === 'blocked');
+  const pendingDecisionsEarly = Object.values(interventions).filter((intervention) => intervention.kind === 'decision' && intervention.state === 'pending');
+  const ownDecision = stage === 'draft' || stage === 'review' || ticket.status === 'blocked' || ticket.needsUser != null
+    || pendingDecisionsEarly.length > 0 || confirming !== null || restoring !== null || Boolean(actionState?.error)
+    // 做完了还没合并：合并或开 PR 是你的事。操作清单读不到时也出卡，写原因、给重试。
+    || (stage === 'done' && Boolean(bar.primary?.available))
+    || (actions.length === 0 && (actionsStatus === 'error' || actionsStatus === 'unsupported'));
+  const showDecisionCard = ownDecision || childrenWaiting.length > 0;
+  // 不出决定卡时，工单的操作（包括旧接口的恢复、开始）并进顶栏的「⋯」，点了走和决定卡同一个入口（确认框照样出在决定卡里）。
+  const menuActions = showDecisionCard ? [] : [
+    ...[bar.primary, bar.secondary, ...bar.more].filter((action): action is TicketAction => action !== null).map((action) => ({
+      id: action.id,
+      label: action.label,
+      detail: waitingForDelivery(action) ? m.deliveryLoading : actionNote(action, m),
+      onPress: canRun(action) || (action.available && CHAT_OPERATIONS[action.id]) ? () => choose(action) : undefined,
+    })),
+    ...legacyActions.map((action) => ({
+      id: action.id,
+      label: action.label,
+      detail: action.note ?? undefined,
+      onPress: onLegacyAction && pendingActionId === null ? () => chooseLegacy(action) : undefined,
+    })),
+  ];
   const header = (
-    <DetailHeader
-      testID="ticket-thread-header"
-      id={`#${displayId}`}
+    <DetailTopBar
+      phone={standalone}
+      project={ticket.project ?? null}
+      displayId={displayId}
       title={titleText}
-      compact={headerCompact}
-      badges={(
-        <>
-          <StatusBadge label={ticket.statusLabel} tone={ticket.status} />
-          <StatusBadge label={ticket.priorityLabel} tone={ticket.priority} />
-        </>
-      )}
-      project={ticket.project}
+      scrolled={headerCompact}
+      onBack={onClose}
+      onClose={standalone ? undefined : onClose}
+      closeLabel={m.closeDetail}
       more={(
         <HeaderMenu
           link={ticketLink}
           actions={headerActions}
           pendingActionId={pendingActionId}
           onRun={(action, request) => runAction(action, request)}
+          trigger={<MoreTrigger phone={standalone} />}
+          phone={standalone}
+          extra={menuActions}
         />
       )}
-      onClose={standalone ? undefined : onClose}
-      closeLabel={m.closeDetail}
-      onBack={standalone ? onClose : undefined}
-      dense={standalone}
     />
   );
+  // 手机上顶栏没有工单号，这一行总要写它；创建的人和时间还没读到时只写工单号。
+  const creatorMeta = facts
+    ? layout.meta(standalone ? displayId : null, creatorName(facts.createdBy, leadName, m), clockText(facts.createdAt, undefined, locale))
+    : standalone ? layout.ticketId(displayId) : null;
 
   // ── 关系 ──
   const linkAction = findAction(actions, 'link');
@@ -471,107 +496,11 @@ export function TicketThread({
   // 子工单已经在上面的列表里；这里列父工单和相关工单。撤销了的关系不列。
   const relationLinks = relations.filter((relation) => relation.kind !== 'parent_of' && relation.active !== false);
   const hasRelations = childTickets.length > 0 || relationLinks.length > 0;
+  // 工单详情（任务说明、关联、用量）还没读到：这几块先画同高的占位。
+  const detailLoading = taskDescription === undefined;
   const cancelledChildren = childTickets.filter((child) => child.state === 'cancelled').length;
-  const relationsSection = (
-    <Section
-      testID="ticket-section-relations"
-      title={titles.relations}
-      summary={hasRelations ? relationsSummary(childTickets, relationLinks, m) : (
-        <Row items="baseline" gap="inline-item" flexWrap="wrap">
-          <Text size="secondary" tone="secondary">{m.noChildren}</Text>
-          <Button testID="ticket-split-request" label={m.split} variant="link" size="xs" onPress={() => prefill(splitRequestText(displayId, locale))} disabled={!onPrefillChat} />
-          <Text size="secondary" tone="secondary">·</Text>
-          <Text size="secondary" tone="secondary">{m.noRelations}</Text>
-          {linkAction ? (
-            <Button testID="ticket-link-open" label={m.linkTicket} variant="link" size="xs" onPress={() => setLinkFormOpen(true)} disabled={!linkAction.available} />
-          ) : null}
-        </Row>
-      )}
-      collapsed={hasRelations ? collapsed('relations') : !linkFormOpen}
-      onToggle={hasRelations ? toggle('relations') : undefined}
-      inset={!hasRelations || linkFormOpen}
-    >
-      {childTickets.map((child, index) => (
-        <RecordRow
-          key={child.id}
-          testID={`child-ticket-${child.id}`}
-          divider={index > 0}
-          id={`#${child.displayId}`}
-          title={child.title}
-          badge={childBadge(child.state, locale)}
-          detail={child.createdBy === 'lead' ? m.splitBy.lead(leadName) : child.createdBy === 'child' ? m.splitBy.child : undefined}
-          onPress={onOpenTicket ? () => onOpenTicket(child.id) : undefined}
-          accessibilityLabel={m.openChild(child.displayId, childBadge(child.state, locale).label)}
-        />
-      ))}
-      {relationLinks.map((relation, index) => (
-        <RecordRow
-          key={`${relation.kind}-${relation.ticketId}`}
-          testID={`ticket-relation-${relation.ticketId}`}
-          divider={childTickets.length > 0 || index > 0}
-          id={`#${relation.ticketId}`}
-          title={relation.title ?? `#${relation.ticketId}`}
-          badge={{ label: relation.label, tone: 'neutral' }}
-          detail={relation.detail ?? undefined}
-          onPress={onOpenTicket ? () => onOpenTicket(String(relation.ticketId)) : undefined}
-          // 解除关联：关系账本里的关系才有编号（父子树上的关系没有），能不能点按清单。
-          action={unlinkAction && relation.relationId ? {
-            icon: 'close',
-            label: m.unlink(relation.ticketId),
-            disabled: !canRun(unlinkAction),
-            onPress: () => runAction(unlinkAction, { input: { relationId: relation.relationId! }, reason: m.unlinkReason }),
-          } : undefined}
-        />
-      ))}
-      {hasRelations && linkAction ? (
-        <RecordRow
-          divider
-          testID="ticket-link-open"
-          title={m.linkTicket}
-          detail={linkAction.available ? undefined : linkAction.reason ?? undefined}
-          onPress={linkAction.available ? () => setLinkFormOpen(true) : undefined}
-        />
-      ) : null}
-      {linkFormOpen && linkAction ? (
-        <LinkTicketForm
-          action={linkAction}
-          pending={pendingActionId === 'link'}
-          onCancel={() => setLinkFormOpen(false)}
-          onSubmit={(request) => {
-            setLinkFormOpen(false);
-            runAction(linkAction, request);
-          }}
-        />
-      ) : null}
-    </Section>
-  );
-
   // ── 任务说明 ──
   const brief = briefPreview(taskDescription?.brief ?? '');
-  // 附件（工单 #231）放在任务说明下面：没有任务说明、只有附件时照样有这一块。折叠时摘要后面写几个附件。
-  const attachmentNote = attachments.length ? attachmentText.summary(attachments.length) : null;
-  const taskSummary = [brief.full ? briefSummary(brief.full, ticket.summary) : null, attachmentNote].filter(Boolean).join(' · ');
-  const taskSection = brief.full || attachments.length ? (
-    <Section
-      testID="ticket-section-task"
-      title={titles.task}
-      source={writerLabel(facts?.createdBy, leadName, locale)}
-      summary={collapsed('task') ? taskSummary : undefined}
-      collapsed={collapsed('task')}
-      onToggle={toggle('task')}
-    >
-      <Column gap="card-row">
-        {brief.full ? <MarkdownMessage markdown={briefOpen ? brief.full : brief.preview} /> : null}
-        {brief.truncated ? (
-          <Row>
-            <Button testID="ticket-brief-toggle" label={briefOpen ? m.collapse : m.showAll} variant="link" size="xs" onPress={() => setBriefOpen((open) => !open)} />
-          </Row>
-        ) : null}
-        <TicketAttachmentStrip attachments={attachments} load={onLoadAttachment} onOpen={setOpenAttachment} />
-      </Column>
-    </Section>
-  ) : null;
-
   // ── 验收标准 ──
   const criteria = criteriaPresentation(acceptanceCriteria, locale);
   const confirmAction = findAction(actions, 'confirm_criterion');
@@ -584,14 +513,13 @@ export function TicketThread({
   };
   const canToggleCriteria = criteria.compare && (confirmAction?.available || unconfirmAction?.available) && pendingActionId === null;
   const criteriaSection = (
-    <Section
+    <FoldRow
       testID="ticket-section-criteria"
       title={titles.criteria}
-      source={criteriaSourceLabel(acceptanceCriteria, leadName, locale)}
-      variant="subtle"
       summary={criteria.summary}
-      collapsed={collapsed('criteria')}
-      onToggle={toggle('criteria')}
+      source={criteriaSourceLabel(acceptanceCriteria, leadName, locale)}
+      open={!collapsed('criteria')}
+      onToggle={(open) => remember('criteria', !open)}
     >
       {criteria.empty ? (
         <Text size="secondary" tone="secondary">{m.noCriteria}</Text>
@@ -599,13 +527,14 @@ export function TicketThread({
         <Checklist
           testID="ticket-criteria"
           items={criteria.items}
-          columns={criteria.compare ? [{ label: sources.reviewer, emptyLabel: m.reviewerNoVerdict }] : []}
+          // 没有核查员的工单（只由你验收）不画核查员那一列：那一列只会是一排「—」，还把标准的文字挤窄（2026-11-15）。
+          columns={criteria.compare && reviewer ? [{ label: sources.reviewer, emptyLabel: m.reviewerNoVerdict }] : []}
           checkColumn={criteria.compare ? m.you : undefined}
           onToggle={canToggleCriteria ? toggleCriterion : undefined}
           checkLabel={(_item, index) => m.confirmCriterion(index + 1)}
         />
       )}
-    </Section>
+    </FoldRow>
   );
 
   // ── 工单信息 ──
@@ -639,35 +568,13 @@ export function TicketThread({
     { label: m.budget, value: budgetText(facts, m), ...delegatedEntry(actions, 'set_budget', m.set, () => prefill(m.prefill.budget(displayId))) },
     { label: m.acceptance, value: acceptanceText(ticket, leadName, m), ...delegationEntry },
   ];
-  const infoSection = (
-    <Section
-      testID="ticket-section-info"
-      title={titles.info}
-      source={sources.system}
-      summary={collapsed('info') ? acceptanceText(ticket, leadName, m) : undefined}
-      collapsed={collapsed('info')}
-      onToggle={toggle('info')}
-    >
-      <FactList variant="labeled" items={infoItems} />
-      {delegationActionState?.error ? <Text role="alert" size="note" tone="danger-dark">{delegationActionState.error}</Text> : null}
-    </Section>
-  );
-
   // ── 执行 ──
-  const running = stage === 'running';
-  const usage = {
-    activeExecutionMs: timing?.activeExecutionMs ?? null,
-    totalTokens: facts?.totalTokens ?? null,
-    totalCostUsd: facts?.totalCostUsd ?? null,
-    running,
-  };
-  const usageParts = usagePartsStats(facts?.usageParts, locale);
   const changeReviewer = findAction(actions, 'change_reviewer');
   const profileItems: FactItem[] = [
     {
       label: m.executor,
       value: profileText(executor ?? (ticket.runtimeName ? { runtime: runtimeDisplayName(ticket.runtimeName) ?? ticket.runtimeName, model: null, effort: null } : null), m),
-      ...delegatedEntry(actions, 'set_run_profile' as TicketOperationId, m.changeProfile, () => prefill(m.prefill.runProfile(displayId)), 'end'),
+      ...delegatedEntry(actions, 'set_run_profile' as TicketOperationId, m.changeProfile, () => prefill(m.prefill.runProfile(displayId))),
     },
     ...(reviewer ? [{
       label: m.reviewer,
@@ -677,119 +584,39 @@ export function TicketThread({
       } : {}),
     }] : []),
   ];
-  const latestProgress = running ? checkpoints.find((checkpoint) => checkpoint.source === 'agent_reported') ?? null : null;
-  const recentLogs = running ? logs.slice(-5).reverse() : [];
   const steps = planSteps(executionPlan, locale);
-  const executionSection = ticket.hasRun || stage !== 'draft' ? (
-    <Section
-      testID="ticket-section-execution"
-      variant="group"
-      title={titles.execution}
-      summary={collapsed('execution') ? executionSummary(executor?.runtime ?? agent, usage, locale) : undefined}
-      collapsed={collapsed('execution')}
-      onToggle={toggle('execution')}
-    >
-      <Card overflow="hidden">
-        <Section testID="ticket-execution-profiles" variant="part" divider={false}>
-          <FactList variant="labeled" items={profileItems} />
-        </Section>
-        <Section testID="ticket-execution-usage" variant="part" title={m.usage} source={sources.system}>
-          <Column gap="card-row">
-            <Stats variant="compact" items={usageStats(usage, locale)} />
-            <Text size="note" tone="secondary">{usageCaption(running, locale)}</Text>
-            {usageParts.length > 0 && facts?.usageParts ? (
-              <>
-                <Stats variant="compact" items={usageParts} testID="ticket-usage-parts" />
-                <Text size="note" tone="secondary">{usagePartsCaption(facts.usageParts, locale)}</Text>
-              </>
-            ) : null}
-          </Column>
-        </Section>
-        <Section testID="ticket-execution-plan" variant="part" title={m.plan} source={sources.child} summary={planSummary(executionPlan, undefined, locale) ?? undefined} summaryMono>
-          {steps.length > 0
-            ? <Steps variant="compact" items={steps} />
-            : <Text size="secondary" tone="secondary">{executionPlan === undefined ? m.planLoading : m.noPlan}</Text>}
-        </Section>
-        {running ? (
-          <Section testID="ticket-execution-now" variant="part" title={m.now} source={sources.child} summary={latestProgress ? m.saidAt(clockText(latestProgress.createdAt, undefined, locale)) : undefined}>
-            <Text size="body">{latestProgress ? latestProgress.summary || latestProgress.title : m.noProgress}</Text>
-          </Section>
-        ) : null}
-        {recentLogs.length > 0 ? (
-          <Section testID="ticket-execution-actions" variant="part" title={m.recentActions} source={sources.system}>
-            <Timeline
-              variant="compact"
-              // 只写做了什么（工具和它的主要参数）；耗时、输出大小这些在完整记录里。
-              items={recentLogs.map((log) => ({ at: clockText(log.createdAt, undefined, locale), text: log.title }))}
-            />
-          </Section>
-        ) : null}
-        <Section testID="ticket-execution-runs" variant="part" title={m.runs} source={sources.system} summary={attempts.length > 0 ? m.runsHint : undefined} inset={attempts.length === 0}>
-          {attempts.length === 0 ? <Text size="secondary" tone="secondary">{m.noRuns}</Text> : null}
-          {attempts.map((attempt, index) => (
-            <RecordRow
-              key={attempt.id}
-              testID={`ticket-run-${attempt.id}`}
-              divider={index > 0}
-              title={attempt.purposeLabel}
-              meta={`· ${runChoice(attempt)}`}
-              badge={{ label: attempt.result, tone: RUN_TONE[attempt.resultTone] }}
-              detail={runDetail(attempt, m, locale)}
-              detailMono
-              onPress={openRecords}
-              accessibilityLabel={m.runRecords(attempt.purposeLabel, clockText(attempt.startedAt, undefined, locale))}
-            />
-          ))}
-        </Section>
-        {ticket.workflowKind === 'coding' && ticket.workspace ? (
-          <Section testID="ticket-execution-workspace" variant="part">
-            <FactList variant="labeled" items={[workspaceFact(stage, ticket, workspace, m, locale)]} />
-          </Section>
-        ) : null}
-      </Card>
-    </Section>
-  ) : null;
-
   // ── 交付与验收（内容在工单 13 做）──
   const latestOutcome = outcome?.latest ?? null;
-  const deliverySection = stage === 'draft' ? null : (
-    <Section
-      testID="ticket-section-delivery"
-      variant="group"
-      title={titles.delivery}
-      summary={deliverySummary(stage, latestOutcome, acceptanceCriteria?.delivery ?? null, m, locale)}
-      collapsed={latestOutcome ? collapsed('delivery') : false}
-      onToggle={latestOutcome ? toggle('delivery') : undefined}
-    >
-      <Card overflow="hidden">
-        {latestOutcome ? (
-          <Section testID="ticket-delivery-summary" variant="part" divider={false} title={m.whatWasDone} source={sources.child}>
-            <Text size="body" numberOfLines={4}>{latestOutcome.summary}</Text>
-          </Section>
-        ) : (
-          <Section testID="ticket-delivery-pending" variant="part" divider={false}>
-            <Text size="secondary" tone="secondary">{stage === 'cancelled' ? m.cancelledNoDelivery : m.notDelivered}</Text>
-          </Section>
-        )}
-      </Card>
-    </Section>
-  );
-
   // ── 经过与记录 ──
+  // 画布 M3：页面在这里收尾，收起时写最近的一件事。交付、工单信息（截止、预算、验收方式、执行者）都在展开以后，
+  // 每次执行的日志在「完整记录」里。
+  const latestStory = story.at(-1);
   const historySection = (
-    <Section
+    <FoldRow
       testID="ticket-section-history"
-      variant="group"
       title={titles.history}
-      summary={collapsed('history') ? m.eventCount(story.length) : undefined}
-      collapsed={collapsed('history')}
-      onToggle={toggle('history')}
+      summary={latestStory ? `${clockText(latestStory.at, undefined, locale)} ${latestStory.title}` : m.eventCount(0)}
+      open={!collapsed('history')}
+      onToggle={(open) => remember('history', !open)}
     >
       <Card overflow="hidden">
         <Section testID="ticket-history-story" variant="part" divider={false} title={m.story} source={sources.system}>
           {story.length > 0
             ? <Timeline testID="ticket-history-timeline" variant="compact" items={historyItems(story, undefined, locale)} />
             : <Text size="secondary" tone="secondary">{m.noStory}</Text>}
+        </Section>
+        {latestOutcome ? (
+          <Section testID="ticket-delivery-summary" variant="part" title={m.whatWasDone} source={sources.child}
+            summary={deliverySummary(stage, latestOutcome, acceptanceCriteria?.delivery ?? null, m, locale)}>
+            <Text size="body" numberOfLines={4}>{latestOutcome.summary}</Text>
+          </Section>
+        ) : null}
+        <Section testID="ticket-section-info" variant="part" title={titles.info} source={sources.system}>
+          <FactList variant="labeled" items={[
+            ...infoItems, ...profileItems,
+            ...(ticket.workflowKind === 'coding' && ticket.workspace ? [workspaceFact(stage, ticket, workspace, m, locale)] : []),
+          ]} />
+          {delegationActionState?.error ? <Text role="alert" size="note" tone="danger-dark">{delegationActionState.error}</Text> : null}
         </Section>
         <RecordRow
           divider
@@ -801,7 +628,7 @@ export function TicketThread({
           accessibilityLabel={m.openFullRecords}
         />
       </Card>
-    </Section>
+    </FoldRow>
   );
 
   // 等你回答的决定直接放在最上面：收件箱「查看」打开的就是这里（2026-10-16）。
@@ -833,7 +660,10 @@ export function TicketThread({
   const actionBar = (
     <ActionBar
       testID="ticket-action-bar"
-      next={next}
+      // 决定卡里的操作条（主题 T-7）：胶囊按钮，不排满一行。
+      buttons="compact"
+      // 决定卡上面已经用大字写了结论（T-7）；「下一步」是同一句时不再写一遍。
+      next={next === decision.headline ? undefined : next}
       caption={actionState?.error ?? actionsCaption ?? deliveryCaption ?? barCaption(bar, acceptanceCriteria, locale)}
       primary={barButton(bar.primary, 'primary')}
       secondary={barButton(bar.secondary, 'secondary') ?? retryButton}
@@ -916,6 +746,242 @@ export function TicketThread({
     if (action) choose(action);
   };
 
+  // ── 新版式的各块（主题 11.21，2026-11-14）──
+  // 决定卡：只在有要你处理的事时出现，白底悬浮。第一行是琥珀点和状态词，第二行是结论，下面是操作（确认栏也在这里）。
+  // 父工单自己没有决定、但有子工单等你时，卡片转达那张子工单。
+  const relayChild = !ownDecision ? childrenWaiting[0] ?? null : null;
+  const decisionCard = showDecisionCard ? (
+    <Card testID="ticket-decision-card" variant="float" p="card" gap="card-row">
+      <Row items="center" gap="icon-label">
+        <Box w={7} h={7} rounded="full" bg="warning" />
+        <Text size="label" weight="semibold" tone="warning-dark">
+          {relayChild ? layout.childWaiting(childrenWaiting.length) : ticket.statusLabel}
+        </Text>
+      </Row>
+      {relayChild ? (
+        <>
+          <Text size="sheet-title" weight="semibold">{relayChild.title}</Text>
+          {onOpenTicket ? (
+            <Row>
+              <Button testID="ticket-decision-open-child" label={layout.openTicket(relayChild.displayId)} shape="pill" size="sm" onPress={() => onOpenTicket(relayChild.id)} />
+            </Row>
+          ) : null}
+        </>
+      ) : (
+        <>
+          {decision.headline ? <Text size="sheet-title" weight="semibold">{decision.headline}</Text> : null}
+          {pendingDecisions.length > 0 ? (
+            <Column testID="ticket-pending-decision" gap="stacked-card">
+              {pendingDecisions.map((intervention) => (
+                <InterventionPanel
+                  key={intervention.id}
+                  intervention={buildInterventionPresentation(intervention, locale)}
+                  commandState={interventionCommandStates[intervention.id]}
+                  onResolve={onResolveIntervention}
+                />
+              ))}
+            </Column>
+          ) : null}
+          {actionBar}
+        </>
+      )}
+    </Card>
+  ) : null;
+
+  // 属性：两列的小表。草稿是项目、优先级、执行者；开跑以后是状态、项目、已执行、成本，再加一整行的 Token。
+  const statusTone = ticket.status === 'active' ? 'accent' as const : ticket.status === 'done' ? 'success-dark' as const
+    : ticket.status === 'blocked' || ticket.status === 'review' ? 'warning-dark' as const : 'secondary' as const;
+  const executorText = profileText(executor ?? (ticket.runtimeName ? { runtime: runtimeDisplayName(ticket.runtimeName) ?? ticket.runtimeName, model: null, effort: null } : null), m);
+  const attributeItems: AttributeItem[] = stage === 'draft'
+    ? [
+        ...(ticket.project ? [{ key: 'project', label: layout.project, value: ticket.project }] : []),
+        { key: 'priority', label: layout.priority, value: ticket.priorityLabel },
+        { key: 'executor', label: layout.executor, value: executorText },
+      ]
+    : [
+        { key: 'status', label: layout.status, value: ticket.statusLabel, tone: statusTone },
+        ...(ticket.project ? [{ key: 'project', label: layout.project, value: ticket.project }] : []),
+        { key: 'ran', label: layout.ran, value: durationText(timing?.activeExecutionMs, locale) ?? '-' },
+        { key: 'cost', label: layout.cost, value: facts?.totalCostUsd ? costText(facts.totalCostUsd) : '-' },
+      ];
+  if (facts?.dueAt) attributeItems.push({ key: 'due', label: layout.due, value: clockText(facts.dueAt, undefined, locale) });
+  const tokens = stage === 'draft' ? null : tokenSummary(facts?.usageParts);
+  // Token 一行（主题 T-8）：有拆分时写缓存、未缓存；没有拆分（旧的用量）时写总数。都有圆圈里的 i，点了看明细。
+  const parts = facts?.usageParts ?? null;
+  const usageLabels = ticketDetailMessages(locale).usage;
+  const tokenParts: TokenPart[] = parts ? [
+    { key: 'cache-read', label: usageLabels.cacheRead, value: tokenText(parts.cacheReadTokens, locale), weight: parts.cacheReadTokens, color: 'success' },
+    { key: 'cache-write', label: usageLabels.cacheWrite, value: tokenText(parts.cacheWriteTokens, locale), weight: parts.cacheWriteTokens, color: 'success-line' },
+    { key: 'uncached', label: usageLabels.uncachedInput, value: tokenText(parts.uncachedInputTokens, locale), weight: parts.uncachedInputTokens, color: 'accent' },
+    { key: 'output', label: usageLabels.output, value: tokenText(parts.outputTokens, locale), weight: parts.outputTokens, color: 'text' },
+    ...(parts.unsplitTokens > 0 ? [{ key: 'unsplit', label: layout.unsplit, value: tokenText(parts.unsplitTokens, locale), weight: parts.unsplitTokens, color: 'border-strong' as const }] : []),
+  ] : [];
+  const tokenCaption = parts ? usagePartsCaption(parts, locale) : usageLabels.captionParts;
+  const tokenRow = stage !== 'draft' && detailLoading ? (
+    // 用量还没读到：Token 这一行先占住，读到以后不把下面的块往下推。
+    <>
+      <Text w={44} size="label" tone="muted">{layout.tokens}</Text>
+      <Box flex={1}><PlaceholderLines lines={1} lineHeight={28} /></Box>
+    </>
+  ) : stage !== 'draft' && facts?.totalTokens ? (
+    <TokenAttribute
+      onShowDetails={standalone ? () => setRootSheet('token') : undefined}
+      summary={tokens ? { cached: tokenText(tokens.cached, locale), uncached: tokenText(tokens.uncached, locale), percent: tokens.cachedPercent } : null}
+      total={tokenText(facts.totalTokens, locale)}
+      parts={tokenParts}
+      caption={tokenCaption}
+    />
+  ) : null;
+
+  // 关联工单：子工单和别的关联在一起，按状态分组。
+  const childRowState = (state: ChildStage): RelationRowItem['state'] => (
+    state === 'review' || state === 'blocked' ? 'waiting' : state === 'running' ? 'running' : state === 'waiting' ? 'queued' : state);
+  const relatedRowState = (relation: RelationPresentation): RelationRowItem['state'] => {
+    switch (relation.relatedStage) {
+      case 'active': return 'running';
+      case 'review': case 'blocked': return 'waiting';
+      case 'done': case 'acked': return 'done';
+      case 'cancelled': return 'cancelled';
+      case null: case undefined: return null;
+      default: return 'queued';
+    }
+  };
+  const relationItems: RelationRowItem[] = [
+    ...childTickets.map((child) => ({
+      key: `child-${child.id}`,
+      testID: `child-ticket-${child.id}`,
+      ticketId: child.displayId,
+      title: child.title,
+      relation: null,
+      state: childRowState(child.state),
+      stateLabel: childBadge(child.state, locale).label,
+      onPress: onOpenTicket ? () => onOpenTicket(child.id) : undefined,
+    })),
+    ...relationLinks.map((relation) => ({
+      key: `${relation.kind}-${relation.ticketId}`,
+      testID: `ticket-relation-${relation.ticketId}`,
+      ticketId: String(relation.ticketId),
+      title: relation.title ?? `#${relation.ticketId}`,
+      relation: relation.label,
+      state: relatedRowState(relation),
+      stateLabel: relation.stateLabel || null,
+      onPress: onOpenTicket ? () => onOpenTicket(String(relation.ticketId)) : undefined,
+      action: unlinkAction && relation.relationId ? (
+        <Pressable testID={`ticket-relation-${relation.ticketId}-action`} aria-label={m.unlink(relation.ticketId)} disabled={!canRun(unlinkAction)} feedback="opacity"
+          onPress={() => runAction(unlinkAction, { input: { relationId: relation.relationId! }, reason: m.unlinkReason })}>
+          <Icon name="close" size={12} color="text-secondary" />
+        </Pressable>
+      ) : undefined,
+    })),
+  ];
+  const childDone = childTickets.filter((child) => child.state === 'done').length;
+  const segments = childTickets.map((child) => (child.state === 'done' || child.state === 'cancelled' ? 'done' as const
+    : child.state === 'running' ? 'running' as const : child.state === 'review' || child.state === 'blocked' ? 'waiting' as const : 'queued' as const));
+  const relationsBlock = (
+    <DetailSection
+      testID="ticket-section-relations"
+      title={layout.relations}
+      count={hasRelations ? relationItems.length : undefined}
+      aside={childTickets.length > 0 ? <Text size="label" tone="muted">{layout.childProgress(childDone, childTickets.length)}</Text> : undefined}
+      gap="text-stack"
+    >
+      {!hasRelations && detailLoading ? <PlaceholderLines testID="ticket-relations-placeholder" lines={2} lineHeight={30} /> : hasRelations ? (
+        <RelationRows
+          items={relationItems}
+          childDone={childDone}
+          childTotal={childTickets.length}
+          segments={segments}
+          footer={linkAction ? (
+            <Row pt="text-stack">
+              <Button testID="ticket-link-open" label={m.linkTicket} variant="link" size="xs" onPress={() => setLinkFormOpen(true)} disabled={!linkAction.available} />
+            </Row>
+          ) : undefined}
+        />
+      ) : (
+        <Row items="baseline" gap="inline-item" flexWrap="wrap">
+          <Text size="secondary" tone="secondary">{m.noChildren}</Text>
+          <Button testID="ticket-split-request" label={m.split} variant="link" size="xs" onPress={() => prefill(splitRequestText(displayId, locale))} disabled={!onPrefillChat} />
+          <Text size="secondary" tone="secondary">·</Text>
+          <Text size="secondary" tone="secondary">{m.noRelations}</Text>
+          {linkAction ? (
+            <Button testID="ticket-link-open" label={m.linkTicket} variant="link" size="xs" onPress={() => setLinkFormOpen(true)} disabled={!linkAction.available} />
+          ) : null}
+        </Row>
+      )}
+      {linkFormOpen && linkAction ? (
+        <LinkTicketForm
+          action={linkAction}
+          pending={pendingActionId === 'link'}
+          onCancel={() => setLinkFormOpen(false)}
+          onSubmit={(request) => {
+            setLinkFormOpen(false);
+            runAction(linkAction, request);
+          }}
+        />
+      ) : null}
+    </DetailSection>
+  );
+
+  // 任务说明：在关联工单和执行计划之间。最多 6 行，渐隐，「展开全文」。附件跟在下面。
+  // 详情还没读到（taskDescription 是 undefined）：先画任务说明的占位，6 行正文加「展开全文」那一行。
+  const taskBlock = taskDescription === undefined ? (
+    <DetailSection testID="ticket-section-task" title={titles.task}>
+      <PlaceholderLines testID="ticket-task-placeholder" lines={7} lineHeight={24} />
+    </DetailSection>
+  ) : brief.full || attachments.length ? (
+    <DetailSection testID="ticket-section-task" title={titles.task} aside={<Text size="label" tone="muted">{writerLabel(facts?.createdBy, leadName, locale)}</Text>}>
+      {brief.full ? <TaskBrief markdown={brief.full} expanded={briefOpen} onExpandInline={setBriefOpen} onOpenSheet={() => setRootSheet('brief')} /> : null}
+      <TicketAttachmentStrip attachments={attachments} load={onLoadAttachment} onOpen={setOpenAttachment} />
+    </DetailSection>
+  ) : null;
+
+  // 执行计划：每步一行。执行中展开；草稿阶段（都没开始）收成一行。
+  // 跳过的步骤不算进分母（和 planSummary、engine 的 executionPlanText 一样）。
+  const planCounted = (executionPlan?.steps ?? []).filter((step) => step.status !== 'skipped');
+  const planDone = planCounted.filter((step) => step.status === 'done').length;
+  const planAside = steps.length ? layout.planUpdated(planDone, planCounted.length, null) : undefined;
+  const planBlock = stage === 'draft'
+    ? (steps.length ? (
+        <FoldRow testID="ticket-section-plan" title={layout.plan} summary={planAside} open={!collapsed('execution')} onToggle={(open) => remember('execution', !open)}>
+          <Steps variant="compact" items={steps} />
+        </FoldRow>
+      ) : null)
+    : (
+        <DetailSection testID="ticket-section-plan" title={layout.plan} aside={planAside ? <Text size="label" tone="muted" mono>{planAside}</Text> : undefined}>
+          {steps.length > 0
+            ? <Steps variant="compact" items={steps} />
+            : executionPlan === undefined
+              ? <PlaceholderLines testID="ticket-plan-placeholder" lines={3} lineHeight={28} />
+              : <Text size="secondary" tone="secondary">{m.noPlan}</Text>}
+        </DetailSection>
+      );
+
+  // 决定卡「⋯」里的各行：手机面板和桌面 Sheet 用不同的行组件，内容相同。
+  const barMenuRows = (Item: typeof RecordRow | typeof SheetMenuRow) => (
+    <>
+        {bar.more.map((action, index) => (
+          <Item
+            key={action.id}
+            testID={`ticket-bar-menu-${action.id}`}
+            divider={index > 0}
+            title={action.label}
+            detail={waitingForDelivery(action) ? m.deliveryLoading : actionNote(action, m, reviewAgainst && accepts(action))}
+            onPress={canRun(action) || CHAT_OPERATIONS[action.id] ? () => choose(action) : undefined}
+          />
+        ))}
+        {legacyActions.map((action, index) => (
+          <Item
+            key={action.id}
+            testID={`ticket-bar-menu-${action.id}`}
+            divider={bar.more.length + index > 0}
+            title={action.label}
+            detail={action.note ?? undefined}
+            onPress={onLegacyAction && pendingActionId === null ? () => chooseLegacy(action) : undefined}
+          />
+        ))}
+    </>
+  );
+
   const onScroll = (event: ScrollEvent) => setHeaderCompact(event.nativeEvent.contentOffset.y > 24);
 
   return (
@@ -943,7 +1009,6 @@ export function TicketThread({
             onSendMessage={onSendMessage ? (message) => onSendMessage(message, ticket.id) : undefined}
             actions={confirming ? [] : chatActions}
             onAction={chooseFromChat}
-            bar={actionBar}
             composerRevision={composerRevision}
           /></Density>
         ) : null}
@@ -979,56 +1044,45 @@ export function TicketThread({
           />
         ) : (
           <ScrollArea testID="ticket-thread-scroll" fillContent onScroll={onScroll}>
-            <Column testID="ticket-detail-sections" px="page-x" pb="page-bottom">
-              <Column pt="stacked-card" gap="stacked-card">
-                {pendingDecisions.length > 0 ? (
-                  <Column testID="ticket-pending-decision" gap="stacked-card">
-                    {pendingDecisions.map((intervention) => (
-                      <InterventionPanel
-                        key={intervention.id}
-                        intervention={buildInterventionPresentation(intervention, locale)}
-                        commandState={interventionCommandStates[intervention.id]}
-                        onResolve={onResolveIntervention}
-                      />
-                    ))}
-                  </Column>
-                ) : null}
-                {resolutionError ? <Text role="alert" size="note" tone="danger-dark">{resolutionError}</Text> : null}
-                {relationsSection}
-                {taskSection}
-                {criteriaSection}
-                {infoSection}
+            <Column testID="ticket-detail-sections" px="page-x" pt="card-row" pb="page-bottom" gap="detail-section">
+              <DetailTitle title={titleText} meta={creatorMeta} />
+              {decisionCard}
+              {resolutionError ? <Text role="alert" size="note" tone="danger-dark">{resolutionError}</Text> : null}
+              <DetailAttributes items={attributeItems} token={tokenRow} />
+              <Column>
+                {relationsBlock}
               </Column>
-              {executionSection ? <Column pt="page-section">{executionSection}</Column> : null}
-              {deliverySection ? <Column pt="page-section">{deliverySection}</Column> : null}
-              <Column pt="page-section">{historySection}</Column>
+              {taskBlock}
+              {planBlock}
+              <Column>
+                {criteriaSection}
+                {historySection}
+              </Column>
             </Column>
           </ScrollArea>
         )}
       </DockedLayout>
       <TicketAttachmentViewer attachment={openAttachment} load={onLoadAttachment} onClose={() => setOpenAttachment(null)} />
-      <Sheet testID="ticket-bar-menu" open={barMenuOpen} onClose={() => setBarMenuOpen(false)} title={m.moreActionsTitle}>
-        {bar.more.map((action, index) => (
-          <RecordRow
-            key={action.id}
-            testID={`ticket-bar-menu-${action.id}`}
-            divider={index > 0}
-            title={action.label}
-            detail={waitingForDelivery(action) ? m.deliveryLoading : actionNote(action, m, reviewAgainst && accepts(action))}
-            onPress={canRun(action) || CHAT_OPERATIONS[action.id] ? () => choose(action) : undefined}
-          />
-        ))}
-        {legacyActions.map((action, index) => (
-          <RecordRow
-            key={action.id}
-            testID={`ticket-bar-menu-${action.id}`}
-            divider={bar.more.length + index > 0}
-            title={action.label}
-            detail={action.note ?? undefined}
-            onPress={onLegacyAction && pendingActionId === null ? () => chooseLegacy(action) : undefined}
-          />
-        ))}
-      </Sheet>
+      {standalone && tokenRow ? (
+        <FloatingSheet testID="ticket-token-sheet" open={rootSheet === 'token'} onClose={() => setRootSheet(null)} label={layout.tokenDetails}>
+          <TokenBreakdown total={tokenText(facts?.totalTokens ?? 0, locale)} parts={tokenParts} caption={tokenCaption} heading />
+        </FloatingSheet>
+      ) : null}
+      {standalone && brief.full ? (
+        <FloatingSheet testID="ticket-brief-sheet" open={rootSheet === 'brief'} onClose={() => setRootSheet(null)} label={layout.fullTask} tall>
+          <TaskBriefSheetContent markdown={brief.full} writer={writerLabel(facts?.createdBy, leadName, locale)} />
+        </FloatingSheet>
+      ) : null}
+      {/* 决定卡里的「⋯」：手机上和顶栏的「⋯」同一种悬浮面板（画板 SheetRules），桌面上还是 Sheet。 */}
+      {standalone ? (
+        <FloatingSheet testID="ticket-bar-menu" inset="menu" open={barMenuOpen} onClose={() => setBarMenuOpen(false)} label={m.moreActionsTitle}>
+          {barMenuRows(SheetMenuRow)}
+        </FloatingSheet>
+      ) : (
+        <Sheet testID="ticket-bar-menu" open={barMenuOpen} onClose={() => setBarMenuOpen(false)} title={m.moreActionsTitle}>
+          {barMenuRows(RecordRow)}
+        </Sheet>
+      )}
     </Column>
   );
 }
@@ -1037,65 +1091,120 @@ export function TicketThread({
 
 const PRIORITY_IDS = ['urgent', 'high', 'normal', 'low'] as const;
 
-function HeaderMenu({ link, actions, pendingActionId, onRun }: {
+function HeaderMenu({ link, actions, pendingActionId, onRun, trigger, phone = false, extra = [] }: {
   link: string;
   actions: readonly TicketAction[];
   pendingActionId: string | null;
   onRun: (action: TicketAction, request: TicketActionRunRequest) => void;
+  // 触发按钮（手机上是悬浮圆钮）。不给时是一个小图标。
+  trigger?: ReactNode;
+  // 手机上「⋯」升起贴合内容的悬浮面板（画板 SheetRules：「⋯」里的菜单用小的一档），桌面上是弹出的小浮层。
+  phone?: boolean;
+  // 决定卡不出现时（没有要你处理的事），工单的操作并进这个菜单（主题 11.21）：点了走和决定卡同一个入口。
+  extra?: readonly { id: string; label: string; detail?: string; onPress?: () => void }[];
 }) {
   const m = useMessages(ticketThreadMessages);
   const [view, setView] = useState<'root' | 'set_priority' | 'set_project' | 'link'>('root');
   const [project, setProject] = useState('');
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const Item = phone ? SheetMenuRow : RecordRow;
+  const label = m.headerMore(actions.map((action) => action.label));
+  const content = (close: () => void) => {
+    const done = () => { setView('root'); close(); };
+    const action = view === 'root' ? null : actions.find((candidate) => candidate.id === view) ?? null;
+    if (action?.id === 'set_priority') {
+      return PRIORITY_IDS.map((id, index) => (
+        <Item key={id} divider={index > 0} title={m.priority[id]} onPress={() => { onRun(action, { input: { priority: id } }); done(); }} />
+      ));
+    }
+    if (action?.id === 'set_project') {
+      return (
+        <Column gap="form-field" p={phone ? 'row-x' : undefined}>
+          <TextField testID="ticket-project-input" value={project} onChangeText={setProject} placeholder={m.projectName} />
+          <Row gap="actions">
+            <Button label={m.save} size={phone ? 'md' : 'sm'} shape={phone ? 'pill' : undefined} disabled={!project.trim() || pendingActionId !== null} onPress={() => { onRun(action, { input: { project: project.trim() } }); done(); }} />
+            <Button label={m.clearProject} size={phone ? 'md' : 'sm'} shape={phone ? 'pill' : undefined} variant="ghost" tone="neutral" onPress={() => { onRun(action, { input: { project: null } }); done(); }} />
+          </Row>
+        </Column>
+      );
+    }
+    if (action?.id === 'link') {
+      return (
+        <Column p={phone ? 'row-x' : undefined}>
+          <LinkTicketForm action={action} pending={pendingActionId === 'link'} onCancel={() => setView('root')} onSubmit={(request) => { onRun(action, request); done(); }} />
+        </Column>
+      );
+    }
+    return (
+      <Column>
+        {/* 原生应用里还没有剪贴板（canCopyText），不给这一项。 */}
+        {extra.map((entry, index) => (
+          <Item
+            key={`extra-${entry.id}`}
+            divider={index > 0}
+            // 和决定卡里「更多」面板的那一行同一个标识：同一个操作，两处入口不会同时出现。
+            testID={`ticket-bar-menu-${entry.id}`}
+            title={entry.label}
+            detail={entry.detail}
+            onPress={entry.onPress ? () => { done(); entry.onPress!(); } : undefined}
+          />
+        ))}
+        {canCopyText && link ? (
+          <Item testID="ticket-copy-link" divider={extra.length > 0} title={m.copyLink} detail={link} detailMono onPress={() => { void copyText(link); done(); }} />
+        ) : null}
+        {actions.map((candidate, index) => (
+          <Item
+            key={candidate.id}
+            divider={index > 0 || extra.length > 0 || (canCopyText && Boolean(link))}
+            testID={`ticket-header-${candidate.id}`}
+            title={candidate.label}
+            detail={actionNote(candidate, m)}
+            onPress={candidate.available ? () => setView(candidate.id as typeof view) : undefined}
+          />
+        ))}
+      </Column>
+    );
+  };
+  if (phone) {
+    const close = () => { setSheetOpen(false); setView('root'); };
+    return (
+      <>
+        <Pressable testID="ticket-header-more" aria-label={label} feedback="opacity" rounded="full" onPress={() => setSheetOpen(true)}>
+          {trigger}
+        </Pressable>
+        <FloatingSheet testID="ticket-header-more-sheet" inset="menu" open={sheetOpen} onClose={close} label={m.ticketActions}>
+          {content(close)}
+        </FloatingSheet>
+      </>
+    );
+  }
   return (
     <Popover
       testID="ticket-header-more"
-      label={m.headerMore(actions.map((action) => action.label))}
+      label={label}
       title={m.ticketActions}
       width={300}
-      trigger={<Row testID="ticket-header-more-trigger"><Icon name="more" size={15} color="text-secondary" /></Row>}
+      trigger={trigger ?? <Row testID="ticket-header-more-trigger"><Icon name="more" size={15} color="text-secondary" /></Row>}
     >
-      {(close) => {
-        const done = () => { setView('root'); close(); };
-        const action = view === 'root' ? null : actions.find((candidate) => candidate.id === view) ?? null;
-        if (action?.id === 'set_priority') {
-          return PRIORITY_IDS.map((id, index) => (
-            <RecordRow key={id} divider={index > 0} title={m.priority[id]} onPress={() => { onRun(action, { input: { priority: id } }); done(); }} />
-          ));
-        }
-        if (action?.id === 'set_project') {
-          return (
-            <Column gap="form-field">
-              <TextField testID="ticket-project-input" value={project} onChangeText={setProject} placeholder={m.projectName} />
-              <Row gap="actions">
-                <Button label={m.save} size="sm" disabled={!project.trim() || pendingActionId !== null} onPress={() => { onRun(action, { input: { project: project.trim() } }); done(); }} />
-                <Button label={m.clearProject} size="sm" variant="ghost" tone="neutral" onPress={() => { onRun(action, { input: { project: null } }); done(); }} />
-              </Row>
-            </Column>
-          );
-        }
-        if (action?.id === 'link') {
-          return <LinkTicketForm action={action} pending={pendingActionId === 'link'} onCancel={() => setView('root')} onSubmit={(request) => { onRun(action, request); done(); }} />;
-        }
-        return (
-          <Column>
-            {/* 原生应用里还没有剪贴板（canCopyText），不给这一项。 */}
-            {canCopyText && link ? (
-              <RecordRow testID="ticket-copy-link" title={m.copyLink} detail={link} detailMono onPress={() => { void copyText(link); done(); }} />
-            ) : null}
-            {actions.map((candidate, index) => (
-              <RecordRow
-                key={candidate.id}
-                divider={index > 0 || (canCopyText && Boolean(link))}
-                testID={`ticket-header-${candidate.id}`}
-                title={candidate.label}
-                detail={actionNote(candidate, m)}
-                onPress={candidate.available ? () => setView(candidate.id as typeof view) : undefined}
-              />
-            ))}
-          </Column>
-        );
-      }}
+      {content}
     </Popover>
+  );
+}
+
+// 手机面板里的一行（和加号面板同一种）：整行可点，高至少 48，圆角的按下底色；不能点的写灰，原因在下面一行。
+function SheetMenuRow({ title, detail, detailMono, onPress, testID }: {
+  title: string;
+  detail?: string;
+  detailMono?: boolean;
+  onPress?: () => void;
+  testID?: string;
+  divider?: boolean;
+}) {
+  return (
+    <Pressable testID={testID} onPress={onPress} disabled={!onPress} feedback="highlight" rounded="3xl" px="row-x" py="row-y" minH={48} justify="center">
+      <Text size="card-title" weight="semibold" tone={onPress ? 'default' : 'muted'} numberOfLines={1}>{title}</Text>
+      {detail ? <Text size="note" tone="secondary" mono={detailMono} numberOfLines={2}>{detail}</Text> : null}
+    </Pressable>
   );
 }
 
@@ -1226,22 +1335,6 @@ function profileText(profile: RunProfilePresentation | null, m: ThreadMessages):
   return [profile.runtime, profile.model, profile.effort ? m.effort(profile.effort) : null].filter(Boolean).join(' · ');
 }
 
-const RUN_TONE: Record<AttemptPresentation['resultTone'], 'success' | 'danger' | 'accent' | 'neutral'> = {
-  success: 'success', danger: 'danger', running: 'accent', neutral: 'neutral',
-};
-
-// 「Claude Code · sonnet · high」：和执行者那一行同一种写法。
-function runChoice(attempt: AttemptPresentation): string {
-  return [runtimeDisplayName(attempt.runtime) ?? attempt.runtime, attempt.recordedModel, attempt.effort].filter(Boolean).join(' · ');
-}
-
-function runDetail(attempt: AttemptPresentation, m: ThreadMessages, locale: Locale): string {
-  const start = clockText(attempt.startedAt, undefined, locale);
-  const range = attempt.endedAt ? `${start}–${clockText(attempt.endedAt, undefined, locale)}` : m.started(start);
-  const duration = attempt.endedAt ? durationText(attempt.durationMs, locale) : null;
-  return [range, duration].filter(Boolean).join(' · ');
-}
-
 function workspaceFact(
   stage: DetailStage,
   ticket: Ticket,
@@ -1258,19 +1351,6 @@ function workspaceFact(
     detail: [mode, workspace?.target ? m.mergeTarget(workspace.target) : null].filter(Boolean).join(' · '),
     ...(badge ? { badge } : {}),
   };
-}
-
-function relationsSummary(
-  children: readonly ChildTicketPresentation[],
-  relations: readonly RelationPresentation[],
-  m: ThreadMessages,
-): string {
-  const waiting = children.filter((child) => child.state === 'review').length;
-  return [
-    children.length > 0 ? m.relationsSummary.children(children.length) : null,
-    waiting > 0 ? m.relationsSummary.waiting(waiting) : null,
-    relations.length > 0 ? m.relationsSummary.links(relations.length) : null,
-  ].filter(Boolean).join(' · ');
 }
 
 // 「第 1 次交付 · 15:18」：第几次读交付快照（工单 04、05），读不到时只写交付的时间。

@@ -53,17 +53,16 @@ export function detailSectionTitles(locale: Locale = 'en'): Record<DetailSection
   return ticketDetailMessages(locale).sections;
 }
 
-// 默认展开哪几块（4.0）：
-// - 执行中：执行展开，交付与验收只有一句话。
-// - 等你验收：验收标准、交付与验收展开，任务说明和执行折叠。
-// - 已完成：交付与验收展开，其余折叠。已取消同已完成。
-// - 草稿：还没开跑，工单本身的信息展开。
+// 默认展开哪几块（画布 M3，2026-11-15）：页面的最后是「验收标准」「经过与记录」两行，平时收起。
+// - 等你验收：验收标准展开，要对着它验收。
+// - 已完成、已取消：经过与记录展开，交付的结果在里面。
+// - 草稿：验收标准展开，开跑前要确认；执行计划（execution）也展开。
 const EXPANDED_BY_STAGE: Record<DetailStage, readonly DetailSectionKind[]> = {
-  draft: ['relations', 'task', 'criteria', 'info', 'execution', 'history'],
-  running: ['relations', 'task', 'criteria', 'info', 'execution', 'delivery', 'history'],
-  review: ['relations', 'criteria', 'info', 'delivery', 'history'],
-  done: ['delivery'],
-  cancelled: ['delivery'],
+  draft: ['relations', 'task', 'criteria', 'execution'],
+  running: ['relations', 'task'],
+  review: ['relations', 'criteria'],
+  done: ['history'],
+  cancelled: ['history'],
 };
 
 /** 你在这台设备上手动展开或折叠过的块：按块的种类记，不按工单记（4.0）。 */
@@ -219,6 +218,17 @@ export function usagePartsStats(parts: UsageParts | null | undefined, locale: Lo
     { label: m.cacheRead, value: tokenText(parts.cacheReadTokens, locale) },
     { label: m.output, value: tokenText(parts.outputTokens, locale) },
   ];
+}
+
+// 属性里 Token 一行的两个数（主题 11.21，用户 2026-11-14 选的算法）：缓存 = 缓存读；未缓存 = 未缓存输入 + 缓存写 + 输出；
+// 百分比 = 缓存读占四部分合计的多少。没拆分的旧用量不算进去（明细里另外写）。一部分都没有时返回 null。
+export function tokenSummary(parts: UsageParts | null | undefined): { cached: number; uncached: number; cachedPercent: number } | null {
+  if (!parts) return null;
+  const cached = parts.cacheReadTokens;
+  const uncached = parts.uncachedInputTokens + parts.cacheWriteTokens + parts.outputTokens;
+  const total = cached + uncached;
+  if (total === 0) return null;
+  return { cached, uncached, cachedPercent: Math.round((cached / total) * 100) };
 }
 
 // 有明细时说明几部分的价差；有没拆分的旧用量时说出多少。

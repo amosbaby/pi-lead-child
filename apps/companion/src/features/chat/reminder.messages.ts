@@ -21,6 +21,9 @@ export const reminderMessages = defineMessages({
     ackedAt: (time: string) => `Acknowledged at ${time}`,
     acked: 'Acknowledged',
     cancelledAt: (time: string) => `You cancelled it on ${time}`,
+    // 结束行右边的一小段（主题 11.5）。
+    endedCancelled: (day: string) => `Cancelled ${day}`,
+    endedAcked: (time: string) => `Acknowledged ${time}`,
     cancelled: 'Cancelled',
     importantDue: 'Important. It is due.',
     due: 'Due',
@@ -58,6 +61,8 @@ export const reminderMessages = defineMessages({
     ackedAt: (time) => `${time} 已确认`,
     acked: '已确认',
     cancelledAt: (time) => `你在 ${time} 取消`,
+    endedCancelled: (day) => `${day} 已取消`,
+    endedAcked: (time) => `${time} 已确认`,
     cancelled: '已取消',
     importantDue: '重要，到点了',
     due: '到点了',

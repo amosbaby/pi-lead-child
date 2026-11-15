@@ -46,6 +46,24 @@ describe('ActionBar', () => {
     expect(getComputedStyle(accept.parentElement!).flexGrow).toBe('1.4');
   });
 
+  // 2026-11-15：工单决定卡里的按钮排满一行、44 高，比卡片里别的字重得多。主题 T-7 要的是胶囊按钮，按文字宽，主按钮在前。
+  it('draws compact pill buttons sized to their text, the main one first, for the decision card', () => {
+    renderUI(
+      <ActionBar testID="card" layout="stacked" buttons="compact" next="你验收"
+        more={{ label: '更多操作：取消工单', onPress: () => {} }}
+        secondary={{ label: '打回返工', onPress: () => {} }} primary={{ label: '验收', onPress: () => {} }} />,
+    );
+    const accept = screen.getByRole('button', { name: '验收' });
+    const rework = screen.getByRole('button', { name: '打回返工' });
+    expect(getComputedStyle(accept).height).toBe('38px');
+    expect(getComputedStyle(accept).width).not.toBe('100%');
+    expect(getComputedStyle(accept).borderTopLeftRadius).toBe('19px');
+    const order = [...screen.getByTestId('card').querySelectorAll('[role="button"]')].map((button) => button.getAttribute('aria-label') ?? button.textContent);
+    expect(order.indexOf('验收')).toBeLessThan(order.indexOf('打回返工'));
+    expect(order.at(-1)).toBe('更多操作：取消工单');
+    expect(rework).toBeTruthy();
+  });
+
   it('does not run a button the caller disabled', () => {
     const pause = vi.fn();
     renderUI(<ActionBar next="Claude Code 继续做，现在不需要你" primary={{ label: '暂停', onPress: pause, disabled: true }} />);

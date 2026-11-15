@@ -104,7 +104,8 @@ describe('ticket detail components', () => {
     const thread = source('./TicketThread.tsx');
     const model = source('./useTicketDetailModel.ts');
 
-    for (const component of ['<DetailHeader', '<Section', '<RecordRow', '<Checklist', '<ActionBar', '<Steps', '<Stats', '<Timeline', '<FactList']) {
+    // 主题 11.21（2026-11-15）：顶栏、分区、折叠行在 TicketDetailParts.tsx，也只用组件库的组件拼。
+    for (const component of ['<DetailTopBar', '<FoldRow', '<RecordRow', '<Checklist', '<ActionBar', '<Steps', '<Timeline', '<FactList']) {
       expect.soft(thread).toContain(component);
     }
     // 不再按 protocol 的矩阵和工作区的 availableActions 摆按钮：那是和 Lead 的 list_ticket_actions 不同的另一套判断。
@@ -124,12 +125,24 @@ describe('ticket detail components', () => {
     expect.soft(thread).not.toContain('这张工单"');
   });
 
+  // 2026-11-15 真机：Token 明细和任务说明全文的面板画在滚动区里，Android 上点了不出现，页面还会跳。面板要画在页面根上。
+  it('renders the phone sheets at the page root, outside the scroll area', () => {
+    const thread = source('./TicketThread.tsx');
+    const parts = source('./TicketDetailParts.tsx');
+    for (const sheet of ['ticket-token-sheet', 'ticket-brief-sheet', 'ticket-bar-menu']) {
+      expect.soft(thread).toMatch(new RegExp(`</DockedLayout>[\\s\\S]*testID="${sheet}"`));
+    }
+    expect.soft(parts).not.toContain('<FloatingSheet testID="ticket-token-sheet"');
+    expect.soft(parts).not.toContain('<FloatingSheet testID="ticket-brief-sheet"');
+  });
+
   it('pins the header above the sections and the action bar with the chat dock below them', () => {
     const thread = source('./TicketThread.tsx');
 
-    // 头部在滚动区外；各块在滚动区里；底部操作栏和工单对话坞在滚动区下面（第四轮画板）。
+    // 头部在滚动区外；各块在滚动区里；工单对话坞在滚动区下面。操作条在标题下面的决定卡里（主题 11.21，2026-11-15）。
+    expect.soft(thread).toMatch(/const decisionCard = showDecisionCard \?[\s\S]*?\{actionBar\}/);
     expect.soft(thread).toMatch(
-      /\{header\}[\s\S]*?<DockedLayout[\s\S]*?<TicketChatDock[\s\S]*?bar=\{actionBar\}[\s\S]*?\{recordsInline \? \([\s\S]*?<TicketRecords[\s\S]*?<ScrollArea testID="ticket-thread-scroll"[\s\S]*?<\/ScrollArea>\s*\)\}\s*<\/DockedLayout>/,
+      /\{header\}[\s\S]*?<DockedLayout[\s\S]*?<TicketChatDock[\s\S]*?\{recordsInline \? \([\s\S]*?<TicketRecords[\s\S]*?<ScrollArea testID="ticket-thread-scroll"[\s\S]*?<\/ScrollArea>\s*\)\}\s*<\/DockedLayout>/,
     );
     expect.soft(thread).toContain('const showTicketComposer = showComposer ?? true');
     expect.soft(source('./TicketRecords.tsx')).not.toContain('nested');

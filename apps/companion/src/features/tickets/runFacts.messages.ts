@@ -81,12 +81,19 @@ export const runFactsMessages = defineMessages({
     destination: {
       takesMessages: (noun: string) => `The ${noun} is running · Your message goes into its current work`,
       queued: (noun: string, runtime: string | null) => `The ${noun} is running · ${runtime ?? 'This executor'} cannot take messages while it works. Your message waits and goes to it when it ends.`,
-      placeholder: (noun: string) => `Ask the ${noun}, or add requirements`,
+      placeholder: (noun: string) => `Ask this ticket's ${noun}…`,
       resume: (ticket: string, noun: string) => `To the ${noun} of #${ticket} · Continues the last session. The ticket state does not change.`,
       costUnknown: 'Estimated cost: unknown',
       cost: (estimate: string) => `Estimated cost: ${estimate} (from the last usage of this session)`,
       fresh: (ticket: string) => `To the agent of #${ticket} · Starts a new conversation. The ticket state does not change.`,
-      freshPlaceholder: 'Ask the agent of this ticket, or add requirements',
+      freshPlaceholder: "Ask this ticket's agent…",
+      // 收着的对话卡片里那一行（主题 T-13）：一行写完去向，续接时带上预估成本。
+      brief: {
+        takesMessages: (noun: string) => `Goes into the ${noun}'s current work`,
+        queued: (noun: string) => `The ${noun} is busy · Your message waits until it ends`,
+        resume: (noun: string, estimate: string | null) => `To the ${noun} · Resumes${estimate ? ` · ${estimate}` : ''}`,
+        fresh: 'To the agent · Starts a new conversation',
+      },
     },
   },
   zh: {
@@ -162,12 +169,18 @@ export const runFactsMessages = defineMessages({
     destination: {
       takesMessages: (noun) => `${noun} 正在跑 · 消息会插进它当前的工作`,
       queued: (noun, runtime) => `${noun} 正在跑 · ${runtime ?? '这个执行器'} 不能中途插话，消息排队，结束后转交`,
-      placeholder: (noun) => `问${noun}，或者补充要求`,
+      placeholder: (noun) => `问这张工单的${noun}…`,
       resume: (ticket, noun) => `发给 #${ticket} 的${noun} · 接着上一次的会话，不改变工单状态`,
       costUnknown: '预估成本：无法估算',
       cost: (estimate) => `预估成本：${estimate}（按这个会话上次的用量）`,
       fresh: (ticket) => `发给 #${ticket} 的 agent · 开始一次新对话，不改变工单状态`,
-      freshPlaceholder: '问这张工单的 agent，或者补充要求',
+      freshPlaceholder: '问这张工单的 agent…',
+      brief: {
+        takesMessages: (noun) => `插进${noun}当前的工作`,
+        queued: (noun) => `${noun}在忙 · 消息排队，结束后转交`,
+        resume: (noun, estimate) => `发给${noun} · 接着上次${estimate ? ` · ${estimate}` : ''}`,
+        fresh: '发给 agent · 开始一次新对话',
+      },
     },
   },
 });

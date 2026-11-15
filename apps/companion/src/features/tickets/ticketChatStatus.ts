@@ -127,6 +127,8 @@ const RUNTIME_TAKES_MESSAGES_MID_RUN: Record<string, boolean> = { pi: true, code
 
 export type TicketChatDestination = {
   hint: string;
+  /** 收着的对话卡片里那一行：比 hint 短，续接时带上预估成本（主题 T-13）。 */
+  brief: string;
   placeholder: string;
   /** 续接已结束的会话时的预估成本（2026-10-16：#77 的一问 45.6 万 token，#66 的一问 586 万 token）。其余情况为 null。 */
   cost: string | null;
@@ -154,6 +156,7 @@ export function ticketChatDestination({ ticketDisplayId, liveRun, runtimeName, r
       hint: takesMessages
         ? m.destination.takesMessages(noun)
         : m.destination.queued(noun, runtimeDisplayName(runtimeName)),
+      brief: takesMessages ? m.destination.brief.takesMessages(noun) : m.destination.brief.queued(noun),
       placeholder: m.destination.placeholder(noun),
       cost: null,
     };
@@ -162,6 +165,7 @@ export function ticketChatDestination({ ticketDisplayId, liveRun, runtimeName, r
     const noun = m.role[resume.role];
     return {
       hint: m.destination.resume(ticketDisplayId, noun),
+      brief: m.destination.brief.resume(noun, resume.lastTokens === null ? null : tokenEstimateText(resume.lastTokens, locale)),
       placeholder: m.destination.placeholder(noun),
       cost: resume.lastTokens === null
         ? m.destination.costUnknown
@@ -170,6 +174,7 @@ export function ticketChatDestination({ ticketDisplayId, liveRun, runtimeName, r
   }
   return {
     hint: m.destination.fresh(ticketDisplayId),
+    brief: m.destination.brief.fresh,
     placeholder: m.destination.freshPlaceholder,
     cost: null,
   };

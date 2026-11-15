@@ -71,7 +71,7 @@ export const ticketDetailMessages = defineMessages({
       cacheRead: 'Cache reads',
       output: 'Output',
       captionParts: 'Cache reads cost much less than uncached input, and output costs the most.',
-      unsplit: (text: string) => `${text} tokens from before this split have no breakdown.`,
+      unsplit: (text: string) => `${text.charAt(0).toUpperCase()}${text.slice(1)} tokens from before this split have no breakdown.`,
     },
     tokens: (tokens: number) => (tokens >= 1_000_000
       ? `about ${(Math.round(tokens / 100_000) / 10).toLocaleString('en-US', { maximumFractionDigits: 1 })}M`

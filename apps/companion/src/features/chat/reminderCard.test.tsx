@@ -106,22 +106,22 @@ describe('a reminder Lead created in the conversation', () => {
     expect(getComputedStyle(screen.getByTestId('reminder-page-eyebrow')).backgroundColor).toBe(cssVar('--c-warning-soft'));
   });
 
-  it('shows when it was confirmed, with a check on a green band, and no longer opens', async () => {
+  // 2026-11-15：结束了的提醒收成一行结束行（patterns P4.4），和会话里别的一行对齐，不再是一张卡。
+  it('folds a confirmed reminder into one end row that says when, and no longer opens the reschedule panel', async () => {
     const confirmed = new Date(2026, 9, 27, 14, 3).toISOString();
     render(async () => detail(reminder({ stage: 'acked', status: 'acked', stageChangedAt: confirmed })));
-    expect(await screen.findByText('Acknowledged at 14:03')).toBeTruthy();
-    expect(getComputedStyle(screen.getByTestId('reminder-page-eyebrow')).backgroundColor).toBe(cssVar('--c-success-soft'));
-    fireEvent.click(screen.getByTestId('surface-disclosure-reminder-83-summary'));
+    expect(await screen.findByText('Acknowledged 14:03')).toBeTruthy();
+    expect(screen.queryByTestId('reminder-page-eyebrow')).toBeNull();
+    fireEvent.click(screen.getByTestId('reminder-card-83'));
     expect(screen.queryByRole('radio', { name: 'In 1 hour' })).toBeNull();
   });
 
-  it('greys out and strikes through a cancelled reminder, says when, and no longer opens', async () => {
+  it('folds a cancelled reminder into one end row with the title struck through, and says when', async () => {
     const cancelled = new Date(2026, 9, 27, 9, 12).toISOString();
     render(async () => detail(reminder({ stage: 'cancelled', status: 'cancelled', stageChangedAt: cancelled })), [{ name: 'cancel_item' }]);
-    expect(await screen.findByText('You cancelled it on 10-27 09:12')).toBeTruthy();
-    expect(screen.getByTestId('reminder-page-crossed')).toBeTruthy();
+    expect(await screen.findByText('Cancelled 10-27')).toBeTruthy();
     expect(getComputedStyle(screen.getByText('关注 aish PR86 是否合并')).textDecorationLine).toBe('line-through');
-    fireEvent.click(screen.getByTestId('surface-disclosure-reminder-83-summary'));
+    fireEvent.click(screen.getByTestId('reminder-card-83'));
     expect(screen.queryByRole('radio', { name: 'In 1 hour' })).toBeNull();
   });
 

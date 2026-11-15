@@ -13,7 +13,8 @@ describe('where a ticket message goes', () => {
   it('queues for a running Codex or Claude Code run and says so', () => {
     expect(ticketChatDestination({ ticketDisplayId: '66', liveRun: run('review'), runtimeName: 'codex' })).toEqual({
       hint: 'The reviewer is running · Codex cannot take messages while it works. Your message waits and goes to it when it ends.',
-      placeholder: 'Ask the reviewer, or add requirements',
+      brief: 'The reviewer is busy · Your message waits until it ends',
+      placeholder: "Ask this ticket's reviewer…",
       cost: null,
     });
   });
@@ -26,7 +27,8 @@ describe('where a ticket message goes', () => {
   it('opens a conversation run when nothing runs', () => {
     expect(ticketChatDestination({ ticketDisplayId: '66', liveRun: null, runtimeName: 'codex' })).toEqual({
       hint: 'To the agent of #66 · Starts a new conversation. The ticket state does not change.',
-      placeholder: 'Ask the agent of this ticket, or add requirements',
+      brief: 'To the agent · Starts a new conversation',
+      placeholder: "Ask this ticket's agent…",
       cost: null,
     });
   });
@@ -41,7 +43,9 @@ describe('resuming an ended session', () => {
   it('says which session it resumes and what it may cost', () => {
     expect(ticketChatDestination(base)).toEqual({
       hint: 'To the reviewer of #77 · Continues the last session. The ticket state does not change.',
-      placeholder: 'Ask the reviewer, or add requirements',
+      // 收着的对话卡片里只有这一行：去向和预估成本都要在里面（主题 T-13）。
+      brief: 'To the reviewer · Resumes · about 456K tokens',
+      placeholder: "Ask this ticket's reviewer…",
       cost: 'Estimated cost: about 456K tokens (from the last usage of this session)',
     });
   });
@@ -52,7 +56,8 @@ describe('resuming an ended session', () => {
 
   it('goes to a running agent without a cost', () => {
     expect(ticketChatDestination({ ...base, liveRun: run('execution'), runtimeName: 'pi' })).toEqual({
-      hint: 'The executor is running · Your message goes into its current work', placeholder: 'Ask the executor, or add requirements', cost: null,
+      hint: 'The executor is running · Your message goes into its current work',
+      brief: "Goes into the executor's current work", placeholder: "Ask this ticket's executor…", cost: null,
     });
   });
 

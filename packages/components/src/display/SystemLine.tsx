@@ -91,6 +91,8 @@ function SystemLineRow({
       {action ? (
         <Button testID={action.testID} label={action.label} onPress={action.onPress} variant="link" tone={action.tone ?? 'neutral'} size="xs" />
       ) : null}
+      {/* 时间紧跟在说明后面（11.9）；展开箭头贴着右边，和别的一行的箭头对在同一条竖线上（2026-11-15）。 */}
+      {toggle ? <Box flex={1} /> : null}
       {toggle ? (
         <Pressable aria-label={toggle.open ? m.hideDetails(detailsLabel) : m.showDetails(detailsLabel)} aria-expanded={toggle.open} onPress={toggle.onPress} feedback="none" shrink={0}
           testID={testID ? `${testID}-${toggle.open ? 'collapse' : 'expand'}` : undefined}>

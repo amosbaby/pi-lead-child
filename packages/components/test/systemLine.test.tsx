@@ -25,4 +25,13 @@ describe('SystemLine', () => {
     fireEvent.click(screen.getByTestId('line-expand'));
     expect((await screen.findByTestId('line-details')).textContent).toBe(long);
   });
+
+  // 2026-11-15 用户截图：会话里各种一行的右边对不齐。展开箭头紧跟着时间，说明短时箭头跑到中间。箭头要贴着右边。
+  it('puts the expand arrow at the right edge, after a spacer, however short the text is', () => {
+    renderUI(<SystemLine testID="line" icon="chat" lead="Nina" text="sent a new message" time="17:03" details="x" />);
+    const arrow = screen.getByTestId('line-expand');
+    const spacer = arrow.previousElementSibling as HTMLElement;
+    expect(getComputedStyle(spacer).flexGrow).toBe('1');
+    expect(arrow.nextElementSibling).toBeNull();
+  });
 });

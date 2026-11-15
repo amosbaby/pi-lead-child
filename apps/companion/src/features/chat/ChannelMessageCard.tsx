@@ -350,9 +350,13 @@ export function ChannelMessageCard({ card, onAction, onOpenTicket, now, leadStuc
 
   const summary = view.folded ? (
     // 结束行（P9.4）：状态图标、人名、对方的话、结果和时间、展开箭头。
-    <Row items="center" gap="inline-item" px="card" py="card-row" minW={0}>
-      <Icon name={status.tone === 'success' ? 'check' : 'chat'} size={13} color={status.tone === 'success' ? 'success' : 'text-muted'} />
-      <Text size="label" weight="bold" shrink={0}>{card.sender.name}</Text>
+    // 会话里一行的格子（主题 11.10「一行的对齐」，2026-11-15）：左边 18 宽的图标列贴着内容区的左边，右边的箭头贴着右边，
+    // 不另加左右留白。人名太长时也截断：结果和时间不被挤出去。
+    <Row items="center" gap="icon-label" py="card-row" minW={0}>
+      <Box w={18} shrink={0} items="center">
+        <Icon name={status.tone === 'success' ? 'check' : 'chat'} size={13} color={status.tone === 'success' ? 'success' : 'text-muted'} />
+      </Box>
+      <Text size="label" weight="bold" shrink={1} minW={0} numberOfLines={1}>{card.sender.name}</Text>
       <Text testID={`channel-card-${card.id}-line`} flex={1} minW={0} size="secondary" tone="strong" numberOfLines={1}>{plainLine(card, card.recent?.at(-1)?.text ?? card.excerpt)}</Text>
       <Text size="meta" tone="secondary" shrink={0} testID={`channel-card-${card.id}-outcome`}>{view.folded.outcome}</Text>
       <Icon name="chevron-down" size={12} color="text-muted" />
