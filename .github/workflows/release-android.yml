@@ -1,0 +1,180 @@
+# 发布 release 时打出签了名的 Android 安装包（Lead-Child），把 apk 和它的 SHA-256 挂到 release 上。
+# 用户从 GitHub 下载安装；签名和密钥怎么准备见 docs/release/android-signing.md。
+# - 一个 ubuntu job：runner 自带 Android SDK 和 JDK 17，不用另装。先 expo prebuild 生成 android/，再用 Gradle 打 release 包。
+# - 签名：keystore 从 secret 解到临时目录；口令写进临时 Gradle home 的 gradle.properties（权限 600），用 AGP 的
+#   android.injected.signing.* 属性签名，不改生成的 build.gradle。job 结束时（成功或失败）都删掉。
+# - 只打 arm64-v8a 和 armeabi-v7a：真机都在这两种里，包小一半。
+# - 签完用 apksigner 校验；仓库变量 ANDROID_SIGNING_CERT_SHA256 有值时，证书指纹必须和它一样，签错了钥匙就不上传。
+# - 用 workflow_dispatch 填同一个 tag 能重跑；--clobber 覆盖已经传上去的附件。
+# - PR 改了这个 workflow 或者 App 的配置时，同一个 job 打一次包检查能不能打出来：用 prebuild 缺省的调试签名，
+#   不读 secret，不上传。
+# - 只有这个 job 读签名的 secret；第三方 action 固定到 commit SHA。
+# - 事件或输入里的 tag 先校验格式，再经 env 带引号传给 shell，不用 ${{ }} 拼进脚本。
+name: release-android
+
+on:
+  release:
+    types: [published]
+  pull_request:
+    paths:
+      - .github/workflows/release-android.yml
+      - apps/companion/app.json
+      - apps/companion/app.config.ts
+      - apps/companion/plugins/**
+      - apps/companion/locales/**
+      - apps/companion/package.json
+      - package-lock.json
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to package again, for example v1.6.0
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-android-${{ github.event.release.tag_name || inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      # PR 上只检查能不能打出包（调试签名，不上传）。
+      RELEASE: ${{ github.event_name != 'pull_request' }}
+      EXPO_NO_DOTENV: "1"
+      EXPO_NO_TELEMETRY: "1"
+    steps:
+      - name: Check the tag
+        if: env.RELEASE == 'true'
+        run: |
+          if [[ ! "$TAG" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$ ]]; then
+            echo "The tag is not a version such as v1.6.0." >&2
+            exit 1
+          fi
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+
+      - name: Use a check version on a pull request
+        if: env.RELEASE != 'true'
+        run: echo "VERSION=0.0.0-check.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+
+      - name: Check that the signing secrets are set
+        if: env.RELEASE == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=()
+          [[ -n "$KEYSTORE" ]] || missing+=(ANDROID_KEYSTORE_BASE64)
+          [[ -n "$STORE_PASSWORD" ]] || missing+=(ANDROID_KEYSTORE_PASSWORD)
+          [[ -n "$KEY_ALIAS" ]] || missing+=(ANDROID_KEY_ALIAS)
+          [[ -n "$KEY_PASSWORD" ]] || missing+=(ANDROID_KEY_PASSWORD)
+          if (( ${#missing[@]} )); then
+            echo "These repository secrets are missing: ${missing[*]}. See docs/release/android-signing.md." >&2
+            exit 1
+          fi
+
+      - name: Check out the tag
+        if: env.RELEASE == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ env.TAG }}
+          persist-credentials: false
+
+      - name: Check out the pull request
+        if: env.RELEASE != 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: desktop/node-version
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate the native Android project
+        working-directory: apps/companion
+        env:
+          PLC_APP_VERSION: ${{ env.VERSION }}
+        run: npx expo prebuild --platform android --no-install --clean
+
+      - name: Prepare the signing key
+        if: env.RELEASE == 'true'
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          umask 077
+          signing="$RUNNER_TEMP/signing"
+          mkdir -p "$signing/gradle-home"
+          printf '%s' "$KEYSTORE" | base64 --decode > "$signing/release.keystore"
+          # gradle.properties 是 Java 的 properties 格式：口令里的 \ : = ! # 和开头的空格要转义。
+          node -e '
+            const fs = require("node:fs");
+            const esc = (value) => value.replace(/[\\:=!#]/g, (c) => "\\" + c).replace(/^\s/, (c) => "\\" + c);
+            const lines = [
+              "org.gradle.jvmargs=-Xmx4g -XX:MaxMetaspaceSize=1g",
+              `android.injected.signing.store.file=${esc(process.argv[1])}`,
+              `android.injected.signing.store.password=${esc(process.env.STORE_PASSWORD)}`,
+              `android.injected.signing.key.alias=${esc(process.env.KEY_ALIAS)}`,
+              `android.injected.signing.key.password=${esc(process.env.KEY_PASSWORD)}`,
+            ];
+            fs.writeFileSync(process.argv[2], lines.join("\n") + "\n", { mode: 0o600 });
+          ' "$signing/release.keystore" "$signing/gradle-home/gradle.properties"
+          echo "GRADLE_USER_HOME=$signing/gradle-home" >> "$GITHUB_ENV"
+
+      - name: Build the signed APK
+        working-directory: apps/companion/android
+        run: |
+          export JAVA_HOME="$JAVA_HOME_17_X64"
+          ./gradlew assembleRelease --no-daemon -PreactNativeArchitectures=arm64-v8a,armeabi-v7a
+
+      - name: Verify the signature
+        if: env.RELEASE == 'true'
+        env:
+          EXPECTED_CERT_SHA256: ${{ vars.ANDROID_SIGNING_CERT_SHA256 }}
+        run: |
+          apk="apps/companion/android/app/build/outputs/apk/release/app-release.apk"
+          apksigner="$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -1)apksigner"
+          "$apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/apksigner.txt"
+          actual="$(sed -n 's/^Signer #1 certificate SHA-256 digest: //p' "$RUNNER_TEMP/apksigner.txt" | tr -d ':' | tr 'A-F' 'a-f')"
+          if [[ -z "$actual" ]]; then
+            echo "apksigner printed no certificate digest." >&2
+            exit 1
+          fi
+          if [[ -n "$EXPECTED_CERT_SHA256" ]]; then
+            expected="$(printf '%s' "$EXPECTED_CERT_SHA256" | tr -d ': ' | tr 'A-F' 'a-f')"
+            if [[ "$actual" != "$expected" ]]; then
+              echo "The APK is signed with certificate $actual, not the expected $expected." >&2
+              exit 1
+            fi
+          fi
+          mkdir -p out/android
+          cp "$apk" "out/android/lead-child-${VERSION}.apk"
+          (cd out/android && sha256sum "lead-child-${VERSION}.apk" > "lead-child-${VERSION}.apk.sha256")
+          echo "Signing certificate SHA-256: $actual" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload to the release
+        if: env.RELEASE == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release upload "$TAG"
+          "out/android/lead-child-${VERSION}.apk"
+          "out/android/lead-child-${VERSION}.apk.sha256"
+          --clobber --repo "$GITHUB_REPOSITORY"
+
+      - name: Remove the signing key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/signing"

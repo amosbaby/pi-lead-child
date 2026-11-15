@@ -9,7 +9,7 @@
     "userInterfaceStyle": "light",
     "ios": {
       "infoPlist": {
-        "NSLocalNetworkUsageDescription": "Lead-Child 需要连接同一局域网内的 pi-lead-child daemon。"
+        "NSLocalNetworkUsageDescription": "Lead-Child connects to the Lead-Child daemon on your local network."
       }
     },
     "android": {
@@ -20,7 +20,22 @@
         "monochromeImage": "./assets/images/android-icon-monochrome.png"
       },
       "predictiveBackGestureEnabled": true,
-      "package": "com.bytezard.plc"
+      "package": "com.bytezard.plc",
+      "permissions": [
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.CAMERA",
+        "android.permission.POST_NOTIFICATIONS"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW"
+      ]
     },
     "web": {
       "output": "static",
@@ -40,14 +55,20 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "允许 Lead-Child 扫描本地 daemon 的配对二维码。"
+          "cameraPermission": "Scan the pairing QR code of the Lead-Child daemon on your computer, or take a photo to send to Lead.",
+          "microphonePermission": false,
+          "recordAudioAndroid": false
         }
       ],
-      "expo-sharing"
+      "expo-sharing",
+      "./plugins/withLanCleartext"
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "locales": {
+      "zh": "./locales/zh.json"
     }
   }
 }

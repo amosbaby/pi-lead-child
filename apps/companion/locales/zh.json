@@ -1,0 +1,6 @@
+{
+  "ios": {
+    "NSCameraUsageDescription": "扫描电脑上 Lead-Child daemon 的配对二维码，或者拍一张照片发给 Lead。",
+    "NSLocalNetworkUsageDescription": "Lead-Child 需要连接同一局域网里的 Lead-Child daemon。"
+  }
+}

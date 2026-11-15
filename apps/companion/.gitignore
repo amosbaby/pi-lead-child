@@ -41,3 +41,6 @@ example
 # generated native folders
 /ios
 /android
+
+# 发版签名用的密钥（docs/release/android-signing.md）：永远不进仓库。
+*.keystore
