@@ -156,7 +156,6 @@ export const modelMessages = defineMessages({
     connectTabs: 'How to connect',
     tabApiKey: 'API key',
     tabSubscription: 'Subscription',
-    subscriptionLater: 'Subscription sign-in is not available in this version yet.',
     kindChoice: 'Kind of API key',
     kindLabels: { custom: 'Custom', vibeproxy: 'vibeproxy', magpie: 'magpie' },
     kindHints: {
@@ -328,7 +327,6 @@ export const modelMessages = defineMessages({
     connectTabs: '接入方式',
     tabApiKey: 'API key',
     tabSubscription: '订阅',
-    subscriptionLater: '这个版本还不能登录订阅。',
     kindChoice: 'API key 的种类',
     kindLabels: { custom: '自定义', vibeproxy: 'vibeproxy', magpie: 'magpie' },
     kindHints: {

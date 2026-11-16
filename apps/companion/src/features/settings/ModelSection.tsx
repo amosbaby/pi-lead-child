@@ -11,9 +11,10 @@ import { memoryErrorText } from './memoryModel';
 import { modelMessages } from './model.messages';
 import { AddSlot, brainPickerGroups, Slot, SlotFace, SlotGrid, type PickerGroup } from './ModelPicker';
 import { ModelLibrary } from './ModelLibrary';
+import { SubscriptionRows } from './SubscriptionRows';
 import { useModelAction } from './useModelAction';
 import {
-  backupsLeft, brainIndex, brainModelName, brainModelSub, choiceFor, fastModelSub, slotLabel, untilLabel, withoutSlot, withSlot,
+  backupsLeft, brainIndex, brainModelName, brainModelSub, choiceFor, fastModelSub, hasSubscriptionField, slotLabel, untilLabel, withoutSlot, withSlot,
 } from './modelSettingsModel';
 
 // 设置 → Lead → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）。
@@ -47,7 +48,8 @@ export function ModelSection() {
     <Column testID="model-section" gap="page-section">
       <ModelPendingSwitch />
       <Assignment dto={modelSettings} />
-      <ModelLibrary dto={modelSettings} />
+      {/* 接入列表里「订阅」一组（方案 C 的 S3）：daemon 给了 subscriptions 字段时才有。 */}
+      <ModelLibrary dto={modelSettings} subscriptions={hasSubscriptionField(modelSettings) ? <SubscriptionRows dto={modelSettings} /> : undefined} />
     </Column>
   );
 }

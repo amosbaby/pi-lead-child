@@ -15,11 +15,13 @@ import {
   type AddModelForm, type ProviderKind,
 } from './modelSettingsModel';
 import { useSettingsDrawer } from './SettingsDesktopShell';
+import { useSubscriptionAddTab } from './SubscriptionLogin';
 import { useModelAction } from './useModelAction';
 
 // 设置 → 模型的「添加模型」（模型配置方案 C，2026-11-16，画板 C-Settings-Desktop、C-Key-Forms、C-Add-Mobile-Key）。
 // 桌面上是设置页右边的抽屉（SettingsDesktopShell 的 SlidePanel）；手机上（或者没有抽屉的地方）是悬浮底部面板（P13.2）。
 // 从上到下：接入方式（API key / 订阅，daemon 给了订阅时才有）→ API key 的种类（自定义、vibeproxy、magpie）→ 字段。
+// 订阅 tab（切片 S3）是 SubscriptionLogin 的 useSubscriptionAddTab：选 GitHub Copilot 或 Codex，起名字，登录。
 // 添加用现有的 save_provider（user_direct）。添加以后读新的模型设置，写出读到了什么：模型数、账号、路由别名，或者目录的问题。
 
 const DRAWER_KEY = 'model-add';
@@ -27,7 +29,7 @@ const DRAWER_KEY = 'model-add';
 export type AddModelPanelProps = {
   open: boolean;
   onClose: () => void;
-  // 订阅 tab 的内容（切片 S3）。daemon 给了 subscriptions 字段时才画 tab。
+  // 换掉订阅 tab 的内容（测试用）。不给时是 useSubscriptionAddTab。daemon 给了 subscriptions 字段时才画 tab。
   subscriptionTab?: ReactNode;
 };
 
@@ -38,7 +40,7 @@ export function AddModelPanel({ open, onClose, subscriptionTab }: AddModelPanelP
   const inDrawer = desktop && host !== null;
   useEffect(() => {
     if (!inDrawer || !open || !host) return undefined;
-    host.show(DRAWER_KEY, <AddModelContent frame="drawer" onClose={onClose} subscriptionTab={subscriptionTab} />);
+    host.show(DRAWER_KEY, <AddModelContent frame="drawer" onClose={onClose} subscriptionTab={subscriptionTab} />, onClose);
     return () => host.hide(DRAWER_KEY);
   }, [inDrawer, open, host, onClose, subscriptionTab]);
   if (inDrawer) return null;
@@ -82,7 +84,9 @@ function AddModelContent({ frame, onClose, subscriptionTab, render }: {
   const [message, setMessage] = useState<Message | null>(null);
   const [added, setAdded] = useState<string | null>(null);
   const subscriptions = modelSettings ? hasSubscriptionField(modelSettings) : false;
+  const subscriptionFlow = useSubscriptionAddTab({ dto: modelSettings, onDone: () => close() });
   const close = () => {
+    subscriptionFlow.reset();
     setForm(EMPTY_FORM);
     setMessage(null);
     setAdded(null);
@@ -131,8 +135,9 @@ function AddModelContent({ frame, onClose, subscriptionTab, render }: {
     body = <AddedResult dto={modelSettings} name={added} locale={locale} />;
     footer = <FooterBar bare={frame === 'sheet'} status={null} action={<Button testID="model-add-done" label={m.done} size={frame === 'sheet' ? 'md' : 'sm'} onPress={close} />} />;
   } else if (tab === 'subscription') {
-    body = subscriptionTab ?? <Text testID="model-add-subscription-later" size="note" tone="secondary">{m.subscriptionLater}</Text>;
-    footer = null;
+    body = subscriptionTab ?? subscriptionFlow.body;
+    const flowFooter = subscriptionTab ? null : subscriptionFlow.footer;
+    footer = flowFooter ? <FooterBar bare={frame === 'sheet'} status={flowFooter.status} action={flowFooter.action} /> : null;
   } else {
     body = <KeyForm dto={modelSettings} form={form} setKind={setKind} field={field} setApi={(api) => setForm((current) => ({ ...current, api }))}
       leadName={leadName} locale={locale} />;

@@ -171,7 +171,7 @@ describe('the add model request', () => {
 
   it('knows when the daemon gives subscriptions', () => {
     expect(hasSubscriptionField(settings([vibeproxy]))).toBe(false);
-    expect(hasSubscriptionField(settings([vibeproxy], { subscriptions: [] }))).toBe(true);
+    expect(hasSubscriptionField(settings([vibeproxy], { subscriptions: { subscriptions: [], logins: [], multiPass: true } }))).toBe(true);
   });
 });
 
@@ -232,12 +232,13 @@ describe('the add model panel', () => {
   });
 
   it('shows the subscription tab only when the daemon gives subscriptions', async () => {
-    const { runtime } = addRuntime(settings([vibeproxy], { subscriptions: [] }));
+    const { runtime } = addRuntime(settings([vibeproxy], { subscriptions: { subscriptions: [], logins: [], multiPass: true } }));
     renderWithRuntime(<ModelRoute />, runtime);
     fireEvent.click(screen.getByTestId('model-add-open'));
     expect(await screen.findByTestId('model-add-tabs')).toBeTruthy();
     fireEvent.click(screen.getByTestId('model-add-tab-subscription'));
-    expect(screen.getByTestId('model-add-subscription-later')).toBeTruthy();
+    // 订阅 tab 的内容在 subscriptions.test.tsx 里测。
+    expect(screen.getByTestId('subscription-add-choose')).toBeTruthy();
     expect(screen.queryByTestId('model-add-save')).toBeNull();
   });
 

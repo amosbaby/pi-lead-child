@@ -1,5 +1,5 @@
 import { Badge, Box, Column, Pressable, Row, Screen, ScrollArea, SlidePanel, Text } from '@pi-lead-child/components';
-import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
+import { createContext, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 
 import { useMessages } from '@/i18n';
 import { useLeadName } from '@/state/hooks';
@@ -21,8 +21,10 @@ type SettingsDesktopShellProps = {
 
 // 页面自己打开的抽屉（例如「设置 → 模型」的「添加模型」，方案 C，2026-11-16）。路由给的抽屉（一个连接的详情）优先。
 // 页面卸载时要 hide，抽屉跟着收起。手机上没有这个抽屉：页面拿到 null，自己用悬浮底部面板。
+// 抽屉只有一个位置：别的 key 打开时换掉原来的，原来那个的 onReplaced 被调用，好让它把自己的「开着」改回关着
+// （例如开着「添加模型」时点了一种订阅，订阅详情换掉它，2026-11-16）。
 export type SettingsDrawerHost = {
-  show: (key: string, content: ReactNode) => void;
+  show: (key: string, content: ReactNode, onReplaced?: () => void) => void;
   hide: (key: string) => void;
 };
 
@@ -43,9 +45,18 @@ export function SettingsDesktopShell({
   const leadName = useLeadName();
   const m = useMessages(settingsMessages);
   const [pageDrawer, setPageDrawer] = useState<{ key: string; content: ReactNode } | null>(null);
+  const owner = useRef<{ key: string; onReplaced?: () => void } | null>(null);
   const host = useMemo<SettingsDrawerHost>(() => ({
-    show: (key, content) => setPageDrawer({ key, content }),
-    hide: (key) => setPageDrawer((current) => (current?.key === key ? null : current)),
+    show: (key, content, onReplaced) => {
+      const previous = owner.current;
+      owner.current = { key, onReplaced };
+      if (previous && previous.key !== key) previous.onReplaced?.();
+      setPageDrawer({ key, content });
+    },
+    hide: (key) => {
+      if (owner.current?.key === key) owner.current = null;
+      setPageDrawer((current) => (current?.key === key ? null : current));
+    },
   }), []);
   const shownDrawer = drawer ?? pageDrawer?.content ?? null;
   const shownKey = drawer ? drawerKey : pageDrawer?.key;
