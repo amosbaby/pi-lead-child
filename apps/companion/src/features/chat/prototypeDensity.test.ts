@@ -106,16 +106,16 @@ describe('chat prototype density', () => {
   });
 
   // 2026-10-25 用户要求（参考 Kimi）：一张白色圆角卡片，浅色描边加轻微阴影；上面是文字，下面一行工具栏：
-  // 左边「+」选图片，右边模型名和圆形的发送按钮。原来没有接功能的语音按钮去掉了。
-  it('lays the composer out as one card: text above, a toolbar with +, the model and a round send button below', () => {
+  // 左边「+」选图片，右边圆形的发送按钮。原来没有接功能的语音按钮去掉了。
+  // 2026-11-16（模型配置方案 C 的 S4）：输入框上不再放模型，模型名在回答头上，输入 /model 也能换。
+  it('lays the composer out as one card: text above, a toolbar with + and a round send button below, no model', () => {
     const composer = source('MessageComposer.tsx');
 
     expect(composer).toMatch(/<Column\s+testID="composer"[^>]*rounded="4xl"[^>]*borderWidth=\{1\}[^>]*boxShadow=/s);
     expect(composer).toMatch(/<IconButton\s+testID="composer-attach"\s+icon="plus"\s+label=\{m\.addImage\}/s);
     expect(composer).not.toContain('icon="mic"');
     expect(composer).toMatch(/testID="send-message"[^]*?rounded="full"/);
-    // 模型名和推理强度由 LeadModelPicker 画（点开换模型），输入框只给它留位置。
-    expect(composer).toContain('{modelControl}');
+    expect(composer).not.toContain('modelControl');
     // 工单对话坞的输入框：文字和发送按钮在一行，灰底胶囊、没有描边（主题 11.21，画板 M3Wait，2026-11-15）。
     expect(composer).toMatch(/if \(minimal\) \{[^]*?<Row\s+testID="composer"[^>]*rounded="full"[^>]*bg="surface-muted"/);
   });

@@ -51,8 +51,20 @@ export const LeadModelCatalogSchema = StrictObject({
   // 你选的（config.json 的 lead.models 的第一个）。
   selected: LeadModelChoiceSchema,
   models: Type.Array(LeadModelOptionSchema),
+  // Lead 的会话此刻真正挂着的模型（provider/id），带订阅的账号：current 写分工的格子（openai-codex/gpt-5.5），
+  // 这里写 pi-multi-pass 换上的账号（openai-codex-2/gpt-5.5）；「只这一条」的那一轮里是那一轮的模型。不知道时为 null。
+  // 可选，只在客户端带 LEAD_MODELS_LIVE_QUERY 时给：这个 DTO 是严格的契约，旧版 Companion 多一个字段就整份拒收。
+  inSession: Type.Optional(Nullable(Type.String({ minLength: 3, maxLength: 300 }))),
 });
 export type LeadModelCatalog = Static<typeof LeadModelCatalogSchema>;
+
+// 客户端要 inSession 时，GET /v1/lead/models 带的查询参数（模型配置方案 C 的 S4，会话里换模型的浮层）。
+export const LEAD_MODELS_LIVE_QUERY = "live=1";
+
+// 「只这一条」（模型配置方案 C 的 D8）：chat.send 带一个单轮模型（turnModel），daemon 用它答这一条消息，答完回到分工的主用，
+// 不改 config.json。daemon 宣布了这个能力时客户端才带 turnModel：旧 daemon 严格校验命令，多一个字段整条拒收。
+// hello.v2 是严格的契约，能力写在已有的 capabilities 数组里，不加字段。
+export const CHAT_TURN_MODEL_CAPABILITY = "chat.turn-model.v1";
 
 export const LeadModelSwitchResultSchema = StrictObject({
   previous: LeadModelChoiceSchema,

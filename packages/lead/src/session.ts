@@ -707,7 +707,10 @@ export async function createLeadSession(opts: {
       if (!modelRuntime.getModel(provider, id)) {
         const config = loadLeadModelConfig(opts.dataDir);
         providerSettings = config;
-        for (const note of await registerLeadProviders(modelRuntime, config)) {
+        // 「只这一条」的单轮模型（模型配置方案 C 的 D8）不在 config.json 的分工里：带推理强度后缀的 id 不在目录里，
+        // 和分工里的模型一起注册，config.json 不改。
+        const register = config.models.includes(next) ? config : { ...config, models: [...config.models, next] };
+        for (const note of await registerLeadProviders(modelRuntime, register)) {
           console.error(`[lead] ${note}`);
         }
       }

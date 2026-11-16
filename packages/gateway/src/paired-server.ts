@@ -28,6 +28,9 @@ import {
   CHAT_PLACEMENT_CAPABILITY,
   CHAT_FOLLOW_UP_ACTIONS_CAPABILITY,
   CHAT_PLACEMENT_PREFERENCE_CAPABILITY,
+  CHAT_TURN_MODEL_CAPABILITY,
+  leadModelSpec,
+  type LeadModelChoice,
   FollowUpActionRequestSchema,
   CHAT_IMAGE_ID_PATTERN,
   TICKET_ATTACHMENT_ID_PATTERN,
@@ -253,7 +256,12 @@ export interface PairedBridge {
     mode?: ChatPlacement;
     // 用户发的图片（protocol 的 chat-images.ts），网关已经校验并解码。只有 Lead 的会话收图片。
     images?: ChatImageData[];
+    // 「只这一条」：只用这个模型答这一条（provider/id，带推理强度的后缀）。只在 chatTurnModel 为 true 时有。
+    turnModel?: string;
   }) => { mode: ChatSendMode; turnId: string };
+  // chatV2 收「只这一条」的单轮模型（protocol 的 CHAT_TURN_MODEL_CAPABILITY）。为 true 时网关在 hello.v2 里宣布这个能力，
+  // 客户端据此才带 turnModel。
+  chatTurnModel?: boolean;
   // chatV2 收到没带 mode 的消息时按「Lead 忙时你发的消息」的设置放（protocol 的 busy-placement.ts）。为 true 时网关在 hello.v2 里
   // 宣布 CHAT_PLACEMENT_PREFERENCE_CAPABILITY，客户端据此不再带 mode。
   chatPlacementPreference?: boolean;
@@ -1181,7 +1189,7 @@ export async function startPairedServer(
   function executeChatCommand(
     input: {
       id: string; message: string; context?: { ticketId?: number };
-      clientMessageId?: string; mode?: ChatPlacement; images?: unknown;
+      clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice;
     },
     binding: Binding,
   ): { mode: ChatSendMode; turnId: string; duplicate?: true } {
@@ -1206,6 +1214,13 @@ export async function startPairedServer(
     }
     // 只带图片的消息可以没有文字；文字和图片都没有时拒收。
     if (!input.message.trim() && !images) throw new PairedCommandError("invalid_request", "message is required");
+    // 「只这一条」：只有 Lead 的会话收，daemon 也要说它收（CHAT_TURN_MODEL_CAPABILITY）。
+    if (input.turnModel !== undefined) {
+      if (input.context?.ticketId !== undefined) {
+        throw new PairedCommandError("invalid_request", "turnModel is only accepted in the Lead conversation");
+      }
+      if (!bridge.chatV2 || !bridge.chatTurnModel) throw new PairedCommandError("invalid_request", "this daemon does not accept turnModel");
+    }
     const { images: _raw, ...command } = input;
     const result = startChatTurn({ ...command, ...(images ? { images } : {}) }, binding);
     if (clientMessageId !== undefined) {
@@ -1215,7 +1230,10 @@ export async function startPairedServer(
   }
 
   function startChatTurn(
-    input: { id: string; message: string; context?: { ticketId?: number }; mode?: ChatPlacement; images?: ChatImageData[] },
+    input: {
+      id: string; message: string; context?: { ticketId?: number }; mode?: ChatPlacement; images?: ChatImageData[];
+      turnModel?: LeadModelChoice;
+    },
     binding: Binding,
   ): { mode: ChatSendMode; turnId: string } {
     return input.context?.ticketId !== undefined && bridge.ticketMessageV2
@@ -1237,6 +1255,7 @@ export async function startPairedServer(
           commandId: input.id,
           ...(input.mode ? { mode: input.mode } : {}),
           ...(input.images ? { images: input.images } : {}),
+          ...(input.turnModel ? { turnModel: leadModelSpec(input.turnModel) } : {}),
         })
       : {
           mode: bridge.chat(input.message, { label: `paired:${binding.kind}:${binding.display_name}` }),
@@ -1248,7 +1267,7 @@ export async function startPairedServer(
     body: Record<string, unknown>,
   ): {
     id: string; message: string; context?: { ticketId?: number };
-    clientMessageId?: string; mode?: ChatPlacement; images?: unknown;
+    clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice;
   } {
     if (typeof body.id !== "string" || !body.id.trim()) {
       throw new HttpError(400, "invalid_request", "id is required");
@@ -1263,11 +1282,15 @@ export async function startPairedServer(
     if (body.mode !== undefined && !Value.Check(ChatPlacementSchema, body.mode)) {
       throw new HttpError(400, "invalid_request", "mode must be steer or followUp");
     }
+    if (body.turnModel !== undefined && !Value.Check(LeadModelChoiceSchema, body.turnModel)) {
+      throw new HttpError(400, "invalid_request", "turnModel must be a model and an effort");
+    }
     const parsed = {
       id: body.id, message: body.message,
       ...(body.clientMessageId === undefined ? {} : { clientMessageId: body.clientMessageId as string }),
       ...(body.mode === undefined ? {} : { mode: body.mode as ChatPlacement }),
       ...(body.images === undefined ? {} : { images: body.images }),
+      ...(body.turnModel === undefined ? {} : { turnModel: body.turnModel as LeadModelChoice }),
     };
     const context = body.context;
     if (context === undefined || context === null) return parsed;
@@ -1495,6 +1518,10 @@ export async function startPairedServer(
           catalog = await service.catalog();
         } catch (error) {
           throw new HttpError(503, "internal_error", m.leadModelsFailed(error));
+        }
+        // inSession 只给带了 live=1 的客户端（会话里换模型的浮层）：旧版 Companion 的严格 schema 不认它。
+        if (url.searchParams.get("live") === "1" && service.inSession) {
+          catalog = { ...catalog, inSession: service.inSession() };
         }
         json(req, res, 200, catalog);
         return;
@@ -3462,6 +3489,8 @@ export async function startPairedServer(
           ...(bridge.uiActionServices?.followUps ? [CHAT_FOLLOW_UP_ACTIONS_CAPABILITY] : []),
           // 没带 mode 的消息按「Lead 忙时你发的消息」的设置放（daemon 说它这样做时）。
           ...(bridge.chatV2 && bridge.chatPlacementPreference ? [CHAT_PLACEMENT_PREFERENCE_CAPABILITY] : []),
+          // 「只这一条」的单轮模型（daemon 说它收时）。
+          ...(bridge.chatV2 && bridge.chatTurnModel ? [CHAT_TURN_MODEL_CAPABILITY] : []),
           // Lead 的会话收图片（只有 chatV2 的桥接收）。
           ...(bridge.chatV2 ? [CHAT_IMAGES_CAPABILITY] : []),
           // Lead 的形象（/v1/lead/avatar 的路由，protocol 的 lead-avatar.ts）。这个网关总有这些路由。

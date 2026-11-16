@@ -1,9 +1,13 @@
 // @vitest-environment happy-dom
-// 会话输入框右下角的模型选择（2026-10-26）：写着 Lead 正在用的模型 id 和推理强度；点开是按来源分组的模型（as1、as4 各一组）
-// 和推理强度；上面一个搜索框，左栏是 provider（PR #11，2026-11-06）。选一个就换（和 Lead 的 switch_lead_model 是同一个操作）；马上换好时浮层关上，模型名跟着变。
-import type { LeadModelCatalog, LeadModelChoice, LeadModelOption, LeadStatus, Overview } from '@pi-lead-child/protocol';
+// 会话里换模型（模型配置方案 C 的 S4、S5，画板 C-Picker-Desktop / C-Picker-Mobile，2026-11-16）：
+// 输入框上不放模型；最新一条回答头上写着模型名，点开是浮层（输入 /model 也能打开）。
+// 左栏按「订阅 / API key」列接入，订阅带 5 小时额度；右边是账号（缺省自动，可以固定）和模型；底部「只这一条」和「换成主用」。
+import {
+  CHAT_TURN_MODEL_CAPABILITY, type ConversationTurn, type LeadModelCatalog, type LeadModelChoice, type LeadModelOption,
+  type LeadStatus, type ModelSettingsDto, type Overview,
+} from '@pi-lead-child/protocol';
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { renderUI } from '../../../test/render';
 import { CompanionRuntimeProvider } from '../../state/CompanionStateProvider';
@@ -11,10 +15,21 @@ import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '
 import { LeadConversation } from './LeadConversation';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }), useFocusEffect: () => {} }));
 vi.hoisted(() => {
   window.requestAnimationFrame = () => 0;
   window.cancelAnimationFrame = () => {};
+});
+// 桌面宽度（锚定浮层，左右两栏）或者手机宽度（底部面板，一段一段）。
+const viewport = vi.hoisted(() => ({ wide: true }));
+vi.mock('@pi-lead-child/components', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@pi-lead-child/components')>();
+  return {
+    ...actual,
+    useBreakpoint: () => (viewport.wide
+      ? { width: 1440, height: 900, tablet: true, desktop: true, wide: true }
+      : { width: 390, height: 844, tablet: false, desktop: false, wide: false }),
+  };
 });
 
 const SESSION = 'lead-session';
@@ -30,34 +45,69 @@ function overview(model: string): Overview {
   };
 }
 
-// prefix 是 daemon 给的账号：这个 vibeproxy 读到了详细目录，as1/、as4/ 是账号。
-function option(model: string, source: string, efforts: string[], extra: Partial<LeadModelOption> = {}): LeadModelOption {
-  const id = model.slice('vibeproxy/'.length);
-  const slash = id.indexOf('/');
+function option(model: string, extra: Partial<LeadModelOption> = {}): LeadModelOption {
+  const slash = model.indexOf('/');
   return {
-    model, provider: 'vibeproxy', id, prefix: slash > 0 ? id.slice(0, slash) : null, source, name: null,
-    image: true, efforts, defaultEffort: null, blockedUntil: null, ...extra,
+    model, provider: model.slice(0, slash), id: model.slice(slash + 1), prefix: null, source: null, name: null,
+    image: true, efforts: [], defaultEffort: null, blockedUntil: null, ...extra,
   };
 }
 
+// 分工：Codex 的 gpt-5.5 主用，vibeproxy 的 claude-opus-5-5 备用。会话此刻挂在 Codex 的第 2 个账号上（pi-multi-pass 换的）。
 const catalog: LeadModelCatalog = {
-  current: { model: 'vibeproxy/as4/claude-sonnet-5', effort: 'high' },
-  selected: { model: 'vibeproxy/as4/claude-sonnet-5', effort: 'high' },
+  current: { model: 'openai-codex/gpt-5.5', effort: null },
+  selected: { model: 'openai-codex/gpt-5.5', effort: null },
+  inSession: 'openai-codex-2/gpt-5.5',
   models: [
-    option('vibeproxy/claude-sonnet-5', 'anthropic', ['low', 'high']),
-    option('vibeproxy/gemini-3.8-flash-high', 'antigravity', [], { image: false }),
-    option('vibeproxy/as1/claude-sonnet-5', 'anthropic', ['low', 'high'], { blockedUntil: '2026-10-26T13:30:00.000Z' }),
-    option('vibeproxy/as4/claude-sonnet-5', 'anthropic', ['low', 'high']),
-    option('vibeproxy/as4/claude-opus-5-5', 'anthropic', ['low', 'high', 'max']),
+    option('vibeproxy/claude-opus-5-5', { name: 'Claude Opus 5.5', efforts: ['low', 'high'] }),
+    option('vibeproxy/claude-sonnet-5', { blockedUntil: '2026-11-16T13:30:00.000Z' }),
+    option('openai-codex/gpt-5.5', { name: 'GPT-5.5' }),
+    option('openai-codex/gpt-5.5-mini', { name: 'GPT-5.5 Mini', image: false }),
+    option('github-copilot/claude-sonnet-5', { name: 'Claude Sonnet 5' }),
   ],
 };
 
-function setup(options: { applied?: 'now' | 'after_turn'; fail?: string; catalog?: LeadModelCatalog } = {}) {
+function account(provider: string, index: number, label: string, remaining: number | null) {
+  return {
+    provider, index, label, loggedIn: true, email: null, plan: null,
+    quota: remaining === null ? null : { windows: [{ label: '5h', remainingPercent: remaining, resetAt: null }], checkedAt: '2026-11-16T10:00:00.000Z', problem: null },
+    coolingUntil: null, role: 'default' as const, windows: [], inUse: true,
+  };
+}
+
+const settings = {
+  brain: {
+    chain: [{ model: 'openai-codex/gpt-5.5', effort: null }, { model: 'vibeproxy/claude-opus-5-5', effort: 'high' }],
+    current: { model: 'openai-codex/gpt-5.5', effort: null },
+    providers: [],
+  },
+  fast: { models: [], chain: [], llmFallback: null, effectiveLlm: null },
+  maxBackups: 3,
+  subscriptions: {
+    multiPass: true,
+    logins: [],
+    subscriptions: [
+      {
+        base: 'openai-codex', strategy: 'quota-first', quotaSupported: true,
+        accounts: [account('openai-codex', 1, 'Work', 76), account('openai-codex-2', 2, 'Home', 9)],
+        models: [{ model: 'openai-codex/gpt-5.5', id: 'gpt-5.5', name: 'GPT-5.5', image: true, contextWindow: 400_000, efforts: [] }],
+      },
+      { base: 'github-copilot', strategy: 'round-robin', quotaSupported: false, accounts: [account('github-copilot', 1, 'Me', null)], models: [] },
+    ],
+  },
+} as unknown as ModelSettingsDto;
+
+const replyTurn: ConversationTurn = {
+  id: 'turn-1', originBindingId: 1, originKind: 'paired:companion', ticketId: null, state: 'completed',
+  userText: 'Think harder', assistantText: 'Sure.', error: null,
+  createdAt: '2026-11-16T10:00:00.000Z', updatedAt: '2026-11-16T10:00:05.000Z',
+} as ConversationTurn;
+
+function setup(options: { applied?: 'now' | 'after_turn'; capabilities?: string[]; busy?: boolean; compact?: boolean } = {}) {
   const switched: LeadModelChoice[] = [];
   const client = {
-    getLeadModels: vi.fn(async () => options.catalog ?? catalog),
+    getLeadModels: vi.fn(async () => catalog),
     switchLeadModel: vi.fn(async (choice: LeadModelChoice) => {
-      if (options.fail) throw new Error(options.fail);
       switched.push(choice);
       return { previous: catalog.selected, selected: choice, applied: options.applied ?? 'now' };
     }),
@@ -67,118 +117,175 @@ function setup(options: { applied?: 'now' | 'after_turn'; fail?: string; catalog
     credentials: {} as CompanionRuntimeDependencies['credentials'],
     scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
   });
-  runtime.control.setState({ phase: 'ready', connectionState: 'connected', overview: overview('vibeproxy/as4/claude-sonnet-5(high)'), capabilities: [] });
-  runtime.control.getState().replaceConversation(SESSION, []);
-  renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation /></CompanionRuntimeProvider>);
-  return { client, switched };
+  runtime.control.setState({
+    phase: 'ready', connectionState: 'connected', overview: { ...overview('openai-codex/gpt-5.5'), busy: options.busy ?? false },
+    capabilities: options.capabilities ?? [CHAT_TURN_MODEL_CAPABILITY], modelSettings: settings,
+  });
+  runtime.control.getState().replaceConversation(SESSION, [replyTurn]);
+  const sendChat = vi.spyOn(runtime, 'sendChat').mockResolvedValue({ clientMessageId: 'msg_1' });
+  renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation compact={options.compact ?? false} /></CompanionRuntimeProvider>);
+  return { runtime, client, switched, sendChat };
 }
 
-async function open() {
-  await act(async () => { fireEvent.click(screen.getByTestId('lead-model')); });
-  await waitFor(() => expect(screen.getByTestId('lead-model-catalog')).toBeTruthy());
+async function openFromHeader() {
+  await act(async () => { fireEvent.click(await screen.findByTestId('lead-model-trigger')); });
+  await waitFor(() => expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy());
 }
 
-const groupTitles = () => Array.from(screen.getByTestId('lead-model-catalog').querySelectorAll('[data-testid^="lead-model-group-"]'))
-  .map((element) => element.getAttribute('data-testid')!.slice('lead-model-group-'.length));
+const connectionKeys = () => Array.from(screen.getByTestId('lead-model-connection-list').querySelectorAll('[data-testid^="lead-model-connection-"]'))
+  .map((element) => element.getAttribute('data-testid')!.slice('lead-model-connection-'.length))
+  .filter((key) => key !== 'list');
 
-describe('the model picker in the composer', () => {
-  it('shows only the model id and the effort', async () => {
+beforeEach(() => { viewport.wide = true; });
+
+describe('the model on the latest reply', () => {
+  it('writes the model, not on the composer, and opens the picker anchored there', async () => {
     setup();
-    // 读到目录、知道 as4 是账号以后，只写模型 id。
-    await waitFor(() => expect(screen.getByTestId('composer-model').textContent).toBe('claude-sonnet-5'));
-    expect(screen.getByTestId('composer-model-effort').textContent).toBe('high');
+    expect(screen.queryByTestId('composer-model')).toBeNull();
+    // 目录读到以后：模型 id 和接入。
+    await waitFor(() => expect(screen.getByTestId('lead-model-trigger').textContent).toBe('gpt-5.5 · Codex'));
+    await openFromHeader();
+    expect(screen.getByTestId('lead-model-picker-panel')).toBeTruthy();
+  });
+});
+
+describe('the model picker', () => {
+  it('lists subscriptions before API keys, with the quota of the account in use, and the true account in the header', async () => {
+    setup();
+    await openFromHeader();
+    expect(connectionKeys()).toEqual(['openai-codex', 'github-copilot', 'vibeproxy']);
+    // 会话此刻挂在第 2 个账号（Home）上：额度条写它用了多少（100 - 9 = 91）。
+    expect(screen.getByTestId('lead-model-connection-openai-codex').getAttribute('aria-label')).toBe('Codex, 91% of the 5-hour quota used');
+    // Copilot 查不了额度：写模型数。
+    expect(screen.getByTestId('lead-model-connection-github-copilot').textContent).toContain('1');
+    expect(screen.getByTestId('lead-model-in-use').textContent).toBe('GPT-5.5');
+    expect(screen.getByTestId('lead-model-in-use-source').textContent).toBe('Codex · Home · in use');
+    // 打开时选着的是主用；它在分工的第一个，标「主用」。
+    expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('lead-model-role-openai-codex/gpt-5.5').textContent).toBe('Primary');
+    expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5').textContent).toContain('400K');
+    expect(screen.getByTestId('lead-model-account-menu-openai-codex').textContent).toBe('Automatic · now Home');
+    expect(screen.getByTestId('lead-model-account-info-openai-codex').textContent).toBe('Most quota first · Work 5h 24% · Home 5h 91%');
   });
 
-  it('lists the models by account and source, marks the chosen one, and shows a blocked account', async () => {
+  it('shows the models of the connection you pick, with backup tags and a blocked model', async () => {
     setup();
-    await open();
-    // 分组和设置页同一个规则（2026-11-05）：账号 · 通道，没有账号的按通道。
-    expect(groupTitles()).toEqual(['as1 · anthropic', 'as4 · anthropic', 'anthropic', 'antigravity']);
-    expect(screen.getByTestId('lead-model-option-vibeproxy/as4/claude-sonnet-5').getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByTestId('lead-model-option-vibeproxy/as1/claude-sonnet-5').textContent).toContain('Quota used up');
-    // 只标出不能看图的模型。
-    expect(screen.getByTestId('lead-model-option-vibeproxy/gemini-3.8-flash-high').textContent).toContain('Cannot read images');
-    expect(screen.getByTestId('lead-model-option-vibeproxy/as4/claude-sonnet-5').textContent).not.toContain('read images');
-    expect(screen.getByTestId('lead-model-effort-high').getAttribute('aria-pressed')).toBe('true');
-    // 最上面写着正在用的是哪个账号的哪个模型。
-    expect(screen.getByTestId('lead-model-selected').textContent).toBe('In use: as4 · anthropic · claude-sonnet-5 high');
+    await openFromHeader();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    expect(screen.getByTestId('lead-model-connection-vibeproxy').getAttribute('aria-pressed')).toBe('true');
+    expect(screen.getByTestId('lead-model-role-vibeproxy/claude-opus-5-5').textContent).toBe('Backup');
+    expect(screen.getByTestId('lead-model-option-vibeproxy/claude-sonnet-5').textContent).toContain('Quota used up');
+    expect(screen.queryByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeNull();
   });
 
-  it('filters as you type without changing the section titles, and switches from a search result', async () => {
-    const { switched } = setup();
-    await open();
-    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'OPUS' } }); });
-    expect(groupTitles()).toEqual(['as4 · anthropic']);
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/as4/claude-opus-5-5')); });
-    expect(switched).toEqual([{ model: 'vibeproxy/as4/claude-opus-5-5', effort: 'high' }]);
-  });
-
-  it('says so when nothing matches, and keeps the in-use line', async () => {
+  it('searches all models across connections', async () => {
     setup();
-    await open();
+    await openFromHeader();
+    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'SONNET' } }); });
+    expect(screen.getByTestId('lead-model-option-vibeproxy/claude-sonnet-5')).toBeTruthy();
+    expect(screen.getByTestId('lead-model-option-github-copilot/claude-sonnet-5')).toBeTruthy();
+    expect(screen.queryByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeNull();
     await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'zzz' } }); });
     expect(screen.getByTestId('lead-model-no-match')).toBeTruthy();
-    expect(groupTitles()).toEqual([]);
-    expect(screen.getByTestId('lead-model-selected').textContent).toBe('In use: as4 · anthropic · claude-sonnet-5 high');
   });
 
-  it('lists the providers in the left rail and shows only the picked one', async () => {
-    const magpie: LeadModelOption = {
-      model: 'magpie/deepseek/deepseek-v4', provider: 'magpie', id: 'deepseek/deepseek-v4', prefix: null, source: 'deepseek', name: null,
-      image: false, efforts: [], defaultEffort: null, blockedUntil: null,
-    };
-    setup({ catalog: { ...catalog, models: [...catalog.models, magpie] } });
-    await open();
-    const rail = Array.from(screen.getByTestId('lead-model-providers').querySelectorAll('[data-testid^="lead-model-provider-"]'))
-      .map((element) => element.getAttribute('data-testid')!.slice('lead-model-provider-'.length));
-    expect(rail).toEqual(['all', 'vibeproxy', 'magpie']);
-    expect(screen.getByTestId('lead-model-provider-all').getAttribute('aria-pressed')).toBe('true');
-    // 全部模型：有两个 provider，标题前面写 provider。
-    expect(groupTitles()).toEqual(['vibeproxy · as1 · anthropic', 'vibeproxy · as4 · anthropic', 'vibeproxy · anthropic', 'vibeproxy · antigravity', 'magpie']);
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-provider-magpie')); });
-    expect(screen.getByTestId('lead-model-provider-magpie').getAttribute('aria-pressed')).toBe('true');
-    expect(screen.getByTestId('lead-model-provider-magpie').getAttribute('aria-label')).toBe('magpie, 1 model');
-    // 只画 magpie：标题不再写 provider，它只有一种通道，分段没有标题。
-    expect(groupTitles()).toEqual(['']);
-    expect(screen.getByTestId('lead-model-option-magpie/deepseek/deepseek-v4')).toBeTruthy();
-    // 这个 provider 里搜不到：空状态，不跳回全部。
-    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'sonnet' } }); });
-    expect(screen.getByTestId('lead-model-no-match')).toBeTruthy();
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-provider-all')); });
-    expect(groupTitles()).toEqual(['vibeproxy · as1 · anthropic', 'vibeproxy · as4 · anthropic', 'vibeproxy · anthropic']);
-  });
-
-  it('switches to another model, keeping the effort when it supports it, and closes', async () => {
+  it('makes the chosen model and effort the primary', async () => {
     const { switched } = setup();
-    await open();
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/as4/claude-opus-5-5')); });
-    expect(switched).toEqual([{ model: 'vibeproxy/as4/claude-opus-5-5', effort: 'high' }]);
-    await waitFor(() => expect(screen.queryByTestId('lead-model-catalog')).toBeNull());
-    expect(screen.getByTestId('composer-model').textContent).toBe('claude-opus-5-5');
+    await openFromHeader();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    expect(switched).toEqual([{ model: 'vibeproxy/claude-opus-5-5', effort: 'high' }]);
+    await waitFor(() => expect(screen.queryByTestId('lead-model-in-use')).toBeNull());
   });
 
-  it('drops the effort for a model that has none, and changes only the effort from the effort row', async () => {
-    const { switched } = setup({ applied: 'after_turn' });
-    await open();
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/gemini-3.8-flash-high')); });
-    expect(switched).toEqual([{ model: 'vibeproxy/gemini-3.8-flash-high', effort: null }]);
-    // Lead 正在回答：浮层留着，说这一轮结束后换。
-    await waitFor(() => expect(screen.getByTestId('lead-model-notice').textContent).toContain('starts after this answer ends'));
-    expect(screen.getByTestId('lead-model-pending')).toBeTruthy();
+  it('keeps the panel open and says when the switch starts after this answer', async () => {
+    setup({ applied: 'after_turn' });
+    await openFromHeader();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5-mini')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    await waitFor(() => expect(screen.getByTestId('lead-model-notice').textContent).toBe('GPT-5.5 Mini starts after this answer ends.'));
   });
 
-  it('changes the effort of the chosen model', async () => {
+  it('pins a subscription account by switching to <base>-<n>/<id>, and goes back to automatic', async () => {
     const { switched } = setup();
-    await open();
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-low')); });
-    expect(switched).toEqual([{ model: 'vibeproxy/as4/claude-sonnet-5', effort: 'low' }]);
+    await openFromHeader();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-account-menu-openai-codex')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-account-openai-codex-2')); });
+    expect(screen.getByTestId('lead-model-account-menu-openai-codex').textContent).toBe('Home');
+    // 换模型时留在固定的账号上。
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5-mini')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    expect(switched).toEqual([{ model: 'openai-codex-2/gpt-5.5-mini', effort: null }]);
+  });
+});
+
+describe('only this message', () => {
+  it('puts a removable chip above the composer and sends the next message once with that model', async () => {
+    const { sendChat, switched } = setup();
+    await openFromHeader();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-only-this')); });
+    expect(switched).toEqual([]);
+    expect(screen.getByTestId('turn-model-chip').textContent).toContain('Only this message: claude-opus-5-5 · High · vibeproxy');
+    await act(async () => { fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'Think harder' } }); });
+    await act(async () => { fireEvent.click(screen.getByTestId('send-message')); });
+    expect(sendChat).toHaveBeenCalledWith('Think harder', undefined, undefined, undefined, { model: 'vibeproxy/claude-opus-5-5', effort: 'high' });
+    // 只这一条：发出以后小标签消失，下一条照常。
+    expect(screen.queryByTestId('turn-model-chip')).toBeNull();
+    await act(async () => { fireEvent.change(screen.getByTestId('composer-input'), { target: { value: 'Next' } }); });
+    await act(async () => { fireEvent.click(screen.getByTestId('send-message')); });
+    expect(sendChat).toHaveBeenLastCalledWith('Next', undefined, undefined);
   });
 
-  it('says why a switch was refused and keeps the panel open', async () => {
-    setup({ fail: '模型 vibeproxy/as4/claude-sonnet-5 不支持推理强度 max。可选：low、high' });
-    await open();
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-default')); });
-    await waitFor(() => expect(screen.getByTestId('lead-model-notice').textContent).toContain('不支持推理强度'));
-    expect(screen.getByTestId('lead-model-catalog')).toBeTruthy();
+  it('removes the chip with its ×', async () => {
+    setup();
+    await openFromHeader();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5-mini')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-only-this')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('turn-model-chip-remove')); });
+    expect(screen.queryByTestId('turn-model-chip')).toBeNull();
+  });
+
+  it('is not offered by an old daemon', async () => {
+    setup({ capabilities: [] });
+    await openFromHeader();
+    expect(screen.queryByTestId('lead-model-only-this')).toBeNull();
+    expect(screen.getByTestId('lead-model-make-primary')).toBeTruthy();
+  });
+
+  it('cannot be the model already in use', async () => {
+    setup();
+    await openFromHeader();
+    // 打开时选着的就是正在用的模型：「只这一条」没有意义。
+    const button = screen.getByTestId('lead-model-only-this');
+    expect(button.getAttribute('aria-disabled') === 'true' || button.hasAttribute('disabled')).toBe(true);
+  });
+});
+
+describe('the model picker on a phone', () => {
+  it('opens from the model in the top bar as a bottom sheet with collapsible connections', async () => {
+    viewport.wide = false;
+    setup({ compact: true });
+    await act(async () => { fireEvent.click(await screen.findByTestId('home-model')); });
+    await waitFor(() => expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy());
+    expect(screen.getByTestId('lead-model-picker-content')).toBeTruthy();
+    // 主用所在的接入先展开。
+    expect(screen.getByTestId('lead-model-section-openai-codex').getAttribute('aria-expanded')).toBe('true');
+    expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-section-vibeproxy')); });
+    expect(screen.queryByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeNull();
+    expect(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')).toBeTruthy();
+    expect(screen.getByTestId('lead-model-only-this')).toBeTruthy();
+  });
+
+  it('has no model row in the plus sheet any more', async () => {
+    viewport.wide = false;
+    setup({ compact: true });
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-plus')); });
+    expect(screen.queryByTestId('lead-plus-model')).toBeNull();
   });
 });

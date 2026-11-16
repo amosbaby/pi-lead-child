@@ -234,7 +234,7 @@ describe('failures in the Lead conversation', () => {
   });
 
   // 2026-10-27 画布「没有回答」状态 2：点开以后「原因」一行写现在用的模型，后面「换个模型重发」：
-  // 点开同一个模型浮层，选了另一个模型，就换上它，再发一次你那句话。
+  // 点开同一个模型浮层，选了另一个模型、点「换成主用」，就换上它，再发一次你那句话。
   it('switches Lead to another model and resends the question from the reason row', async () => {
     const { sendChat, runtime } = setup();
     const switchLeadModel = vi.spyOn(runtime, 'switchLeadModel').mockResolvedValue({
@@ -253,6 +253,8 @@ describe('failures in the Lead conversation', () => {
     expect(reason.textContent).toContain('The model service of Paimon is not available now · claude-sonnet-5-5');
     fireEvent.click(within(reason).getByRole('button', { name: 'Resend with another model' }));
     fireEvent.click(await screen.findByTestId('lead-model-option-vibeproxy/claude-opus-5-5'));
+    // 「换成主用」：换好以后重发（模型配置方案 C：浮层里先选，再点底部的按钮）。
+    fireEvent.click(screen.getByTestId('lead-model-make-primary'));
     await waitFor(() => expect(sendChat).toHaveBeenCalledWith('现在有什么要我处理'));
     expect(switchLeadModel).toHaveBeenCalledWith({ model: 'vibeproxy/claude-opus-5-5', effort: null });
   });

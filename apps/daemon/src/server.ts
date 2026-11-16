@@ -1057,6 +1057,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 这一轮的回答写到一半被插话打断了（lead 的 step-interrupt.ts，2026-11-10）：已经写出的字留着，
     // 收口时 lead.message.completed 带 interrupted="steer"，界面在字后面接「被你的插话打断」。
     interruptedBySteer?: boolean;
+    // 「只这一条」（模型配置方案 C 的 D8）：这一轮用的单轮模型（provider/id，带推理强度的后缀）。runTurnNow 换上，答完换回。
+    turnModel?: string;
   }
   // assistant 文本的"出水口"：lead 说的话流进哪一条 channel_turn（= 会话流里的哪个气泡）。
   let activeChannelTurn: ActiveChannelTurn | null = null;
@@ -1160,6 +1162,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 只管 Lead 的普通会话轮次（chatV2 记下了交给 Lead 的原文）；认证、配置这类再试也一样的失败不等。
   // 再试也失败，就是普通的失败。
   const userTurnPrompts = new Map<string, string>();
+  // 「只这一条」的轮次用的单轮模型（模型配置方案 C 的 D8）：自动再试一次时照样用它。和 userTurnPrompts 一起删。
+  const userTurnModels = new Map<string, string>();
   // 外部通道里用户本人写给 Lead 的话开的一轮（acceptChannelOwnerMessage）→ 回复发回的对话。这一轮和后面的一轮一起答了时，
   // 对话交给后面那一轮（settleAnsweredTogether）。只在内存里：daemon 重启以后，重启前收的这种消息的回复只在 App 里看得到。
   const channelOwnerReplies = new Map<string, string[]>();
@@ -1324,7 +1328,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 等重启的这一轮还没真正答过：这一次不算那一次重试。
       if (!isLeadRestartInterruption(waiting?.error)) retriedUserTurns.add(id);
       log(`retrying user turn ${id}`);
-      void runTurn(prompt, { channelTurn: { turn, assistantText: "" } });
+      const turnModel = userTurnModels.get(id);
+      void runTurn(prompt, { channelTurn: { turn, assistantText: "", ...(turnModel ? { turnModel } : {}) } });
       return;
     }
   }
@@ -1341,6 +1346,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (waitToRetry(entry, error)) return;
     replyToChannelOwner(entry.turn.id, `这一轮没有答上：${error}`);
     userTurnPrompts.delete(entry.turn.id);
+    userTurnModels.delete(entry.turn.id);
     retriedUserTurns.delete(entry.turn.id);
     failTurn(db, entry.turn.id, error);
     publishControlEvent({
@@ -1415,6 +1421,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     completeTurn(db, entry.turn.id);
     replyToChannelOwner(entry.turn.id, entry.assistantText.trim() || (entry.drewSurface ? "回复是一张卡片，只在 App 里看得到。" : ""));
     userTurnPrompts.delete(entry.turn.id);
+    userTurnModels.delete(entry.turn.id);
     retriedUserTurns.delete(entry.turn.id);
     publishControlEvent({
       type: "lead.message.completed", requiredScope: "chat",
@@ -1544,6 +1551,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       replyToChannelOwner(entry.turn.id, note);
     }
     userTurnPrompts.delete(entry.turn.id);
+    userTurnModels.delete(entry.turn.id);
     retriedUserTurns.delete(entry.turn.id);
     userTurnRetries.delete(entry.turn.id);
     publishTurnStarted(entry, "steered", {
@@ -2246,6 +2254,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             dropQueued();
             userTurnRetries.delete(anchor.id);
             userTurnPrompts.delete(anchor.id);
+            userTurnModels.delete(anchor.id);
             publishTurnStarted(sink, "steered");
           }
           return;
@@ -2504,6 +2513,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   function settleCancelledFollowUp(entry: ActiveChannelTurn, by: string): void {
     settleTurnCancelled(db, entry.turn.id, { by });
     userTurnPrompts.delete(entry.turn.id);
+    userTurnModels.delete(entry.turn.id);
     retriedUserTurns.delete(entry.turn.id);
     userTurnRetries.delete(entry.turn.id);
     publishTurnStarted(entry, "steered", { placement: "cancelled" });
@@ -3246,6 +3256,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // D5：下一轮在同一格里换用的订阅账号（noteLeadModelFailure 定，syncLeadModel 换），和正在定的那一次。
   let pendingAccountSwitch: { to: string; from: string; error: string } | null = null;
   let pendingAccountDecision: Promise<void> | null = null;
+  // 「只这一条」（D8）：正在跑的这一轮换上的单轮模型，和答完要换回的模型（换之前会话挂着的那个）。
+  // 换回失败时 turnModelRestore 留着，下一轮开始前（syncLeadModel）再换一次。模型切换（modelFailover）不知道这一轮：
+  // appliedLeadModel 不变，这一轮的成败也不记给它。
+  let activeTurnModel: string | null = null;
+  let turnModelRestore: string | null = null;
   // 重新挂模型时：会话正用着同一格的另一个订阅账号（pi-multi-pass 换的）就挂回那个账号，不换回第一个账号。
   const leadRebindTarget = (): string => {
     const current = leadCurrentModel?.() ?? null;
@@ -3280,6 +3295,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   const leadModelService: LeadModelService = {
     state: () => ({ current: choiceOf(leadModelName), selected: choiceOf(selectedLeadSpec()) }),
+    // 会话此刻挂着的模型：订阅的账号（pi-multi-pass 换上的 <base>-<n>）和「只这一条」的那一轮都照实写。
+    inSession: () => leadCurrentModel?.() ?? null,
     async catalog() {
       if (!leadCatalogCache || Date.now() - leadCatalogCache.at > LEAD_CATALOG_TTL_MS) {
         const models = leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => result.models);
@@ -4222,6 +4239,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 两轮之间换模型：上一轮定下要换的，或者限流的恢复时间到了要换回第一个。换好以后写日志，并在这一轮开头告诉 Lead。
   // 会话换不到某个模型时跳过它，换下一个。这里从不抛错：它在 runTurnNow 的 try 外面。
   async function syncLeadModel(): Promise<void> {
+    await restoreAfterTurnModel();
     if (!modelFailover || !switchLeadModel) return;
     try {
       if (pendingAccountDecision) await pendingAccountDecision;
@@ -4298,6 +4316,42 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
   }
 
+  // 「只这一条」（D8）：这一轮先换上单轮模型。不改 config.json，不动模型切换的状态（appliedLeadModel）。
+  // 模型不在目录里、推理强度不支持或者换不上时，这一轮照常用现在的模型答，原因写日志。返回换上了没有。
+  async function applyTurnModel(spec: string): Promise<boolean> {
+    if (!switchLeadModel) return false;
+    const restoreTo = leadCurrentModel?.() ?? appliedLeadModel;
+    if (spec === restoreTo) return false;
+    try {
+      const { model, effort } = parseLeadModelSpec(spec);
+      const option = (await leadModelService.catalog()).models.find((candidate) => candidate.model === subscriptionSlotSpec(model));
+      if (!option && !loadLeadModelConfig(opts.dataDir).models.includes(spec)) throw new Error(`${spec} is not in the model catalog`);
+      if (option && effort && !option.efforts.includes(effort)) throw new Error(`${option.model} does not support the effort ${effort}`);
+      await switchLeadModel(spec);
+    } catch (error) {
+      log(`one-message model ${spec} not used; this turn keeps ${restoreTo}: ${error instanceof Error ? error.message : String(error)}`);
+      return false;
+    }
+    activeTurnModel = spec;
+    turnModelRestore = restoreTo;
+    log(`one-message model: ${restoreTo} -> ${spec} for this turn`);
+    return true;
+  }
+
+  // 「只这一条」的那一轮结束了（或者上一次没换回去）：换回那一轮之前的模型。
+  async function restoreAfterTurnModel(): Promise<void> {
+    activeTurnModel = null;
+    const restoreTo = turnModelRestore;
+    if (!restoreTo || !switchLeadModel) return;
+    try {
+      await switchLeadModel(restoreTo);
+      turnModelRestore = null;
+      log(`one-message model done; back to ${restoreTo}`);
+    } catch (error) {
+      log(`could not switch back to ${restoreTo} after a one-message model; trying again before the next turn: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // 系统回合先探网络，探完才把 daemon 标成忙（发布评审 f796c1c 的 B2）：以前先标忙再探（最多 3 秒），
   // 这时来的用户消息被当成插话排进空着的 pi 的队列；探测不通，这一轮不跑，那条消息却留在队列里，
   // 后来和它的重试各送一次。现在探测期间 daemon 不忙，用户的消息自己开一轮；探完发现已经有一轮在跑，系统回合让开。
@@ -4367,6 +4421,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (extensionReload) await extensionReload;
     // 上一轮定下要换模型，或者限流的恢复时间到了：先换好模型，再给模型发这一轮。
     await syncLeadModel();
+    // 「只这一条」：用户这句话带着单轮模型。系统回合不带。
+    const turnModelUsed = channelTurn?.turnModel && !options.system ? await applyTurnModel(channelTurn.turnModel) : false;
     // 单元开始跑：两盏灯从这里算。
     sched.dispatch({ type: "unit.begin" });
     if (clientCount() > 0) lastAttendedAt = Date.now();
@@ -4556,7 +4612,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
       if (!emptyUserTurn) {
         // 用户停下的一轮、换了会话的一轮说明不了模型好不好。
-        if (!stoppedByUser(sched.state) && !released) modelFailover?.turnSucceeded();
+        // 「只这一条」的一轮用的不是分工里的模型：成败不记给模型切换。
+        if (!stoppedByUser(sched.state) && !released && !turnModelUsed) modelFailover?.turnSucceeded();
         succeeded = true;
       }
     } catch (err: any) {
@@ -4582,7 +4639,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         }
       }
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
-      const switched = !interrupted && !networkFailure ? noteLeadModelFailure(error) : false;
+      // 「只这一条」的一轮失败了：那是单轮模型的问题，不换分工的模型；记模型暂停时算作还有别的模型（分工的模型照常可用）。
+      const switched = !interrupted && !networkFailure && !turnModelUsed ? noteLeadModelFailure(error) : turnModelUsed;
       // 记进模型暂停（model-hold.ts）：连续失败到 3 次熔断；账号级的失败（认证、账号被停用、欠费）马上暂停，
       // 除非刚才换到了另一个模型：那个模型停用了，系统用备用的接着做事。
       // 订阅换账号要等凭据读完（noteLeadModelFailure 返回 Promise）：定了再记。
@@ -4632,6 +4690,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       log(offline ? `turn skipped: network unreachable (${error})`
         : interrupted ? "turn interrupted by the daemon shutdown" : `turn error: ${error}`);
     } finally {
+      // 「只这一条」：答完（或者失败）就换回去，下一轮用回分工的模型。
+      if (turnModelUsed) await restoreAfterTurnModel();
       // materializeSystemTurn 在别的函数里赋值，TypeScript 看不到，这里按声明的类型读。
       const systemEntry = systemEntryThisTurn as ActiveChannelTurn | null;
       outcome = {
@@ -5490,8 +5550,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (carried) {
       log(`answering queued user message ${carried.entry.turn.id} in a turn of its own`);
       startQueuedTurn(db, carried.entry.turn.id);
-      const { turn, commandId } = carried.entry;
-      void runTurn(carried.prompt, { channelTurn: { turn, assistantText: "", ...(commandId ? { commandId } : {}) } });
+      const { turn, commandId, turnModel } = carried.entry;
+      void runTurn(carried.prompt, {
+        channelTurn: { turn, assistantText: "", ...(commandId ? { commandId } : {}), ...(turnModel ? { turnModel } : {}) },
+      });
       return;
     }
     retryWaitingUserTurn();
@@ -6290,6 +6352,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     ].filter(Boolean).join("\n");
     // 这一轮要是因为断网或临时故障没答上，自动再试一次时用同一段原文（waitToRetry）。
     userTurnPrompts.set(turn.id, prompt);
+    // 「只这一条」（D8）：只在 Lead 的会话里。这句话自己开一轮（不插进、不排进别的一轮），那一轮用它的模型。
+    const turnModel = command.itemId === undefined ? command.turnModel : undefined;
+    if (turnModel) userTurnModels.set(turn.id, turnModel);
+    const entryOf = (): ActiveChannelTurn => ({ turn, assistantText: "", commandId: command.commandId, ...(turnModel ? { turnModel } : {}) });
 
     if (sched.draining) {
       // 正在停机：这条消息存成排队的轮次，重启后的 daemon 回答它（不插进马上要被中断的这一轮）。
@@ -6303,7 +6369,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 交给正在跑的这一轮之前，这一轮可能刚好结束了：那时 pi 已经空了，交给它的消息要等下一次运行才送到，
     // Lead 一直空着就一直没有回答。这时开新的一轮答它（工单 04）。
     const startOwnTurn = () => {
-      void runTurn(prompt, { channelTurn: { turn, assistantText: "", commandId: command.commandId } });
+      void runTurn(prompt, { channelTurn: entryOf() });
     };
     // 消息没带 mode（plc、Slack 里用户发给自己的私信、新版的 App）时，按「Lead 忙时你发的消息」的设置放：缺省排队，
     // 用户可以在设置里改成插话（protocol 的 busy-placement.ts，用户 2026-11-09）。带了 mode 的照 mode 放。
@@ -6311,7 +6377,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (sched.busy && sched.unit?.lane === 4) {
       // Lead 在做空闲车道的活（整理笔记，L4）：用户的话不插进那一轮，那一轮在下一个让出点停下，用户的话马上单独开一轮
       // （lead-scheduler spec D1、D8，P4）。
-      holdForIdleYield(prompt, { turn, assistantText: "", commandId: command.commandId });
+      holdForIdleYield(prompt, entryOf());
       return { mode: "queued", turnId: turn.id };
     }
     // 空闲车道（L4）的单元在上面让路；这里只剩 L1–L3。
@@ -6319,14 +6385,21 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 不插进那一轮，也不排在它后面：调度器中止那一步（工具在跑时等到下一个让出点），单元挂起，这条消息马上开一轮只属于用户的。
     // L0 的单元（用户自己的事、交回给用户的结果）照旧按忙时的放置方式。
     if (sched.busy && sched.unit && sched.unit.lane > 0 && !sched.draining) {
-      holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId }, `it preempts ${sched.unit.id}`, { preempts: true });
+      holdForOwnTurn(prompt, entryOf(), `it preempts ${sched.unit.id}`, { preempts: true });
       sched.noteInput({ kind: "user", turnId: turn.id, placement: "preempt" });
       sched.dispatch({ type: "preempt.request", by: turn.id, stage: sched.stage?.stage ?? null });
       return { mode: "queued", turnId: turn.id };
     }
     if (userMessagePlacement({ ...placementFacts(), followUp: mode === "followUp" }) === "own_turn_after") {
       // 这一轮带着外部内容（lead-tools-and-routing spec D16，user-placement.ts）：不插进去，等它结束后开一轮只属于用户的。
-      holdForOwnTurn(prompt, { turn, assistantText: "", commandId: command.commandId });
+      holdForOwnTurn(prompt, entryOf());
+      sched.noteInput({ kind: "user", turnId: turn.id, placement: "own_turn_after" });
+      return { mode: "queued", turnId: turn.id };
+    }
+    // 「只这一条」：Lead 忙时，带单轮模型的话等这一轮结束后单独开一轮；正在用单轮模型的那一轮也不收别的话
+    // （收进去就也用了那个模型）。
+    if (sched.busy && (turnModel || activeTurnModel)) {
+      holdForOwnTurn(prompt, entryOf(), turnModel ? "it asks for a one-message model" : "the running turn uses a one-message model");
       sched.noteInput({ kind: "user", turnId: turn.id, placement: "own_turn_after" });
       return { mode: "queued", turnId: turn.id };
     }
@@ -6353,7 +6426,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
 
     queueMicrotask(() => {
-      void runTurn(prompt, { channelTurn: { turn, assistantText: "", commandId: command.commandId } });
+      void runTurn(prompt, { channelTurn: entryOf() });
     });
     return { mode: "started", turnId: turn.id };
   }
@@ -6450,6 +6523,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         chatV2: (command) => acceptChatMessage(command),
         // 没带 mode 的消息按「Lead 忙时你发的消息」的设置放（acceptChatMessage）：网关据此宣布 CHAT_PLACEMENT_PREFERENCE_CAPABILITY。
         chatPlacementPreference: true,
+        // 「只这一条」的单轮模型（acceptChatMessage、runTurnNow）：网关据此宣布 CHAT_TURN_MODEL_CAPABILITY。
+        chatTurnModel: true,
         ticketMessageV2: handleTicketMessage,
         addClient: (send) => { senders.add(send); return () => senders.delete(send); },
         recheckRuntimes: (runtime) => healthRecovery.recheck({ runtime }),

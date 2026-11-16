@@ -23,8 +23,10 @@ type MessageComposerProps = {
   disabled?: boolean;
   // 能不能带图片：Lead 的会话，daemon 也收图片（CHAT_IMAGES_CAPABILITY）。这个平台还不能选图片时（canPickImages）也没有「+」。
   attachImages?: boolean;
-  // 工具栏右边、发送按钮前面的模型选择（Lead 的会话：LeadModelPicker，写着模型 id 和推理强度）。
-  modelControl?: ReactNode;
+  // 输入 /model 发送时（只有 Lead 的会话给）：不发给 Lead，在输入框上方打开换模型的浮层（模型配置方案 C 的 S4）。
+  onModelCommand?: () => void;
+  // 输入区上面的小标签，例如「只这一条」的单轮模型（TurnModelChip）。
+  chip?: ReactNode;
   // Lead 正忙时，这条消息插话还是排队（工单 04，spec D6）。给出时，输入框上面多一个选择。
   placement?: { value: ChatPlacement; onChange: (value: ChatPlacement) => void };
   // 那一行右边的状态（工单 10：Lead 忙时排着的外部消息，LeadQueueBar）。只和 placement 一起出现，不让那一行变高。
@@ -79,7 +81,7 @@ export function MessageComposer(props: MessageComposerProps) {
 // 中间是文字（缺省一行高，内容多了自动长高），下面一行工具栏：左边「+」选图片，右边模型名和圆形的发送按钮。
 // web 上 Enter 发送、Shift+Enter 换行；可以粘贴剪贴板里的图片。草稿按 contextKey 存在工作区里，失去焦点时保存（图片不存）。
 function MessageComposerField({
-  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, modelControl, tray,
+  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, chip, tray,
   float = false, onPlus, ref,
 }: MessageComposerProps) {
   const locale = useLocale();
@@ -97,6 +99,13 @@ function MessageComposerField({
 
   const send = () => {
     if (!ready) return;
+    // /model 是界面自己的命令：打开换模型的浮层，这句话不发给 Lead（daemon 的 /fairyeye、/stop 才交给 daemon）。
+    if (onModelCommand && isModelCommand(text) && images.length === 0) {
+      setText('');
+      workspace.getState().clearComposerDraft(contextKey);
+      onModelCommand();
+      return;
+    }
     onSend(text.trim(), images.map(({ mimeType, data }) => ({ mimeType, data })));
     setText('');
     setAttachments(EMPTY_ATTACHMENTS);
@@ -180,6 +189,7 @@ function MessageComposerField({
           </Row>
         ) : null}
         {notice ? <Text testID="composer-notice" size="note" tone="danger" px="inline-item">{notice}</Text> : null}
+        {chip ? <Box px="inline-item" pt="inline-item">{chip}</Box> : null}
         <Box px="inline-item" py="inline-item">{input}</Box>
         <Row items="center" gap="inline-item">
           {onPlus ? (
@@ -252,6 +262,7 @@ function MessageComposerField({
         </Row>
       ) : null}
       {notice ? <Text testID="composer-notice" size="note" tone="danger">{notice}</Text> : null}
+      {chip ?? null}
       {input}
       <Row items="center" gap="inline-item">
         {canAttach ? (
@@ -268,7 +279,6 @@ function MessageComposerField({
         ) : null}
         {preparing > 0 ? <Text testID="composer-preparing" size="note" tone="muted">{m.preparingImages}</Text> : null}
         <Spacer />
-        {modelControl}
         {sendButton}
       </Row>
     </Column>
@@ -298,6 +308,11 @@ function MessageComposerField({
       {card}
     </Box>
   );
+}
+
+// 整条消息只有 /model（不分大小写，两头的空白不算）。
+export function isModelCommand(text: string): boolean {
+  return /^\/model$/i.test(text.trim());
 }
 
 const EMPTY_ATTACHMENTS: { images: ComposerImage[]; notice: string | null } = { images: [], notice: null };

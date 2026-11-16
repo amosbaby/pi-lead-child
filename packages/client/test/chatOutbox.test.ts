@@ -54,6 +54,19 @@ describe('ChatOutbox', () => {
     expect(h.sends[0]!.clientMessageId).toBe('msg_1');
   });
 
+  // 「只这一条」（模型配置方案 C 的 D8）：单轮模型和文字存在一起，重新加载以后照样带。
+  it('keeps the one-message model across a reload', async () => {
+    const storage = new MemoryStorage();
+    const first = harness({ storage, connected: false });
+    await first.outbox.load();
+    await first.outbox.enqueue('想深一点', undefined, undefined, undefined, { model: 'vibeproxy/claude-opus-5-5', effort: 'high' });
+    expect(storage.saved[0]).toMatchObject({ message: '想深一点', turnModel: { model: 'vibeproxy/claude-opus-5-5', effort: 'high' } });
+    const reloaded = harness({ storage });
+    await reloaded.outbox.load();
+    await vi.waitFor(() => expect(reloaded.sends).toHaveLength(1));
+    expect(reloaded.sends[0]).toMatchObject({ message: '想深一点', turnModel: { model: 'vibeproxy/claude-opus-5-5', effort: 'high' } });
+  });
+
   // 工单 04：Lead 正忙时选了排队的消息，重发、重新加载以后照样按排队发；旧版本存下的条目没有它，照旧按插话发。
   it('keeps the placement the user chose across a reload, and reads entries saved without one', async () => {
     const storage = new MemoryStorage();
@@ -303,6 +316,11 @@ describe('createJsonOutboxStorage', () => {
     const badImages = { ...entry, clientMessageId: 'msg_4', images: [{ mimeType: 'image/bmp', data: 'Qk0=' }] };
     values.set('pi-lead-child.chat-outbox.v1', JSON.stringify([withImages, badImages]));
     expect(await storage.load()).toEqual([withImages]);
+    // 「只这一条」的单轮模型：形状不对时整条读不懂。
+    const withModel = { ...entry, clientMessageId: 'msg_5', turnModel: { model: 'vibeproxy/claude-opus-5-5', effort: 'high' } };
+    const badModel = { ...entry, clientMessageId: 'msg_6', turnModel: { model: 'vibeproxy/claude-opus-5-5' } };
+    values.set('pi-lead-child.chat-outbox.v1', JSON.stringify([withModel, badModel]));
+    expect(await storage.load()).toEqual([withModel]);
     values.set('pi-lead-child.chat-outbox.v1', '{not json');
     expect(await storage.load()).toEqual([]);
     await storage.save([]);

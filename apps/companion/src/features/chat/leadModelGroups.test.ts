@@ -1,7 +1,10 @@
-import type { LeadModelOption } from '@pi-lead-child/protocol';
+import type { LeadModelOption, SubscriptionsDto } from '@pi-lead-child/protocol';
 import { describe, expect, it } from 'vitest';
 
-import { effortForModel, groupLeadModels, leadModelLabel, leadModelProviders, matchesLeadModel } from './leadModelGroups';
+import {
+  accountInSession, chainRole, effortForModel, formatContextWindow, groupLeadModels, leadModelConnections, leadModelLabel, leadModelProviders,
+  matchesLeadModel, pinnedAccountOf, sameSlot, withAccount,
+} from './leadModelGroups';
 
 // prefix 是 daemon 给的账号（group）：只有服务商的 accountPrefix 生效时才有。
 function option(model: string, source: string | null, efforts: string[] = [], prefix: string | null = null): LeadModelOption {
@@ -103,5 +106,63 @@ describe('effortForModel', () => {
   it('keeps the effort when the new model supports it, and uses the model default otherwise', () => {
     expect(effortForModel(option('vibeproxy/as4/claude-sonnet-5', 'anthropic', ['low', 'high'], 'as4'), 'high')).toBe('high');
     expect(effortForModel(option('vibeproxy/gemini-3.8-flash-high', 'antigravity'), 'high')).toBeNull();
+  });
+});
+
+// 会话里换模型的浮层（模型配置方案 C 的 S4）：左栏按接入列，订阅在前；订阅的第 n 个账号是 <base>-<n>，和 <base> 是同一格。
+describe('the connections of the model picker', () => {
+  const subscriptions = {
+    multiPass: true, logins: [],
+    subscriptions: [{
+      base: 'openai-codex', strategy: 'quota-first', quotaSupported: true, models: [],
+      accounts: [
+        { provider: 'openai-codex-2', index: 2, label: 'Home', loggedIn: true, email: null, plan: null, coolingUntil: null, role: 'default', windows: [], inUse: false,
+          quota: { windows: [{ label: '5h', remainingPercent: 9, resetAt: null }], checkedAt: '2026-11-16T10:00:00Z', problem: null } },
+        { provider: 'openai-codex', index: 1, label: null, loggedIn: true, email: null, plan: null, coolingUntil: null, role: 'default', windows: [], inUse: true, quota: null },
+        { provider: 'openai-codex-3', index: 3, label: 'Old', loggedIn: false, email: null, plan: null, coolingUntil: null, role: 'default', windows: [], inUse: false, quota: null },
+      ],
+    }],
+  } as unknown as SubscriptionsDto;
+
+  it('puts subscriptions first and lists only the logged-in accounts, in order, with the used quota', () => {
+    const connections = leadModelConnections([
+      option('vibeproxy/claude-sonnet-5', null),
+      option('openai-codex/gpt-5.5', null),
+      option('magpie/auto/deepseek', null),
+      option('github-copilot/claude-sonnet-5', null),
+    ], subscriptions);
+    expect(connections.map((entry) => [entry.key, entry.kind])).toEqual([
+      ['openai-codex', 'subscription'], ['github-copilot', 'subscription'], ['vibeproxy', 'key'], ['magpie', 'key'],
+    ]);
+    expect(connections[0]!.accounts.map((entry) => [entry.provider, entry.label, entry.quotaUsed])).toEqual([
+      ['openai-codex', null, null], ['openai-codex-2', 'Home', 91],
+    ]);
+    expect(connections[1]!.accounts).toEqual([]);
+  });
+
+  it('pins and unpins an account in the same slot', () => {
+    expect(withAccount('openai-codex/gpt-5.5', 'openai-codex-2')).toBe('openai-codex-2/gpt-5.5');
+    expect(withAccount('openai-codex-2/gpt-5.5', null)).toBe('openai-codex/gpt-5.5');
+    expect(pinnedAccountOf('openai-codex-2/gpt-5.5')).toBe('openai-codex-2');
+    expect(pinnedAccountOf('openai-codex/gpt-5.5')).toBeNull();
+    expect(pinnedAccountOf('vibeproxy/as4/claude')).toBeNull();
+    expect(sameSlot('openai-codex-2/gpt-5.5', 'openai-codex/gpt-5.5(high)')).toBe(true);
+    expect(sameSlot('openai-codex/gpt-5.5', 'openai-codex/gpt-5.5-mini')).toBe(false);
+    expect(accountInSession('openai-codex', 'openai-codex-2/gpt-5.5')).toBe(2);
+    expect(accountInSession('openai-codex', 'openai-codex/gpt-5.5')).toBe(1);
+    expect(accountInSession('github-copilot', 'openai-codex-2/gpt-5.5')).toBeNull();
+  });
+
+  it('tags the primary and the backups of the chain, whatever the account', () => {
+    const chain = [{ model: 'openai-codex/gpt-5.5', effort: null }, { model: 'vibeproxy/claude-opus-5-5', effort: 'high' }];
+    expect(chainRole('openai-codex-2/gpt-5.5', chain)).toBe('primary');
+    expect(chainRole('vibeproxy/claude-opus-5-5', chain)).toBe('backup');
+    expect(chainRole('vibeproxy/claude-sonnet-5', chain)).toBeNull();
+  });
+
+  it('writes the context window short', () => {
+    expect(formatContextWindow(400_000)).toBe('400K');
+    expect(formatContextWindow(1_000_000)).toBe('1M');
+    expect(formatContextWindow(1_050_000)).toBe('1.1M');
   });
 });

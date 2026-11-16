@@ -185,6 +185,8 @@ import {
   PROTOCOL_VERSION,
   CHAT_CLIENT_MESSAGE_ID_CAPABILITY,
   CHAT_IMAGES_CAPABILITY,
+  CHAT_TURN_MODEL_CAPABILITY,
+  LEAD_MODELS_LIVE_QUERY,
   CHAT_IMAGES_INCLUDE,
   CONVERSATION_ANSWER_STARTED_INCLUDE,
   CONVERSATION_INTERRUPTED_INCLUDE,
@@ -432,6 +434,9 @@ export interface SendChatCommandInput {
   mode?: ChatPlacement;
   // 发给 Lead 的图片（protocol 的 chat-images.ts）。daemon 没有宣布 CHAT_IMAGES_CAPABILITY 时不发，报拒收。
   images?: ChatImageInput[];
+  // 「只这一条」（protocol 的 CHAT_TURN_MODEL_CAPABILITY）：只用这个模型答这一条。daemon 没有宣布这个能力时不带
+  // （界面也不给选）：这条照常用现在的模型答。
+  turnModel?: LeadModelChoice;
 }
 
 export interface SendChatCommandResult {
@@ -1295,7 +1300,8 @@ export class ControlPlaneClient {
 
   // Lead 可以用的模型和推理强度（会话输入框右下角的模型选择，protocol 的 lead-models.ts）。
   async getLeadModels(signal?: AbortSignal): Promise<LeadModelCatalog> {
-    return this.request<LeadModelCatalog>('/v1/lead/models', LeadModelCatalogSchema, { signal });
+    // live=1：要会话此刻挂着的模型（inSession，带订阅的账号）。旧 daemon 不看这个参数，不给这个字段。
+    return this.request<LeadModelCatalog>(`/v1/lead/models?${LEAD_MODELS_LIVE_QUERY}`, LeadModelCatalogSchema, { signal });
   }
 
   // Lead 忙时排着的外部消息（主对话输入框上方的排队状态栏，protocol 的 lead-queue.ts，工单 10）。
@@ -2368,6 +2374,9 @@ export class ControlPlaneClient {
         : {}),
       ...(input.mode !== undefined && this.capabilities.has(CHAT_PLACEMENT_CAPABILITY) ? { mode: input.mode } : {}),
       ...(images ? { images } : {}),
+      ...(input.turnModel !== undefined && input.ticketId === undefined && this.capabilities.has(CHAT_TURN_MODEL_CAPABILITY)
+        ? { turnModel: { model: input.turnModel.model, effort: input.turnModel.effort } }
+        : {}),
     };
     const result = await this.sendChatCommandWithFallback(command, input.clientMessageId, signal);
     if (typeof result.turnId !== 'string' || !result.turnId) {
@@ -2416,6 +2425,7 @@ export class ControlPlaneClient {
           ...(clientMessageId === undefined ? {} : { clientMessageId }),
           ...(command.mode === undefined ? {} : { mode: command.mode }),
           ...(command.images === undefined ? {} : { images: command.images }),
+          ...(command.turnModel === undefined ? {} : { turnModel: command.turnModel }),
         }),
         signal: controller.signal,
       }) as Record<string, unknown>;

@@ -95,8 +95,8 @@ export type { RecordBlockProps, RecordLineProps, RecordTagProps } from './displa
 export type { AnnotationConfirmProps, AnnotationDetail, AnnotationProps } from './display/Annotation';
 export type { SystemLineProps } from './display/SystemLine';
 export type { NoticeRowProps, NoticeTone } from './display/NoticeRow';
-export { Popover, PopoverPanel } from './display/Popover';
-export type { PopoverAnchor, PopoverPanelProps, PopoverProps } from './display/Popover';
+export { Popover, PopoverAnchorView, PopoverPanel } from './display/Popover';
+export type { PopoverAnchor, PopoverAnchorHandle, PopoverPanelProps, PopoverProps } from './display/Popover';
 export { AnchoredPanel } from './display/AnchoredPanel';
 export type { AnchoredPanelProps } from './display/AnchoredPanel';
 export { ProgressBar } from './display/ProgressBar';

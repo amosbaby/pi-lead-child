@@ -1,4 +1,4 @@
-import { Density } from '@pi-lead-child/components';
+import { Density, PopoverAnchorView, type PopoverAnchor, type PopoverAnchorHandle } from '@pi-lead-child/components';
 import {
   AbsenceTail, Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
   Pressable, Row,
@@ -6,7 +6,7 @@ import {
   Text,
 } from '@pi-lead-child/components';
 import {
-  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
+  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
   ownerActionRefOfTurn, SYSTEM_TURN_ORIGINS, ticketNeedsUser,
   ticketNeedsUserLabel, ticketTurn, type ChatPlacement, type KernelTicketWorkItemV2,
   type ChannelCardDto,
@@ -14,7 +14,7 @@ import {
   type TicketSummary,
   validateUiSurface,
 } from '@pi-lead-child/protocol';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { ticketsNeedingUser } from '@pi-lead-child/protocol';
 
@@ -63,7 +63,9 @@ import { FailureCard } from './FailureCard';
 import { presentOutage } from './outagePresentation';
 import { failureActionLabels, presentTurnFailure, turnFailureGroupKey, type FailureAction } from './failurePresentation';
 import { InterventionCard } from './InterventionCard';
-import { LeadModelPicker, LeadModelResendLink } from './LeadModelPicker';
+import {
+  LeadModelHeaderTrigger, LeadModelPicker, LeadModelResendLink, leadModelTriggerText, TurnModelChip, useModelAccounts,
+} from './LeadModelPicker';
 import { MessageComposer, type MessageComposerHandle } from './MessageComposer';
 import { AssistantTurnView } from './AssistantTurnView';
 import { MessagePartView } from './MessagePartView';
@@ -275,16 +277,32 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const queueTray = useComposerQueueTray({ leadName, actions: canSteerQueued });
   // daemon 收图片时，输入框才有「+」和粘贴图片（protocol 的 chat-images.ts）。
   const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
-  // 输入框右下角写 Lead 现在用的模型 id 和推理强度，点开换模型（LeadModelPicker）。
+  // Lead 现在用的模型（模型配置方案 C 的 S4）：写在最新一条回答的头上，点开换模型（LeadModelPicker）；手机上写在顶部。
   // 只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
   const leadModel = useControlPlaneStore((state) => state.overview?.model);
+  const modelAccounts = useModelAccounts();
+  // 换模型的浮层：桌面上对着点开它的那个东西（回答头上的模型名，或者输入框），手机上是底部面板。同一时间只开一个（P2.8）。
+  const [picker, setPicker] = useState<{ anchor: PopoverAnchor | null } | null>(null);
+  // 「只这一条」（D8）：下一条消息用的单轮模型。daemon 宣布了 chat.turn-model.v1 才有。
+  const canTurnModel = useControlPlaneStore((state) => state.capabilities.includes(CHAT_TURN_MODEL_CAPABILITY));
+  const [turnModel, setTurnModel] = useState<LeadModelChoice | null>(null);
+  const composerAnchorRef = useRef<PopoverAnchorHandle>(null);
+  const modelTrigger = useMemo<LeadModelTriggerState>(() => ({
+    current: leadModel ?? null,
+    accounts: modelAccounts,
+    open: (anchor) => setPicker({ anchor }),
+  }), [leadModel, modelAccounts]);
   // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
   // 不看连接：消息先进本机发件箱，断线时显示「连接恢复后发送」，连上以后按顺序发出（2026-10-16）。
   const send = (message: string, images: ChatImageInput[]) => {
     const mode = canPlace && leadBusy ? (canSteerQueued ? (placesByPreference ? undefined : 'followUp') : placement) : undefined;
-    void (images.length ? runtime.sendChat(message, undefined, mode, images) : runtime.sendChat(message, undefined, mode)).catch(() => {});
+    const once = canTurnModel ? turnModel : null;
+    setTurnModel(null);
+    void (once
+      ? runtime.sendChat(message, undefined, mode, images.length ? images : undefined, once)
+      : images.length ? runtime.sendChat(message, undefined, mode, images) : runtime.sendChat(message, undefined, mode)).catch(() => {});
   };
   const loadOlderConversationCards = async () => {
     if (!connected || historyRequest.loading) return;
@@ -372,10 +390,17 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
 
   // 会话按外观偏好里会话区域的密度（缺省标准）。
   return (
+    <LeadModelTriggerContext.Provider value={modelTrigger}>
     <Density zone="conversation"><KeyboardArea testID="lead-conversation" bg={compact ? 'page' : 'surface'}>
       {/* 手机上没有顶栏，是两颗悬浮圆钮（主题 11.20 H-2，2026-11-14 方案 F）。 */}
       {compact ? (
-        <HomeTopBar waitingCount={waiting.length} onOpenMenu={() => setMenuOpen(true)} onOpenWaiting={openWaiting} />
+        <HomeTopBar
+          waitingCount={waiting.length}
+          onOpenMenu={() => setMenuOpen(true)}
+          onOpenWaiting={openWaiting}
+          modelText={leadModelTriggerText(leadModel, modelAccounts, locale)}
+          onOpenModel={() => setPicker({ anchor: null })}
+        />
       ) : (
       <Row
         minH={compact ? 64 : 60}
@@ -470,6 +495,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         <ConversationColumn testID="conversation-footer-column" gap={compact ? 0 : 11}>
         {/* interrupt 级的事（工单 06，spec D10）：输入框上方的横幅，用户点「知道了」之前一直在。 */}
         <InterruptBanner />
+        {/* 量输入框的位置：输入 /model 时换模型的浮层对着它，从输入框上方打开。 */}
+        <PopoverAnchorView ref={composerAnchorRef} layout="block">
         <MessageComposer
           compact={compact}
           contextKey="lead"
@@ -478,16 +505,19 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           placeholder={connected ? m.composer.placeholder(leadName) : m.composer.offline}
           onSend={send}
           attachImages={canSendImages}
-          // 手机上模型收进加号面板（主题 H-6、H-7），输入框上不显示。
-          {...(compact
-            ? { float: true, onPlus: () => setPlusOpen(true), ref: composerRef }
-            : { modelControl: <LeadModelPicker current={leadModel} /> })}
+          // 输入框上不放模型（模型配置方案 C 的 S4）：输入 /model 打开换模型的浮层，这句话不发给 Lead。
+          onModelCommand={() => composerAnchorRef.current?.measure((anchor) => setPicker({ anchor }))}
+          chip={canTurnModel && turnModel ? (
+            <TurnModelChip text={leadModelTriggerText(leadModelSpec(turnModel), modelAccounts, locale) ?? turnModel.model} onRemove={() => setTurnModel(null)} />
+          ) : null}
+          {...(compact ? { float: true, onPlus: () => setPlusOpen(true), ref: composerRef } : {})}
           // 新 daemon：排着的事在输入卡片上半截的状态栏里（主题 11.13）。
           // 旧 daemon（没有 Steer 和取消）：照旧在发送前选「插话/排队」，排着的外部消息在那一行的右边（工单 10）。
           {...(canSteerQueued
             ? { tray: queueTray }
             : canPlace && leadBusy ? { placement: { value: placement, onChange: setPlacement }, placementStatus: <LeadQueueBar /> } : {})}
         />
+        </PopoverAnchorView>
         </ConversationColumn>
       </Column>
       {compact ? (
@@ -496,9 +526,14 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           onClose={() => setPlusOpen(false)}
           // 只放现在能用的：daemon 收图片、这台设备能选图片时才有「图片」。拍照和文件还没有（主题 H-7）。
           tiles={canSendImages && canPickImages ? [{ id: 'photos', icon: 'camera', label: homeText.photos, onPress: () => composerRef.current?.pickImages() }] : []}
-          currentModel={leadModel}
         />
       ) : null}
+      <LeadModelPicker
+        open={picker !== null}
+        anchor={picker?.anchor ?? null}
+        onClose={() => setPicker(null)}
+        onTurnModel={setTurnModel}
+      />
       {compact ? (
         <HomeDrawer
           open={menuOpen}
@@ -508,8 +543,18 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         />
       ) : null}
     </KeyboardArea></Density>
+    </LeadModelTriggerContext.Provider>
   );
 }
+
+// 回答头上的模型名要的东西（模型配置方案 C 的 S4）：Lead 现在用的模型、模型的账号前缀，和打开浮层。
+// 用 context 传，不放进 rowContext：模型变了只重画头上写着模型的那几条。
+type LeadModelTriggerState = {
+  current: string | null;
+  accounts: ReadonlyMap<string, string | null>;
+  open: (anchor: PopoverAnchor) => void;
+};
+const LeadModelTriggerContext = createContext<LeadModelTriggerState | null>(null);
 
 const NO_ROWS: LeadConversationRow[] = [];
 const conversationRowKey = (row: LeadConversationRow) => row.key;
@@ -646,6 +691,10 @@ function ConversationMessage({
       && other.state === 'completed' && other.createdAt > turn.createdAt)));
   const delivered = useControlPlaneStore((state) => Boolean(message?.turnId && state.deliveredTurnIds[message.turnId]));
   const cardSlots = useTurnCardSlots(cardIds, cardsById, dispatchScopes);
+  // 回答头上的模型名（模型配置方案 C 的 S4）：「只这一条」的那一轮写它用的模型（这个页面记下的）；
+  // 别的回答只有最新的一条写 Lead 现在用的模型（daemon 不记每一轮用的模型）。
+  const modelTrigger = useContext(LeadModelTriggerContext);
+  const recordedTurnModel = useWorkspaceStore((state) => (message?.turnId ? state.turnModelByTurnId[message.turnId] : undefined));
   if (!message) return null;
   if (isHiddenUserMessage(message)) return null;
 
@@ -693,6 +742,11 @@ function ConversationMessage({
   const fairyMark = !user && !systemNotice && !compact
     ? <MessageLeadAvatar name={leadName} latest={latest} replying={replying} />
     : null;
+  const headerModelSpec = recordedTurnModel ? leadModelSpec(recordedTurnModel) : latest ? modelTrigger?.current ?? null : null;
+  const headerModelText = fairyMark && modelTrigger ? leadModelTriggerText(headerModelSpec, modelTrigger.accounts, locale) : null;
+  const headerModel = headerModelText && modelTrigger
+    ? <LeadModelHeaderTrigger testID={latest ? 'lead-model-trigger' : `lead-model-trigger-${message.turnId}`} text={headerModelText} onOpen={modelTrigger.open} />
+    : null;
   // 气泡上的时间（2026-11-09）：你的话是发出的时刻，Lead 的回答是开始回答的时刻，和它在会话里的位置一致
   // （conversationMessageTimes）；回答用了多久写在回合头上。以前写结束的时刻，排序改了以后时间会前后颠倒。
   const time = formatConversationTime(message.createdAt, undefined, locale);
@@ -733,15 +787,16 @@ function ConversationMessage({
     else if (action === 'resend') resend();
   };
   // 重发这一轮：文字和图片一起。只有文字时马上发；本机没有的图片先向 daemon 取。
-  const resend = () => {
+  // turnModel：「换个模型重发」里点了「只这一条」时，重发的这一次用的模型。
+  const resend = (turnModel?: LeadModelChoice) => {
     const text = turnUserPart?.kind === 'text' ? turnUserPart.text : '';
     if (!turnUserImages.length) {
-      if (text.trim()) void runtime.sendChat(text).catch(() => {});
+      if (text.trim()) void (turnModel ? runtime.sendChat(text, undefined, undefined, undefined, turnModel) : runtime.sendChat(text)).catch(() => {});
       return;
     }
     void Promise.all(turnUserImages.map((part): Promise<ChatImageInput> | ChatImageInput =>
       part.data !== undefined ? { mimeType: part.mimeType, data: part.data } : runtime.loadChatImage(part.imageId ?? '')))
-      .then((images) => runtime.sendChat(text, undefined, undefined, images))
+      .then((images) => runtime.sendChat(text, undefined, undefined, images, turnModel))
       .catch(() => {});
   };
   // 一个字也没说的助手消息不画内容区，失败了就只显示错误。和工单对话（TicketThread）同一条规则。
@@ -803,6 +858,7 @@ function ConversationMessage({
             renderReply={(reply) => <LeadReply reply={reply} />}
             {...(showHeader ? { header: `${sender} · ${stateCopy}` } : {})}
             {...(showHeader && fairyMark ? { headerMark: fairyMark } : {})}
+            {...(showHeader && headerModel ? { headerAccessory: headerModel } : {})}
             taskVariant="inline"
           />
         </Column>
@@ -837,7 +893,7 @@ function ConversationMessage({
             actions={failureActions}
             presentation={failurePresentation}
             modelSwitch={failurePresentation.actions.includes('resend') && leadModel && leadModel !== 'unknown'
-              ? { current: leadModel, link: <LeadModelResendLink onSwitched={resend} /> }
+              ? { current: leadModel, link: <LeadModelResendLink onResend={resend} /> }
               : null}
           />
         </Box>

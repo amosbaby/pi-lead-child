@@ -1510,6 +1510,23 @@ describe('a link that may be dead', () => {
     current.client.disconnect();
   });
 
+  // 「只这一条」（模型配置方案 C 的 D8）：旧 daemon 严格校验命令，多一个 turnModel 整条拒收：只在它宣布 chat.turn-model.v1 时带。
+  // 工单对话不带（只有 Lead 的会话收）。
+  it('sends the one-message model only to a daemon that advertises it, and never in a ticket chat', async () => {
+    const turnModel = { model: 'vibeproxy/claude-opus-5-5', effort: 'high' };
+    const old = await connectedClient(['chat.client-message-id.v1']);
+    void old.client.sendChatCommand({ id: 'cmd-1', message: '想深一点', clientMessageId: 'msg_1', turnModel }).catch(() => {});
+    expect(JSON.parse(old.sockets[0]!.sent.at(-1)!)).not.toHaveProperty('turnModel');
+    old.client.disconnect();
+
+    const current = await connectedClient(['chat.client-message-id.v1', 'chat.turn-model.v1']);
+    void current.client.sendChatCommand({ id: 'cmd-2', message: '想深一点', clientMessageId: 'msg_2', turnModel }).catch(() => {});
+    expect(JSON.parse(current.sockets[0]!.sent.at(-1)!)).toMatchObject({ id: 'cmd-2', turnModel });
+    void current.client.sendChatCommand({ id: 'cmd-3', message: '进展？', ticketId: 77, turnModel }).catch(() => {});
+    expect(JSON.parse(current.sockets[0]!.sent.at(-1)!)).not.toHaveProperty('turnModel');
+    current.client.disconnect();
+  });
+
   // 2026-10-19：工单对话一律交给工单的 agent。即使 daemon 还宣布 chat.ticket-answerer.v1（工单 08 第一版），
   // 客户端也只带工单号，不带回答者。
   it('sends only the ticket id as the chat context', async () => {

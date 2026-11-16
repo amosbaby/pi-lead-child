@@ -17,6 +17,7 @@ import { LEAD_ACTIVITY_OPT_IN, LEAD_ACTIVITY_RESOURCE } from "./lead-activity.ts
 import { ReminderSettingsSchema } from "./reminders.ts";
 import { UI_ACTION_INPUT_SCHEMAS } from "./ui-actions.ts";
 import { ChatImageRefSchema, ChatImagesInputSchema } from "./chat-images.ts";
+import { LeadModelChoiceSchema } from "./lead-models.ts";
 
 export { EVENT_REPLAY_LIMIT, PROTOCOL_VERSION } from "./version.ts";
 
@@ -1250,6 +1251,9 @@ export const ChatSendCommandSchema = StrictObject({
   mode: Type.Optional(ChatPlacementSchema),
   // 发给 Lead 的图片（chat-images.ts）。客户端只在 hello.v2 的 capabilities 里有 CHAT_IMAGES_CAPABILITY 时带它。
   images: Type.Optional(ChatImagesInputSchema),
+  // 「只这一条」（lead-models.ts 的 CHAT_TURN_MODEL_CAPABILITY）：只用这个模型和推理强度答这一条，答完回到主用。
+  // 只在 Lead 的会话里；客户端只在 daemon 宣布了 CHAT_TURN_MODEL_CAPABILITY 时带它。
+  turnModel: Type.Optional(LeadModelChoiceSchema),
 });
 export const StatusGetCommandSchema = StrictObject({
   type: Type.Literal("status.get"),

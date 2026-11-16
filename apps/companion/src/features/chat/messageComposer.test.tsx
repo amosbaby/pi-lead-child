@@ -189,9 +189,32 @@ describe('the message composer', () => {
     expect(thumbnails()).toHaveLength(0);
   });
 
-  it('writes the model Lead uses on the right, without the provider', () => {
+  // 模型配置方案 C 的 S4（2026-11-16）：输入框上不放模型。
+  it('does not show the model on the composer', () => {
     setup();
-    expect(screen.getByTestId('composer-model').textContent).toBe('claude-opus-5-5');
+    expect(screen.queryByTestId('composer-model')).toBeNull();
+    expect(screen.queryByTestId('lead-model-button')).toBeNull();
+  });
+
+  // /model 是界面自己的命令：打开换模型的浮层，从不发给 Lead。
+  it('never sends /model to Lead: it opens the model picker and clears the input', async () => {
+    const { sendChat } = setup();
+    for (const command of ['/model', '  /MODEL  ']) {
+      await act(async () => { type(command); });
+      await act(async () => { enter(); });
+      expect(input().value).toBe('');
+      // 浮层打开了（手机宽度是底部面板，桌面是锚定浮层；两种都有「正在用」那一行）。
+      expect(await screen.findByTestId('lead-model-in-use')).toBeTruthy();
+      await act(async () => { fireEvent.click(screen.getByTestId('lead-model-picker-scrim')); });
+      await waitFor(() => expect(screen.queryByTestId('lead-model-in-use')).toBeNull());
+    }
+    await act(async () => { fireEvent.click(screen.getByTestId('send-message')); });
+    expect(sendChat).not.toHaveBeenCalled();
+    // 只是开头像命令的话照常发。
+    await act(async () => { type('/model please use opus'); });
+    await act(async () => { enter(); });
+    expect(sendChat).toHaveBeenCalledTimes(1);
+    expect(sendChat.mock.calls[0]![0]).toBe('/model please use opus');
   });
 });
 

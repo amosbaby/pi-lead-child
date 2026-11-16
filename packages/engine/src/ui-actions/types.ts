@@ -298,6 +298,9 @@ export interface LeadModelService {
   // 换模型：查它在不在目录里、推理强度支不支持（不支持时抛错，说明可选的），写进 config.json 的 lead.models（排第一），
   // Lead 空闲时马上换，正在回答时这一轮结束后换。
   switch(choice: LeadModelChoice): Promise<LeadModelSwitchResult>;
+  // Lead 的会话此刻挂着的模型（provider/id），带订阅的账号（protocol 的 LeadModelCatalog.inSession）。不知道时为 null。
+  // 没有它的服务（测试的替身）：GET /v1/lead/models?live=1 不给这个字段。
+  inSession?(): string | null;
 }
 
 export interface ChannelPolicyTestService {

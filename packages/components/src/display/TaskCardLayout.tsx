@@ -170,6 +170,7 @@ function InlineSummary({
       <Row testID={testID('inline-row')} items="center" gap="inline-item" minW={0}>
         {props.leadingMark ?? null}
         {props.leading ? <Text size="meta" weight="semibold" tone="secondary" numberOfLines={1} shrink={0}>{props.leading}</Text> : null}
+        {props.leadingAccessory ?? null}
         {/* spacing-exempt: 分隔点字号 */}
         {props.leading ? <Text size="11" weight="semibold" tone="secondary" shrink={0} aria-hidden>·</Text> : null}
         <Toggle

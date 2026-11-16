@@ -461,11 +461,12 @@ export class CompanionStateRuntime {
   // 把消息写进发件箱。它先存在本机，连着时按顺序发出去；断线时等连上再发，重新加载以后照样在。
   // mode：Lead 正忙时插话还是排队（工单 04），缺省插话。工单对话的消息一律交给工单的 agent（2026-10-19）。
   // images：发给 Lead 的图片（只有 Lead 的会话收，protocol 的 chat-images.ts）。
+  // turnModel：「只这一条」的单轮模型（protocol 的 CHAT_TURN_MODEL_CAPABILITY）。只在 daemon 宣布了这个能力时由界面给。
   async sendChat(
-    message: string, ticketId?: number, mode?: ChatPlacement, images?: readonly ChatImageInput[],
+    message: string, ticketId?: number, mode?: ChatPlacement, images?: readonly ChatImageInput[], turnModel?: LeadModelChoice,
   ): Promise<{ clientMessageId: string }> {
     await this.loadOutbox();
-    const entry = await this.outbox.enqueue(message, ticketId, mode, images);
+    const entry = await this.outbox.enqueue(message, ticketId, mode, images, turnModel);
     return { clientMessageId: entry.clientMessageId };
   }
 
@@ -559,6 +560,7 @@ export class CompanionStateRuntime {
         ...(entry.ticketId === null ? {} : { ticketId: entry.ticketId }),
         ...(entry.mode === undefined ? {} : { mode: entry.mode }),
         ...(entry.images?.length ? { images: entry.images } : {}),
+        ...(entry.turnModel ? { turnModel: entry.turnModel } : {}),
       }),
       isConnected: () => this.control.getState().connectionState === 'connected',
       now: () => this.dependencies.now?.() ?? new Date(),
@@ -625,6 +627,8 @@ export class CompanionStateRuntime {
       optimisticMessageId: outboxMessageId(entry.clientMessageId),
     });
     markTurnDelivered(this.control, entry.turnId);
+    // 「只这一条」：记下这一轮用的模型，这一轮的回答头上写它（会话里换模型的入口）。只记在这个页面里。
+    if (entry.turnModel) this.workspace.getState().rememberTurnModel(entry.turnId, entry.turnModel);
     if (entry.ticketId === null) void this.refresh();
     else void this.ensureResource(RESOURCE_KEYS.ticketConversation(entry.ticketId), true).catch(() => {});
   }
