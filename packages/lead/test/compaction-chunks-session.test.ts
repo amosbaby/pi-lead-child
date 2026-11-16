@@ -104,4 +104,68 @@ describe("compacting a history too long for one summary request", () => {
       db.close();
     }
   }, 60_000);
+
+  // Regression (2026-11-16): a session that already holds a backlog, opened with another model. For two days every
+  // model call failed; each wake wrote its prompt and the failed attempts into the session. Then the user moved to a
+  // working model, and the first compaction sent the whole backlog (3.94M tokens, 18 requests).
+  it("sends at most one window when an existing session with a backlog of failed wakes moves to another model", async () => {
+    const stub = await summaryStub();
+    const dataDir = tempDir("plc-lead-compaction-backlog-");
+    writeFileSync(join(dataDir, "config.json"), JSON.stringify({
+      lead: {
+        providers: {
+          stub: {
+            api: "openai-completions", baseUrl: stub.baseUrl, apiKey: { value: "test" }, discover: false,
+            models: [{ id: "m", contextWindow: 64_000, maxTokens: 2_000 }],
+          },
+        },
+        models: ["stub/m"],
+      },
+    }));
+    // The session was written with the old provider: one answered round, then 80 wakes that all failed.
+    // (Each append to a pi session takes about 30 ms, so the backlog is few large wakes, not many small ones.)
+    const manager = SessionManager.create(dataDir, join(dataDir, "lead-sessions"));
+    const old = { api: "openai-completions", provider: "old", model: "gone", usage };
+    manager.appendMessage({ role: "user", content: `<user_message from="user" via="app" channel="main">\n先看一下工单\n</user_message>`, timestamp: 0 });
+    manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "看完了" }], ...old, stopReason: "stop", timestamp: 1 } as never);
+    for (let wake = 0; wake < 80; wake += 1) {
+      manager.appendMessage({
+        role: "user", timestamp: 10 + wake * 4,
+        content: `<system_event kind="clock" source="daemon">\nwake-${wake}-\n</system_event>\n<system_event kind="situation" source="daemon">\n${"s".repeat(20_000)}\n</system_event>`,
+      });
+      for (let attempt = 0; attempt < 1; attempt += 1) {
+        manager.appendMessage({
+          role: "assistant", content: [], ...old, stopReason: "error", errorMessage: "503 auth_unavailable", timestamp: 11 + wake * 4 + attempt,
+        } as never);
+      }
+    }
+    const sessionFile = manager.getSessionFile()!;
+    const backlog = readFileSync(sessionFile, "utf8").length;
+    expect(backlog).toBeGreaterThan(REQUEST_LIMIT * 10);
+
+    const db = openDb(join(dataDir, "plc.db"));
+    const lead = await createLeadSession({ dataDir, dbPath: join(dataDir, "plc.db"), db });
+    const session = lead.session as unknown as { compact(instructions?: string): Promise<unknown>; dispose(): void };
+    try {
+      await session.compact();
+  
+      expect(stub.requests.some((request) => request.rejected)).toBe(false);
+      const sent = stub.requests.reduce((total, request) => total + request.size, 0);
+      // One request with the answered round and the note. The backlog was more than ten requests long.
+      // (pi keeps the newest messages out of the summary, so the newest wakes are not in this request.)
+      expect(stub.requests.length).toBe(1);
+      expect(sent).toBeLessThan(REQUEST_LIMIT);
+      const text = stub.requests[0]!.text;
+      expect(text.includes("先看一下工单")).toBe(true);
+      expect(text.includes("wake-10-")).toBe(false);
+      const dropped = Number(/(\d+) 轮系统唤醒没有得到回复/u.exec(text)?.[1] ?? 0);
+      expect(dropped).toBeGreaterThan(60);
+      const saved = readFileSync(sessionFile, "utf8").trim().split("\n")
+        .map((line) => JSON.parse(line) as { type: string; details?: { unansweredWakes?: number } });
+      expect(saved.find((entry) => entry.type === "compaction")?.details?.unansweredWakes).toBe(dropped);
+    } finally {
+      session.dispose();
+      db.close();
+    }
+  }, 60_000);
 });

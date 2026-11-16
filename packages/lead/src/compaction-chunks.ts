@@ -11,6 +11,14 @@
 //   - 每写完一段告诉 daemon（onProgress），daemon 重新计压缩的时限：时限防的是一次调用卡住，不是段数多。
 // 估算用 core 的 estimateTokens（中日韩文字每个 1 个 token），pi 的估算按 4 个字符 1 个 token，对中文偏少。
 //
+// What goes into a summary, and how much (2026-11-16). For two days every model call failed. Each wake wrote its prompt
+// into the session (1,838 daemon wake prompts, none answered) and the compaction that should have removed them failed
+// too. The history grew to 3.94M tokens. When the user moved to a working model, the compaction sent all of it, in 18
+// requests. Two rules stop that:
+//   - Wakes that got no answer are not history (dropUnansweredWakes): in a run of them only the last one stays.
+//   - One compaction reads at most one model window of history (capToWindow). Older messages are left out and a note
+//     says how many; the previous summary still covers them.
+//
 // Summary on the session prefix (prompt cache, 2026-11-12). pi's summary request uses its own system prompt and a
 // serialized copy of the history, so no provider can serve any of it from cache: every compaction paid for the whole
 // history again. When the prefix of the last Lead request is known (prompt-cache.ts, RequestPrefixRecorder), the summary
@@ -110,6 +118,106 @@ export function planCompactionChunks(
   }
   if (current.length > 0) chunks.push(current);
   return chunks;
+}
+
+// The text of a user message as the model reads it.
+function userText(message: CompactionMessage): string {
+  const content = (message as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => (block && typeof block === "object" && typeof (block as { text?: unknown }).text === "string"
+    ? (block as { text: string }).text : "")).join("");
+}
+
+// A user message that holds only daemon system events (envelope.ts): no words of the user and no external text.
+// The envelope escapes every "<" in a body, so these tags cannot come from content.
+function isSystemOnlyWake(message: CompactionMessage): boolean {
+  if (message.role !== "user") return false;
+  const text = userText(message);
+  return text.includes("<system_event") && !text.includes("<user_message") && !text.includes("<untrusted_external_text");
+}
+
+// A model call that failed or was stopped.
+function isFailedAttempt(message: CompactionMessage): boolean {
+  if (message.role !== "assistant") return false;
+  const stop = (message as { stopReason?: string }).stopReason;
+  return stop === "error" || stop === "aborted";
+}
+
+function hasContent(message: CompactionMessage): boolean {
+  const content = (message as { content?: unknown }).content;
+  return typeof content === "string" ? content.trim() !== "" : Array.isArray(content) && content.length > 0;
+}
+
+/**
+ * Removes the wakes that got no answer. A turn starts at a user message. A turn is unanswered when everything after its
+ * user message is a failed attempt. In a run of unanswered turns that hold only system events, only the last turn
+ * stays: the daemon writes the current state again at each wake, so the older ones say nothing more. A turn with the
+ * user's words or external text always stays. Failed attempts without content go in every unanswered turn.
+ * Pure function. dropped counts the removed turns.
+ */
+export function dropUnansweredWakes(messages: readonly CompactionMessage[]): { messages: CompactionMessage[]; dropped: number } {
+  const turns: CompactionMessage[][] = [];
+  const head: CompactionMessage[] = [];
+  for (const message of messages) {
+    if (message.role === "user") turns.push([message]);
+    else if (turns.length === 0) head.push(message);
+    else turns[turns.length - 1]!.push(message);
+  }
+  const unanswered = (turn: CompactionMessage[]) => turn.slice(1).every(isFailedAttempt);
+  const out = [...head];
+  let dropped = 0;
+  for (const [index, turn] of turns.entries()) {
+    if (!unanswered(turn)) {
+      out.push(...turn);
+      continue;
+    }
+    const next = turns[index + 1];
+    if (isSystemOnlyWake(turn[0]!) && next && unanswered(next) && isSystemOnlyWake(next[0]!)) {
+      dropped += 1;
+      continue;
+    }
+    out.push(turn[0]!, ...turn.slice(1).filter(hasContent));
+  }
+  return { messages: out, dropped };
+}
+
+/**
+ * Keeps the newest messages that fit in cap tokens, and starts them at a user message when one is there.
+ * omitted counts the older messages that were left out, omittedTokens their estimated size. Pure function.
+ */
+export function capToWindow(
+  messages: readonly CompactionMessage[], cap: number, tokens: (message: CompactionMessage) => number = messageTokens,
+): { messages: CompactionMessage[]; omitted: number; omittedTokens: number } {
+  const sizes = messages.map((message) => tokens(message));
+  const total = sizes.reduce((sum, size) => sum + size, 0);
+  if (total <= cap) return { messages: [...messages], omitted: 0, omittedTokens: 0 };
+  let start = messages.length;
+  let used = 0;
+  // The newest message always stays: planCompactionChunks shrinks it when it is larger than a part.
+  while (start > 0 && (start === messages.length || used + sizes[start - 1]! <= cap)) {
+    start -= 1;
+    used += sizes[start]!;
+  }
+  const turnStart = messages.findIndex((message, index) => index >= start && message.role === "user");
+  if (turnStart > start) {
+    for (let index = start; index < turnStart; index += 1) used -= sizes[index]!;
+    start = turnStart;
+  }
+  return { messages: messages.slice(start), omitted: start, omittedTokens: total - used };
+}
+
+// The note that stands in for what a compaction left out. It is a user message at the start of the history.
+function leftOutNote(dropped: number, omitted: number, omittedTokens: number): CompactionMessage | null {
+  const lines: string[] = [];
+  if (omitted > 0) {
+    lines.push(`这次压缩只读了最近的一段历史。更早的 ${omitted} 条消息（约 ${omittedTokens} token）没有读：它们超过了一个模型窗口。更早的内容以上一次的摘要为准。`);
+  }
+  if (dropped > 0) {
+    lines.push(`这段历史里有 ${dropped} 轮系统唤醒没有得到回复（模型调用失败），已经略去；每一段连续的失败只留了最后一轮。那段时间里你没有处理任何事件，现状以最新的当前局面为准。`);
+  }
+  if (lines.length === 0) return null;
+  return { role: "user", content: `[压缩说明] ${lines.join("")}`, timestamp: Date.now() } as CompactionMessage;
 }
 
 // 几次摘要调用的用量加在一起（数字逐项相加，cost 里的也一样）。
@@ -284,12 +392,21 @@ export async function compactInChunks(
   const onPrefix = await compactOnPrefix(event, model, ctx, instructions, options);
   if (onPrefix) return onPrefix;
   // 切在一轮中间时，那一轮的前半段也并进历史一起摘要：分段时不再单独写「这一轮的前情」。
-  const messages = [...preparation.messagesToSummarize, ...(preparation.isSplitTurn ? preparation.turnPrefixMessages : [])];
+  const history = [...preparation.messagesToSummarize, ...(preparation.isSplitTurn ? preparation.turnPrefixMessages : [])];
   const budget = chunkTokenBudget(model.contextWindow, preparation.settings.reserveTokens);
+  // 没有得到回复的系统唤醒不是历史；一次压缩最多读一个模型窗口的历史（文件开头，2026-11-16）。
+  const answered = dropUnansweredWakes(history);
+  const capped = capToWindow(answered.messages, Math.max(budget, model.contextWindow));
+  const note = leftOutNote(answered.dropped, capped.omitted, capped.omittedTokens);
+  const messages = note ? [note, ...capped.messages] : capped.messages;
   const tokens = messages.reduce((total, message) => total + messageTokens(message), 0);
+  if (note) {
+    options.log?.(`[lead] compaction: left out ${answered.dropped} unanswered wakes and ${capped.omitted} older messages (about ${capped.omittedTokens} tokens); summarizing about ${tokens} tokens`);
+  }
   // pi 自己触发的压缩不带要求（customInstructions 是空的）：有要给它的要求时由这里来写，放得进一次请求也一样。
+  // 略去了东西时也由这里来写：pi 自己的压缩会把略去的部分照样发出去。
   const ours = event.customInstructions === undefined && options.instructions !== undefined;
-  if (tokens <= budget && !ours) return undefined;
+  if (tokens <= budget && !ours && !note) return undefined;
 
   const chunks = tokens <= budget ? [messages] : planCompactionChunks(messages, budget);
   if (chunks.length > 1) {
@@ -317,7 +434,10 @@ export async function compactInChunks(
       firstKeptEntryId: preparation.firstKeptEntryId,
       tokensBefore: preparation.tokensBefore,
       ...(usage ? { usage } : {}),
-      details: { ...files, chunks: chunks.length },
+      details: {
+        ...files, chunks: chunks.length,
+        ...(note ? { unansweredWakes: answered.dropped, omittedMessages: capped.omitted, omittedTokens: capped.omittedTokens } : {}),
+      },
     },
   };
 }

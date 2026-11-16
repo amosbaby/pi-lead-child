@@ -2,7 +2,7 @@
 // 完整的一跳（真实的 pi 会话、模型拒绝超长请求）在 compaction-chunks-session.test.ts。
 import { describe, expect, it, vi } from "vitest";
 import {
-  chunkTokenBudget, compactInChunks, messageTokens, planCompactionChunks, shrinkMessage,
+  capToWindow, chunkTokenBudget, compactInChunks, dropUnansweredWakes, messageTokens, planCompactionChunks, shrinkMessage,
 } from "../src/compaction-chunks.js";
 
 const user = (text: string) => ({ role: "user" as const, content: text, timestamp: 0 });
@@ -13,6 +13,65 @@ const assistant = (text: string) => ({
 });
 // 测试用的估算：每个字符 1 个 token。
 const chars = (message: unknown) => JSON.stringify(message).length;
+
+// A model call that failed: no content, stopReason error (what pi writes for a provider error).
+const failed = () => ({ ...assistant(""), content: [], stopReason: "error" as const, errorMessage: "503 auth_unavailable" });
+// What the daemon writes when it wakes Lead: only system events.
+const wake = (label: string, size = 0) => user(
+  `<system_event kind="clock" source="daemon">\n${label}\n</system_event>\n<system_event kind="situation" source="daemon">\n${"s".repeat(size)}\n</system_event>`,
+);
+const said = (text: string) => user(`<system_event kind="clock" source="daemon">\n12:00\n</system_event>\n<user_message from="user" via="app" channel="main">\n${text}\n</user_message>`);
+const external = (text: string) => user(
+  `<system_event kind="message" source="daemon">\n消息事件 #7\n</system_event>\n<untrusted_external_text from="external" source="slack">\n${text}\n</untrusted_external_text>`,
+);
+
+describe("dropUnansweredWakes", () => {
+  it("keeps only the last wake of a run that got no answer, and every answered turn", () => {
+    const answered = [wake("wake-0"), assistant("done")];
+    const history = [...answered, wake("wake-1"), failed(), failed(), wake("wake-2"), failed(), wake("wake-3"), failed(), wake("wake-4"), assistant("back")];
+    const result = dropUnansweredWakes(history as never);
+    expect(result.dropped).toBe(2);
+    expect(result.messages).toEqual([...answered, wake("wake-3"), wake("wake-4"), assistant("back")]);
+  });
+
+  it("never drops the user's words or external text, also when no call succeeded after them", () => {
+    const history = [wake("wake-1"), failed(), said("帮我看一下部署"), failed(), wake("wake-2"), failed(), external("ping"), failed(), wake("wake-3"), failed()];
+    const result = dropUnansweredWakes(history as never);
+    expect(result.dropped).toBe(0);
+    expect(result.messages).toEqual([wake("wake-1"), said("帮我看一下部署"), wake("wake-2"), external("ping"), wake("wake-3")]);
+  });
+
+  it("keeps a failed attempt that wrote something, and the messages before the first turn", () => {
+    const partial = { ...assistant("写到一半"), stopReason: "aborted" as const };
+    const history = [assistant("earlier reply"), wake("wake-1"), partial, wake("wake-2"), assistant("ok")];
+    const result = dropUnansweredWakes(history as never);
+    expect(result).toEqual({ messages: history, dropped: 0 });
+  });
+});
+
+describe("capToWindow", () => {
+  it("returns the history as it is when it fits", () => {
+    const history = [user("a"), assistant("b")];
+    expect(capToWindow(history as never, 10_000, chars as never)).toEqual({ messages: history, omitted: 0, omittedTokens: 0 });
+  });
+
+  it("keeps the newest messages under the cap and starts them at a user message", () => {
+    const history = Array.from({ length: 10 }, (_, index) => (index % 2 ? assistant : user)(`${index}`.padEnd(200, "x")));
+    const size = chars(history[0]) + chars(history[1]);
+    // Room for two turns and a half: the half turn (an assistant reply without its question) goes too.
+    const result = capToWindow(history as never, size * 2 + chars(history[1]) + 5, chars as never);
+    expect(result.messages).toEqual(history.slice(6));
+    expect(result.omitted).toBe(6);
+    expect(result.omittedTokens).toBe(size * 3);
+  });
+
+  it("keeps the newest message when it alone is over the cap", () => {
+    const history = [user("old"), assistant("x".repeat(5_000))];
+    const result = capToWindow(history as never, 100, chars as never);
+    expect(result.messages).toEqual([history[1]]);
+    expect(result.omitted).toBe(1);
+  });
+});
 
 describe("planCompactionChunks", () => {
   it("keeps the order and puts as many messages in a part as fit under the budget", () => {
@@ -133,5 +192,74 @@ describe("compactInChunks", () => {
     const cancelled = { ...event(messages), signal: controller.signal };
     await expect(compactInChunks(cancelled as never, ctx(16_000) as never, { summarize: summarize as never })).rejects.toThrow("Compaction cancelled");
     expect(summarize).toHaveBeenCalledTimes(1);
+  });
+
+  const usage0 = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+  const recorder = () => {
+    const sent: unknown[][] = [];
+    const summarize = vi.fn(async (chunk: unknown[]) => {
+      sent.push(chunk);
+      return { text: `摘要 ${sent.length}`, usage: usage0 };
+    });
+    const size = () => sent.flat().reduce<number>((total, message) => total + messageTokens(message as never), 0);
+    const text = () => JSON.stringify(sent);
+    return { sent, summarize, size, text };
+  };
+
+  // Regression (2026-11-16). Every model call failed for two days: 1,838 wake prompts and 7,028 failed attempts went
+  // into the session, 3.94M tokens, and no compaction succeeded. With a working model again, the compaction sent all
+  // of it in 18 requests on the user's most expensive model.
+  it("does not send a backlog of unanswered wakes to the model", async () => {
+    const backlog = Array.from({ length: 400 }, (_, index) => [wake(`wake-${index}`, 3_000), failed(), failed(), failed()]).flat();
+    const history = [said("先看一下工单"), assistant("看完了"), ...backlog.slice(0, 800), said("你还在吗"), failed(), ...backlog.slice(800)];
+    const window = 16_000;
+    const before = history.reduce((total, message) => total + messageTokens(message as never), 0);
+    expect(before).toBeGreaterThan(window * 10);
+    const seen = recorder();
+    const logs: string[] = [];
+
+    const result = await compactInChunks(event(history) as never, ctx(window) as never, { summarize: seen.summarize as never, log: (line) => logs.push(line) });
+
+    expect(seen.size()).toBeLessThanOrEqual(window);
+    expect(seen.summarize.mock.calls.length).toBeLessThanOrEqual(3);
+    // What the user said stays, with and without an answer. So does the last wake of each run.
+    expect(seen.text()).toContain("先看一下工单");
+    expect(seen.text()).toContain("你还在吗");
+    expect(seen.text()).toContain("wake-199");
+    expect(seen.text()).toContain("wake-399");
+    expect(seen.text()).not.toContain("wake-198");
+    expect(seen.text()).toContain("398 轮系统唤醒没有得到回复");
+    expect(result!.compaction.details).toMatchObject({ unansweredWakes: 398, omittedMessages: 0 });
+    expect(logs.join("\n")).toContain("left out 398 unanswered wakes");
+  });
+
+  it("reads at most one model window of history, and says what it left out", async () => {
+    const window = 16_000;
+    const history = Array.from({ length: 200 }, (_, index) => (index % 2 ? assistant : user)(`第 ${index} 条 ${"内容".repeat(500)}`));
+    const before = history.reduce((total, message) => total + messageTokens(message as never), 0);
+    expect(before).toBeGreaterThan(window * 5);
+    const seen = recorder();
+
+    const result = await compactInChunks(event(history) as never, ctx(window) as never, { summarize: seen.summarize as never });
+
+    // The note is the only thing on top of one window of history.
+    expect(seen.size()).toBeLessThanOrEqual(window + 200);
+    expect(seen.text()).toContain("第 199 条");
+    expect(seen.text()).not.toContain("第 0 条");
+    const details = result!.compaction.details as { omittedMessages: number; omittedTokens: number };
+    expect(details.omittedMessages).toBeGreaterThan(100);
+    expect(seen.text()).toContain(`更早的 ${details.omittedMessages} 条消息（约 ${details.omittedTokens} token）没有读`);
+    // The first request still carries the summary of the compaction before this one.
+    expect((seen.summarize.mock.calls[0] as unknown[])[7]).toBe("上一次的摘要");
+  });
+
+  it("writes the compaction itself when it left something out, so that pi does not send it", async () => {
+    const history = [wake("wake-1"), failed(), wake("wake-2"), failed(), wake("wake-3"), assistant("好")];
+    const seen = recorder();
+    // A request from the daemon (customInstructions set) that fits in one request: before, this went back to pi.
+    const result = await compactInChunks(event(history) as never, ctx(500_000) as never, { summarize: seen.summarize as never });
+    expect(seen.summarize).toHaveBeenCalledTimes(1);
+    expect(seen.text()).not.toContain("wake-1");
+    expect(result!.compaction.details).toMatchObject({ chunks: 1, unansweredWakes: 1 });
   });
 });
