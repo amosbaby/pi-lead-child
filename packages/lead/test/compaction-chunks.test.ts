@@ -2,7 +2,7 @@
 // 完整的一跳（真实的 pi 会话、模型拒绝超长请求）在 compaction-chunks-session.test.ts。
 import { describe, expect, it, vi } from "vitest";
 import {
-  capToWindow, chooseSummaryRoute, chunkTokenBudget, compactInChunks, dropUnansweredWakes, messageTokens, planCompactionChunks, PREFIX_WARM_MS,
+  capToWindow, chooseSummaryRoute, chunkTokenBudget, compactInChunks, dropUnansweredWakes, messageTokens, planCompactionChunks, PREFIX_WARM_LONG_MS, PREFIX_WARM_MS,
   shrinkMessage,
 } from "../src/compaction-chunks.js";
 
@@ -99,6 +99,12 @@ describe("chooseSummaryRoute", () => {
     expect(chooseSummaryRoute({ main, cheap: undefined, prefix: cold, now })).toEqual({ prefix: cold, model: main, reason: "main_model" });
     expect(chooseSummaryRoute({ main, cheap: { ...main }, prefix: cold, now })).toEqual({ prefix: cold, model: main, reason: "main_model" });
     expect(chooseSummaryRoute({ main, cheap: undefined, prefix: null, now })).toEqual({ prefix: null, model: main, reason: "main_model" });
+  });
+
+  it("takes a longer warm time for a provider that keeps the cache longer", () => {
+    const old = prefix(now - 30 * 60_000);
+    expect(chooseSummaryRoute({ main, cheap, prefix: old, now }).reason).toBe("cheap_model");
+    expect(chooseSummaryRoute({ main, cheap, prefix: old, now, warmMs: PREFIX_WARM_LONG_MS }).reason).toBe("warm_prefix");
   });
 
   it("counts a prefix without a time as warm", () => {

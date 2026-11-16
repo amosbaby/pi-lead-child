@@ -604,6 +604,8 @@ export function idleLaneExtension(
     prefix?: (model: { provider: string; id: string }) => RequestPrefix | null;
     // A cheaper model for a summary that cannot use the provider's cache (compaction-chunks.ts, chooseSummaryRoute).
     summaryModel?: (main: NonNullable<ExtensionContext["model"]>) => ExtensionContext["model"];
+    // How long a prefix counts as held in the provider's cache (compaction-chunks.ts, PREFIX_WARM_MS).
+    prefixWarmMs?: (main: { provider: string; id: string }) => number;
     now?: () => number;
   } = {},
 ): ExtensionFactory {
@@ -613,6 +615,7 @@ export function idleLaneExtension(
       if (!main) return runtime.beforeCompact(event, ctx, null);
       const route = chooseSummaryRoute({
         main, cheap: options.summaryModel?.(main), prefix: options.prefix?.(main) ?? null, now: (options.now ?? Date.now)(),
+        ...(options.prefixWarmMs ? { warmMs: options.prefixWarmMs(main) } : {}),
       });
       // 有前缀可试时交给 Lead 的模型（子进程里前缀不成就由它自己写）；没有时交给便宜的模型。
       if (route.prefix || route.model === main) return runtime.beforeCompact(event, ctx, route.prefix);

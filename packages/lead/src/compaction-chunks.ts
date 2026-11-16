@@ -386,8 +386,9 @@ export interface CompactionChunksOptions {
   // How many tokens of history one compaction reads at most. Default: the window of Lead's model. The idle child
   // gets it from the daemon, because there the summary model can be the only model it knows.
   historyCap?: number;
-  // How long after its last message a prefix counts as held in the provider's cache. Default PREFIX_WARM_MS.
-  prefixWarmMs?: number;
+  // How long after its last message a prefix counts as held in the provider's cache. Default PREFIX_WARM_MS; a
+  // provider with long cache retention gets PREFIX_WARM_LONG_MS from the session.
+  prefixWarmMs?: number | ((main: { provider: string; id: string }) => number);
   now?: () => number;
   // Tests replace the prefix summary call.
   complete?: CompleteFn;
@@ -398,6 +399,8 @@ export interface CompactionChunksOptions {
  * read starts it again; the margin covers the time the request itself takes.
  */
 export const PREFIX_WARM_MS = 4.5 * 60_000;
+/** The same for a provider that keeps the cache for 1 hour (lead.providers.<name>.cacheRetention: "long"). */
+export const PREFIX_WARM_LONG_MS = 55 * 60_000;
 
 /**
  * How to write the summary. prefix: try the session prefix first, on Lead's model. model: who writes a separate
@@ -431,7 +434,9 @@ export async function compactInChunks(
   const instructions = event.customInstructions ?? options.instructions;
   const route = chooseSummaryRoute({
     main, cheap: options.summaryModel?.(main) as typeof main | undefined, prefix: options.prefix?.(main),
-    now: (options.now ?? Date.now)(), ...(options.prefixWarmMs !== undefined ? { warmMs: options.prefixWarmMs } : {}),
+    now: (options.now ?? Date.now)(),
+    ...(options.prefixWarmMs !== undefined
+      ? { warmMs: typeof options.prefixWarmMs === "function" ? options.prefixWarmMs(main) : options.prefixWarmMs } : {}),
   });
   if (route.prefix) {
     const onPrefix = await compactOnPrefix(event, main, route.prefix, ctx, instructions, options);

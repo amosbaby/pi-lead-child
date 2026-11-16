@@ -32,7 +32,7 @@ import { cacheWarmingConfigured, leadCacheWarmingExtension } from "./cache-warmi
 import { installStepInterrupt } from "./step-interrupt.js";
 import { installToolAbortGuard, type ToolAbortGuardOptions } from "./tool-abort-guard.js";
 import type { LeadAbortReason } from "./scheduler/controller.js";
-import { compactionChunksExtension, type CompactionProgress } from "./compaction-chunks.js";
+import { compactionChunksExtension, PREFIX_WARM_LONG_MS, PREFIX_WARM_MS, type CompactionProgress } from "./compaction-chunks.js";
 import {
   getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory, renderStandingOrdersForLead,
 } from "@pi-lead-child/store";
@@ -296,6 +296,8 @@ export async function createLeadSession(opts: {
   //   0. config.json 的 lead.compactionModel（"main" 是总用 Lead 自己的模型）；
   //   1. 否则按 SmartModel 的选法（PLC_SMART_MODEL，或者名字带 haiku 的最新模型）。
   // 选出来的就是 Lead 的模型、或者没有注册时，没有便宜模型。
+  // 前缀在服务商的缓存里留多久：按这个服务商的 cacheRetention（prompt-cache.ts 的 cacheRetentionExtension）。
+  const prefixWarmMsFor = (main: { provider: string }) => (cacheRetentionOf(providerSettings, main.provider) === "long" ? PREFIX_WARM_LONG_MS : PREFIX_WARM_MS);
   const summaryModelFor = <M extends { provider: string; id: string }>(main: M): M | undefined => {
     const setting = loadPlcConfig(opts.dataDir).lead?.compactionModel?.trim();
     if (setting === "main") return undefined;
@@ -483,7 +485,7 @@ export async function createLeadSession(opts: {
       },
       // 空闲车道（scheduler/idle-runtime.ts，P4）：pi 在单元中间想压缩时推迟到空闲，或者用子进程写好的摘要。
       // 排在分段压缩之前：它取消时 pi 不再问后面的扩展；它接上时分段压缩跳过（skip）。
-      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, { prefix: prefixFor, summaryModel: summaryModelFor }) }] : []),
+      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, { prefix: prefixFor, summaryModel: summaryModelFor, prefixWarmMs: prefixWarmMsFor }) }] : []),
       // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
       // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {
@@ -494,6 +496,7 @@ export async function createLeadSession(opts: {
           instructions: leadAutoCompactionInstructions(),
           prefix: prefixFor,
           summaryModel: summaryModelFor,
+          prefixWarmMs: prefixWarmMsFor,
           ...(opts.idleLane ? { skip: (event) => opts.idleLane!.claims(event) } : {}),
         }),
       },
