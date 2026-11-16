@@ -8,6 +8,7 @@
 //   B2 等第一段输出：after_provider_response → 第一个 message_update。模型慢不算卡死。
 //   C  流式输出：相邻两个 message_update 之间最长的间隔。
 //   工具：tool_execution_start → tool_execution_end，每个工具各记一个耗时。
+//   用量：这一步的模型回复报的 token 数（input、cacheRead、cacheWrite、output）。精简上下文的每一项都靠它量效果。
 //
 // 记在两个地方（D12）：
 //   · daemon 的日志，前缀 [sched]：每一步一行；阶段 A 等过阈值时马上一行，带上宿主的负载（线程池、后台重活）。
@@ -80,6 +81,23 @@ export interface LeadStepTiming {
   totalMs: number;
   stop: string | null;
   status: number | null;
+  // 这一步的模型回复报的 token 数。服务商没报、或者这一步没有模型回复时为 null。旧的记录没有这个字段。
+  usage?: LeadStepUsage | null;
+}
+
+export interface LeadStepUsage {
+  input: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+}
+
+/** 从模型回复的 usage 里取出这一步的 token 数。字段不是数字时当 0；整个 usage 不在时为 null。 */
+export function stepUsage(usage: unknown): LeadStepUsage | null {
+  if (!usage || typeof usage !== "object") return null;
+  const value = usage as Record<string, unknown>;
+  const count = (key: string) => (typeof value[key] === "number" && Number.isFinite(value[key]) ? value[key] as number : 0);
+  return { input: count("input"), cacheRead: count("cacheRead"), cacheWrite: count("cacheWrite"), output: count("output") };
 }
 
 interface StepState {
@@ -95,6 +113,7 @@ interface StepState {
   maxGapMs: number;
   modelEndAt: number | null;
   stop: string | null;
+  usage: LeadStepUsage | null;
   tools: Map<string, { name: string; startedAt: number }>;
   toolTimes: Array<{ name: string; ms: number; error: boolean }>;
   aWarned: boolean;
@@ -118,6 +137,9 @@ export function stepLine(timing: LeadStepTiming): string {
     `stream=${field(timing.stream)}`, `tools=${tools}`, `total=${timing.totalMs}`,
     ...(timing.stop ? [`stop=${timing.stop}`] : []),
     ...(timing.status !== null && timing.status !== 200 ? [`status=${timing.status}`] : []),
+    ...(timing.usage
+      ? [`in=${timing.usage.input}`, `cr=${timing.usage.cacheRead}`, `cw=${timing.usage.cacheWrite}`, `out=${timing.usage.output}`]
+      : []),
   ].join(" ");
 }
 
@@ -191,6 +213,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
         totalMs: end - state.startedAt,
         stop: state.stop,
         status: state.status,
+        usage: state.usage,
       };
       log(stepLine(timing));
       record({ kind: "step", ...timing, at: new Date(end).toISOString() });
@@ -207,7 +230,7 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
       stepInRun += 1;
       const state: StepState = {
         step: stepInRun, startedAt: now(), requestAt: null, responseAt: null, status: null,
-        firstOutputAt: null, lastOutputAt: null, maxGapMs: 0, modelEndAt: null, stop: null,
+        firstOutputAt: null, lastOutputAt: null, maxGapMs: 0, modelEndAt: null, stop: null, usage: null,
         tools: new Map(), toolTimes: [], aWarned: false, bSlow: false, toolCalls: 0,
       };
       current = state;
@@ -285,9 +308,10 @@ export function leadSchedulerExtension(options: LeadSchedulerExtensionOptions = 
 
     pi.on("message_end", (event) => {
       const state = current;
-      const message = event.message as { role?: string; stopReason?: string; content?: Array<{ type?: string }> };
+      const message = event.message as { role?: string; stopReason?: string; content?: Array<{ type?: string }>; usage?: unknown };
       if (!state || message.role !== "assistant") return;
       state.modelEndAt = now();
+      state.usage = stepUsage(message.usage);
       state.toolCalls = Array.isArray(message.content) ? message.content.filter((block) => block?.type === "toolCall").length : 0;
       if (message.stopReason && message.stopReason !== "stop" && message.stopReason !== "toolUse") state.stop = message.stopReason;
     });

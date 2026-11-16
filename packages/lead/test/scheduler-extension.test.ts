@@ -107,6 +107,31 @@ describe("the stage timing of Lead's steps", () => {
     expect(lines.map((line) => line.match(/run=\d+ step=\d+/)![0])).toEqual(["run=1 step=1", "run=1 step=2", "run=2 step=1"]);
   });
 
+  // 每一步的 token 用量：没有它，精简上下文的每一项都量不出效果。
+  it("records the step's token usage in the step line and the session record", () => {
+    const { emit, lines, entries } = setup();
+    emit("agent_start");
+    emit("turn_start", {});
+    emit("before_provider_request", { payload: {} });
+    emit("message_end", { message: {
+      role: "assistant", stopReason: "stop",
+      usage: { input: 1_200, output: 340, cacheRead: 250_000, cacheWrite: 6_400, totalTokens: 257_940, cost: {} },
+    } });
+    emit("turn_end", {});
+    expect(lines[0]).toMatch(/ in=1200 cr=250000 cw=6400 out=340$/);
+    expect(entries[0]!.data).toMatchObject({ kind: "step", usage: { input: 1_200, cacheRead: 250_000, cacheWrite: 6_400, output: 340 } });
+  });
+
+  it("records no usage for a step whose model reply carries none", () => {
+    const { emit, lines, entries } = setup();
+    emit("agent_start");
+    emit("turn_start", {});
+    emit("message_end", assistant("aborted"));
+    emit("agent_end", {});
+    expect(lines[0]).not.toMatch(/ in=/);
+    expect(entries[0]!.data.usage).toBeNull();
+  });
+
   it("writes a non-200 status into the step line", () => {
     expect(stepLine({
       run: 3, step: 2, turnId: null, a: 100, b1: 400, b2: null, c: null, stream: null, tools: [], totalMs: 500, stop: "error", status: 429,
