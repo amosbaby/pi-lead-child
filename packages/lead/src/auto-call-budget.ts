@@ -54,22 +54,56 @@ export function autoCallBudgetLimits(configured: unknown): AutoCallBudgetLimits 
   return limits;
 }
 
+/** 存下来的调用：每一条是 [时间（毫秒）, 没命中缓存的输入]。 */
+export type AutoCallBudgetSnapshot = Array<[number, number]>;
+
+// 存下来的调用里还在 24 小时窗口里的。时间比现在晚一分钟以上的不要（时钟被改过）。
+function savedCalls(saved: unknown, now: number): Array<{ at: number; uncached: number }> {
+  if (!Array.isArray(saved)) return [];
+  const calls: Array<{ at: number; uncached: number }> = [];
+  for (const entry of saved) {
+    if (!Array.isArray(entry)) continue;
+    const [at, uncached] = entry as unknown[];
+    if (typeof at !== "number" || typeof uncached !== "number" || !Number.isFinite(at) || !Number.isFinite(uncached)) continue;
+    if (at <= now - DAY || at > now + 60_000) continue;
+    calls.push({ at, uncached: Math.max(0, uncached) });
+  }
+  return calls.sort((a, b) => a.at - b.at);
+}
+
 export class AutoCallBudget {
   readonly #limits: AutoCallBudgetLimits;
   readonly #now: () => number;
   // 最近 24 小时里的自动调用，按时间排。
   #calls: Array<{ at: number; uncached: number }> = [];
 
-  constructor(options: { limits?: AutoCallBudgetLimits; now?: () => number } = {}) {
+  readonly #onRecord: ((calls: AutoCallBudgetSnapshot) => void) | undefined;
+
+  /**
+   * saved：上一个 daemon 进程记下的调用（snapshot 的结果，daemon 存在库里）。重启以后接着算：不然每次重启预算都从零开始。
+   * 读到的不是这个形状时当作没有。onRecord：每记一次调用就给出现在的快照，daemon 把它存下来。
+   */
+  constructor(options: { limits?: AutoCallBudgetLimits; now?: () => number; saved?: unknown; onRecord?: (calls: AutoCallBudgetSnapshot) => void } = {}) {
     this.#limits = options.limits ?? DEFAULT_AUTO_CALL_BUDGET;
     this.#now = options.now ?? Date.now;
+    this.#onRecord = options.onRecord;
+    this.#calls = savedCalls(options.saved, this.#now());
+  }
+
+  /** 最近 24 小时里的自动调用：[时间, 没命中缓存的输入]，按时间排。 */
+  snapshot(): AutoCallBudgetSnapshot {
+    const now = this.#now();
+    this.#calls = this.#calls.filter((call) => call.at > now - DAY);
+    return this.#calls.map((call) => [call.at, call.uncached]);
   }
 
   /** 记一次自动的模型调用（成功、失败都算）。uncachedTokens：没命中缓存的输入（input + cacheWrite）。超了预算时返回超的那一条。 */
   record(uncachedTokens: number): AutoCallBudgetExceeded | null {
     const now = this.#now();
     this.#calls.push({ at: now, uncached: Math.max(0, uncachedTokens) });
-    return this.exceeded();
+    const over = this.exceeded();
+    this.#onRecord?.(this.snapshot());
+    return over;
   }
 
   usage(): { callsLastHour: number; callsLastDay: number; uncachedTokensLastDay: number } {

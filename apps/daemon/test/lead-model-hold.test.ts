@@ -175,6 +175,91 @@ describe("the breaker after consecutive failures", () => {
   }, 40_000);
 });
 
+// The hold and the budget across a daemon restart (2026-11-16). Both lived only in memory. On 2026-11-15 the daemon
+// restarted about 400 times while every model call failed: each new process made three more calls before its breaker
+// opened. A planned restart on 2026-11-16 set a running hourly budget back to zero. Now the daemon saves both in the
+// database (store's lead-call-guards.ts) and a new process goes on from there.
+describe("the hold and the budget across a daemon restart", () => {
+  const REFUSED = "Connection error.: connect ECONNREFUSED 127.0.0.1:8317";
+
+  it("keeps the breaker open after a restart: no automatic call, and the user is not told again", async () => {
+    vi.stubEnv("PLC_MODEL_BREAKER_WAIT_MS", "60000");
+    blocker("依赖升级卡住了");
+    const first = await boot(() => ({ error: REFUSED }));
+    await vi.waitFor(() => expect(first.logs.some((line) => line.startsWith("[sched] model.hold action=opened failures=3"))).toBe(true), { timeout: 10_000 });
+    const notices = () => (db.prepare("SELECT count(*) AS n FROM notifications WHERE kind = 'lead_model_hold'").get() as { n: number }).n;
+    await vi.waitFor(() => expect(notices()).toBe(1), { timeout: 2_000 });
+    await daemon!.close();
+    daemon = null;
+
+    // The new process: the events are still there, the model still fails, and nothing calls it.
+    const second = await boot(() => ({ error: REFUSED }));
+    expect(second.logs.some((line) => line.startsWith("[sched] model.hold action=restored kind=breaker failures=3"))).toBe(true);
+    blocker("发布流水线红了");
+    await sleep(1_200);
+    expect(second.lead.calls.length).toBe(0);
+    expect(second.logs.some((line) => line.includes("model.hold action=opened"))).toBe(false);
+    expect(notices()).toBe(1);
+    const open = db.prepare("SELECT count(*) AS n FROM inbox WHERE state IN ('pending', 'delivered')").get() as { n: number };
+    expect(open.n).toBe(2);
+  }, 40_000);
+
+  it("lets the user's message through after a restart, and its answer lifts the restored hold", async () => {
+    vi.stubEnv("PLC_MODEL_BREAKER_WAIT_MS", "60000");
+    blocker("依赖升级卡住了");
+    const first = await boot(() => ({ error: REFUSED }));
+    await vi.waitFor(() => expect(first.logs.some((line) => line.startsWith("[sched] model.hold action=opened"))).toBe(true), { timeout: 10_000 });
+    await daemon!.close();
+    daemon = null;
+
+    // The user fixed the model service and restarted. Their message goes out at once.
+    const second = await boot((call) => ({ say: has(call, "你好") ? "你好！" : "处理了。" }));
+    await sleep(300);
+    expect(second.lead.calls.length).toBe(0);
+    const sent = await second.say("t1", "你好");
+    await vi.waitFor(() => expect(second.turn(sent.turnId).state).toBe("completed"), { timeout: 5_000 });
+    await vi.waitFor(() => expect(second.logs.some((line) => line.startsWith("[sched] model.hold action=lifted by=user_turn"))).toBe(true), { timeout: 5_000 });
+    // The queued event reaches Lead now.
+    await vi.waitFor(() => expect(second.lead.calls.some((call) => has(call, "依赖升级卡住了"))).toBe(true), { timeout: 5_000 });
+  }, 40_000);
+
+  it("keeps the count of automatic calls after a restart: the budget does not start at zero", async () => {
+    writeFileSync(join(dir, "config.json"), JSON.stringify({ lead: { autoBudget: { callsPerHour: 4 } } }));
+    blocker("提示 1");
+    const first = await boot(() => ({ say: "记下了。" }));
+    await vi.waitFor(() => expect(first.lead.calls.length).toBeGreaterThanOrEqual(1), { timeout: 5_000 });
+    await sleep(150);
+    blocker("提示 2");
+    await vi.waitFor(() => expect(first.lead.calls.length).toBeGreaterThanOrEqual(2), { timeout: 5_000 });
+    await sleep(300);
+    const before = first.lead.calls.length;
+    expect(before).toBeLessThan(4);
+    expect(first.logs.some((line) => line.includes("model.hold action=paused"))).toBe(false);
+    await daemon!.close();
+    daemon = null;
+
+    // The new process has 4 - before calls left, not 4.
+    const second = await boot(() => ({ say: "记下了。" }));
+    for (let i = 3; i <= 12; i += 1) {
+      blocker(`提示 ${i}`);
+      await sleep(150);
+    }
+    await vi.waitFor(() => expect(second.logs.some((line) => line.startsWith("[sched] model.hold action=paused kind=budget"))).toBe(true), { timeout: 10_000 });
+    await sleep(600);
+    expect(second.lead.calls.length).toBeLessThanOrEqual(4 - before + 1);
+    expect(second.lead.calls.length).toBeLessThan(4);
+
+    // A restart during the pause: still paused, no call.
+    await daemon!.close();
+    daemon = null;
+    const third = await boot(() => ({ say: "记下了。" }));
+    expect(third.logs.some((line) => line.startsWith("[sched] model.hold action=restored kind=budget"))).toBe(true);
+    blocker("提示 13");
+    await sleep(800);
+    expect(third.lead.calls.length).toBe(0);
+  }, 60_000);
+});
+
 // 自动调用的预算（lead 的 auto-call-budget.ts，2026-11-16）。2026-11-05 一张工单的预算提示每 7–10 秒来一条，每一条都叫醒 Lead
 // 答一轮，一夜 6,923 轮：每一轮都成功，所以没有任何失败的退避拦着它。现在：系统自己发起的调用到了每小时的上限就暂停，
 // 告诉用户一次；用户本人的消息照常答。

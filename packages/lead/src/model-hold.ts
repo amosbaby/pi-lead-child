@@ -12,9 +12,10 @@
 // 用户本人的消息照常开一轮（一条消息一次请求）。那一轮答上了就解除，排着的事接着交给 Lead；还是账号级的失败就继续暂停。
 // 没有定时探测：暂停期间没有任何定时器去调模型。
 //
-// 暂停只在 daemon 的内存里，重启以后是清的：重启后第一次自动调用碰到同样的错误就重新进入，每次重启最多多一次调用。
-// 不存进 kv：存下来就要处理「用户在别处修好了账号、daemon 重启」这一种（一直暂停到用户说话，没人知道为什么事件不处理），
-// 而内存里的暂停在重启时自然解开，代价只是那一次调用。
+// 暂停跨重启保留（2026-11-16，snapshot / restore，daemon 存在库里）。以前只在内存里：每次重启，熔断要再失败 3 次才打开，
+// 账号级的暂停也要再失败一次。2026-11-15 daemon 崩溃重启了约 400 次，那样就是上千次注定失败的调用。
+// 当时不存的理由是「用户在别处修好了账号、daemon 重启，暂停还在，没人知道为什么事件不处理」。现在进入暂停时系统告诉用户一次，
+// 顶栏的健康状态也写着；用户发一条消息，答上了就解除。恢复出来的熔断到点照样放一次调用去试。
 //
 // 熔断和预算（2026-11-16）。只拦账号级的失败不够：模型代理关了两天，daemon 自动调了 7,028 次，其中 5,527 次是空闲车道的活，
 // 1,466 次是事件叫醒的一轮，用户本人的只有 13 次。同一个暂停再管两种情况，拦的地方和上面一样：
@@ -70,6 +71,41 @@ export interface ModelHoldOptions {
   reachable?: () => Promise<boolean>;
   /** 熔断的参数。缺省：连续 3 次失败，等 5 分钟起，最长 4 小时。 */
   breaker?: Partial<ModelBreakerLimits>;
+  /** 暂停或者连续失败的次数变了：daemon 把快照存进库，重启以后交给 restore。 */
+  onPersist?: (snapshot: ModelHoldSnapshot) => void;
+}
+
+/** 跨重启保留的那一部分（restore 读它）。at 是存的时间。 */
+export interface ModelHoldSnapshot {
+  version: 1;
+  at: number;
+  state: ModelHoldState | null;
+  failures: number;
+  reopens: number;
+  lastError: string;
+}
+
+const HOLD_KINDS: readonly ModelHoldKind[] = ["account", "breaker", "budget"];
+const HOLD_SOURCES: readonly ModelHoldSource[] = ["turn", "compaction", "decision"];
+
+// 读到的快照是不是这个形状。不是时当作没有（旧版本、手改、截断）。
+function parseSnapshot(raw: unknown): ModelHoldSnapshot | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as Record<string, unknown>;
+  const count = (key: string) => (typeof value[key] === "number" && Number.isSafeInteger(value[key]) && (value[key] as number) >= 0 ? value[key] as number : null);
+  const failures = count("failures");
+  const reopens = count("reopens");
+  if (value.version !== 1 || typeof value.at !== "number" || failures === null || reopens === null) return null;
+  let state: ModelHoldState | null = null;
+  if (value.state !== null && value.state !== undefined) {
+    const s = value.state as Record<string, unknown>;
+    if (typeof s !== "object" || !HOLD_KINDS.includes(s.kind as ModelHoldKind) || !HOLD_SOURCES.includes(s.source as ModelHoldSource)) return null;
+    if (typeof s.since !== "number" || typeof s.error !== "string" || !(s.retryAt === null || typeof s.retryAt === "number")) return null;
+    // 熔断和预算一定有时间；账号级的没有。
+    if ((s.kind === "account") !== (s.retryAt === null)) return null;
+    state = { kind: s.kind as ModelHoldKind, since: s.since, source: s.source as ModelHoldSource, error: s.error, retryAt: s.retryAt as number | null };
+  }
+  return { version: 1, at: value.at, state, failures, reopens, lastError: typeof value.lastError === "string" ? value.lastError : "" };
 }
 
 export interface ModelBreakerLimits {
@@ -122,6 +158,7 @@ export class ModelHold implements ModelHoldPort {
   readonly #setTimer: (run: () => void, ms: number) => () => void;
   readonly #reachable: (() => Promise<boolean>) | undefined;
   readonly #limits: ModelBreakerLimits;
+  readonly #onPersist: ((snapshot: ModelHoldSnapshot) => void) | undefined;
 
   constructor(options: ModelHoldOptions) {
     this.#log = options.log;
@@ -130,6 +167,63 @@ export class ModelHold implements ModelHoldPort {
     this.#setTimer = options.setTimer ?? defaultTimer;
     this.#reachable = options.reachable;
     this.#limits = { ...DEFAULT_MODEL_BREAKER, ...options.breaker };
+    this.#onPersist = options.onPersist;
+  }
+
+  /** 现在的暂停和连续失败的次数，给 daemon 存进库。 */
+  snapshot(): ModelHoldSnapshot {
+    return {
+      version: 1, at: this.#now(), state: this.#state ? { ...this.#state } : null,
+      failures: this.#failures, reopens: this.#reopens, lastError: this.#brief(this.#lastError),
+    };
+  }
+
+  /**
+   * daemon 启动时接着上一个进程的暂停（raw 是上一个进程存的 snapshot）。返回恢复以后是不是在暂停。
+   *   · 账号级的：照旧暂停到用户的下一条消息答上。
+   *   · 熔断：时间不变。还没到点就接着等；已经到点就放一次调用去试（能免费看一眼时先看）。重新停过几次也接着算，
+   *     所以放出去的那一次失败了，等待照样加倍。
+   *   · 预算：时间窗还没结束就接着暂停；结束了就不恢复。
+   *   · 没有暂停时只恢复连续失败的次数；它比熔断最长的等待还旧时不算（那几次失败和现在没有关系了）。
+   * 只在启动时调一次，在任何模型调用以前。读到的不是快照时什么都不做。
+   */
+  restore(raw: unknown): boolean {
+    const saved = parseSnapshot(raw);
+    if (!saved) return false;
+    const now = this.#now();
+    const state = saved.state;
+    if (!state) {
+      if (now - saved.at <= this.#limits.maxWaitMs) {
+        this.#failures = saved.failures;
+        this.#lastError = saved.lastError;
+      }
+      return false;
+    }
+    if (state.kind === "budget" && (state.retryAt ?? 0) <= now) return false;
+    this.#clearTimer();
+    this.#failures = saved.failures;
+    this.#reopens = saved.reopens;
+    this.#lastError = saved.lastError;
+    this.#probing = false;
+    this.#sawDown = false;
+    this.#state = { ...state };
+    this.#log(schedulerLine("model.hold", {
+      action: "restored", kind: state.kind, failures: this.#failures,
+      ...(state.retryAt === null ? {} : { retry_in_s: Math.max(0, Math.round((state.retryAt - now) / 1000)) }), error: state.error,
+    }));
+    if (state.kind === "breaker") this.#schedule();
+    if (state.kind === "budget") this.#cancelTimer = this.#setTimer(() => this.resume("window_end"), Math.max(0, state.retryAt! - now));
+    this.#notify(true);
+    return true;
+  }
+
+  #persist(): void {
+    if (!this.#onPersist) return;
+    try {
+      this.#onPersist(this.snapshot());
+    } catch (error) {
+      this.#log(`model hold: saving the state failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   get held(): boolean {
@@ -151,6 +245,12 @@ export class ModelHold implements ModelHoldPort {
   }
 
   failed(source: ModelHoldSource, error: string, options: { alternative?: boolean } = {}): boolean {
+    const held = this.#failed(source, error, options);
+    this.#persist();
+    return held;
+  }
+
+  #failed(source: ModelHoldSource, error: string, options: { alternative?: boolean }): boolean {
     const text = this.#brief(error);
     if (isLeadAccountFailure(error) && !options.alternative) {
       if (this.#state?.kind === "account") return true;
@@ -184,6 +284,13 @@ export class ModelHold implements ModelHoldPort {
 
   /** 一次模型调用答上了：连续失败重新数；账号级的暂停和熔断解除。预算的暂停不解除（模型是好的，是调得太多）。 */
   lift(by: string): void {
+    const changed = this.#failures !== 0 || this.#reopens !== 0 || (this.#state !== null && this.#state.kind !== "budget");
+    this.#lift(by);
+    // 每一次成功的调用都会到这里：只有真的变了才写库。
+    if (changed) this.#persist();
+  }
+
+  #lift(by: string): void {
     this.#failures = 0;
     this.#reopens = 0;
     const state = this.#state;
@@ -207,6 +314,7 @@ export class ModelHold implements ModelHoldPort {
       action: "paused", kind: "budget", detail, resume_in_s: Math.max(0, Math.round((until - this.#now()) / 1000)),
     }));
     this.#cancelTimer = this.#setTimer(() => this.resume("window_end"), Math.max(0, until - this.#now()));
+    this.#persist();
     if (!wasHeld) this.#notify(true);
   }
 
@@ -217,6 +325,7 @@ export class ModelHold implements ModelHoldPort {
     this.#clearTimer();
     this.#state = null;
     this.#log(schedulerLine("model.hold", { action: "resumed", kind: "budget", by, heldMs: this.#now() - state.since }));
+    this.#persist();
     this.#notify(false);
   }
 

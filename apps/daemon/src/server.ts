@@ -86,7 +86,7 @@ import {
   killIdleChildren, liveChildren, runWorkspaceFactsReady, setGitFactsLog, UiActionError, warmRunWorkspaceFacts, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
-import { appendBody, getBusyPlacement, getItem, transition } from "@pi-lead-child/store";
+import { appendBody, getBusyPlacement, getItem, readLeadCallGuard, transition, writeLeadCallGuard } from "@pi-lead-child/store";
 import { activeRun, getRun, updateRun } from "@pi-lead-child/store";
 import { repairNonBudgetRetryExhaustion } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
@@ -836,7 +836,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 账号被停用、欠费）时，系统暂停所有自动的模型调用：不为事件、提醒、摘要、通知、挂起的单元自动开一轮（runTurn、
   // dispatchLeadWork、maybeWakeForDigest、wakeForSuspended），不排重试（leadWakeRetry），空闲车道不开要调模型的活。
   // 事件留在日志里，游标不动。用户本人的消息照常开一轮；答上了就解除（runTurnNow 的 finally），排着的事接着交给 Lead。
-  // 暂停只在内存里：daemon 重启以后是清的，第一次自动调用碰到同样的错误就重新进入（理由见 model-hold.ts 开头）。
+  // 暂停跨重启保留（2026-11-16，理由见 model-hold.ts 开头）：存在库里，启动时在 leadHealth 建好以后恢复。
   const modelHold = new ModelHold({
     log,
     breaker: modelBreakerLimitsFromEnv(process.env),
@@ -850,6 +850,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         return Promise.resolve(true);
       }
     },
+    // 暂停跨重启保留（store 的 lead-call-guards.ts）：每次变化存一份，启动时在下面 restore。
+    onPersist: (snapshot) => writeLeadCallGuard(db, "model_hold", snapshot),
     onChange: (held) => {
       idleLane.modelHold(held);
       // 顶栏的健康状态：暂停期间「下一次自动调用」的时间变了（nextScheduledAttempt），重发一次。
@@ -883,7 +885,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
   }
   // 自动调用的预算（lead 的 auto-call-budget.ts，2026-11-16）：系统自己发起的模型调用超过每小时、每天的上限时暂停，告诉用户。
-  const autoBudget = new AutoCallBudget({ limits: autoCallBudgetLimits(loadPlcConfig(opts.dataDir).lead?.autoBudget) });
+  // 记过的调用也跨重启保留：不然每次重启预算都从零开始（2026-11-16 一次重启就把一小时的计数清掉了）。
+  const autoBudget = new AutoCallBudget({
+    limits: autoCallBudgetLimits(loadPlcConfig(opts.dataDir).lead?.autoBudget),
+    saved: readLeadCallGuard(db, "auto_budget"),
+    onRecord: (calls) => {
+      try {
+        writeLeadCallGuard(db, "auto_budget", calls);
+      } catch (error: any) {
+        log(`auto budget: saving the calls failed: ${error?.message ?? String(error)}`);
+      }
+    },
+  });
   // 上一个单元的结局（整理笔记那一轮让路了没有：runPrecipitation 据此告诉空闲车道）。
   let lastUnitOutcome: UnitOutcome | null = null;
   // 排着的外部消息的推送（工单 10，publishLeadQueue）：上一次推的样子、合并变化的定时器、daemon 在停（不再推）。
@@ -3488,6 +3501,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     leadName: () => leadDisplayName(db),
     locale: () => getLocale(db),
   });
+  // 接着上一个 daemon 进程的模型暂停（熔断、预算、账号级；model-hold.ts 的 restore）。放在这里：它的 onChange 要用 leadHealth。
+  // 上一个进程进入暂停时已经告诉过用户，这里不再通知一次（崩溃重启几百次时不能发几百条）。
+  {
+    const saved = readLeadCallGuard(db, "model_hold");
+    if ((saved as { state?: unknown } | null)?.state) modelHoldNoticed = true;
+    if (!modelHold.restore(saved)) modelHoldNoticed = false;
+  }
   // 断网不是模型的问题（2026-10-16）：系统回合叫醒 Lead 之前先探网络，不通时等它恢复，恢复后马上接着做。
   const networkProbeHost = process.env.PLC_NETWORK_PROBE_HOST ?? "api.anthropic.com";
   const network = new NetworkMonitor({

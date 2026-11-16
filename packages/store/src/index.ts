@@ -83,6 +83,7 @@ export * from "./host-bypass.js";
 export * from "./signal-sources.js";
 export * from "./agenda-feeds.js";
 export * from "./busy-placement.js";
+export * from "./lead-call-guards.js";
 export * from "./channel-connections.js";
 export * from "./channel-catch-up.js";
 export * from "./security-alerts.js";
