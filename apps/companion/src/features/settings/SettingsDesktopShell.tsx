@@ -1,5 +1,5 @@
 import { Badge, Box, Column, Pressable, Row, Screen, ScrollArea, SlidePanel, Text } from '@pi-lead-child/components';
-import type { ReactNode } from 'react';
+import { createContext, useContext, useMemo, useState, type ReactNode } from 'react';
 
 import { useMessages } from '@/i18n';
 import { useLeadName } from '@/state/hooks';
@@ -19,6 +19,19 @@ type SettingsDesktopShellProps = {
   children?: ReactNode;
 };
 
+// 页面自己打开的抽屉（例如「设置 → 模型」的「添加模型」，方案 C，2026-11-16）。路由给的抽屉（一个连接的详情）优先。
+// 页面卸载时要 hide，抽屉跟着收起。手机上没有这个抽屉：页面拿到 null，自己用悬浮底部面板。
+export type SettingsDrawerHost = {
+  show: (key: string, content: ReactNode) => void;
+  hide: (key: string) => void;
+};
+
+const SettingsDrawerContext = createContext<SettingsDrawerHost | null>(null);
+
+export function useSettingsDrawer(): SettingsDrawerHost | null {
+  return useContext(SettingsDrawerContext);
+}
+
 // 抽屉固定 372 宽，和工作台的工单面板一样用 SlidePanel 滑入。
 const DRAWER_LAYOUT = { grow: 0, basis: 372, minWidth: 372, maxWidth: 372 };
 
@@ -29,8 +42,15 @@ export function SettingsDesktopShell({
 }: SettingsDesktopShellProps) {
   const leadName = useLeadName();
   const m = useMessages(settingsMessages);
+  const [pageDrawer, setPageDrawer] = useState<{ key: string; content: ReactNode } | null>(null);
+  const host = useMemo<SettingsDrawerHost>(() => ({
+    show: (key, content) => setPageDrawer({ key, content }),
+    hide: (key) => setPageDrawer((current) => (current?.key === key ? null : current)),
+  }), []);
+  const shownDrawer = drawer ?? pageDrawer?.content ?? null;
+  const shownKey = drawer ? drawerKey : pageDrawer?.key;
   return (
-    <Screen edges={['top', 'bottom', 'left', 'right']} bg="canvas">
+    <SettingsDrawerContext.Provider value={host}><Screen edges={['top', 'bottom', 'left', 'right']} bg="canvas">
       <Row
         testID="settings-desktop"
         flex={1}
@@ -88,16 +108,16 @@ export function SettingsDesktopShell({
             {children}
           </Column>
         </ScrollArea>
-        {drawer ? (
-          <SlidePanel key={drawerKey} edge="right" {...DRAWER_LAYOUT} bg="surface" borderLeftWidth={1} borderLeftColor="border">
+        {shownDrawer ? (
+          <SlidePanel key={shownKey} edge="right" {...DRAWER_LAYOUT} bg="surface" borderLeftWidth={1} borderLeftColor="border">
             <ScrollArea testID="settings-drawer">
               {/* spacing-exempt: 右侧抽屉自己的规格 */}
-              <Column px={22} pt={20} pb={32}>{drawer}</Column>
+              <Column px={22} pt={20} pb={32}>{shownDrawer}</Column>
             </ScrollArea>
           </SlidePanel>
         ) : null}
       </Row>
-    </Screen>
+    </Screen></SettingsDrawerContext.Provider>
   );
 }
 

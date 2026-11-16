@@ -245,14 +245,22 @@ describe('who is on duty', () => {
 });
 
 describe('the model library', () => {
-  it('opens the providers whose models are in use, folds the rest, and shows the rest of a long catalog on demand', () => {
+  // 方案 C（2026-11-16）：接入列表一行一个服务商，缺省收着；点开才露出模型和设置。
+  it('lists each provider on one compact row, opens it on press, and shows the rest of a long catalog on demand', () => {
     const { runtime } = modelRuntime(settings());
     renderWithRuntime(<ModelSection />, runtime);
+    expect(screen.getByTestId('model-sources-api-key').textContent).toBe('API key');
+    expect(screen.queryByTestId('model-sources-subscriptions')).toBeNull();
+    expect(screen.queryByTestId('model-row-vibeproxy/as4/claude-sonnet-5-5')).toBeNull();
+    expect(screen.getByTestId('model-provider-summary-vibeproxy').textContent).toBe('1 account');
+    expect(screen.getByTestId('model-provider-use-vibeproxy').textContent).toBe('7 models · Primary · Backup 1 · Intuition fallback');
+    expect(screen.getByTestId('model-provider-summary-openai').textContent).toBe('Custom · api.openai.com');
+    expect(screen.getByTestId('model-provider-use-openai').textContent).toBe('2 models');
+    fireEvent.click(screen.getByTestId('model-provider-toggle-vibeproxy'));
     expect(screen.getByTestId('model-row-vibeproxy/as4/claude-sonnet-5-5').textContent).toContain('Primary');
     expect(screen.getByTestId('model-row-vibeproxy/as4/claude-haiku-5-5').textContent).toContain('Intuition fallback');
     expect(screen.queryByTestId('model-row-openai/gpt-5.5')).toBeNull();
-    expect(screen.getByTestId('model-provider-sub-openai').textContent).toBe('OpenAI compatible · Key is set · 2 models · Latest 2026-10-02');
-    // 服务商一行不写地址（地址在「设置」里）；按账号分组的写出来。
+    // 点开以后第二行写接口、key、模型数。服务商一行不写地址（地址在「设置」里）；按账号分组的写出来。
     expect(screen.getByTestId('model-provider-sub-vibeproxy').textContent).not.toContain('127.0.0.1');
     expect(screen.getByTestId('model-provider-sub-vibeproxy').textContent).toContain('Grouped by account');
     expect(screen.queryByTestId('model-row-vibeproxy/claude-3-7-sonnet')).toBeNull();
@@ -260,8 +268,16 @@ describe('the model library', () => {
     expect(screen.getByTestId('model-row-vibeproxy/claude-3-7-sonnet')).toBeTruthy();
     fireEvent.click(screen.getByTestId('model-provider-toggle-openai'));
     expect(screen.getByTestId('model-row-openai/gpt-5.5')).toBeTruthy();
+    expect(screen.getByTestId('model-provider-sub-openai').textContent).toBe('OpenAI compatible · Key is set · 2 models · Latest 2026-10-02');
     fireEvent.click(screen.getByTestId('model-provider-toggle-vibeproxy'));
     expect(screen.queryByTestId('model-row-vibeproxy/as4/claude-sonnet-5-5')).toBeNull();
+  });
+
+  it('says which account of vibeproxy waits for its quota on the provider row', () => {
+    const blocked = { ...vibeproxy, models: vibeproxy.models.map((entry) => (entry.group === 'as4' ? { ...entry, blockedUntil: '2026-11-02T08:00:00.000Z' } : entry)) };
+    const { runtime } = modelRuntime(settings({ providers: [blocked, openai] }));
+    renderWithRuntime(<ModelSection />, runtime);
+    expect(screen.getByTestId('model-provider-summary-vibeproxy').textContent).toMatch(/^1 account · as4 quota used up, available again /);
   });
 
   it('finds a model in any provider by search', () => {
@@ -272,31 +288,10 @@ describe('the model library', () => {
     expect(screen.queryByTestId('model-provider-vibeproxy')).toBeNull();
   });
 
-  it('connects a provider with a secret key field and clears the key from the form after saving', async () => {
-    const { runtime, client } = modelRuntime(settings());
-    renderWithRuntime(<ModelSection />, runtime);
-    fireEvent.click(screen.getByTestId('model-provider-add'));
-    const key = screen.getByTestId('model-provider-key') as HTMLInputElement;
-    expect(key.type).toBe('password');
-    expect(key.getAttribute('autocomplete')).toBe('new-password');
-    fireEvent.change(screen.getByTestId('model-provider-name'), { target: { value: 'Open AI' } });
-    fireEvent.change(screen.getByTestId('model-provider-url'), { target: { value: 'https://api.openai.com/v1' } });
-    fireEvent.click(screen.getByTestId('model-provider-save'));
-    expect(screen.getByTestId('model-provider-message').textContent).toContain('The name can use only lowercase letters');
-    expect(client.performUiAction).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByTestId('model-provider-name'), { target: { value: 'corp' } });
-    fireEvent.change(screen.getByTestId('model-provider-url'), { target: { value: 'https://llm.corp.example.com/v1' } });
-    fireEvent.change(key, { target: { value: 'sk-test-123' } });
-    await act(async () => { fireEvent.click(screen.getByTestId('model-provider-save')); });
-    expect(client.performUiAction).toHaveBeenCalledWith('model_settings', 'models', 'save_provider', {
-      input: { name: 'corp', baseUrl: 'https://llm.corp.example.com/v1', api: 'openai-completions', apiKey: 'sk-test-123' },
-    });
-    expect(screen.queryByTestId('model-provider-form-new')).toBeNull();
-  });
-
   it('will not delete a provider whose model is in the chain, and says why', () => {
     const { runtime } = modelRuntime(settings());
     renderWithRuntime(<ModelSection />, runtime);
+    fireEvent.click(screen.getByTestId('model-provider-toggle-vibeproxy'));
     fireEvent.click(screen.getByTestId('model-provider-edit-vibeproxy'));
     expect(screen.getByTestId('model-provider-delete').getAttribute('aria-disabled')).toBe('true');
     expect(screen.getByTestId('model-provider-form-vibeproxy').textContent).toContain('still uses vibeproxy/as4/claude-sonnet-5-5');
@@ -422,13 +417,19 @@ describe('grouping by account and channel', () => {
     fireEvent.click(screen.getByTestId('model-brain-picker-0-open'));
     fireEvent.click(screen.getByTestId('model-fallback-picker-open'));
     expect(await screen.findByTestId('model-fallback-picker-group-magpie||bailian-token-plan')).toBeTruthy();
-    // 模型库：外层是服务商，里面的分段标题不再写服务商。
+    // 模型库：外层是服务商，里面的分段标题不再写服务商。magpie 的 auto/ 是路由别名，单独一段「由 magpie 选」。
+    fireEvent.click(screen.getByTestId('model-provider-toggle-vibeproxy'));
     expect(screen.getByTestId('model-section-vibeproxy|as4|anthropic').textContent).toContain('as4 · anthropic');
+    fireEvent.click(screen.getByTestId('model-provider-toggle-magpie'));
+    expect(screen.getByTestId('model-section-magpie|auto/').textContent).toContain('Chosen by magpie');
+    expect(screen.getByTestId('model-section-magpie|auto/').textContent).toContain('auto/deepseek-flash');
+    expect(screen.getByTestId('model-section-magpie||deepseek').textContent).not.toContain('auto/deepseek-flash');
   });
 
   it('changes accountPrefix and capabilities in Advanced and saves them with save_provider', async () => {
     const { runtime, client } = modelRuntime(settings({ providers: [vibeproxy, magpie] }));
     renderWithRuntime(<ModelSection />, runtime);
+    fireEvent.click(screen.getByTestId('model-provider-toggle-magpie'));
     fireEvent.click(screen.getByTestId('model-provider-edit-magpie'));
     expect(screen.getByTestId('model-provider-advanced').textContent).toContain('Prefix is account: no · capabilities: auto');
     fireEvent.click(screen.getByTestId('model-provider-advanced-toggle'));
@@ -446,6 +447,7 @@ describe('grouping by account and channel', () => {
     const declared = { ...vibeproxy, accountPrefix: false, accountPrefixActive: false };
     const { runtime, client } = modelRuntime(settings({ providers: [declared] }));
     renderWithRuntime(<ModelSection />, runtime);
+    fireEvent.click(screen.getByTestId('model-provider-toggle-vibeproxy'));
     fireEvent.click(screen.getByTestId('model-provider-edit-vibeproxy'));
     await act(async () => { fireEvent.click(screen.getByTestId('model-provider-save')); });
     expect(inputOf(client.performUiAction)).toEqual({ name: 'vibeproxy', baseUrl: 'http://127.0.0.1:8317/v1', api: 'openai-completions' });

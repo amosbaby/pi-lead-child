@@ -121,6 +121,22 @@ describe("ModelSettings: account groups and the advanced settings", () => {
   });
 });
 
+// 模型配置方案 C（2026-11-16）：「添加模型」选的种类写进 config，只给界面显示用。不给时不变；旧的服务商没有它，DTO 里是 null。
+describe("ModelSettings: the provider preset", () => {
+  it("saves the preset, keeps it when a later save omits it, and gives null for a provider without one", async () => {
+    const t = setup();
+    expect((await t.settings.get()).brain.providers[0]!.preset).toBeNull();
+
+    await t.settings.saveProvider({ name: "magpie", baseUrl: "https://magpie.example.com/v1", api: "openai-completions", accountPrefix: false, preset: "magpie" });
+    expect((loadPlcConfig(t.dataDir).lead?.providers?.magpie as Record<string, unknown>).preset).toBe("magpie");
+    await t.settings.saveProvider({ name: "magpie", baseUrl: "https://magpie.example.com/v2", api: "openai-completions" });
+    const dto = await t.settings.get();
+    expect(Value.Check(ModelSettingsDtoSchema, dto)).toBe(true);
+    expect(dto.brain.providers.map((provider) => [provider.name, provider.preset])).toEqual([["vibeproxy", null], ["magpie", "magpie"]]);
+    expect(loadLeadModelConfig(t.dataDir).providers.magpie?.preset).toBe("magpie");
+  });
+});
+
 describe("ModelSettings: the page's data", () => {
   it("lists each provider's catalog newest first, keeps unknown release dates last, and reads the old decision config as one entry", async () => {
     const t = setup({ decision: { baseUrl: "https://api.typesafe.ai", model: "jev-latest" } });

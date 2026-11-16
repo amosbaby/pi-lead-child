@@ -9,7 +9,7 @@ import {
   type EnvSpec,
   type PlcConfigFile,
 } from "@pi-lead-child/core";
-import { DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_CHAIN } from "@pi-lead-child/protocol";
+import { DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_CHAIN, subscriptionAccountOf, subscriptionSlotSpec } from "@pi-lead-child/protocol";
 import { getBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 
 export const DEFAULT_LEAD_MODEL = "openai/gpt-5.5";
@@ -29,6 +29,9 @@ export type OpenAICompatibleApi = (typeof OPENAI_COMPATIBLE_APIS)[number];
 // config.json 里写了 models[].input 的模型，不管哪一种，都以写的为准。
 export const LEAD_CAPABILITY_SOURCES = ["auto", "detailed", "plain", "config"] as const;
 export type LeadCapabilitySource = (typeof LEAD_CAPABILITY_SOURCES)[number];
+// 设置页「添加模型」的 API key 种类（模型配置方案 C，2026-11-16）。只给界面显示用：没写时界面按 accountPrefix 和模型 id 推断。
+export const LEAD_PROVIDER_PRESETS = ["custom", "vibeproxy", "magpie"] as const;
+export type LeadProviderPreset = (typeof LEAD_PROVIDER_PRESETS)[number];
 
 export interface LeadProviderModelConfig {
   id: string;
@@ -53,6 +56,8 @@ export interface LeadProviderConfig {
   accountPrefix?: boolean;
   // 能不能看图从哪里读。没写时是 auto。
   capabilities?: LeadCapabilitySource;
+  // 设置页添加时选的种类（custom、vibeproxy、magpie）。只影响界面怎样显示这个服务商，不影响 Lead 怎样调用它。
+  preset?: LeadProviderPreset;
   // Send the Lead session id as prompt_cache_key to this OpenAI-compatible endpoint (prompt-cache.ts). Default: on.
   // Set it to false when the endpoint rejects the field.
   promptCacheKey?: boolean;
@@ -124,6 +129,36 @@ let providerKeySource: LeadProviderKeySource | null = null;
 
 export function setLeadProviderKeySource(source: LeadProviderKeySource | null): void {
   providerKeySource = source;
+}
+
+// 订阅（模型配置方案 C 的 S2，subscriptions.ts）：有账号登录了的订阅（openai-codex、github-copilot）。daemon 的订阅服务接上。
+// 目录里列出它们的模型（pi 自带的目录），分工写 <base>/<id>。没接上时（测试、子 agent 另起的会话）不列订阅。
+export type LeadSubscriptionSource = () => Promise<readonly string[]>;
+let subscriptionSource: LeadSubscriptionSource | null = null;
+
+export function setLeadSubscriptionSource(source: LeadSubscriptionSource | null): void {
+  subscriptionSource = source;
+}
+
+/** 一种订阅的模型：pi 自带的目录（D3：分工里写 <base>/<id>）。 */
+export function leadSubscriptionModels(base: string): LeadCatalogModel[] {
+  if (!subscriptionAccountOf(base) || !(getBuiltinProviders() as readonly string[]).includes(base)) return [];
+  return getBuiltinModels(base as Parameters<typeof getBuiltinModels>[0]).map((model) => ({
+    provider: base, id: model.id, group: null, source: base, name: model.name ?? null,
+    input: model.input.filter((kind): kind is "text" | "image" => kind === "text" || kind === "image"),
+    efforts: [], defaultEffort: null,
+    contextWindow: positiveInteger(model.contextWindow), maxTokens: positiveInteger(model.maxTokens), created: null,
+  }));
+}
+
+async function connectedSubscriptions(notes: string[]): Promise<string[]> {
+  if (!subscriptionSource) return [];
+  try {
+    return [...await subscriptionSource()];
+  } catch (error) {
+    notes.push(`subscriptions: not listed (${String(error)})`);
+    return [];
+  }
 }
 
 /** 服务商的 key：设置页存的优先，其次是 config.json 里写的（value 或 fromEnv）。不知道服务商的名字时只看 config.json。 */
@@ -492,6 +527,11 @@ export async function leadModelCatalog(
       notes.push(`${name}: no models (${String(error)})`);
     }
   }
+  // 订阅的模型（D3）。config.json 里有同名的服务商时用服务商的。
+  for (const base of await connectedSubscriptions(notes)) {
+    if (base in config.providers) continue;
+    models.push(...leadSubscriptionModels(base));
+  }
   return { models, notes, providers };
 }
 
@@ -549,7 +589,8 @@ export async function assertConfiguredLeadModel(
   const { provider, id } = parseModelName(spec);
   const { models } = await leadModelCatalog(config, env, fetchImpl);
   const available = uniqueStrings([...config.models, ...models.map((model) => `${model.provider}/${model.id}`)]);
-  if (available.includes(spec)) return;
+  // 订阅的第 n 个账号（<base>-<n>/<id>）和 <base>/<id> 是分工里的同一格（D5）。
+  if (available.includes(spec) || available.includes(subscriptionSlotSpec(spec))) return;
   const { base, effort } = splitLeadModelEffort(id);
   const model = models.find((candidate) => candidate.provider === provider && candidate.id === base);
   if (effort && model) {
@@ -560,11 +601,27 @@ export async function assertConfiguredLeadModel(
   throw new Error(`模型 ${spec} 不在已配置的 Lead provider 目录中。可选：\n${available.join("\n")}`);
 }
 
+/**
+ * D7：Lead 不用 pi 自带的别的订阅登录。provider 走 OAuth 登录（auth.json 里存的是 oauth 凭据），又不是 openai-codex* 或
+ * github-copilot* 时拒绝，例如 auth.json 里的 anthropic 登录。走 API key 的同一个 provider 照常能用。
+ */
+export async function assertLeadOAuthProviderAllowed(
+  runtime: Pick<ModelRuntime, "listCredentials">, provider: string,
+): Promise<void> {
+  if (subscriptionAccountOf(provider) || typeof runtime.listCredentials !== "function") return;
+  const credential = (await runtime.listCredentials()).find((entry) => entry.providerId === provider);
+  if (credential?.type === "oauth") {
+    throw new Error(`模型的服务商 ${provider} 用的是 OAuth 订阅登录。Lead 只用 GitHub Copilot 和 Codex 的订阅（经过 pi-multi-pass）；`
+      + `${provider} 请改用 API key 接入。`);
+  }
+}
+
 export async function resolveLeadModel(
   runtime: ModelRuntime,
   spec: string,
 ): Promise<{ provider: string; id: string; model: NonNullable<ReturnType<ModelRuntime["getModel"]>> }> {
   const { provider, id } = parseModelName(spec);
+  await assertLeadOAuthProviderAllowed(runtime, provider);
   const model = runtime.getModel(provider, id);
   if (!model) {
     const avail = (await runtime.getAvailable()).map((item) => `${item.provider}/${item.id}`).slice(0, 20);
@@ -605,11 +662,13 @@ export function setLeadModelChainInConfig(specs: readonly string[], dir?: string
  * 接入或修改一个服务商（lead.providers.<name>）。新的服务商拉目录（discover: true）。改了别的字段（models、headers……）照旧。
  * 地址换了主机、config.json 里又手写了 apiKey 时，删掉那个 key：key 只发给原来的主机。返回删没删。
  * accountPrefix、capabilities（设置页的「高级」、首次启动的「前缀是账号吗」）：不给时不变；accountPrefix 为 null、
- * capabilities 为 auto 时从 config 里删掉，回到缺省。
+ * capabilities 为 auto 时从 config 里删掉，回到缺省。preset（设置页添加时选的种类）：不给时不变。
  */
 export function saveLeadProviderInConfig(
   name: string,
-  settings: { baseUrl: string; api: OpenAICompatibleApi; accountPrefix?: boolean | null; capabilities?: LeadCapabilitySource },
+  settings: {
+    baseUrl: string; api: OpenAICompatibleApi; accountPrefix?: boolean | null; capabilities?: LeadCapabilitySource; preset?: LeadProviderPreset;
+  },
   hostOf: (url: string) => string | null,
   dir?: string,
 ): { droppedConfigKey: boolean } {
@@ -632,6 +691,7 @@ export function saveLeadProviderInConfig(
     if (settings.capabilities === "auto") delete next.capabilities;
     else next.capabilities = settings.capabilities;
   }
+  if (settings.preset !== undefined) next.preset = settings.preset;
   providers[name] = next;
   writePlcConfig({ ...file, lead: { ...file.lead, providers, models: file.lead?.models ?? [] } }, dir);
   return { droppedConfigKey };
@@ -669,6 +729,7 @@ function normalizeLeadProvider(name: string, raw: unknown): LeadProviderConfig {
     discover: value.discover === undefined ? undefined : Boolean(value.discover),
     ...(normalizeAccountPrefix(name, value.accountPrefix)),
     ...(normalizeCapabilities(name, value.capabilities)),
+    ...(normalizePreset(name, value.preset)),
     ...(normalizePromptCacheKey(name, value.promptCacheKey)),
     ...(normalizeCacheRetention(name, value.cacheRetention)),
   };
@@ -710,6 +771,14 @@ function normalizeCapabilities(name: string, raw: unknown): { capabilities?: Lea
     throw new Error(`lead.providers.${name}.capabilities 仅支持 ${LEAD_CAPABILITY_SOURCES.join(", ")}`);
   }
   return { capabilities: raw as LeadCapabilitySource };
+}
+
+function normalizePreset(name: string, raw: unknown): { preset?: LeadProviderPreset } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "string" || !(LEAD_PROVIDER_PRESETS as readonly string[]).includes(raw)) {
+    throw new Error(`lead.providers.${name}.preset 仅支持 ${LEAD_PROVIDER_PRESETS.join(", ")}`);
+  }
+  return { preset: raw as LeadProviderPreset };
 }
 
 function normalizeApiKey(name: string, raw: unknown): EnvSpec | undefined {

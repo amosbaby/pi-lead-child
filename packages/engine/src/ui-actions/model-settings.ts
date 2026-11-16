@@ -6,14 +6,15 @@
 //   - test_fast_model：只读，Lead 可以自己做。
 // 账本只记 detail（不记输入）：key 不进事件日志。
 import type {
-  FastModelIdRequest, RemoveModelProviderRequest, SaveFastModelRequest, SaveModelProviderRequest, SetBrainChainRequest,
-  SetFastChainRequest,
+  CancelSubscriptionLoginRequest, FastModelIdRequest, RemoveModelProviderRequest, RemoveSubscriptionAccountRequest,
+  RenameSubscriptionAccountRequest, SaveFastModelRequest, SaveModelProviderRequest, SetBrainChainRequest, SetFastChainRequest,
+  SetSubscriptionScheduleRequest, SetSubscriptionStrategyRequest, StartSubscriptionLoginRequest, SubmitSubscriptionLoginCodeRequest,
 } from "@pi-lead-child/protocol";
 import { AVAILABLE } from "../ticket-actions/types.js";
 import {
   UiActionError,
-  type ModelSettingsChange, type ModelSettingsService, type ModelSettingsSummary, type UiActionDefinition, type UiActionEnv,
-  type UiActionTargetKind,
+  type ModelSettingsChange, type ModelSettingsService, type ModelSettingsSummary, type SubscriptionsChange, type SubscriptionsService,
+  type UiActionDefinition, type UiActionEnv, type UiActionTargetKind,
 } from "./types.js";
 
 export const MODEL_SETTINGS_WHERE = "设置 → 模型";
@@ -24,15 +25,29 @@ function modelSettings(env: UiActionEnv): ModelSettingsService {
   return service;
 }
 
+function subscriptions(env: UiActionEnv): SubscriptionsService {
+  const service = env.services.subscriptions;
+  if (!service) throw new UiActionError("unavailable", "订阅还没有启动（Lead 的会话还没建好）");
+  return service;
+}
+
 export const MODEL_SETTINGS_TARGET: UiActionTargetKind<ModelSettingsSummary> = {
   type: "model_settings",
   label: "模型设置",
   idHint: "models",
-  load: (env, id) => (id === "models" ? env.services.modelSettings?.summary() ?? null : null),
+  load: (env, id) => {
+    if (id !== "models") return null;
+    const summary = env.services.modelSettings?.summary();
+    if (!summary) return null;
+    const subscriptionSummary = env.services.subscriptions?.summary();
+    return subscriptionSummary ? { ...summary, subscriptions: subscriptionSummary } : summary;
+  },
   name: () => "模型设置",
   describe: (summary) => ({
     brain: summary.brain, fast: summary.fast, maxBackups: summary.maxBackups,
-    words: "大脑是你自己的模型（LLM），直觉是决策模型。每类一个主用、最多 3 个备用。",
+    ...(summary.subscriptions ? { subscriptions: summary.subscriptions } : {}),
+    words: "大脑是你自己的模型（LLM），直觉是决策模型。每类一个主用、最多 3 个备用。"
+      + "订阅（GitHub Copilot、Codex）的模型写 <订阅>/<id>，一种订阅可以有几个账号，一个账号限流时换下一个账号。",
   }),
 };
 
@@ -45,6 +60,12 @@ const changeDetail = (_run: unknown, result: unknown) => {
   return { summary: change.summary, ...(change.applied ? { applied: change.applied } : {}) };
 };
 const USER_DIRECT_WHY = "它决定把对话发给谁，还带 key：只有用户本人能在设置页上做";
+const SUBSCRIPTION_LOGIN_WHY = "登录订阅账号要用户本人在浏览器里授权，凭据只能由用户本人经设置页交给系统";
+const subscriptionForLead = (_run: unknown, result: unknown) => {
+  const change = result as SubscriptionsChange;
+  return { result: "done", summary: change.summary, ...(change.note ? { note: change.note } : {}), ...(change.login ? { login: change.login } : {}) };
+};
+const subscriptionDetail = (_run: unknown, result: unknown) => ({ summary: (result as SubscriptionsChange).summary });
 
 export const MODEL_SETTINGS_ACTIONS = {
   set_brain_chain: {
@@ -133,5 +154,90 @@ export const MODEL_SETTINGS_ACTIONS = {
     available: () => AVAILABLE,
     run: (run) => modelSettings(run.env).testFastModel((run.input as FastModelIdRequest).id),
     forLead: (_run, result) => result,
+  },
+  // ── 订阅（模型配置方案 C 的 S2，daemon 的 subscriptions.ts）──
+  // 登录、粘贴回调地址、取消和删掉账号：user_direct（带凭据，AGENTS.md）。改名、换号方式和时间段：Lead 可以做，算改规则。
+  start_subscription_login: {
+    target: "model_settings", id: "start_subscription_login", label: "登录订阅账号", scope: "tickets:create",
+    permission: "user_direct", permissionNote: SUBSCRIPTION_LOGIN_WHY,
+    changesRules: true, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "登录一个 GitHub Copilot 或 Codex 订阅账号（新加一个，或者重新登录一个）。只有用户本人能在设置页上做：调用会被拒绝，把拒绝里的地方告诉用户。",
+    defaultReason: "在设置页登录订阅账号",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).startLogin(run.input as StartSubscriptionLoginRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
+  },
+  submit_subscription_login_code: {
+    target: "model_settings", id: "submit_subscription_login_code", label: "粘贴订阅登录的回调地址", scope: "tickets:create",
+    permission: "user_direct", permissionNote: SUBSCRIPTION_LOGIN_WHY,
+    changesRules: false, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "把订阅登录的回调地址或者授权码交给正在进行的登录。只有用户本人能在设置页上做。",
+    defaultReason: "在设置页粘贴了订阅登录的回调地址",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).submitLoginCode(run.input as SubmitSubscriptionLoginCodeRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
+  },
+  cancel_subscription_login: {
+    target: "model_settings", id: "cancel_subscription_login", label: "取消订阅登录", scope: "tickets:create",
+    permission: "user_direct", permissionNote: SUBSCRIPTION_LOGIN_WHY,
+    changesRules: false, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "取消一次正在进行的订阅登录。只有用户本人能在设置页上做。",
+    defaultReason: "在设置页取消了订阅登录",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).cancelLogin(run.input as CancelSubscriptionLoginRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
+  },
+  remove_subscription_account: {
+    target: "model_settings", id: "remove_subscription_account", label: "删掉订阅账号", scope: "tickets:create",
+    permission: "user_direct", permissionNote: SUBSCRIPTION_LOGIN_WHY,
+    changesRules: true, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "删掉一个订阅账号（退出登录，删掉它的凭据）。只有用户本人能在设置页上做。它的模型在分工里时会被拒绝。",
+    defaultReason: "在设置页删掉了订阅账号",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).removeAccount(run.input as RemoveSubscriptionAccountRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
+  },
+  rename_subscription_account: {
+    target: "model_settings", id: "rename_subscription_account", label: "给订阅账号改名", scope: "tickets:create",
+    permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "给一个订阅账号改名（例如「工作」「个人」）。provider 是账号的 provider 名（openai-codex、openai-codex-2……）。",
+    defaultReason: "给订阅账号改名",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).renameAccount(run.input as RenameSubscriptionAccountRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
+  },
+  set_subscription_strategy: {
+    target: "model_settings", id: "set_subscription_strategy", label: "改订阅的换号方式", scope: "tickets:create",
+    permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "一种订阅有几个账号时，一个账号限流以后怎样选下一个：round-robin（轮流）、quota-first（额度剩得多的先用，只有 Codex 查得到额度）、"
+      + "scheduled（按每个账号的角色和时间段，用 set_subscription_schedule 设）。",
+    defaultReason: "改订阅的换号方式",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).setStrategy(run.input as SetSubscriptionStrategyRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
+  },
+  set_subscription_schedule: {
+    target: "model_settings", id: "set_subscription_schedule", label: "设订阅账号的时间段", scope: "tickets:create",
+    permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
+    where: MODEL_SETTINGS_WHERE,
+    hint: "按时间段换号（scheduled）时一个账号的角色和时间段。role：preferred 只在自己的时间段里先用，default 一直能用，"
+      + "overflow 别的都用不了时才用。windows 每段写 hours（本机时间的 [开始, 结束)，[22, 6] 跨午夜）、days（mon…sun）。",
+    defaultReason: "设订阅账号的时间段",
+    available: () => AVAILABLE,
+    run: (run) => subscriptions(run.env).setSchedule(run.input as SetSubscriptionScheduleRequest),
+    forLead: subscriptionForLead,
+    detail: subscriptionDetail,
   },
 } satisfies Record<string, UiActionDefinition<ModelSettingsSummary, any>>;

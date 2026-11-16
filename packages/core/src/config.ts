@@ -71,6 +71,8 @@ export const RUNTIME_ASSETS = {
   "web-tools": { kind: "extension", pkg: "engine", source: ["extension", "web-tools.ts"], dist: ["assets", "extensions", "web-tools.js"] },
   "sol-pi-executor": { kind: "extension", pkg: "engine", source: ["extension", "sol-pi-executor.ts"], dist: ["assets", "extensions", "sol-pi-executor.js"] },
   "sol-pi-lead": { kind: "extension", pkg: "engine", source: ["extension", "sol-pi-lead.ts"], dist: ["assets", "extensions", "sol-pi-lead.js"] },
+  // pi-multi-pass 的 Lead 入口（模型配置方案 C 的 S2）：读 PLC_MULTI_PASS_ENTRY，经 pi 的加载器加载装好的 pi-multi-pass。
+  "multi-pass-lead": { kind: "extension", pkg: "engine", source: ["extension", "multi-pass-lead.ts"], dist: ["assets", "extensions", "multi-pass-lead.js"] },
   sandbox: { kind: "extension", pkg: "engine", source: ["extension", "sandbox.ts"], dist: ["assets", "extensions", "sandbox.js"] },
   "child-skills": { kind: "copy", pkg: "engine", source: ["child-skills"], dist: ["assets", "child-skills"] },
   "lead-skills": { kind: "copy", pkg: "lead", source: ["skills"], dist: ["assets", "lead-skills"] },

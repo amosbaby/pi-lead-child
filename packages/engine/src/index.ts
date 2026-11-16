@@ -74,6 +74,10 @@ export {
 export {
   SOL_PI_SOURCE, solPiPackage, solPiPinnedCommit, solPiSource, type SolPiPackage, type SolPiPackageOptions,
 } from "./extension/sol-pi-package.js";
+export {
+  MULTI_PASS_ENTRY_ENV, MULTI_PASS_SOURCE, MULTI_PASS_SWITCH_ENV, multiPassActive, multiPassPackage, multiPassPinnedCommit, multiPassSource,
+  type MultiPassPackage, type MultiPassPackageOptions,
+} from "./extension/multi-pass-package.js";
 export * from "./smart-model/index.js";
 export * from "./triage-shadow.js";
 export * from "./channels/index.js";

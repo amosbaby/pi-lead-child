@@ -57,6 +57,9 @@ const EXCEPTIONS: Record<string, Partial<Record<Kind, { count: number; reason: s
   "packages/engine/src/coordinator/workspace-remote.ts": {
     "sync-child-process": { count: 1, reason: "chooseWorktreeBase 的同步版只给同步的 provisionWorkspace（测试）用；daemon 用 chooseWorktreeBaseAsync" },
   },
+  "packages/engine/src/extension/multi-pass-package.ts": {
+    "sync-child-process": { count: 1, reason: "启动时读一次装好的 pi-multi-pass 的 commit（main.ts，在 daemon 开始服务之前），和 SoL-Pi 一样" },
+  },
   "packages/engine/src/extension/sol-pi-package.ts": {
     "sync-child-process": { count: 1, reason: "启动时读一次内置 SoL-Pi 的 commit（main.ts，在 daemon 开始服务之前）" },
   },

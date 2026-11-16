@@ -11,7 +11,7 @@
 import {
   fastModelAuthHeaderMessages, fastModelAuthHeaderProblem, leadModelSpec, MODEL_MAX_BACKUPS, MODEL_MAX_CHAIN, modelChainProblem,
   normalizeFastModelAuthHeader, parseLeadModelSpec, normalizeServiceUrl,
-  serviceUrlHost, serviceUrlMessages, serviceUrlProblem, type Locale,
+  serviceUrlHost, serviceUrlMessages, serviceUrlProblem, subscriptionSlotSpec, type Locale, type SubscriptionsDto,
   type BrainModel, type FastModel, type LeadModelChoice, type MemoryTestResponse, type ModelKeySource, type ModelProvider,
   type ModelProviderApi, type ModelSettingsDto, type SaveFastModelRequest, type SaveModelProviderRequest, type SetBrainChainRequest,
   type SetFastChainRequest,
@@ -90,6 +90,8 @@ export interface ModelSettingsOptions {
   smartModelLlm: () => string | null;
   // 设置变了：网关发 snapshot.required（resource model-settings）。
   publish: () => void;
+  // 订阅（subscriptions.ts，模型配置方案 C 的 S2）：整份里的 subscriptions。没有时不给这个字段。
+  subscriptions?: { get(): Promise<SubscriptionsDto> };
   env?: Record<string, string | undefined>;
   fetch?: typeof fetch;
   now?: () => Date;
@@ -253,7 +255,13 @@ export class ModelSettings implements ModelSettingsService {
 
   async get(): Promise<ModelSettingsDto> {
     const config = this.config();
+    // 订阅读不出来不挡着整份：没有这个字段，原因写进日志。
+    const subscriptionsPromise = this.options.subscriptions?.get().catch((error: unknown) => {
+      this.options.log(`[models] subscriptions not listed: ${error instanceof Error ? error.message : String(error)}`);
+      return undefined;
+    });
     const catalogs = await this.catalogs(config);
+    const subscriptions = await subscriptionsPromise;
     const firstSeen = this.recordFirstSeen(catalogs);
     const blocked = new Map<string, number>();
     for (const entry of this.options.brain.blocked()) {
@@ -283,6 +291,7 @@ export class ModelSettings implements ModelSettingsService {
         accountPrefix: provider.accountPrefix ?? null,
         accountPrefixActive: catalog.info?.accountPrefix ?? effectiveAccountPrefix(provider, false),
         capabilities: provider.capabilities ?? "auto",
+        preset: provider.preset ?? null,
         catalog: catalog.info && !catalog.problem ? (catalog.info.detailed ? "detailed" : "plain") : "none",
       };
     });
@@ -310,6 +319,7 @@ export class ModelSettings implements ModelSettingsService {
         effectiveLlm: fast.llmFallback ?? this.options.smartModelLlm(),
       },
       maxBackups: MODEL_MAX_BACKUPS,
+      ...(subscriptions ? { subscriptions } : {}),
     };
   }
 
@@ -319,7 +329,8 @@ export class ModelSettings implements ModelSettingsService {
     return this.serial(async () => {
       const locale = this.locale();
       const m = modelSettingsMessages(locale);
-      const problem = modelChainProblem(request.models, (choice) => choice.model, { locale });
+      // 订阅的第 n 个账号（<base>-<n>/<id>）和 <base>/<id> 是同一格（D5）：不能写两次。
+      const problem = modelChainProblem(request.models, (choice) => subscriptionSlotSpec(choice.model), { locale });
       if (problem) invalid(problem);
       const specs = request.models.map(leadModelSpec);
       const config = this.config();
@@ -353,6 +364,7 @@ export class ModelSettings implements ModelSettingsService {
         baseUrl, api: request.api,
         ...(request.accountPrefix !== undefined ? { accountPrefix: request.accountPrefix } : {}),
         ...(request.capabilities !== undefined ? { capabilities: request.capabilities } : {}),
+        ...(request.preset !== undefined ? { preset: request.preset } : {}),
       }, serviceUrlHost, this.options.dataDir);
       const secret = providerSecretName(request.name);
       const notes: string[] = [];

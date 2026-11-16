@@ -1,5 +1,5 @@
 // 旧版 Companion（Lead 模型分组之前，2026-11-05 以前）校验 GET /v1/models/settings 用的 schema：
-// 和现在的一样严格（additionalProperties: false），只是 BrainModel 没有 group、source，ModelProvider 没有「高级」的四个字段。
+// 和现在的一样严格（additionalProperties: false），只是 BrainModel 没有 group、source，ModelProvider 没有「高级」的四个字段和 preset（方案 C）。
 // 从现在的 schema 拿掉这些字段拼出来：别的字段以后再变，这里跟着变；只有分组的字段固定是「旧版不认」。
 import {
   BrainSettingsSchema, BrainModelSchema, ModelProviderSchema, ModelSettingsDtoSchema, ModelSettingsResponseSchema,
@@ -19,7 +19,7 @@ function replaced(schema: TSchema, key: string, value: TSchema): TSchema {
 
 const LegacyBrainModelSchema = without(BrainModelSchema, ['group', 'source']);
 const LegacyModelProviderSchema = replaced(
-  without(ModelProviderSchema, ['accountPrefix', 'accountPrefixActive', 'capabilities', 'catalog']),
+  without(ModelProviderSchema, ['accountPrefix', 'accountPrefixActive', 'capabilities', 'catalog', 'preset']),
   'models', Type.Array(LegacyBrainModelSchema, { maxItems: 2000 }),
 );
 const LegacyBrainSettingsSchema = replaced(BrainSettingsSchema, 'providers', Type.Array(LegacyModelProviderSchema, { maxItems: 32 }));

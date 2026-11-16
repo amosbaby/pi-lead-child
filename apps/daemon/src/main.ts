@@ -2,8 +2,8 @@
 import { join } from "node:path";
 import { dataDir, dbPath, loadEnvConfig, loginShellEnv, mergeLoginShellEnv, readLoginShellPath } from "@pi-lead-child/core";
 import { runtimeSearchPath } from "@pi-lead-child/runtime";
-import { solPiPackage } from "@pi-lead-child/engine";
-import { userSkillDirs } from "@pi-lead-child/lead";
+import { multiPassPackage, solPiPackage } from "@pi-lead-child/engine";
+import { piAgentDir, userSkillDirs } from "@pi-lead-child/lead";
 import { DaemonAlreadyRunningError, startDaemon } from "./server.js";
 
 // 桌面版安装时记下的登录 shell PATH（login-shell-path.json）和已知的用户目录。下面现读的登录 shell 环境读不到时，靠它找到执行器。
@@ -29,6 +29,10 @@ if (login) {
 // 只在这个入口做：测试里起的 daemon 不安装，也不加载 SoL-Pi。
 const solPi = solPiPackage({ agentDir: join(dataDir(), "agent"), cwd: dataDir() });
 await solPi.activate();
+// pi-multi-pass（模型配置方案 C 的 D1，engine 的 extension/multi-pass-package.ts）：和 SoL-Pi 一样装进 Lead 的 pi agentDir。
+// 它管一种订阅（Copilot、Codex）的第 2 个以后的账号。后台第一次装好时重新加载 Lead 的扩展，不重启 daemon。
+const multiPass = multiPassPackage({ agentDir: join(dataDir(), "agent"), cwd: dataDir() });
+await multiPass.activate();
 
 try {
   // manageMemory：托管 Hindsight 记忆服务（memory-controller.ts）。它是独立的 launchd 任务，daemon 重启不会重启它；
@@ -39,9 +43,14 @@ try {
   const d = await startDaemon({
     dataDir: dataDir(), dbPath: dbPath(), manageMemory: true, channels: { live: true }, skillDirs: userSkillDirs(),
     relaxConnectionWrites: true, hostProbes: true,
+    // 订阅（模型配置方案 C）：凭据和 pi-multi-pass 的配置在 pi 自己的 agentDir，和 Lead 的 ModelRuntime、用户自己的 pi 共用（D2）。
+    piAgentDir: piAgentDir(),
   });
   void solPi.sync().then((activated) => {
     if (activated) d.reloadLeadExtensions("SoL-Pi installed");
+  });
+  void multiPass.sync().then((activated) => {
+    if (activated) d.reloadLeadExtensions("pi-multi-pass installed");
   });
   // 停机有上限（closeForExit）：卡在某一步时到时退出，日志写明卡在哪里。
   const stop = () => { void d.closeForExit().then(() => process.exit(0)); };

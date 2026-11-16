@@ -13,6 +13,7 @@ export * from "./model-config.js";
 export * from "./model-failover.js";
 export * from "./model-hold.js";
 export * from "./auto-call-budget.js";
+export * from "./subscriptions.js";
 export * from "./model-switch.js";
 export * from "./precipitate.js";
 export * from "./compaction-settings.js";

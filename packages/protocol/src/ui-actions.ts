@@ -20,6 +20,11 @@ import {
   FastModelIdRequestSchema, RemoveModelProviderRequestSchema, SaveFastModelRequestSchema, SaveModelProviderRequestSchema,
   SetBrainChainRequestSchema, SetFastChainRequestSchema,
 } from "./model-settings.ts";
+import {
+  CancelSubscriptionLoginRequestSchema, RemoveSubscriptionAccountRequestSchema, RenameSubscriptionAccountRequestSchema,
+  SetSubscriptionScheduleRequestSchema, SetSubscriptionStrategyRequestSchema, StartSubscriptionLoginRequestSchema,
+  SubmitSubscriptionLoginCodeRequestSchema,
+} from "./model-subscriptions.ts";
 import { SetSummaryModelRequestSchema, SummaryModelSlotRequestSchema } from "./memory-hindsight.ts";
 import { CoreMemoryUpdateRequestSchema } from "./core-memory.ts";
 import { AddLocalMcpRequestSchema, AddRemoteMcpRequestSchema, InstallSkillRequestSchema } from "./lead-installs.ts";
@@ -307,6 +312,16 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     set_fast_chain: SetFastChainRequestSchema,
     // 测一条直觉能不能用：发一次很小的判断。只读。
     test_fast_model: FastModelIdRequestSchema,
+    // 订阅（model-subscriptions.ts）：开始登录一个账号（新的或者重新登录）、粘贴回调地址、取消登录。带凭据：只有你本人能做。
+    start_subscription_login: StartSubscriptionLoginRequestSchema,
+    submit_subscription_login_code: SubmitSubscriptionLoginCodeRequestSchema,
+    cancel_subscription_login: CancelSubscriptionLoginRequestSchema,
+    // 删掉一个订阅账号（退出登录）。它的模型在分工里时拒绝。只有你本人能做。
+    remove_subscription_account: RemoveSubscriptionAccountRequestSchema,
+    // 账号改名、换号方式、按时间段换号时账号的角色和时间段。
+    rename_subscription_account: RenameSubscriptionAccountRequestSchema,
+    set_subscription_strategy: SetSubscriptionStrategyRequestSchema,
+    set_subscription_schedule: SetSubscriptionScheduleRequestSchema,
   },
   memory_settings: {
     // 选摘要模型（缺省或整理观察）。model 为 null 时改回自动或跟缺省一样。改了以后记忆服务重启。

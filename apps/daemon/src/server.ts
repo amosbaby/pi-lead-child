@@ -63,6 +63,7 @@ import {
 } from "@pi-lead-child/protocol";
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
 import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
+import { Subscriptions } from "./subscriptions.js";
 import { loadDecisionModels } from "./decision-models.js";
 import { isStopCommand, LEAD_AVATAR_RESOURCE, parseFairyEyeCommand } from "@pi-lead-child/protocol";
 import { CONVERSATION_TURN_INTERRUPTED_BY_STEER } from "@pi-lead-child/protocol";
@@ -119,8 +120,10 @@ import {
 import { createConfigWatch } from "./config-watch.js";
 import {
   contextUsageRatio, createLeadModelFailover, createTurnUserActions, nextWeeklyReset, PRECIPITATE_PROMPT, PRECIPITATE_RATIO,
+  leadModelFailureCause, setLeadSubscriptionSource, SubscriptionAccountTracker, subscriptionAccountOf, subscriptionSlotSpec,
   type LeadModelQuotaReset,
 } from "@pi-lead-child/lead";
+import { multiPassActive } from "@pi-lead-child/engine";
 import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-child/gateway";
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
@@ -581,6 +584,9 @@ export interface DaemonOpts {
   skillDirs?: string[];
   // 把还是「先问我」的连接一次性改成「直接写」（connections 的 relaxWritePolicyOnce，用户 2026-10-28）。main.ts 传 true。
   relaxConnectionWrites?: boolean;
+  // 订阅（模型配置方案 C 的 S2，subscriptions.ts）读写的 pi agentDir（auth.json、multi-pass.json，D2）。main.ts 传 pi 的 getAgentDir()。
+  // 不给时没有订阅：测试里起的 daemon 不读用户自己的 pi 登录。
+  piAgentDir?: string;
   childPi?: LeadDeps["childPi"];
   runtimeRegistry?: RuntimeRegistry;
   log?: (line: string) => void;
@@ -3027,9 +3033,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 首次启动引导的设置状态（setup-status.ts）。在通道设置建好以后才建，这之前是 null。
   let setupTracker: SetupTracker | null = null;
   const factory = opts.sessionFactory ?? createLeadSession;
+  // 订阅账号的失败和成功（模型配置方案 C 的 D5，lead 的 subscriptions.ts）：Lead 会话里每次请求记一次，换账号时问它。
+  const subscriptionAccounts = new SubscriptionAccountTracker();
   // 建 Lead 会话的参数存下来：一步停不下、daemon 换会话时（releaseLead）用同一份再建一个（.scratch/tool-occupancy/spec.md L3）。
   const leadSessionOptions = {
     memory,
+    subscriptionAccounts,
     // 直觉的整条分工（设置 → 模型，2026-10-29）：SmartModel 按顺序问，都失败时问 LLM。
     ...(memoryControl ? { decisionModel: () => memoryControl.decisionChainCredentials() } : {}),
     llmFallback: () => loadDecisionModels(opts.dataDir).llmFallback,
@@ -3164,6 +3173,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const {
     session, modelName, syncToolAccess, reloadExtensions, models: leadModels, switchModel: switchLeadModel,
     reportsInputDelivery, interruptStep: interruptLeadStep, smartModel: leadSmartModel, complete: leadComplete, smartModelLlm, refreshProviders, brainReady,
+    currentModel: leadCurrentModel, refreshModelAuth, forgetProvider,
   } = leadSlot.result();
   log(`lead ready (model=${modelName}, session=${session.sessionId})`);
   // 部署改了 Lead 能用的工具或操作时，下一轮告诉它一次（lead-capabilities.ts，2026-11-02）。
@@ -3233,6 +3243,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let pendingModelSwitch: { reason: string; restoreAt: number | null; manual?: boolean; via?: string } | null = modelFailover?.startup ?? null;
   // 服务商的地址或 key 改了（设置 → 模型）：正在用的模型要按新的注册重新挂一次。Lead 正在回答时，下一轮开始前做（syncLeadModel）。
   let rebindLeadModel = false;
+  // D5：下一轮在同一格里换用的订阅账号（noteLeadModelFailure 定，syncLeadModel 换），和正在定的那一次。
+  let pendingAccountSwitch: { to: string; from: string; error: string } | null = null;
+  let pendingAccountDecision: Promise<void> | null = null;
+  // 重新挂模型时：会话正用着同一格的另一个订阅账号（pi-multi-pass 换的）就挂回那个账号，不换回第一个账号。
+  const leadRebindTarget = (): string => {
+    const current = leadCurrentModel?.() ?? null;
+    return current && subscriptionSlotSpec(current) === subscriptionSlotSpec(appliedLeadModel) ? current : appliedLeadModel;
+  };
 
   // Lead 正在用的模型变了（模型自动切换，或者你在输入框里换的）：告诉所有页面，输入框右下角的模型名跟着变。
   // 用 daemon.status.changed 的 model：旧页面也认这个字段。
@@ -3320,10 +3338,38 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   };
   uiActionServices.leadModels = leadModelService;
 
+  // 设置 → 模型的订阅（模型配置方案 C 的 S2，subscriptions.ts）：GitHub Copilot 和 Codex 的账号、登录、换号方式。
+  // 凭据和 pi-multi-pass 的配置在 pi 的 agentDir（D2）。模型目录列出有账号登录了的订阅的模型（setLeadSubscriptionSource）。
+  const publishModelSettings = () => {
+    publishControlEvent({ type: "snapshot.required", requiredScope: "tickets:view", payload: { resource: MODEL_SETTINGS_RESOURCE } });
+  };
+  const subscriptions = opts.piAgentDir === undefined ? null : new Subscriptions({
+    db, log, publish: publishModelSettings, piAgentDir: opts.piAgentDir,
+    lead: {
+      reloadExtensions: (reason) => reloadLeadExtensions(reason),
+      refreshAuth: async (providers) => {
+        leadCatalogCache = null;
+        await refreshModelAuth?.(providers);
+      },
+      forgetProvider: (provider) => forgetProvider?.(provider),
+      multiPassLoaded: () => multiPassActive(),
+      modelsInUse: () => {
+        const fallback = loadDecisionModels(opts.dataDir).llmFallback;
+        return [...loadLeadModelConfig(opts.dataDir).models, ...(fallback ? [fallback] : [])];
+      },
+      coolingUntil: (provider) => subscriptionAccounts.coolingUntil(provider),
+      busy: () => sched.busy || sched.draining || sched.starting,
+    },
+  });
+  if (subscriptions) {
+    setLeadSubscriptionSource(() => subscriptions.connectedBases());
+    uiActionServices.subscriptions = subscriptions;
+  }
+
   // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）。大脑的分工整条写进 lead.models，主用变了才换模型：
   // 只改备用的顺序时不动正在用的（模型自动切换可能正用着备用）。
   const modelSettings = new ModelSettings({
-    db, dataDir: opts.dataDir, vault, log, memory: memoryControl,
+    db, dataDir: opts.dataDir, vault, log, memory: memoryControl, ...(subscriptions ? { subscriptions } : {}),
     externalSecret: (name) => daemonOnlySecrets.get(name) ?? cachedKeychainSecret(name),
     smartModelLlm: () => smartModelLlm ?? null,
     publish: () => {
@@ -3371,7 +3417,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           return;
         }
         try {
-          await switchLeadModel?.(appliedLeadModel);
+          await switchLeadModel?.(leadRebindTarget());
         } catch (error: any) {
           log(`lead model rebind after a provider change failed: ${error?.message ?? String(error)}`);
         }
@@ -4119,8 +4165,47 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // Lead 的一轮失败了：问 model-failover.ts 要不要换模型。要换时记下原因，下一轮开始前换（syncLeadModel）。
   // 顶栏的技术详情里写上下一轮用哪个模型（复用 leadHealth.reclassify：只改原文，不改失败次数和开始时间）。
   // 所有模型都失败时不再换：健康状态留在降级，停摆流程（leadIncapacity）照常接手。
-  // 返回这次失败以后有没有换到另一个模型：换了的话，账号级的失败不让系统整体暂停（model-hold.ts 的 alternative）。
-  function noteLeadModelFailure(error: string): boolean {
+  // D5（模型配置方案 C）：失败来自一种订阅的账号、这种订阅还有没试过、不在冷却的账号时，下一轮换账号，不换分工的格子。
+  // pi-multi-pass 在 pi 的重试里自己换账号（setModel），这里是重试用完以后的兜底；换的是同一格，appliedLeadModel 不变，
+  // 所以 syncLeadModel 不会把 pi-multi-pass 换上的账号换回去。只有这种订阅的账号都试过或者在冷却时，才交给模型切换换格子。
+  // 返回这次失败以后有没有换到另一个模型或同一种订阅的另一个账号：换了的话，账号级的失败不让系统整体暂停（model-hold.ts 的 alternative）。
+  // 换账号要先读凭据，所以订阅这条路返回 Promise，调用方等它定了再记模型暂停。
+  function noteLeadModelFailure(error: string): boolean | Promise<boolean> {
+    if (!modelFailover) return false;
+    const current = leadCurrentModel?.() ?? null;
+    const slash = current?.indexOf("/") ?? -1;
+    const account = current && slash > 0 ? subscriptionAccountOf(current.slice(0, slash)) : null;
+    const cause = leadModelFailureCause(error);
+    if (subscriptions && current && account && (cause === "rate_limit" || cause === "quota" || cause === "auth")
+      && subscriptionSlotSpec(current) === subscriptionSlotSpec(appliedLeadModel)) {
+      const now = current.slice(0, slash);
+      // 失败的是最近一次失败的请求用的账号（会话扩展按回答消息记的）。pi-multi-pass 可能已经换了账号：会话现在用的不一定是它。
+      const last = subscriptionAccounts.lastFailedAccount();
+      const provider = last && subscriptionAccountOf(last)?.base === account.base ? last : now;
+      subscriptionAccounts.failed(provider, error);
+      const decided = subscriptions.accountCandidates(account.base).then((candidates): boolean => {
+        // pi-multi-pass 已经换到一个这次故障里没试过的账号：下一次就用它，不用再换。
+        if (now !== provider && candidates.includes(now) && subscriptionAccounts.usable(now)) {
+          log(`lead subscription account failover: ${provider} failed (${cause}); pi-multi-pass already moved to ${now}`);
+          return true;
+        }
+        const next = subscriptionAccounts.nextAccount(provider, candidates);
+        if (!next) return applyModelFailover(error);
+        pendingAccountSwitch = { to: `${next}${appliedLeadModel.slice(appliedLeadModel.indexOf("/"))}`, from: current, error };
+        log(`lead subscription account failover: ${provider} failed (${cause}); the next turn uses ${next} in the same slot`);
+        leadHealth.reclassify(`${error}（${leadDisplayName(db)} 的下一轮换用 ${next} 账号）`);
+        return true;
+      }, (failure: unknown): boolean => {
+        log(`lead subscription accounts not listed: ${failure instanceof Error ? failure.message : String(failure)}`);
+        return applyModelFailover(error);
+      });
+      pendingAccountDecision = decided.then(() => {}).finally(() => { pendingAccountDecision = null; });
+      return decided;
+    }
+    return applyModelFailover(error);
+  }
+
+  function applyModelFailover(error: string): boolean {
     if (!modelFailover) return false;
     const decision = modelFailover.turnFailed(error);
     if (decision.kind === "switch") {
@@ -4139,6 +4224,21 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   async function syncLeadModel(): Promise<void> {
     if (!modelFailover || !switchLeadModel) return;
     try {
+      if (pendingAccountDecision) await pendingAccountDecision;
+      // D5：同一格里换订阅账号。换不过去（例如 pi-multi-pass 还没注册这个账号）时交给模型切换换格子。
+      if (pendingAccountSwitch) {
+        const { to, from, error } = pendingAccountSwitch;
+        pendingAccountSwitch = null;
+        if (subscriptionSlotSpec(to) === subscriptionSlotSpec(appliedLeadModel)) {
+          try {
+            await switchLeadModel(to);
+            log(`lead subscription account switch: ${from} -> ${to}`);
+          } catch (failure: any) {
+            log(`lead subscription account switch to ${to} failed: ${failure?.message ?? String(failure)}`);
+            applyModelFailover(error);
+          }
+        }
+      }
       const restored = modelFailover.restore();
       let reason = restored?.kind === "switch" ? restored.reason : pendingModelSwitch?.reason ?? "";
       const restoreAt = restored ? null : pendingModelSwitch?.restoreAt ?? null;
@@ -4148,7 +4248,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (rebindLeadModel) {
         rebindLeadModel = false;
         try {
-          await switchLeadModel(appliedLeadModel);
+          await switchLeadModel(leadRebindTarget());
         } catch (error: any) {
           log(`lead model rebind after a provider change failed: ${error?.message ?? String(error)}`);
         }
@@ -4485,7 +4585,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const switched = !interrupted && !networkFailure ? noteLeadModelFailure(error) : false;
       // 记进模型暂停（model-hold.ts）：连续失败到 3 次熔断；账号级的失败（认证、账号被停用、欠费）马上暂停，
       // 除非刚才换到了另一个模型：那个模型停用了，系统用备用的接着做事。
-      if (!interrupted && !networkFailure) modelHold.failed("turn", error, { alternative: switched });
+      // 订阅换账号要等凭据读完（noteLeadModelFailure 返回 Promise）：定了再记。
+      if (!interrupted && !networkFailure) {
+        if (typeof switched === "boolean") modelHold.failed("turn", error, { alternative: switched });
+        else void switched.then((alternative) => { modelHold.failed("turn", error, { alternative }); });
+      }
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn
@@ -6624,6 +6728,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     closeStep = "stopping the shadow triage";
     await triageShadow?.stop();
     modelSettings.stop();
+    if (subscriptions) {
+      subscriptions.stop();
+      setLeadSubscriptionSource(null);
+    }
     // 先停子 agent 工单（被打断的记成失败交回 hub），再停通道：hub 停下时要等它们的回复决定做完，然后才关库。
     closeStep = "stopping agent tasks";
     await agentTasks.close();

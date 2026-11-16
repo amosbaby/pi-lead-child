@@ -253,8 +253,8 @@ describe("smokeRuntime", () => {
     const result = await smokeRuntime({ runtimeDir: runtime, workDir: tempDir("plc-dsm-") });
     expect(result).toMatchObject({ ok: true, version: "1.3.0", piVersion: "1.1.0", processNames: { supervisor: "lead-agent", daemon: "lead-agent" } });
     // pi 执行器和 Lead 的扩展、child-skills、Lead 的 skill 都在包里，pi 真的加载了它们（工单 #260）。
-    expect(result.runtimeAssets).toBe("8 found in dist");
-    expect(result.piLoad.extensions.sort()).toEqual(["sandbox.js", "sol-pi-executor.js", "sol-pi-lead.js", "ticket-tools.js", "web-tools.js"]);
+    expect(result.runtimeAssets).toBe("9 found in dist");
+    expect(result.piLoad.extensions.sort()).toEqual(["multi-pass-lead.js", "sandbox.js", "sol-pi-executor.js", "sol-pi-lead.js", "ticket-tools.js", "web-tools.js"]);
     expect(result.piLoad.skills.sort()).toEqual(["skill:genui-cards", "skill:plc-diagnosing-bugs"]);
     const pids = JSON.parse(readFileSync(join(runtime, "pids.json"), "utf8")) as { supervisor: number; daemon: number };
     expect(result.supervisorPid).toBe(pids.supervisor);

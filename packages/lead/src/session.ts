@@ -63,6 +63,7 @@ import { toolSoftLimitMs, type BackgroundJobRegistry, type ForegroundWaits, type
 import type { LeadSchedulerRuntime } from "./scheduler/runtime.js";
 import { idleLaneExtension, type IdleLaneRuntime } from "./scheduler/idle-runtime.js";
 import { TurnEvidence } from "./credibility/evidence.js";
+import type { SubscriptionAccountTracker } from "./subscriptions.js";
 import type { CreateSmartModelOptions, SmartTextComplete } from "@pi-lead-child/engine";
 
 export { parseModelName } from "./model-config.js";
@@ -266,6 +267,8 @@ export async function createLeadSession(opts: {
   abortReason?: () => LeadAbortReason | null;
   // 用户插话时，正在等的调用马上转后台（background-jobs.ts 的 ForegroundWaits）。
   foregroundWaits?: ForegroundWaits;
+  // 订阅账号的失败和成功（subscriptions.ts，模型配置方案 C 的 D5）：每次请求的结果记进去，daemon 换账号时问它。
+  subscriptionAccounts?: SubscriptionAccountTracker;
   log?: (line: string) => void;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
@@ -280,6 +283,12 @@ export async function createLeadSession(opts: {
   refreshProviders: () => Promise<void>;
   // 大脑现在能不能用（首次启动引导，.scratch/onboarding）：正在用的模型有认证。
   brainReady: () => Promise<boolean>;
+  // 会话现在真正用的模型（provider/id）。pi-multi-pass 换了账号时是 <base>-<n>/<id>，和 modelName 不一样。
+  currentModel: () => string | null;
+  // 订阅账号登录、退出以后：重读这些 provider 的凭据（auth.json）。
+  refreshModelAuth: (providers: readonly string[]) => Promise<void>;
+  // 删掉的订阅账号：从会话的 ModelRuntime 里注销（扩展重新加载不会注销以前注册的 provider）。
+  forgetProvider: (provider: string) => void;
 }> {
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
@@ -469,6 +478,35 @@ export async function createLeadSession(opts: {
         }),
       },
       { name: "plc-environment", factory: environmentExtension, hidden: true },
+      // 订阅账号的每次请求（D5）：失败、成功都记下（重试也算一次）。按回答消息自己的 provider 记，不看 ctx.model：
+      // pi-multi-pass 在同一个 agent_end 里可能已经换了账号。
+      ...(opts.subscriptionAccounts ? [{
+        name: "plc-subscription-accounts", hidden: true,
+        factory: ((pi) => {
+          const tracker = opts.subscriptionAccounts!;
+          // pi-multi-pass 换了账号、pi 又不重试这种错误时，它把这一轮的输入作为 followUp 再发一次（MS 的 handleError）。
+          // Lead 的一轮是 daemon 拼好的输入：再发一次会让同一段输入在上下文里出现两次，daemon 的接收记账也对不上。
+          // 这里拦下它：这一轮照常以失败结束，daemon 在下一次（重试或者下一轮）用 pi-multi-pass 换好的账号。
+          let turnPrompt: string | null = null;
+          // pi 1.5：一轮也可以由自定义消息开始（messageType custom），那时没有可以重发的输入。
+          pi.on("before_agent_start", (event) => { turnPrompt = event.messageType === "user" ? event.prompt : null; });
+          pi.on("input", (event) => {
+            // pi 只在会话正在跑的时候给 streamingBehavior，所以不看它：扩展原样重发这一轮的输入就拦下。
+            if (event.source === "extension" && turnPrompt !== null && event.text === turnPrompt) {
+              console.error("[lead] dropped pi-multi-pass's resend of the turn input; the daemon retries on the new account");
+              return { action: "handled" as const };
+            }
+            return { action: "continue" as const };
+          });
+          pi.on("agent_end", (event) => {
+            const last = event.messages?.[event.messages.length - 1] as
+              | { role?: string; provider?: string; stopReason?: string; errorMessage?: string } | undefined;
+            if (last?.role !== "assistant" || typeof last.provider !== "string") return;
+            if (last.stopReason === "error") tracker.failed(last.provider, last.errorMessage ?? "");
+            else if (last.stopReason !== "aborted") tracker.succeeded(last.provider);
+          });
+        }) satisfies ExtensionFactory,
+      }] : []),
       // Prompt cache warming stops when a run settles, as before pi 1.5.2 (cache-warming.ts).
       {
         name: "plc-cache-warming", hidden: true,
@@ -552,9 +590,9 @@ export async function createLeadSession(opts: {
     additionalSkillPaths: [LEAD_SKILLS_DIR, ...(opts.skillDirs ?? [])],
     // 用户装的 skill 不列进系统提示词，用 find_skill 找（hideUserSkillsFromPrompt）。
     skillsOverride: hideUserSkillsFromPrompt,
-    ...(solPi.features.length > 0
-      ? { additionalExtensionPaths: [runtimeAsset("sol-pi-lead")] }
-      : {}),
+    // pi-multi-pass（模型配置方案 C 的 D1）：入口每次加载都现读 PLC_MULTI_PASS_ENTRY，没装时什么也不做。
+    // 它按 multi-pass.json 注册第 2 个以后的订阅账号（<base>-<n>），一个账号限流时在同一格里换账号。
+    additionalExtensionPaths: [...(solPi.features.length > 0 ? [runtimeAsset("sol-pi-lead")] : []), runtimeAsset("multi-pass-lead")],
   });
   await loader.reload();
   for (const error of loader.getExtensions().errors) {
@@ -695,6 +733,13 @@ export async function createLeadSession(opts: {
       const current = session.model;
       if (!current) return false;
       return modelRuntime.hasConfiguredAuth(current.provider) || (await modelRuntime.checkAuth(current.provider)) !== undefined;
+    },
+    currentModel: () => (session.model ? `${session.model.provider}/${session.model.id}` : null),
+    refreshModelAuth: async (providers) => {
+      await modelRuntime.refresh({ allowNetwork: false, providers: [...providers] });
+    },
+    forgetProvider: (provider) => {
+      if (modelRuntime.getRegisteredProviderIds().includes(provider)) modelRuntime.unregisterProvider(provider);
     },
   };
 }

@@ -47,4 +47,10 @@ export interface LeadEngineFactoryResult {
   brainReady?: () => Promise<boolean>;
   // 按 config.json 现在的 lead.providers 重新注册（设置 → 模型改了服务商）。没有时要重启 daemon 才生效。
   refreshProviders?: () => Promise<void>;
+  // 会话现在真正用的模型（provider/id）：pi-multi-pass 换了订阅账号时是 <base>-<n>/<id>。没有时 daemon 当作 modelName。
+  currentModel?: () => string | null;
+  // 订阅账号登录、退出以后重读这些 provider 的凭据。没有时要重启 daemon 才生效。
+  refreshModelAuth?: (providers: readonly string[]) => Promise<void>;
+  // 删掉的订阅账号从会话的 ModelRuntime 里注销。
+  forgetProvider?: (provider: string) => void;
 }

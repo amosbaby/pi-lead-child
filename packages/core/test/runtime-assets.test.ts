@@ -13,7 +13,8 @@ const names = Object.keys(RUNTIME_ASSETS) as RuntimeAssetName[];
 describe("runtime assets", () => {
   it("covers the pi extensions, the child skills, the Lead skills and the Hindsight download script", () => {
     expect(names.sort()).toEqual([
-      "child-skills", "hindsight-download", "lead-skills", "sandbox", "sol-pi-executor", "sol-pi-lead", "ticket-tools", "web-tools",
+      "child-skills", "hindsight-download", "lead-skills", "multi-pass-lead", "sandbox", "sol-pi-executor", "sol-pi-lead", "ticket-tools",
+      "web-tools",
     ]);
   });
 

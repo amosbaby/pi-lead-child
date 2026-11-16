@@ -159,6 +159,9 @@ describe("the rule-change flag in the catalog", () => {
       // 交接说明（2026-10-30，自动代你处理方案 B）：设置页的选项；接受页边批注的建议也是改交接说明（issue 08）。
       "channel_handbook.update", "channel_handbook.tighten", "channel_handbook.accept_suggestion",
       "model_settings.save_provider", "model_settings.remove_provider", "model_settings.save_fast_model", "model_settings.remove_fast_model",
+      // 订阅（模型配置方案 C 的 S2）：登录和删账号改连接，改名、换号方式和时间段是设置页的选项。粘贴回调地址和取消登录不改规则。
+      "model_settings.start_subscription_login", "model_settings.remove_subscription_account",
+      "model_settings.rename_subscription_account", "model_settings.set_subscription_strategy", "model_settings.set_subscription_schedule",
       // 设置 → 记忆的摘要模型（2026-10-29，hindsight-primary-memory spec D16）：设置页的选项。
       "memory_settings.set_summary_model",
       // 常驻偏好（2026-10-29，spec D15）：进 Lead 的系统提示词。

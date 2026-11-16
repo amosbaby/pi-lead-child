@@ -18,7 +18,7 @@ import {
   resolveAuthority, runUiAction, runtimeEnablePermission, uiActionCatalogText,
   type ChannelCardActionService, type ChannelMessageService, type FollowUpEntry, type FollowUpQueueService, type MemorySettingsService,
   type ModelSettingsService,
-  type RuntimeSwitchService,
+  type RuntimeSwitchService, type SubscriptionsService,
   type TicketActionDefinition, type TicketActionEnv,
 } from "../src/index.js";
 
@@ -1011,6 +1011,87 @@ describe("model settings", () => {
     }).then(() => null, (caught: unknown) => caught);
     expect((error as UiActionError).code).toBe("invalid_input");
     expect(calls).toEqual([["setFastChain", { chain: ["jev"] }]]);
+  });
+});
+
+// 设置 → 模型的订阅（模型配置方案 C 的 S2）：登录、粘贴回调地址、取消和删账号带凭据，只有用户本人能做；
+// 改名、换号方式和时间段 Lead 可以做，算改规则。粘贴的回调地址不进账本。
+describe("model settings: subscriptions", () => {
+  function fakeSubscriptions() {
+    const calls: Array<[string, unknown]> = [];
+    const done = (name: string) => async (request: unknown) => { calls.push([name, request]); return { summary: `${name} done` }; };
+    const service: SubscriptionsService = {
+      summary: () => ({ subscriptions: [{ base: "openai-codex", accounts: [{ provider: "openai-codex", label: "Work", loggedIn: true }], strategy: "round-robin" }], logins: [] }),
+      get: async () => { throw new Error("not used"); },
+      startLogin: async (request) => { calls.push(["startLogin", request]); return { summary: "started", login: "login-1" }; },
+      submitLoginCode: done("submitLoginCode"),
+      cancelLogin: done("cancelLogin"),
+      removeAccount: done("removeAccount"),
+      renameAccount: done("renameAccount"),
+      setStrategy: done("setStrategy"),
+      setSchedule: done("setSchedule"),
+    };
+    // 目标是模型设置（daemon 里两个服务都在）：概要来自 ModelSettings，订阅的概要并进去。
+    const modelSettings = { summary: () => ({ brain: { chain: [], current: "openai-codex/gpt-5.5", providers: [] }, fast: { chain: [], models: [], llmFallback: null }, maxBackups: 3 }) } as unknown as ModelSettingsService;
+    return { service, calls, services: { subscriptions: service, modelSettings } };
+  }
+  const target = { type: "model_settings", id: "models" } as const;
+
+  it("refuses Lead the login, the pasted address, the cancel and the removal, and tells it where the user clicks", async () => {
+    const { calls, services } = fakeSubscriptions();
+    const { turnId } = userTurn();
+    for (const [action, input] of [
+      ["start_subscription_login", { base: "openai-codex", label: "Work" }],
+      ["submit_subscription_login_code", { login: "login-1", code: "http://localhost:1455/auth/callback?code=abc" }],
+      ["cancel_subscription_login", { login: "login-1" }],
+      ["remove_subscription_account", { provider: "openai-codex-2" }],
+    ] as const) {
+      const error = await runUiAction(db, {
+        target, action, input, reason: "用户说登录 Codex", caller: { kind: "lead", turnId }, services,
+      }).then(() => null, (caught: unknown) => caught);
+      expect((error as UiActionError).code, action).toBe("user_direct");
+      expect((error as UiActionError).refusal?.where).toBe("设置 → 模型");
+    }
+    expect(calls).toEqual([]);
+  });
+
+  it("lets the user log in and paste the address, and keeps the address out of the ledger", async () => {
+    const { calls, services } = fakeSubscriptions();
+    const started = await runUiAction(db, {
+      target, action: "start_subscription_login", input: { base: "github-copilot" }, caller: { kind: "user" }, services,
+    });
+    expect(started.authority).toBe("user");
+    await runUiAction(db, {
+      target, action: "submit_subscription_login_code", input: { login: "login-1", code: "http://localhost:1455/auth/callback?code=secret-code-42" },
+      caller: { kind: "user" }, services,
+    });
+    expect(calls.map(([name]) => name)).toEqual(["startLogin", "submitLoginCode"]);
+    expect(JSON.stringify(ledger())).not.toContain("secret-code-42");
+    expect(ledger().map((entry) => entry.action)).toEqual(["start_subscription_login", "submit_subscription_login_code"]);
+  });
+
+  it("lets Lead rename an account and set the strategy and the schedule, and refuses an account name that is not one", async () => {
+    const { calls, services } = fakeSubscriptions();
+    const lead = { kind: "lead" as const, turnId: null };
+    await runUiAction(db, {
+      target, action: "rename_subscription_account", input: { provider: "openai-codex-2", label: "个人" }, reason: "用户说第二个是个人的",
+      caller: lead, services,
+    });
+    await runUiAction(db, {
+      target, action: "set_subscription_strategy", input: { base: "openai-codex", strategy: "scheduled" }, reason: "用户说白天用工作的",
+      caller: lead, services,
+    });
+    await runUiAction(db, {
+      target, action: "set_subscription_schedule", reason: "用户说白天用工作的",
+      input: { provider: "openai-codex", role: "preferred", windows: [{ hours: [9, 18], days: ["mon", "tue", "wed", "thu", "fri"] }] },
+      caller: lead, services,
+    });
+    expect(calls.map(([name]) => name)).toEqual(["renameAccount", "setStrategy", "setSchedule"]);
+    const error = await runUiAction(db, {
+      target, action: "rename_subscription_account", input: { provider: "anthropic", label: "x" }, reason: "试试",
+      caller: lead, services,
+    }).then(() => null, (caught: unknown) => caught);
+    expect((error as UiActionError).code).toBe("invalid_input");
   });
 });
 

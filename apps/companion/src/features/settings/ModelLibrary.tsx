@@ -1,5 +1,5 @@
 import { Badge, Button, Card, Column, Dot, Icon, Pressable, Row, SegmentedControl, Switch, Text, TextField, useBreakpoint } from '@pi-lead-child/components';
-import { modelSectionTitle, type FastModel, type Locale, type ModelProvider, type ModelProviderApi, type ModelSettingsDto } from '@pi-lead-child/protocol';
+import type { FastModel, Locale, ModelProvider, ModelProviderApi, ModelSettingsDto } from '@pi-lead-child/protocol';
 import { useState, type ReactNode } from 'react';
 
 import { useLocale } from '@/i18n';
@@ -10,24 +10,30 @@ import { modelMessages } from './model.messages';
 import { useModelAction } from './useModelAction';
 import {
   accountPrefixOn, advancedChanges, advancedForm, brainIndex, brainInUse, brainModelName, brainRoles, CAPABILITY_SOURCES, capabilitiesNow, contextWindowLabel,
-  defaultExpanded, fastFormProblem, fastKeyLabel, fastModelSub, fastRoles, groupUseLabel, providerFormProblem, providerGroup, providerSub,
-  releaseLabel, untilLabel, urlHost, type AdvancedForm,
+  fastFormProblem, fastKeyLabel, fastModelSub, fastRoles, librarySections, providerFormProblem, providerGroup, providerKind, providerSub,
+  providerSummary, providerUseLabel, releaseLabel, untilLabel, urlHost, type AdvancedForm,
 } from './modelSettingsModel';
 import { useServerForm } from './useServerForm';
 
-// 设置 → 模型的「模型库」（方案 B，2026-10-29）：
-//   大脑：按服务商分组，组可以折叠（有在用模型的组默认展开），组里最新发布的在前，先露 5 个和正在用的。
+// 设置 → 模型的「接入」和直觉的模型库（方案 B，2026-10-29；方案 C，2026-11-16 改了大脑这一块）：
+//   接入：订阅一组（S3）、API key 一组。一个服务商一行：种类的图标、名字、一句说明（账号、路由别名、主机）、模型数和角色。
+//   点一行展开它的模型（组里最新发布的在前，先露 5 个和正在用的）和「设置」。添加服务商在页面头上的「添加模型」（AddModelPanel）。
 //   直觉：一条一行。点一行在下面展开它的表单（和「连接」页的接入流程一样，在原位展开）。
-// 接入服务商、添加直觉也在这里。带 key 的改动只有你本人能做（user_direct），Lead 调用会被拒绝。
+// 添加直觉也在这里。带 key 的改动只有你本人能做（user_direct），Lead 调用会被拒绝。
 
 type Editing = { kind: 'provider'; name: string | null } | { kind: 'fast'; id: string | null } | null;
 
-export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
+export function ModelLibrary({ dto, subscriptions }: {
+  dto: ModelSettingsDto;
+  // 接入列表里「订阅」一组的行（切片 S3）。不给时没有这一组，只有 API key。
+  subscriptions?: ReactNode;
+}) {
   const locale = useLocale();
   const m = modelMessages(locale);
   const { tablet } = useBreakpoint();
   const [search, setSearch] = useState('');
-  const [expanded, setExpanded] = useState<Set<string>>(() => defaultExpanded(dto));
+  // 接入列表缺省都收着，一行一个服务商（方案 C 的画板）。点开才露出模型和设置。
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showAll, setShowAll] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<Editing>(null);
   const toggle = (set: Set<string>, key: string) => {
@@ -43,61 +49,86 @@ export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
 
   return (
     <Column testID="model-library" gap="group-label">
+      {/* 接入（方案 C，画板 C-Settings-Desktop）：订阅一组（切片 S3 给 subscriptions）和 API key 一组。一行一个服务商，点开是它的模型和设置。 */}
       <Row items="center" gap="inline-item" px="section-label-x" flexWrap="wrap">
-        <Text size="eyebrow" weight="bold" tone="secondary">{m.library}</Text>
-        <Text size="meta" tone="muted">{m.libraryHint}</Text>
-        <Column w={tablet ? 220 : '100%'}>{/* spacing-exempt: 搜索框的宽度，组件规格 */}
+        <Text size="eyebrow" weight="bold" tone="secondary" numberOfLines={1}>{m.sources}</Text>
+        <Text size="meta" tone="muted" numberOfLines={1}>{m.sourcesCount(dto.brain.providers.length)}</Text>
+        <Column w={tablet ? 220 : '100%'} ml={tablet ? 'auto' : undefined}>{/* spacing-exempt: 搜索框的宽度，组件规格 */}
           <TextField testID="model-library-search" value={search} onChangeText={setSearch} placeholder={m.searchModels} variant="filled" size="sm"
             autoCapitalize="none" autoCorrect={false} />
         </Column>
       </Row>
 
-      <Text size="label" weight="semibold" tone="strong" px="section-label-x" pt="section-label-top">{m.brainName}</Text>
       <Card testID="model-providers" rounded="2xl" overflow="hidden">
+        {subscriptions ? (
+          <>
+            <GroupLabel testID="model-sources-subscriptions" label={m.subscriptionGroup} first />
+            {subscriptions}
+          </>
+        ) : null}
+        <GroupLabel testID="model-sources-api-key" label={m.apiKeyGroup} first={!subscriptions} />
         {dto.brain.providers.map((provider, i) => {
           const open = query.length > 0 || expanded.has(provider.name);
           const group = providerGroup(provider, used, { query, showAll: showAll.has(provider.name) });
           if (query && group.models.length === 0) return null;
-          const useLabel = groupUseLabel(dto, group, locale);
+          const useLabel = providerUseLabel(dto, provider, locale);
+          const summary = (
+            <Text testID={`model-provider-summary-${provider.name}`} flex={tablet ? 1 : undefined} minW={0} size="meta"
+              tone={provider.problem ? 'danger-dark' : 'secondary'} numberOfLines={1}>
+              {providerSummary(provider, now, locale)}
+            </Text>
+          );
           const editingThis = editing?.kind === 'provider' && editing.name === provider.name;
           return (
             <Column key={provider.name} testID={`model-provider-${provider.name}`} borderTopWidth={i === 0 ? 0 : 1} borderTopColor="border-soft">
-              <Row items="center" gap="side-item" px="row-x" py="row-y">
-                <Pressable
-                  testID={`model-provider-toggle-${provider.name}`}
-                  aria-expanded={open}
-                  aria-label={open ? m.collapse(provider.name) : m.expand(provider.name)}
-                  onPress={() => setExpanded((previous) => toggle(previous, provider.name))}
-                  flex={1}
-                  minW={0}
-                  flexDirection="row"
-                  items="center"
-                  gap="inline-item"
-                  feedback="none"
-                >
-                  <Icon name={open ? 'chevron-down' : 'chevron-right'} size={14} color="text-muted" />
-                  <Column flex={1} minW={0} gap="text-stack">
-                    <Text size="card-title" weight="bold" numberOfLines={1}>{provider.name}</Text>
-                    <Text testID={`model-provider-sub-${provider.name}`} size="meta" tone="secondary" numberOfLines={1}>{providerSub(group, locale)}</Text>
-                  </Column>
-                </Pressable>
-                {!open && useLabel ? <Text size="label" weight="semibold" tone="strong">{useLabel}</Text> : null}
-                <Button testID={`model-provider-edit-${provider.name}`} label={editingThis ? m.closeSettings : m.settings} variant="ghost" tone="neutral" size="xs"
-                  onPress={() => setEditing(editingThis ? null : { kind: 'provider', name: provider.name })} />
-              </Row>
-              {provider.problem ? (
+              <Pressable
+                testID={`model-provider-toggle-${provider.name}`}
+                aria-expanded={open}
+                aria-label={open ? m.collapse(provider.name) : m.expand(provider.name)}
+                onPress={() => setExpanded((previous) => toggle(previous, provider.name))}
+                flexDirection="row"
+                items="center"
+                gap="inline-item"
+                px="row-x"
+                py="row-y"
+                bg={open ? 'surface-subtle' : { default: 'surface', hover: 'surface-subtle', press: 'surface-muted' }}
+                feedback="none"
+              >
+                <Icon name={providerKind(provider) === 'custom' ? 'key' : 'database'} size={16} color="text-secondary" />
+                {/* 短标签不换行（用户否掉过一字一行的画板）：名字和右边的计数不缩，说明截断。
+                    手机上一行放不下三样：说明换到名字下面（两行，点按区域也够 44）。 */}
+                <Column flex={1} minW={0} gap="text-stack">
+                  <Row items="center" gap="inline-item" minW={0}>
+                    <Text size="card-title" weight="semibold" numberOfLines={1} shrink={0}>{provider.name}</Text>
+                    {tablet ? summary : null}
+                  </Row>
+                  {tablet ? null : summary}
+                </Column>
+                <Text testID={`model-provider-use-${provider.name}`} size="meta" tone={useLabel ? 'strong' : 'muted'} numberOfLines={1} shrink={0}>
+                  {[m.modelsShort(provider.models.length), useLabel].filter(Boolean).join(' · ')}
+                </Text>
+                <Icon name={open ? 'chevron-down' : 'chevron-right'} size={14} color="text-ghost" />
+              </Pressable>
+              {open ? (
+                <Row items="center" gap="side-item" pl="group-indent" pr="row-x" py="row-y" borderTopWidth={1} borderTopColor="border-soft">
+                  <Text testID={`model-provider-sub-${provider.name}`} flex={1} minW={0} size="meta" tone="secondary" numberOfLines={1}>{providerSub(group, locale)}</Text>
+                  <Button testID={`model-provider-edit-${provider.name}`} label={editingThis ? m.closeSettings : m.settings} variant="ghost" tone="neutral" size="xs"
+                    onPress={() => setEditing(editingThis ? null : { kind: 'provider', name: provider.name })} />
+                </Row>
+              ) : null}
+              {open && provider.problem ? (
                 <Text testID={`model-provider-problem-${provider.name}`} size="note" tone="danger-dark" pl="group-indent" pr="row-x" pb="row-y">
                   {m.catalogFailed(provider.problem)}
                 </Text>
               ) : null}
-              {editingThis ? <ProviderForm dto={dto} provider={provider} onDone={() => setEditing(null)} /> : null}
-              {open ? group.sections.map((section) => (
+              {open && editingThis ? <ProviderForm dto={dto} provider={provider} onDone={() => setEditing(null)} /> : null}
+              {open ? librarySections(group, locale).map((section) => (
                 <Column key={section.key} testID={`model-section-${section.key}`}>
-                  {/* 分段标题：group · channel（模型库的外层已经是服务商，不再写它）。都没有时不画。 */}
-                  {modelSectionTitle(section, false) ? (
+                  {/* 分段标题：group · channel（外层已经是服务商，不再写它）。magpie 的 auto/ 是路由别名，写「由 magpie 选」。都没有时不画。 */}
+                  {section.title ? (
                     <Row items="center" gap="inline-item" pl="group-indent" pr="row-x" pt="section-label-top" pb="section-label-bottom"
                       borderTopWidth={1} borderTopColor="border-soft" bg="surface-subtle">
-                      <Text size="meta" weight="semibold" tone="secondary">{modelSectionTitle(section, false)}</Text>
+                      <Text size="meta" weight="semibold" tone="secondary" numberOfLines={1}>{section.title}</Text>
                       <Text size="meta" tone="muted" mono>{section.total}</Text>
                     </Row>
                   ) : null}
@@ -117,11 +148,11 @@ export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
                     {model.blockedUntil ? (
                       <Row items="center" gap="icon-label">
                         <Dot color="danger" size={7} />
-                        <Text size="label" weight="semibold" tone="danger-dark">{m.quotaBlocked(untilLabel(model.blockedUntil, now, locale))}</Text>
+                        <Text size="label" weight="semibold" tone="danger-dark" numberOfLines={1}>{m.quotaBlocked(untilLabel(model.blockedUntil, now, locale))}</Text>
                       </Row>
                     ) : null}
                     {roles.map((role) => <Badge key={role} label={role} tone={role === m.primary ? 'accent' : 'neutral'} size="xs" />)}
-                    {release && tablet ? <Text size="meta" tone="muted" mono>{release}</Text> : null}
+                    {release && tablet ? <Text size="meta" tone="muted" mono numberOfLines={1}>{release}</Text> : null}
                   </Row>
                 );
                   })}
@@ -137,11 +168,6 @@ export function ModelLibrary({ dto }: { dto: ModelSettingsDto }) {
             </Column>
           );
         })}
-        {editing?.kind === 'provider' && editing.name === null ? <ProviderForm dto={dto} provider={null} onDone={() => setEditing(null)} /> : null}
-        <Row px="row-x" py="row-y" borderTopWidth={dto.brain.providers.length ? 1 : 0} borderTopColor="border-soft">
-          <Button testID="model-provider-add" label={m.addProvider} icon="plus" variant="link" size="sm"
-            onPress={() => setEditing({ kind: 'provider', name: null })} />
-        </Row>
       </Card>
 
       <Text size="label" weight="semibold" tone="strong" px="section-label-x" pt="section-label-top">{m.fastName}</Text>
@@ -543,3 +569,13 @@ function FastModelForm({ dto, model, onDone }: { dto: ModelSettingsDto; model: F
   );
 }
 
+
+// 接入卡片里一组的小标题（「订阅」「API key」）。
+function GroupLabel({ label, first, testID }: { label: string; first: boolean; testID: string }) {
+  return (
+    <Text testID={testID} size="label" weight="bold" tone="muted" numberOfLines={1} px="row-x" pt={first ? 'row-y' : 'section-label-top'} pb="section-label-bottom"
+      borderTopWidth={first ? 0 : 1} borderTopColor="border-soft">
+      {label}
+    </Text>
+  );
+}

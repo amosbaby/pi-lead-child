@@ -67,6 +67,19 @@ describe('model settings with the grouping fields', () => {
     expect(Value.Check(LegacyModelSettingsResponseSchema, { modelSettings: legacy })).toBe(true);
   });
 
+  // 「添加模型」的种类（方案 C，2026-11-16）也只给带 grouping=1 的客户端。
+  it('drops the provider preset for an old client', () => {
+    const withPreset: ModelSettingsDto = {
+      ...grouped,
+      brain: { ...grouped.brain, providers: grouped.brain.providers.map((provider) => ({ ...provider, preset: 'magpie' as const })) },
+    };
+    expect(Value.Check(ModelSettingsResponseSchema, { modelSettings: withPreset })).toBe(true);
+    expect(Value.Check(LegacyModelSettingsResponseSchema, { modelSettings: withPreset })).toBe(false);
+    const legacy = withoutModelGrouping(withPreset);
+    expect(legacy.brain.providers[0]).not.toHaveProperty('preset');
+    expect(Value.Check(LegacyModelSettingsResponseSchema, { modelSettings: legacy })).toBe(true);
+  });
+
   it('asks for the grouping fields and reads them', async () => {
     const credentials = createJsonCredentialStore(new MemoryKeyValueStorage());
     await credentials.save({ baseUrl: 'http://daemon.test', accessToken: 'secret', binding, lastSeq: 0 });

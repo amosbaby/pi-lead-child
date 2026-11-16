@@ -1,13 +1,16 @@
 // 设置 → 模型（方案 B，2026-10-29，.scratch/model-settings/spec.md）的纯逻辑：分工的格子、模型库的分组和排序、文案。
 // 页面（ModelSection.tsx、ModelPicker.tsx、ModelLibrary.tsx）只管画。
 import {
-  DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_BACKUPS, parseLeadModelSpec, groupModelsByProvider, flatModelSections,
+  DEFAULT_LEAD_CONTEXT_WINDOW, MODEL_MAX_BACKUPS, parseLeadModelSpec, groupModelsByProvider, flatModelSections, modelSectionTitle,
   DEFAULT_LOCALE, fastModelAuthHeaderMessages, fastModelAuthHeaderProblem,
-  type BrainModel, type ModelSection, type FastModel, type LeadModelChoice, type Locale, type ModelProvider, type ModelRelease, type ModelSettingsDto,
+  type BrainModel, type ModelSection, type FastModel, type LeadModelChoice, type Locale, type ModelProvider, type ModelProviderApi,
+  type ModelProviderPreset, type ModelRelease, type ModelSettingsDto,
 } from '@pi-lead-child/protocol';
 
+import { customProviderName, firstRunPreset } from '@/features/onboarding/firstRunModel';
 import { intlLocale } from '@/i18n';
 
+import { endpointProblem } from './memoryModel';
 import { modelMessages } from './model.messages';
 
 // 两类模型的名字（spec D1）、说明和生效时间（P15.2）在 model.messages.ts，界面上只从那里取。
@@ -222,12 +225,6 @@ export function brainInUse(dto: ModelSettingsDto): Set<string> {
   return used;
 }
 
-/** 收起的组的行尾：组里有在用的模型时写出来（例如「主用 · 备用 1」）。 */
-export function groupUseLabel(dto: ModelSettingsDto, group: ProviderGroupView, locale: Locale): string | null {
-  const roles = group.inUse.flatMap((model) => brainRoles(dto, model, locale));
-  return roles.length ? roles.join(' · ') : null;
-}
-
 /** 服务商一行的第二行：接口 · key · 共 N 个 · 按账号分组 · 最新 日期。不写地址（原型的设置页，2026-11-05）：地址在「设置」里。 */
 export function providerSub(group: ProviderGroupView, locale: Locale): string {
   const m = modelMessages(locale);
@@ -251,12 +248,6 @@ export function apiLabels(locale: Locale = DEFAULT_LOCALE): Record<ModelProvider
     'anthropic-messages': 'Anthropic',
     'google-generative-ai': 'Google',
   };
-}
-
-/** 有在用模型的服务商默认展开，其他默认收起（画布方案 B）。 */
-export function defaultExpanded(dto: ModelSettingsDto): Set<string> {
-  const used = brainInUse(dto);
-  return new Set(dto.brain.providers.filter((provider) => provider.models.some((model) => used.has(model.model))).map((provider) => provider.name));
 }
 
 // ── 表单 ─────────────────────────────────────────────────────────────────────
@@ -327,4 +318,194 @@ export function capabilitiesNow(provider: ModelProvider | null, form: AdvancedFo
   if (!provider || provider.catalog === 'none') return form.capabilities === 'config' ? 'config' : 'none';
   if (form.capabilities === 'auto') return provider.catalog === 'detailed' ? 'detailed' : 'plain';
   return form.capabilities;
+}
+
+// ── 接入（模型配置方案 C，2026-11-16，.scratch/model-config-c/spec.md）────────────────────
+
+/** 「添加模型」的 API key 种类（用户 2026-11-16：只有这三种）。 */
+export type ProviderKind = ModelProviderPreset;
+export const PROVIDER_KINDS: readonly ProviderKind[] = ['custom', 'vibeproxy', 'magpie'];
+
+// magpie 的路由别名：id 以 auto/ 开头，由 magpie 选出品方。它不是账号。
+const ROUTE_ALIAS_PREFIX = 'auto/';
+
+export function isRouteAlias(model: Pick<BrainModel, 'id'>): boolean {
+  return model.id.startsWith(ROUTE_ALIAS_PREFIX);
+}
+
+/**
+ * 一个服务商是哪一种。daemon 给了 preset（添加时选的）就用它。没有时（旧的服务商、手写的配置）只为显示推断，
+ * 不改配置：前缀是账号的当作 vibeproxy，有 auto/ 模型的当作 magpie，其余是自定义。
+ */
+export function providerKind(provider: ModelProvider): ProviderKind {
+  if (provider.preset) return provider.preset;
+  if (provider.accountPrefixActive) return 'vibeproxy';
+  if (provider.models.some(isRouteAlias)) return 'magpie';
+  return 'custom';
+}
+
+export type ProviderAccount = { group: string; models: number; blockedUntil: string | null };
+
+/** vibeproxy 的账号（模型的 group），按目录里第一次出现的顺序。一个账号的模型全被额度挡住时，blockedUntil 是最早恢复的时间。 */
+export function providerAccounts(provider: ModelProvider): ProviderAccount[] {
+  const accounts = new Map<string, { models: number; blocked: string[] }>();
+  for (const model of provider.models) {
+    const group = model.group ?? null;
+    if (!group) continue;
+    const entry = accounts.get(group) ?? { models: 0, blocked: [] };
+    entry.models += 1;
+    if (model.blockedUntil) entry.blocked.push(model.blockedUntil);
+    accounts.set(group, entry);
+  }
+  return [...accounts].map(([group, entry]) => ({
+    group,
+    models: entry.models,
+    blockedUntil: entry.blocked.length === entry.models ? [...entry.blocked].sort()[0] ?? null : null,
+  }));
+}
+
+export type ProviderSource = { source: string | null; models: number; names: string[] };
+
+/** magpie 这类网关：路由别名和其余模型按出品方（目录的 owned_by）分开。 */
+export function providerRoutes(provider: ModelProvider): { aliases: BrainModel[]; sources: ProviderSource[] } {
+  const aliases = provider.models.filter(isRouteAlias);
+  const sources = new Map<string | null, ProviderSource>();
+  for (const model of provider.models) {
+    if (isRouteAlias(model)) continue;
+    const source = model.source ?? null;
+    const entry = sources.get(source) ?? { source, models: 0, names: [] };
+    entry.models += 1;
+    entry.names.push(model.name?.trim() || model.id);
+    sources.set(source, entry);
+  }
+  return { aliases, sources: [...sources.values()] };
+}
+
+// 一行里最多写几个出品方。
+const SUMMARY_SOURCES = 4;
+
+/** 接入列表一行的说明：vibeproxy 写账号和被额度挡住的账号；magpie 写路由别名和出品方；自定义写主机。目录拉不到时写原因。 */
+export function providerSummary(provider: ModelProvider, now: Date, locale: Locale): string {
+  const m = modelMessages(locale);
+  if (provider.problem) return m.catalogProblemShort;
+  const kind = providerKind(provider);
+  if (kind === 'vibeproxy') {
+    const accounts = providerAccounts(provider);
+    if (accounts.length) {
+      const blocked = accounts.find((account) => account.blockedUntil);
+      return [m.accountsSummary(accounts.length), blocked ? m.accountBlocked(blocked.group, untilLabel(blocked.blockedUntil!, now, locale)) : null]
+        .filter(Boolean).join(' · ');
+    }
+  }
+  if (kind === 'magpie') {
+    const { aliases, sources } = providerRoutes(provider);
+    const names = sources.map((entry) => entry.source).filter((source): source is string => Boolean(source));
+    const shown = names.slice(0, SUMMARY_SOURCES);
+    return [
+      aliases.length ? m.routeAliases(aliases.length) : null,
+      shown.length ? m.directSources(shown, names.length > shown.length) : null,
+    ].filter(Boolean).join(' · ') || urlHost(provider.baseUrl);
+  }
+  return [m.kindLabels[kind], urlHost(provider.baseUrl)].join(' · ');
+}
+
+export type LibrarySection = { key: string; title: string | null; total: number; models: BrainModel[] };
+
+/**
+ * 模型库里一个服务商的分段：标题是「group · channel」（外层已经是服务商，不再写它），都没有时为 null。
+ * magpie 的路由别名（auto/）单独一段，标题「由 magpie 选」，排在最前；它不是账号，也不和出品方的模型混在一段。
+ */
+export function librarySections(group: ProviderGroupView, locale: Locale): LibrarySection[] {
+  const { provider } = group;
+  const plain = (sections: ModelSection<BrainModel>[]): LibrarySection[] => sections.map((section) => ({
+    key: section.key, title: modelSectionTitle(section, false) || null, total: section.total, models: section.models,
+  }));
+  const aliases = provider.models.filter(isRouteAlias);
+  if (providerKind(provider) !== 'magpie' || aliases.length === 0) return plain(group.sections);
+  const shown = new Set(group.models.map((model) => model.model));
+  const rest = { ...provider, models: provider.models.filter((model) => !isRouteAlias(model)) };
+  return [
+    {
+      key: `${provider.name}|${ROUTE_ALIAS_PREFIX}`, title: modelMessages(locale).routeAliasTitle, total: aliases.length,
+      models: aliases.filter((model) => shown.has(model.model)),
+    },
+    ...plain(providerSections(rest, (model) => shown.has(model.model))),
+  ].filter((section) => section.models.length > 0);
+}
+
+/** 接入列表一行的右边：分工里用了它的哪几个角色，按分工的顺序（主用、备用 n），最后是直觉兜底。没有时为 null。 */
+export function providerUseLabel(dto: ModelSettingsDto, provider: ModelProvider, locale: Locale): string | null {
+  const own = (model: string) => provider.models.some((entry) => entry.model === model);
+  const roles = dto.brain.chain.flatMap((choice, slot) => (own(choice.model) ? [slotLabel(slot, locale)] : []));
+  const fallback = dto.fast.llmFallback?.model ?? (dto.fast.effectiveLlm ? parseLeadModelSpec(dto.fast.effectiveLlm).model : null);
+  if (fallback && own(fallback)) roles.push(modelMessages(locale).fastFallbackRole);
+  return roles.length ? roles.join(' · ') : null;
+}
+
+/** 没被占用的名字：base，占了时 base-2、base-3…… */
+export function freeProviderName(base: string, taken: readonly string[]): string {
+  if (!taken.includes(base)) return base;
+  for (let index = 2; index < 100; index++) if (!taken.includes(`${base}-${index}`)) return `${base}-${index}`;
+  return `${base}-${Date.now() % 1000}`;
+}
+
+/** daemon 给没给订阅（切片 S2 的可选字段 subscriptions）。给了才画「添加模型」的订阅 tab 和接入列表的订阅一组。 */
+export function hasSubscriptionField(dto: ModelSettingsDto): boolean {
+  return (dto as { subscriptions?: unknown }).subscriptions !== undefined;
+}
+
+/** daemon 认不认 save_provider 的 preset：它给的服务商带 preset 字段（哪怕是 null）。旧 daemon 的严格 schema 不认，不发。 */
+export function supportsPreset(dto: ModelSettingsDto): boolean {
+  return dto.brain.providers.some((provider) => provider.preset !== undefined);
+}
+
+export interface AddModelForm {
+  kind: ProviderKind;
+  // 只有自定义要填。空着时按主机起名（和首次启动同一个函数）。
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  // 只有自定义能改（高级）。
+  api: ModelProviderApi;
+}
+
+export type AddModelInput = {
+  name: string; baseUrl: string; api: ModelProviderApi; apiKey?: string; accountPrefix?: boolean; preset?: ProviderKind;
+};
+
+/** 自定义的名字空着时用的名字。 */
+export function suggestedProviderName(form: Pick<AddModelForm, 'kind' | 'baseUrl'>, taken: readonly string[]): string {
+  if (form.kind !== 'custom') return freeProviderName(form.kind, taken);
+  const baseUrl = form.baseUrl.trim();
+  return baseUrl ? customProviderName(baseUrl, taken) : 'custom';
+}
+
+/**
+ * 「添加模型」的 save_provider 请求。vibeproxy 用首次启动的预设（缺省地址、接口格式、accountPrefix: true）；
+ * magpie 的前缀不是账号（accountPrefix: false），地址要填；自定义的名字、地址要填，接口格式在高级里。
+ */
+export function addModelRequest(
+  form: AddModelForm, dto: ModelSettingsDto, locale: Locale,
+): { ok: true; input: AddModelInput } | { ok: false; problem: string } {
+  const m = modelMessages(locale);
+  const taken = dto.brain.providers.map((provider) => provider.name);
+  const vibeproxy = firstRunPreset('vibeproxy', locale);
+  const baseUrl = (form.baseUrl.trim() || (form.kind === 'vibeproxy' ? vibeproxy.baseUrl! : '')).replace(/\/+$/, '');
+  if (!baseUrl) return { ok: false, problem: m.addressRequired };
+  const urlProblem = endpointProblem(baseUrl, locale);
+  if (urlProblem) return { ok: false, problem: urlProblem };
+  const name = form.kind === 'custom' ? form.name.trim() || suggestedProviderName(form, taken) : suggestedProviderName(form, taken);
+  const nameProblem = providerFormProblem({ name, baseUrl }, true, taken, null, locale);
+  if (nameProblem) return { ok: false, problem: nameProblem };
+  const apiKey = form.apiKey.trim();
+  return {
+    ok: true,
+    input: {
+      name, baseUrl,
+      api: form.kind === 'custom' ? form.api : form.kind === 'vibeproxy' ? vibeproxy.api! : 'openai-completions',
+      ...(apiKey ? { apiKey } : {}),
+      ...(form.kind === 'vibeproxy' ? { accountPrefix: true } : form.kind === 'magpie' ? { accountPrefix: false } : {}),
+      ...(supportsPreset(dto) ? { preset: form.kind } : {}),
+    },
+  };
 }

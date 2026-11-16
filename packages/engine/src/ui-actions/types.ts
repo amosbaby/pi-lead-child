@@ -9,6 +9,8 @@ import type {
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
   SchedulerSnapshot, SetFastChainRequest, SignalSourceDto, TimerOrigin, UiActionTargetType, UserActionRequest,
+  CancelSubscriptionLoginRequest, RemoveSubscriptionAccountRequest, RenameSubscriptionAccountRequest, SetSubscriptionScheduleRequest,
+  SetSubscriptionStrategyRequest, StartSubscriptionLoginRequest, SubmitSubscriptionLoginCodeRequest, SubscriptionsDto,
 } from "@pi-lead-child/protocol";
 import type { Db, OwnerActionInput } from "@pi-lead-child/store";
 import type {
@@ -71,6 +73,8 @@ export interface UiActionServices {
   leadScheduler?: { snapshot(): SchedulerSnapshot };
   // 设置 → 模型（daemon 的 model-settings.ts，2026-10-29）。Lead 的会话建好以后才有（换大脑的模型要用会话）。
   modelSettings?: ModelSettingsService;
+  // 设置 → 模型的订阅（daemon 的 subscriptions.ts，模型配置方案 C 的 S2）。Lead 的会话建好以后才有。
+  subscriptions?: SubscriptionsService;
   // 设置 → 记忆的 Hindsight 部分（daemon 的 memory-controller.ts，2026-10-29）。daemon 托管记忆服务时才有。
   memorySettings?: MemorySettingsService;
   // Lead 的笔记记忆（daemon 的 NotesMemory：写 notes，再交给 Hindsight）。常驻偏好的改、删、撤销经过它。
@@ -204,6 +208,8 @@ export interface ModelSettingsSummary {
   brain: { chain: string[]; current: string; providers: string[] };
   fast: { chain: string[]; models: Array<{ id: string; name: string; host: string | null; keySet: boolean }>; llmFallback: string | null };
   maxBackups: number;
+  // 订阅的账号（SubscriptionsService.summary）。订阅服务没起来时没有。
+  subscriptions?: SubscriptionsSummary;
 }
 
 export interface ModelSettingsChange {
@@ -253,6 +259,34 @@ export interface ModelSettingsService {
   removeFastModel(id: string): Promise<ModelSettingsChange>;
   setFastChain(request: SetFastChainRequest): Promise<ModelSettingsChange>;
   testFastModel(id: string): Promise<MemoryTestResponse>;
+}
+
+// 设置 → 模型的订阅（protocol 的 model-subscriptions.ts）：GitHub Copilot 和 Codex 的账号、登录、换号方式。
+// 校验不过时抛 UiActionError。
+export interface SubscriptionsSummary {
+  // 每种订阅：登录了的账号（provider 名和名字）和换号方式。不查额度。
+  subscriptions: Array<{ base: string; accounts: Array<{ provider: string; label: string | null; loggedIn: boolean }>; strategy: string }>;
+  // 正在进行的登录。
+  logins: Array<{ id: string; provider: string; state: string }>;
+}
+
+export interface SubscriptionsChange {
+  summary: string;
+  note?: string | null;
+  // 开始登录时：这次登录的编号，页面据此显示登录地址或者设备码。
+  login?: string;
+}
+
+export interface SubscriptionsService {
+  summary(): SubscriptionsSummary;
+  get(): Promise<SubscriptionsDto>;
+  startLogin(request: StartSubscriptionLoginRequest): Promise<SubscriptionsChange>;
+  submitLoginCode(request: SubmitSubscriptionLoginCodeRequest): Promise<SubscriptionsChange>;
+  cancelLogin(request: CancelSubscriptionLoginRequest): Promise<SubscriptionsChange>;
+  removeAccount(request: RemoveSubscriptionAccountRequest): Promise<SubscriptionsChange>;
+  renameAccount(request: RenameSubscriptionAccountRequest): Promise<SubscriptionsChange>;
+  setStrategy(request: SetSubscriptionStrategyRequest): Promise<SubscriptionsChange>;
+  setSchedule(request: SetSubscriptionScheduleRequest): Promise<SubscriptionsChange>;
 }
 
 // Lead 的模型和推理强度（protocol 的 lead-models.ts）。会话输入框和 Lead 都经过操作层调它的 switch。

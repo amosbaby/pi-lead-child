@@ -109,6 +109,9 @@ export class LeadSessionSlot {
       ...forward("interruptStep"),
       ...forward("refreshProviders"),
       ...forward("brainReady"),
+      ...forward("currentModel"),
+      ...forward("refreshModelAuth"),
+      ...forward("forgetProvider"),
     } as LeadEngineFactoryResult;
   }
 

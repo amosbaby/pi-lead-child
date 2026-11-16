@@ -12,6 +12,7 @@ import { Type, type Static, type TProperties, type TSchema } from "typebox";
 import { DEFAULT_LOCALE, defineMessages, type Locale } from "./i18n.ts";
 import { FAST_MODEL_AUTH_HEADER_PATTERN } from "./fast-model-auth.ts";
 import { LeadModelChoiceSchema } from "./lead-models.ts";
+import { SubscriptionsDtoSchema } from "./model-subscriptions.ts";
 
 const StrictObject = <T extends TProperties>(properties: T) =>
   Type.Object(properties, { additionalProperties: false });
@@ -61,6 +62,10 @@ export const ModelCapabilitySourceSchema = Type.Union([
   Type.Literal("auto"), Type.Literal("detailed"), Type.Literal("plain"), Type.Literal("config"),
 ]);
 export type ModelCapabilitySource = Static<typeof ModelCapabilitySourceSchema>;
+
+// 「添加模型」的 API key 种类（模型配置方案 C，2026-11-16，packages/lead 的 LEAD_PROVIDER_PRESETS）。只给界面显示用。
+export const ModelProviderPresetSchema = Type.Union([Type.Literal("custom"), Type.Literal("vibeproxy"), Type.Literal("magpie")]);
+export type ModelProviderPreset = Static<typeof ModelProviderPresetSchema>;
 
 // The context window Lead assumes for a model whose window nobody knows (config.json, the provider's catalog and pi's
 // built-in catalog do not list it). The settings page shows it next to such a model.
@@ -113,6 +118,8 @@ export const ModelProviderSchema = StrictObject({
   capabilities: Type.Optional(ModelCapabilitySourceSchema),
   // 读到了什么目录：detailed 是 CLIProxyAPI 的详细目录，plain 是普通的 OpenAI 目录，none 是没读到（只有 config 里写的）。
   catalog: Type.Optional(Type.Union([Type.Literal("detailed"), Type.Literal("plain"), Type.Literal("none")])),
+  // 添加时选的种类。null：config.json 没写（旧的服务商、手写的），界面自己按 accountPrefix 和模型 id 推断，不改 config。
+  preset: Type.Optional(Nullable(ModelProviderPresetSchema)),
 });
 export type ModelProvider = Static<typeof ModelProviderSchema>;
 
@@ -155,6 +162,8 @@ export const ModelSettingsDtoSchema = StrictObject({
   brain: BrainSettingsSchema,
   fast: FastSettingsSchema,
   maxBackups: Type.Integer({ minimum: 0, maximum: 8 }),
+  // 订阅（方案 C 的 S2，model-subscriptions.ts）。可选，只在 grouping=1 时给：旧版 Companion 的严格 schema 不认它。
+  subscriptions: Type.Optional(SubscriptionsDtoSchema),
 });
 export type ModelSettingsDto = Static<typeof ModelSettingsDtoSchema>;
 
@@ -165,13 +174,13 @@ export type ModelSettingsResponse = Static<typeof ModelSettingsResponseSchema>;
 export const MODEL_SETTINGS_GROUPING_QUERY = "grouping=1";
 
 /** 去掉分组的字段和直觉的鉴权头：给不带 grouping=1 的客户端（旧版 Companion 的严格 schema 不认这些字段）。 */
-export function withoutModelGrouping(dto: ModelSettingsDto): ModelSettingsDto {
+export function withoutModelGrouping({ subscriptions: _subscriptions, ...dto }: ModelSettingsDto): ModelSettingsDto {
   return {
     ...dto,
     fast: { ...dto.fast, models: dto.fast.models.map(({ authHeader: _h, ...model }) => model) },
     brain: {
       ...dto.brain,
-      providers: dto.brain.providers.map(({ accountPrefix: _a, accountPrefixActive: _b, capabilities: _c, catalog: _d, ...provider }) => ({
+      providers: dto.brain.providers.map(({ accountPrefix: _a, accountPrefixActive: _b, capabilities: _c, catalog: _d, preset: _p, ...provider }) => ({
         ...provider,
         models: provider.models.map(({ group: _g, source: _s, ...model }) => model),
       })),
@@ -195,6 +204,8 @@ export const SaveModelProviderRequestSchema = StrictObject({
   apiKey: Type.Optional(Nullable(ApiKeySchema)),
   accountPrefix: Type.Optional(Nullable(Type.Boolean())),
   capabilities: Type.Optional(ModelCapabilitySourceSchema),
+  // 添加时选的种类（方案 C）。不给时不变。旧版 daemon 的严格 schema 不认它：页面只在 daemon 给了 preset 时才发。
+  preset: Type.Optional(ModelProviderPresetSchema),
 });
 export type SaveModelProviderRequest = Static<typeof SaveModelProviderRequestSchema>;
 

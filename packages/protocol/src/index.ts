@@ -1325,6 +1325,7 @@ export * from "./chat-images.ts";
 export * from "./ticket-attachments.ts";
 export * from "./lead-models.ts";
 export * from "./model-settings.ts";
+export * from "./model-subscriptions.ts";
 export * from "./model-groups.ts";
 export * from "./ui-actions.ts";
 export * from "./rule-change-confirmations.ts";
