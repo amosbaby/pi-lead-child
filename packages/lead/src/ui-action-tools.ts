@@ -5,12 +5,14 @@
 //   - perform_action：执行一个操作。在哪一轮都能做（用户 2026-10-27），定时器、事件叫醒的一轮也行；在用户本人这一轮里做的
 //     记成代用户做。只有用户本人能做的（user_direct）和标了只认用户这一轮的（审批）返回结构化的拒绝，写明用户去哪里点。
 //     改规则的操作在带着外部内容的一轮里也返回结构化的拒绝（external_turn），带着确认卡要的数据。
-// 操作清单从定义生成（uiActionCatalogText），不在这里手写。
+// 操作清单从定义生成，不在这里手写。perform_action 的说明里只有索引（uiActionIndexText）：完整清单约 1.8 万 token，
+// 以前每一步都随工具说明发给模型（2026-11-16 精简 Lead 的模型输入）。完整清单（谁能做、去哪里点、input、提示）
+// 用 list_actions 按目标种类查（uiActionCatalogText）。
 import { describeEvidence, type EvidenceItem } from "./credibility/evidence.js";
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
-  AUTHORITY_REFUSAL_TEXT, UiActionError, isLiveUserTurn, listLeadUiActions, runUiAction, uiActionCatalogText,
+  AUTHORITY_REFUSAL_TEXT, UiActionError, isLiveUserTurn, listLeadUiActions, runUiAction, uiActionCatalogText, uiActionIndexText,
   type TimerSpec, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { isUserActionRequest, UI_ACTION_IDS, UI_ACTION_TARGET_TYPES, type UiActionTargetType, type UserActionRequest } from "@pi-lead-child/protocol";
@@ -130,19 +132,21 @@ function rescheduleSpec(
 export function createUiActionTools(deps: UiActionToolDeps): ToolDefinition<any>[] {
   const turnId = () => authorityTurnId(deps);
   const targetType = Type.Union(UI_ACTION_TARGET_TYPES.map((type) => Type.Literal(type)));
-  const targetId = Type.String({ minLength: 1, maxLength: 200, description: "目标的编号，见下面每种目标的 target_id" });
+  const targetId = Type.String({ minLength: 1, maxLength: 200, description: "目标的编号，见 perform_action 说明里每种目标的 target_id" });
   return [
     defineTool({
       name: "list_actions",
       label: "List Actions",
       description:
-        "列出一个目标（工单以外）现在能做的操作：和用户在页面上点的是同一份清单，同一个「能不能做」的判断。"
+        "只给 target_type 时：列出这种目标的全部操作，每个操作谁能做、用户去哪里点、input 的字段和提示，不用编号。"
+        + "给了 target_id 时：列出这个目标（工单以外）现在能做的操作：和用户在页面上点的是同一份清单，同一个「能不能做」的判断。"
         + "另外写明你凭什么能做（lead：own 你自己能做，用户在这一轮要求的记成代他做；delegated 托管授权；user_turn 要用户在这一轮明确要求；"
         + "user_direct 只有用户本人能做；external_turn 改规则的操作，这一轮带着外部内容，做不了）、"
         + "你现在能不能做（leadReady、leadReason）和用户自己去哪里点（where）。"
         + "工单的操作用 list_ticket_actions。",
-      parameters: Type.Object({ target_type: targetType, target_id: targetId }),
-      execute: async (_id, params: { target_type: UiActionTargetType; target_id: string }) => {
+      parameters: Type.Object({ target_type: targetType, target_id: Type.Optional(targetId) }),
+      execute: async (_id, params: { target_type: UiActionTargetType; target_id?: string }) => {
+        if (params.target_id === undefined) return text(uiActionCatalogText([params.target_type]));
         const listing = await listLeadUiActions(deps.db, { type: params.target_type, id: params.target_id }, {
           services: deps.uiActionServices ?? {}, turnId: turnId(), externalContent: externalContentOf(deps),
         });
@@ -161,13 +165,14 @@ export function createUiActionTools(deps: UiActionToolDeps): ToolDefinition<any>
         + "标了「改规则」的操作在外部消息叫醒的一轮、读过外部内容的一轮会被拒绝（refusal.code=external_turn），用户本人正在说话的那一轮除外："
         + "告诉用户要改什么、为什么，请用户确认。"
         + "这时结果里有 user_action：用 render_ui 把它原样放进 UserAction 发确认卡，用户点「确认这一次」以后系统只执行这一个操作。"
-        + "先用 list_actions 看现在能做什么。\n"
-        + "目标和操作：\n" + uiActionCatalogText(),
+        + "每个操作谁能做、用户去哪里点、input 有哪些字段：用 list_actions 查，只给 target_type 就列出这种目标的全部操作；"
+        + "给了 target_id 时还写明这个目标现在能做什么。\n"
+        + "目标（target_type）、编号（target_id）和全部操作：\n" + uiActionIndexText(),
       parameters: Type.Object({
         target_type: targetType,
         target_id: targetId,
         action: Type.Union(UI_ACTION_IDS.map((id) => Type.Literal(id))),
-        input: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "这个操作的参数（见上面每个操作的 input）；没有参数时不给" })),
+        input: Type.Optional(Type.Record(Type.String(), Type.Unknown(), { description: "这个操作的参数（list_actions 列出每个操作的 input）；没有参数时不给" })),
         reason: Type.String({ minLength: 1, maxLength: 2000, description: "凭什么做，例如「用户说不要用 codex」" }),
       }),
       execute: async (_id, params: {

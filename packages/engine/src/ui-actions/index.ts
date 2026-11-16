@@ -535,9 +535,12 @@ function inputText(schema: TSchema): string {
   return fields.length ? `{${fields.join(", ")}}` : "{}";
 }
 
-/** perform_action 工具说明里的操作清单。从定义生成，不手写。 */
-export function uiActionCatalogText(): string {
-  return UI_ACTION_TARGET_TYPES.map((type) => {
+/**
+ * 操作的完整清单：每个操作谁能做、用户去哪里点、input、提示。从定义生成，不手写。
+ * 给了 types 时只列这几种目标（list_actions 只给 target_type 时用）。
+ */
+export function uiActionCatalogText(types: readonly UiActionTargetType[] = UI_ACTION_TARGET_TYPES): string {
+  return types.map((type) => {
     const kind = UI_ACTION_TARGETS[type];
     const lines = Object.values(UI_ACTIONS[type]).map((definition) => {
       const schema = (UI_ACTION_INPUT_SCHEMAS[type] as Record<string, TSchema>)[definition.id]!;
@@ -557,5 +560,16 @@ export function uiActionCatalogText(): string {
       return `  - ${definition.id}（${definition.label}）：${who}。${where}${rules}input：${inputText(schema)}。${definition.hint}`;
     });
     return `- ${type}（${kind.label}，target_id 是${kind.idHint}）：\n${lines.join("\n")}`;
+  }).join("\n");
+}
+
+/**
+ * perform_action 工具说明里的索引：每种目标一行，写它的编号怎么填和全部操作名。每个操作的细节用 list_actions 查
+ * （uiActionCatalogText）。完整清单约 1.8 万 token，每一步都随工具说明发给模型（2026-11-16 精简 Lead 的模型输入）。
+ */
+export function uiActionIndexText(): string {
+  return UI_ACTION_TARGET_TYPES.map((type) => {
+    const kind = UI_ACTION_TARGETS[type];
+    return `- ${type}（${kind.label}，target_id 是${kind.idHint}）：${Object.keys(UI_ACTIONS[type]).join("、")}`;
   }).join("\n");
 }

@@ -4,6 +4,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { join } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { createLoopbackBinding, createTurn, getBinding, openDb, type Db } from "@pi-lead-child/store";
+import { UI_ACTIONS } from "@pi-lead-child/engine";
+import { UI_ACTION_TARGET_TYPES } from "@pi-lead-child/protocol";
 import { createLeadTools } from "../src/tools.js";
 import { createUiActionTools } from "../src/ui-action-tools.js";
 import { LEAD_SYSTEM_PROMPT } from "../src/prompt.js";
@@ -24,8 +26,30 @@ describe("list_actions and perform_action", () => {
     const names = createLeadTools({ db, dbPath: join(dir, "plc.db"), dataDir: dir }).map((candidate: any) => candidate.name);
     expect(names).toEqual(expect.arrayContaining(["list_actions", "perform_action"]));
     expect(names).not.toContain("set_runtime_enabled");
-    expect(tool("perform_action").description).toContain("revoke（作废设备凭证）：只有用户本人能做");
     expect(LEAD_SYSTEM_PROMPT).toContain("perform_action(target_type='runtime', action='disable')");
+  });
+
+  // 2026-11-16 精简 Lead 的模型输入：整个操作目录（约 1.8 万 token）每一步都随 perform_action 的说明发给模型。
+  // 现在说明里只有一份索引（每种目标、它的编号写法、全部操作名），细节用 list_actions 按目标种类查。
+  it("lists every target type and every action in a short index, without the full catalog", () => {
+    const description: string = tool("perform_action").description;
+    expect(description.length).toBeLessThan(6_000);
+    expect(description).not.toContain("revoke（作废设备凭证）：只有用户本人能做");
+    for (const type of UI_ACTION_TARGET_TYPES) {
+      const line = description.split("\n").find((candidate) => candidate.startsWith(`- ${type}（`));
+      expect(line, type).toBeDefined();
+      for (const id of Object.keys(UI_ACTIONS[type])) expect(line, `${type}.${id}`).toMatch(new RegExp(`[：、]${id}(、|$)`));
+    }
+    expect(description).toContain("list_actions");
+  });
+
+  it("gives the full catalog of a target type, with each action's input, when list_actions has no target_id", async () => {
+    const listed = (await tool("list_actions").execute("t", { target_type: "device" })).content[0].text as string;
+    expect(listed).toContain("revoke（作废设备凭证）：只有用户本人能做");
+    for (const type of UI_ACTION_TARGET_TYPES) {
+      const section = (await tool("list_actions").execute("t", { target_type: type })).content[0].text as string;
+      for (const id of Object.keys(UI_ACTIONS[type])) expect(section, `${type}.${id}`).toMatch(new RegExp(`- ${id}（[^\n]*input：`));
+    }
   });
 
   it("returns a structured refusal for a user_direct action, even in the user's own turn", async () => {
