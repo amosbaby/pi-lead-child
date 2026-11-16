@@ -143,13 +143,15 @@ describe("the stage timing of a real Lead session", () => {
 
     const steps = logs.filter((line) => line.startsWith("[sched] step "));
     expect(steps.length).toBeGreaterThanOrEqual(2);
-    expect(steps[0]).toMatch(new RegExp(`^\\[sched\\] step unit=unit_\\w+ run=\\d+ step=1 turn=${turnId} A=\\d+ B1=\\d+ B2=\\d+ C=\\d+ stream=\\d+ tools=ls:\\d+ total=\\d+$`));
+    expect(steps[0]).toMatch(new RegExp(`^\\[sched\\] step unit=unit_\\w+ run=\\d+ step=1 turn=${turnId} A=\\d+ B1=\\d+ B2=\\d+ C=\\d+ stream=\\d+ tools=ls:\\d+ total=\\d+ in=\\d+ cr=\\d+ cw=\\d+ out=\\d+$`));
     const unitId = /unit=(unit_\w+)/u.exec(steps[0]!)![1]!;
     const sessionFiles = readdirSync(join(dir, "lead-sessions"), { recursive: true }).map(String).filter((name) => name.endsWith(".jsonl"));
     const entries = sessionFiles.flatMap((name) => readFileSync(join(dir, "lead-sessions", name), "utf8").split("\n").filter(Boolean))
       .map((line) => JSON.parse(line) as { type: string; customType?: string; data?: { kind?: string; unitId?: string } })
       .filter((entry) => entry.customType === "scheduler");
     const stepEntries = entries.filter((entry) => entry.data?.kind === "step");
+    // 每一步的 token 用量（精简 Lead 的模型输入时用它量效果）。
+    expect(stepEntries.every((entry) => typeof (entry.data as { usage?: { input?: unknown } }).usage?.input === "number")).toBe(true);
     expect(stepEntries.length).toBe(steps.length);
     expect(stepEntries.every((entry) => entry.data?.unitId === unitId)).toBe(true);
     expect(entries.filter((entry) => entry.data?.unitId === unitId).map((entry) => entry.data?.kind))
