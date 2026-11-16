@@ -8,7 +8,17 @@
 //    `lead.providers.<name>.promptCacheKey: false`. When a provider answers with an error that names the field, the
 //    extension stops sending it to that provider until the daemon restarts.
 //
-// 2. The request prefix of the last model call (RequestPrefixRecorder). Compaction (compaction-chunks.ts) sends its
+// 2. Long cache retention, off by default (cacheRetentionExtension). With `lead.providers.<name>.cacheRetention: "long"`
+//    Lead asks that provider to keep its prompt cache longer: `ttl: "1h"` on every Anthropic-style cache breakpoint
+//    (cache_control), and `prompt_cache_retention: "24h"` on OpenAI-compatible endpoints. This is what pi-ai sends with
+//    cacheRetention "long", but pi's session passes no retention per request, and the env switch PI_CACHE_RETENTION
+//    applies to every provider at once. The 1-hour tier costs 2× to write instead of 1.25×: in Lead's data from
+//    11-10 to 11-14 it saves about half on quiet days and costs about 30% more on the busiest day, so it stays off until
+//    the user turns it on for a provider. When the provider answers with an error that names one of the fields, the
+//    extension stops changing requests to that provider until the daemon restarts. Compaction requests
+//    (compaction-chunks.ts) keep the provider's default retention.
+//
+// 3. The request prefix of the last model call (RequestPrefixRecorder). Compaction (compaction-chunks.ts) sends its
 //    summary request on top of this prefix instead of a new system prompt and a serialized copy of the history, so the
 //    provider can serve the whole prefix from its cache.
 import { convertToLlm, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -71,6 +81,91 @@ export function promptCacheKeyExtension(options: PromptCacheKeyOptions): Extensi
       if (!isPromptCacheKeyRejection(message.errorMessage) || rejected.has(provider)) return undefined;
       rejected.add(provider);
       options.log?.(`[lead] prompt cache: ${provider} rejected prompt_cache_key; no longer sending it to this provider`);
+      return undefined;
+    });
+  };
+}
+
+const LONG_TTL = "1h";
+const LONG_OPENAI_RETENTION = "24h";
+// APIs whose request body takes a top-level prompt_cache_retention.
+const PROMPT_CACHE_RETENTION_APIS = new Set(["openai-completions", "openai-responses"]);
+// APIs that can carry Anthropic-style cache_control breakpoints (OpenAI-compatible gateways in front of Claude may).
+const CACHE_CONTROL_APIS = new Set(["anthropic-messages", "openai-completions"]);
+
+function withLongTtl(value: unknown): { value: unknown; changed: boolean } {
+  if (!isRecord(value) || !isRecord(value.cache_control)) return { value, changed: false };
+  const control = value.cache_control;
+  if (control.type !== "ephemeral" || control.ttl !== undefined) return { value, changed: false };
+  return { value: { ...value, cache_control: { ...control, ttl: LONG_TTL } }, changed: true };
+}
+
+function withLongTtls(list: unknown): { value: unknown; changed: boolean } {
+  if (!Array.isArray(list)) return { value: list, changed: false };
+  let changed = false;
+  const value = list.map((entry) => {
+    let next = withLongTtl(entry);
+    // Content blocks of a message carry the breakpoints too.
+    if (isRecord(next.value) && Array.isArray(next.value.content)) {
+      const blocks = withLongTtls(next.value.content);
+      if (blocks.changed) next = { value: { ...next.value, content: blocks.value }, changed: true };
+    }
+    changed ||= next.changed;
+    return next.value;
+  });
+  return { value, changed };
+}
+
+/**
+ * Returns the payload with long cache retention, or undefined to keep the payload as it is: the API takes neither field,
+ * the payload already sets a retention, or the payload is for another model. Only the cache breakpoints that pi already
+ * placed get a TTL; no new breakpoint is added.
+ */
+export function withLongCacheRetention(payload: unknown, model: Pick<ModelRef, "api" | "id">): unknown {
+  if (!isRecord(payload)) return undefined;
+  if (typeof payload.model === "string" && payload.model !== model.id) return undefined;
+  let next: Record<string, unknown> = payload;
+  let changed = false;
+  if (CACHE_CONTROL_APIS.has(model.api)) {
+    for (const key of ["system", "tools", "messages"] as const) {
+      const result = withLongTtls(next[key]);
+      if (result.changed) { next = { ...next, [key]: result.value }; changed = true; }
+    }
+  }
+  if (PROMPT_CACHE_RETENTION_APIS.has(model.api) && payload.prompt_cache_retention === undefined) {
+    next = { ...next, prompt_cache_retention: LONG_OPENAI_RETENTION };
+    changed = true;
+  }
+  return changed ? next : undefined;
+}
+
+/** True when a provider error is about the retention fields (the provider does not accept them). */
+export function isCacheRetentionRejection(errorMessage: string | undefined): boolean {
+  return typeof errorMessage === "string" && /prompt_cache_retention|cache_control\.ttl|\bttl\b/i.test(errorMessage);
+}
+
+export interface CacheRetentionOptions {
+  // The provider's setting (lead.providers.<name>.cacheRetention). Only "long" changes requests.
+  retention: (provider: string) => "short" | "long";
+  log?: (line: string) => void;
+}
+
+/** pi extension: asks providers set to long retention to keep Lead's prompt cache longer. */
+export function cacheRetentionExtension(options: CacheRetentionOptions): ExtensionFactory {
+  const rejected = new Set<string>();
+  return (pi) => {
+    pi.on("before_provider_request", (event, ctx) => {
+      const model = ctx.model;
+      if (!model || rejected.has(model.provider) || options.retention(model.provider) !== "long") return undefined;
+      return withLongCacheRetention(event.payload, model);
+    });
+    pi.on("message_end", (event, ctx) => {
+      const message = event.message as { role?: string; stopReason?: string; errorMessage?: string };
+      const provider = ctx.model?.provider;
+      if (!provider || message.role !== "assistant" || message.stopReason !== "error") return undefined;
+      if (rejected.has(provider) || options.retention(provider) !== "long" || !isCacheRetentionRejection(message.errorMessage)) return undefined;
+      rejected.add(provider);
+      options.log?.(`[lead] prompt cache: ${provider} rejected long cache retention; using the provider's default retention`);
       return undefined;
     });
   };

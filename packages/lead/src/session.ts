@@ -45,12 +45,13 @@ import {
   loadLeadModelConfig,
   parseModelName,
   promptCacheKeyEnabled,
+  cacheRetentionOf,
   registerLeadProviders,
   resolveLeadModel,
   selectedLeadModelSpec,
   type LeadModelConfig,
 } from "./model-config.js";
-import { promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
+import { cacheRetentionExtension, promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
 import { configuredLeadModelSpecs, createLeadSmartModel, isValidSmartModelSpec, selectSmartModelSpec } from "./smart-model.js";
 import type { ModelHoldPort } from "./model-hold.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
@@ -522,6 +523,11 @@ export async function createLeadSession(opts: {
       // Prompt cache (prompt-cache.ts): the session's prompt_cache_key for OpenAI-compatible endpoints, and the record of
       // the last request's prefix for compaction.
       { name: "plc-prompt-cache-key", hidden: true, factory: promptCacheKeyExtension({ enabled: sendPromptCacheKey, log: (line) => console.error(line) }) },
+      // Long cache retention for providers whose config asks for it (off by default; prompt-cache.ts).
+      {
+        name: "plc-cache-retention", hidden: true,
+        factory: cacheRetentionExtension({ retention: (provider) => cacheRetentionOf(providerSettings, provider), log: (line) => console.error(line) }),
+      },
       { name: "plc-request-prefix", hidden: true, factory: requestPrefix.extension() },
       // 系统提示词里不写用户目录的完整路径（home-paths.ts，用户 2026-10-30）。排在最后：别的扩展改完提示词以后再换。
       {

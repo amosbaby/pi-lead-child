@@ -5,6 +5,8 @@
 //     last request, then one user message that asks for the summary. Before, it sent a new system prompt and the
 //     history as one serialized text, so no provider could serve any of it from cache.
 //   - promptCacheKey: false in the provider config turns the key off.
+//   - cacheRetention: "long" in the provider config asks for extended retention; after the provider rejects the field,
+//     Lead stops sending it (the default sends nothing).
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -125,6 +127,25 @@ describe("Lead prompt cache against an OpenAI-compatible gateway", () => {
       const compaction = saved.find((entry) => entry.type === "compaction");
       expect(compaction?.summary).toContain("summary on the prefix");
       expect(compaction?.details?.prefix).toBe(true);
+    } finally {
+      session.dispose();
+      db.close();
+    }
+  }, 60_000);
+
+  it("asks for long retention only when the provider config says long, and stops after the provider rejects it", async () => {
+    const stub = await gatewayStub();
+    const dataDir = tempDir("plc-lead-cache-retention-");
+    writeConfig(dataDir, stub.baseUrl, { cacheRetention: "long" });
+    const db = openDb(join(dataDir, "plc.db"));
+    const lead = await createLeadSession({ dataDir, dbPath: join(dataDir, "plc.db"), db });
+    const session = lead.session as unknown as TestSession;
+    try {
+      await session.prompt("hello").catch(() => {});
+      await session.prompt("again").catch(() => {});
+      expect(stub.bodies[0]!.prompt_cache_retention).toBe("24h");
+      expect(stub.bodies.at(-1)).not.toHaveProperty("prompt_cache_retention");
+      expect(stub.bodies.at(-1)!.prompt_cache_key).toBeTruthy();
     } finally {
       session.dispose();
       db.close();

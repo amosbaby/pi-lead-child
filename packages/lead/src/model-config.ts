@@ -56,7 +56,15 @@ export interface LeadProviderConfig {
   // Send the Lead session id as prompt_cache_key to this OpenAI-compatible endpoint (prompt-cache.ts). Default: on.
   // Set it to false when the endpoint rejects the field.
   promptCacheKey?: boolean;
+  // How long the provider keeps Lead's prompt cache (prompt-cache.ts, cacheRetentionExtension). Default: short, the
+  // provider's own default (5 minutes on Anthropic). long asks for 1 hour on Anthropic-style cache breakpoints and
+  // for extended retention (prompt_cache_retention: "24h") on OpenAI-compatible endpoints. The 1-hour tier costs 2×
+  // to write instead of 1.25×, so it pays only when Lead often waits 5 to 60 minutes between calls.
+  cacheRetention?: LeadCacheRetention;
 }
+
+export const LEAD_CACHE_RETENTIONS = ["short", "long"] as const;
+export type LeadCacheRetention = (typeof LEAD_CACHE_RETENTIONS)[number];
 
 export interface LeadModelConfig {
   providers: Record<string, LeadProviderConfig>;
@@ -662,7 +670,21 @@ function normalizeLeadProvider(name: string, raw: unknown): LeadProviderConfig {
     ...(normalizeAccountPrefix(name, value.accountPrefix)),
     ...(normalizeCapabilities(name, value.capabilities)),
     ...(normalizePromptCacheKey(name, value.promptCacheKey)),
+    ...(normalizeCacheRetention(name, value.cacheRetention)),
   };
+}
+
+function normalizeCacheRetention(name: string, raw: unknown): { cacheRetention?: LeadCacheRetention } {
+  if (raw === undefined || raw === null) return {};
+  if (typeof raw !== "string" || !(LEAD_CACHE_RETENTIONS as readonly string[]).includes(raw)) {
+    throw new Error(`lead.providers.${name}.cacheRetention 仅支持 ${LEAD_CACHE_RETENTIONS.join(", ")}`);
+  }
+  return { cacheRetention: raw as LeadCacheRetention };
+}
+
+/** How long this provider keeps Lead's prompt cache: short (the provider's default) unless the config says long. */
+export function cacheRetentionOf(config: Pick<LeadModelConfig, "providers">, provider: string): LeadCacheRetention {
+  return config.providers[provider]?.cacheRetention === "long" ? "long" : "short";
 }
 
 function normalizePromptCacheKey(name: string, raw: unknown): { promptCacheKey?: boolean } {
