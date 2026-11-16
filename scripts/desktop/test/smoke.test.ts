@@ -118,7 +118,7 @@ if (process.argv[2] !== "selfcheck") process.exit(2);
 const ok = mode !== "selfcheck-fails";
 console.log(JSON.stringify({ ok, checks: [
   { name: "better-sqlite3", ok: true, detail: "loaded" },
-  { name: "runtime assets", ok, detail: ok ? "8 found in dist" : "missing: ticket-tools.js" },
+  { name: "runtime assets", ok, detail: ok ? "9 found in dist" : "missing: ticket-tools.js" },
 ] }));
 process.exit(ok ? 0 : 1);
 `;
