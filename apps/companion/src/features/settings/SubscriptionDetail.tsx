@@ -246,11 +246,14 @@ function AccountCard({ account, subscription, active, scheduled, locale, onRelog
       ) : null}
       {mode === 'remove' ? (
         // 原地确认（P5.3）：确认行换掉原来的操作。
+        // 换行的行里文字不写 flex（nativeFlexWrap.test.ts：Android 上会被挤成一个字宽）。按钮用 ml="auto" 推到行尾。
         <Row testID={`subscription-account-remove-confirm-${provider}`} items="center" gap="actions" flexWrap="wrap">
-          <Text flex={1} minW={0} size="body" tone="secondary">{m.removeConfirm(name)}</Text>
-          <Button testID={`subscription-account-remove-yes-${provider}`} label={busy ? m.removing : m.removeYes} variant="outline" tone="danger" size="sm"
-            disabled={busy} onPress={() => void remove()} />
-          <Button label={m.cancel} variant="ghost" tone="neutral" size="sm" disabled={busy} onPress={() => setMode('view')} />
+          <Text size="body" tone="secondary">{m.removeConfirm(name)}</Text>
+          <Row ml="auto" items="center" gap="actions">
+            <Button testID={`subscription-account-remove-yes-${provider}`} label={busy ? m.removing : m.removeYes} variant="outline" tone="danger" size="sm"
+              disabled={busy} onPress={() => void remove()} />
+            <Button label={m.cancel} variant="ghost" tone="neutral" size="sm" disabled={busy} onPress={() => setMode('view')} />
+          </Row>
         </Row>
       ) : null}
       {message ? (
