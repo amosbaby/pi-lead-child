@@ -7,7 +7,8 @@ import { intlLocale, useLocale, type Locale } from '@/i18n';
 import { useCompanionRuntime, useControlPlaneStore } from '../../state/CompanionStateProvider';
 import { useLeadName } from '../../state/hooks';
 import { MarkdownMessage } from './MarkdownMessage';
-import { ReminderCard as ReminderObjectCard } from './ReminderCard';
+import { ReminderCard as ReminderObjectCard, ReminderPreview } from './ReminderCard';
+import { useOpenAgenda } from './useOpenAgenda';
 import { reminderMessages } from './reminder.messages';
 
 // 会话里的到点卡（工单 07，spec D10、D11）：一次到点一张，从到点到确认都在原地更新，位置是到点的时间。
@@ -78,11 +79,30 @@ export function ReminderFireCardView({
   const leadWords = leadText?.trim() || card.lead?.reason.trim() || null;
   const locale = useLocale();
   const m = reminderMessages(locale);
+  const openAgenda = useOpenAgenda();
   if (card.state !== 'fired') {
+    // 改了时间的提醒还在等：点开看改到的时刻。确认、取消了的看什么时候结束的。
+    const stage = card.state === 'acked' ? 'acked' as const : card.state === 'cancelled' ? 'cancelled' as const : null;
     return (
       <Column testID={`reminder-fire-${card.reminderId}`} w="100%" gap="card-row">
-        {/* 结束了的提醒是一行系统信息（主题 11.9）：和别的系统信息行同一个格子，图标列对齐。 */}
-        <SystemLine testID="reminder-fire-line" icon={card.state === 'acked' ? 'check' : 'clock'} text={reminderClosedLine(card, locale)} />
+        {/* 结束了的提醒是一行系统信息（主题 11.9）：和别的系统信息行同一个格子，图标列对齐。
+            行尾的展开箭头（结束行 11.5、P9.4）：点开在原位置撑开，看那条提醒（2026-11-16 用户）。 */}
+        <SystemLine
+          testID="reminder-fire-line"
+          icon={card.state === 'acked' ? 'check' : 'clock'}
+          text={reminderClosedLine(card, locale)}
+          detailsLabel={m.previewLabel}
+          details={(close) => (
+            <ReminderPreview
+              reminderId={card.reminderId}
+              title={card.title}
+              remindAt={card.state === 'snoozed' ? card.nextAt ?? card.remindAt : card.remindAt}
+              stage={stage}
+              changedAt={card.closedAt}
+              onOpenAgenda={() => { close(); openAgenda(); }}
+            />
+          )}
+        />
         {leadWords ? <LeadWords text={leadWords} leadName={leadName} /> : null}
       </Column>
     );

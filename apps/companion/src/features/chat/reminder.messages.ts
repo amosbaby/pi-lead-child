@@ -17,6 +17,9 @@ export const reminderMessages = defineMessages({
     tomorrow9: 'Tomorrow 09:00',
     nextMonday9: 'Next Monday 09:00',
     reminder: 'Reminder',
+    // 结束了的到点卡行尾展开箭头的名称：「Show reminder」（SystemLine 的 detailsLabel，英文小写）。
+    previewLabel: 'reminder',
+    openInAgenda: 'Open in agenda',
     was: (weekday: string, day: number) => `Was ${weekday} ${day}`,
     ackedAt: (time: string) => `Acknowledged at ${time}`,
     acked: 'Acknowledged',
@@ -57,6 +60,8 @@ export const reminderMessages = defineMessages({
     tomorrow9: '明天 09:00',
     nextMonday9: '下周一 09:00',
     reminder: '提醒',
+    previewLabel: '提醒',
+    openInAgenda: '在日程里看',
     was: (weekday, day) => `原 ${weekday} ${day}`,
     ackedAt: (time) => `${time} 已确认`,
     acked: '已确认',

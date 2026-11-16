@@ -1,4 +1,4 @@
-import { Box, Card, Column, MediaRow, Row, Text, Tile, type DataTone } from '@pi-lead-child/components';
+import { Box, Button, Card, Column, MediaRow, Row, Text, Tile, type DataTone } from '@pi-lead-child/components';
 import type { ReminderLevel, TicketStatus } from '@pi-lead-child/protocol';
 import { useEffect, useState } from 'react';
 
@@ -152,6 +152,32 @@ export function ReminderCard({ view }: { view: ReminderCardView }) {
         )}
       />
     </Card>
+  );
+}
+
+// 结束了的到点卡点开以后看的提醒（2026-11-16 用户：「确认后就不见了，也没法点击预览了」）。
+// 和到点时点开的那一块一样：日历页、标题、下面一行状态（什么时候确认、取消，或者改到的时刻）；没有改时间和取消，
+// 结束了的事不再改（ReminderCard 的 5、6）。最下面「在日程里看」，和结束行 EndRow 点了去的地方一样。
+export function ReminderPreview({ reminderId, title, remindAt, stage, changedAt, onOpenAgenda }: {
+  reminderId: number;
+  title: string;
+  remindAt: string | null;
+  // acked、cancelled；改了时间时是 null（还在等），remindAt 给改到的时刻。
+  stage: TicketStatus | null;
+  changedAt: string | null;
+  onOpenAgenda: () => void;
+}) {
+  const m = reminderMessages(useLocale());
+  const at = remindAt ? new Date(remindAt) : null;
+  const changed = changedAt ? new Date(changedAt) : null;
+  const tone: DataTone = stage === 'acked' ? 'success' : stage === 'cancelled' ? 'neutral' : 'info';
+  return (
+    <MediaRow attach bleed notches={false} testID={`reminder-preview-${reminderId}`} lead={<ReminderPage at={at} tone={tone} stage={stage} expanded />}>
+      <Column gap="card-section" items="flex-start">
+        <ReminderLines reminderId={reminderId} title={title} at={at} stage={stage} level={null} changedAt={changed} />
+        <Button testID={`reminder-preview-${reminderId}-agenda`} label={m.openInAgenda} variant="link" size="sm" onPress={onOpenAgenda} />
+      </Column>
+    </MediaRow>
   );
 }
 

@@ -112,6 +112,20 @@ describe('the card when a reminder fires', () => {
     expect(screen.getByTestId('reminder-fire-line').textContent).toBe('09:00 抢票 · Moved to 09:11');
   });
 
+  // 2026-11-16 用户：「日历卡片点击确认后就不见了，也没法点击预览了」。结束行（主题 11.5、P9.4）行尾有展开箭头：
+  // 点开在原位置撑开，看到和到点时同样的日历页、标题和确认时间，没有改时间和取消；最下面能去日程。
+  it('opens the confirmed reminder again from the arrow at the end of its line', async () => {
+    const runtime = setup();
+    push(runtime, { reminder: reminder({ entityVersion: 44, lastSeq: 44, state: 'acked', closedAt: local(9, 1), closedBy: 'user' }) });
+    expect(screen.getByTestId('reminder-fire-line').textContent).toBe('09:00 抢票 · Acknowledged at 09:01');
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Show reminder' })); });
+    const preview = within(await screen.findByTestId('reminder-fire-line-details'));
+    expect(preview.getByTestId('reminder-preview-5').textContent).toContain('抢票');
+    expect(preview.getByTestId('reminder-preview-5').textContent).toContain('Acknowledged at 09:01');
+    expect(preview.queryByRole('button', { name: 'Cancel reminder' })).toBeNull();
+    expect(preview.getByRole('button', { name: 'Open in agenda' })).toBeTruthy();
+  });
+
   it('says it stays in the tray when the pushes ran out', () => {
     const runtime = setup();
     push(runtime, { reminder: reminder({ pushes: { count: 6, planned: 6, lastAt: local(9, 10), nextAt: null, exhausted: true, earlyAt: null } }) });
