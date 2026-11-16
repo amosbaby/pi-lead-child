@@ -101,13 +101,19 @@ describe("release-macos workflow", () => {
     for (const step of job.steps) expect(step.run ?? "", step.name).not.toContain("${{");
   });
 
-  it("is the only workflow with write permission, and asks only for contents: write", () => {
+  // The Android release workflow attaches the APK to the release, so it needs the same permission (19380a1).
+  it("shares write permission only with the Android release workflow, and both ask only for contents: write", () => {
     expect(workflow.permissions).toEqual({ contents: "write" });
     expect(job.permissions).toBeUndefined();
     for (const file of readdirSync(WORKFLOWS).filter((name) => /\.ya?ml$/.test(name) && name !== "release-macos.yml")) {
       const other = parse(readFileSync(join(WORKFLOWS, file), "utf8")) as { permissions?: unknown; jobs?: Record<string, { permissions?: unknown }> };
-      const grants = [other.permissions, ...Object.values(other.jobs ?? {}).map((entry) => entry.permissions)];
-      for (const grant of grants) {
+      const jobGrants = Object.values(other.jobs ?? {}).map((entry) => entry.permissions);
+      if (file === "release-android.yml") {
+        expect(other.permissions, file).toEqual({ contents: "write" });
+        for (const grant of jobGrants) expect(grant, file).toBeUndefined();
+        continue;
+      }
+      for (const grant of [other.permissions, ...jobGrants]) {
         // 没写 permissions 时用仓库缺省（只读），写了就不能有 write。
         expect(grant, file).not.toBe("write-all");
         expect(JSON.stringify(grant ?? {}), file).not.toContain("write");
