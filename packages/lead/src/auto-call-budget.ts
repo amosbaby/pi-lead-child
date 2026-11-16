@@ -106,6 +106,11 @@ export class AutoCallBudget {
     return over;
   }
 
+  /** 用户定的上限（0 是不限）。 */
+  get limits(): AutoCallBudgetLimits {
+    return { ...this.#limits };
+  }
+
   usage(): { callsLastHour: number; callsLastDay: number; uncachedTokensLastDay: number } {
     const now = this.#now();
     this.#calls = this.#calls.filter((call) => call.at > now - DAY);

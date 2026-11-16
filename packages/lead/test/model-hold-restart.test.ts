@@ -217,3 +217,16 @@ describe("the budget for automatic calls across a daemon restart", () => {
     for (const value of [null, "x", {}, 5]) expect(new AutoCallBudget({ now: () => now, saved: value }).snapshot()).toEqual([]);
   });
 });
+
+describe("the error that callers get while a hold is on", () => {
+  // 2026-11-16: a budget pause was reported as "the Lead model account failed".
+  it("names the kind of hold", async () => {
+    const { MODEL_HOLD_ERROR, modelHoldError } = await import("../src/model-hold.js");
+    expect(modelHoldError({ kind: "account", retryAt: null })).toBe(MODEL_HOLD_ERROR);
+    expect(modelHoldError(null)).toBe(MODEL_HOLD_ERROR);
+    expect(modelHoldError({ kind: "budget", retryAt: Date.UTC(2026, 10, 16, 7, 48, 8) }))
+      .toBe("model hold: the budget for automatic model calls is used up; automatic model calls wait until 2026-11-16T07:48:08.000Z");
+    expect(modelHoldError({ kind: "breaker", retryAt: Date.UTC(2026, 10, 16, 8, 0, 0) }))
+      .toBe("model hold: model calls keep failing; the next automatic model call is at 2026-11-16T08:00:00.000Z");
+  });
+});

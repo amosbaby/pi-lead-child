@@ -32,6 +32,7 @@ import { latestInstantOf, leadUserTurnOf } from "./authority.js";
 import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
+import { WAKE_PACE_ACTIONS, WAKE_PACE_TARGET } from "./wake-pace.js";
 import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
 } from "./agenda-feeds.js";
@@ -1257,6 +1258,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   skill: SKILL_TARGET,
   host_bypass: HOST_BYPASS_TARGET,
   busy_placement: BUSY_PLACEMENT_TARGET,
+  wake_pace: WAKE_PACE_TARGET,
   signal_sources: SIGNAL_SOURCES_TARGET,
   signal_source: SIGNAL_SOURCE_TARGET,
   agenda_feeds: AGENDA_FEEDS_TARGET,
@@ -1311,6 +1313,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   host_bypass: HOST_BYPASS_ACTIONS,
   // Lead 忙时你发的消息怎么放（2026-11-09）：排队或插话。改规则，Lead 也能改。定义在 busy-placement.ts。
   busy_placement: BUSY_PLACEMENT_ACTIONS,
+  // How soon Lead wakes for ordinary system events when its cache is cold (user 2026-11-16). Changes rules; Lead can set it. wake-pace.ts.
+  wake_pace: WAKE_PACE_ACTIONS,
   // 信号源（用户 2026-11-12）：通过对话把一个连接接进事件体系。建、试跑、改、暂停、恢复、马上跑、删。定义在 signal-sources.ts。
   signal_sources: SIGNAL_SOURCES_ACTIONS,
   signal_source: SIGNAL_SOURCE_ACTIONS,

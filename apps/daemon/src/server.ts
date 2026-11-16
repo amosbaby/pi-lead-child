@@ -35,7 +35,10 @@ import {
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { isInterruptedForSteer } from "@pi-lead-child/lead";
-import { AutoCallBudget, autoCallBudgetLimits, ModelHold, modelBreakerLimitsFromEnv, uncachedTokens, type ModelHoldPort } from "@pi-lead-child/lead";
+import {
+  AutoCallBudget, autoCallBudgetLimits, autoCallUsageLine, cacheRetentionOf, ModelHold, modelBreakerLimitsFromEnv, PREFIX_WARM_LONG_MS,
+  PREFIX_WARM_MS, uncachedTokens, wakePaceDecision, type ModelHoldPort,
+} from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
@@ -87,7 +90,7 @@ import {
   killIdleChildren, liveChildren, runWorkspaceFactsReady, setGitFactsLog, UiActionError, warmRunWorkspaceFacts, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
-import { appendBody, getBusyPlacement, getItem, readLeadCallGuard, transition, writeLeadCallGuard } from "@pi-lead-child/store";
+import { appendBody, getBusyPlacement, getItem, getWakePace, readLeadCallGuard, transition, writeLeadCallGuard } from "@pi-lead-child/store";
 import { activeRun, getRun, updateRun } from "@pi-lead-child/store";
 import { repairNonBudgetRetryExhaustion } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
@@ -926,6 +929,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let lastAttendedAt: number | null = null;
   // 带着事的那一轮失败以后，下一次叫醒 Lead 的时间和已经失败的次数。
   let leadWakeRetry: { at: number; failures: number } | null = null;
+  // 节奏（lead 的 wake-pace.ts，用户 2026-11-16）：Lead 上一次模型调用结束的时间（服务商的缓存从这时起还热几分钟）；
+  // 正在攒批时，到点再派发一次的定时器和它的时间。
+  let lastLeadModelCallAt: number | null = null;
+  let wakePaceWait: { at: number; timer: NodeJS.Timeout } | null = null;
   const leadWakeRetryBaseMs = Number(process.env.PLC_LEAD_WAKE_RETRY_MS ?? 15_000);
   // 正在跑的这一轮是谁发起的（system: 来源；用户的回合为 null）。整理笔记那一轮不接 inbox。
   let runningSystemOrigin: SystemTurnOrigin | null = null;
@@ -3029,6 +3036,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         queuedNotifications: listNotifications(db, { state: ["pending"], urgency: "immediate" })
           .filter((note) => !isDirectPushNotification(note.kind)).length,
         contextUsage: usage ? contextUsageLine(usage) : null,
+        autoCallUsage: autoCallUsageLine({ ...autoBudget.usage(), limits: autoBudget.limits, coldBatchMinutes: getWakePace(db).coldBatchMinutes }),
       });
       // 挂起的单元、子 agent 正在处理的对象（lead-scheduler spec H5、H10）。
       const handoffText = handoffs.situationText();
@@ -3672,6 +3680,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
           const over = autoBudget.record(uncachedTokens(event.message.usage));
           if (over) modelHold.pause(over.until, over.detail);
         }
+        // 服务商的缓存从这一次调用起还热几分钟（节奏据此判断这时叫醒 Lead 便宜不便宜）。失败的调用不算。
+        if (event.message.stopReason !== "error" && event.message.stopReason !== "aborted") lastLeadModelCallAt = Date.now();
         // 一次模型回复是一步（lead-scheduler spec D3）：单元结束时的日志和记录带上步数。
         sched.dispatch({ type: "step.end" });
         // 中断时 Lead 常在跑工具：pi 等工具做完，再开始下一次模型调用，准备请求那一步（取凭证）看到已经中断就抛
@@ -4137,6 +4147,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     only?: EventRecord[];
     // 单元的车道（lead-scheduler spec P2）：为挂起的单元叫醒 Lead 时用挂起的那个单元的车道。不给时按来源定（D2）。
     lane?: Lane;
+    // 预算的暂停不拦这一轮（外部通道里在等的人、到点的提醒、用户本人设的跟进；wakeForEvents）。账号级的暂停和熔断照样拦：
+    // 那时模型调不通。
+    pastBudget?: true;
   };
 
   // 这一轮要交给 Lead 的事件。为一条到点的提醒开的一轮只交它（还没处理完的话）；普通的一轮交别的，提醒各自单独一轮（工单 07）。
@@ -4359,7 +4372,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (options.system) {
       const skipped: TurnOutcome = { ok: false, voiced: false, systemTurnId: null };
       // 模型暂停：系统不自己调模型。和「有一轮在跑」一样算没开成，调用方不当失败，事件留着，解除以后再开。
-      if (modelHold.held) return { ...skipped, deferred: true };
+      if (modelHold.held && !(options.pastBudget && modelHold.state?.kind === "budget")) return { ...skipped, deferred: true };
       // 能不能开、什么时候探网络，由调度器定（lead 的 scheduler/placement.ts 的 admitSystemUnit）。
       if (admitSystemUnit(schedulerAdmission()) === "deferred") return { ...skipped, deferred: true };
       sched.dispatch({ type: "starting", on: true });
@@ -5558,8 +5571,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     retryWaitingUserTurn();
     if (sched.busy || !network.online) return;
-    // 模型暂停：事件和摘要都等用户的一轮答上（model-hold.ts）。
-    if (modelHold.held) return;
+    // 模型暂停：事件和摘要都等用户的一轮答上（model-hold.ts）。预算的暂停是系统调得太多，模型是好的：有人在等的事
+    // （外部通道里在等的人、到点的提醒、用户本人设的跟进）照样开一轮。2026-11-16：预算暂停里来了一条同事的私信，
+    // 卡片出来了，Lead 没有被叫醒。别的系统事件接着等。
+    if (modelHold.held) {
+      if (modelHold.state?.kind === "budget" && leadInput.pendingMessages().length) wakeForEvents({ waitingOnly: true });
+      return;
+    }
     if (leadInput.pendingMessages().length && !(leadWakeRetry && leadWakeRetry.at > Date.now())) {
       wakeForEvents();
       return;
@@ -5581,35 +5599,81 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 要 Lead 处理的事单独开一轮（spec D6 的 tell 级）。交给 Lead 的事在 runTurnNow 开头才取：探网络的这段时间里
   // 又来的事一起交。
-  function wakeForEvents(): void {
+  function wakeForEvents(mode: { waitingOnly?: boolean } = {}): void {
+    const pastBudget = mode.waitingOnly ? { pastBudget: true as const } : {};
     // 车道顺序（lead-scheduler spec D1、D2；P1 报告「发现的问题」第 3 条）：外部的人的消息（L1）先单独开一个 L1 单元，
     // 然后才是到点的提醒、用户的跟进和别的系统事件（L2、L3）。以前按事件的种类排，同事的私信排在用户的跟进和 blocker
     // 后面等了 98 秒。
-    if (wakeForPeople()) return;
+    if (wakeForPeople(pastBudget)) return;
     // 到点的提醒先处理，一条一轮（工单 07）：这一轮说的话挂在提醒卡下面，不和别的事混在一个气泡里。
     const reminder = leadInput.pendingMessages().find(isReminderFireEvent);
     if (reminder) {
       log(`reminder: waking lead for event #${reminder.seq}${leadWakeRetry ? " (retry)" : ""}`);
-      void runTurn(REMINDER_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.reminder, deliverEvents: true, respondTo: [reminder] });
+      void runTurn(REMINDER_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.reminder, deliverEvents: true, respondTo: [reminder], ...pastBudget });
       return;
     }
     // 用户本人设的跟进到点也单独一轮（2026-10-28）：只有它的一轮才算用户的一轮（userTimerOf），和别的事一起交时，
     // 那一轮只有 Lead 自己的权限，设下一次跟进也不再算用户的。
     const userTimer = leadInput.pendingMessages().find(isUserFollowUpFire);
     const only = userTimer ? { only: [userTimer] } : {};
+    // 预算暂停里只放有人在等的事：别的事接着等。
+    if (mode.waitingOnly && !userTimer) return;
+    // 节奏：普通的系统事件在缓存冷了以后攒一会儿再一起交（wakePaceHolds）。用户设的跟进不等。
+    if (!userTimer && wakePaceHolds()) return;
     log(`system event: waking lead (${userTimer ? `the user's follow-up #${userTimer.seq}` : `${leadInput.pendingMessages().length} event(s)`}`
       + `${leadWakeRetry ? ", retry" : ""})`);
-    void runTurn(EVENT_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, deliverEvents: true, ...only }).then((outcome) => {
+    void runTurn(EVENT_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, deliverEvents: true, ...only, ...pastBudget }).then((outcome) => {
       if (!outcome.ok || !outcome.voiced || !outcome.inboxIds?.length) return;
       const ids = new Set(outcome.inboxIds);
       noteVoiced(blockerNotificationIds(listInbox(db).filter((row) => ids.has(row.id))));
     });
   }
 
+  // 节奏（lead 的 wake-pace.ts；设置是操作层的 wake_pace.set，用户和 Lead 都能调）。要不要先攒着：缓存还热就马上叫醒，
+  // 冷了就等到窗口结束，从第一件在等的事算起。有 interrupt 级的事、或者带着交回来的 L0/L1 的结果时不等。
+  // 外部的人的消息、到点的提醒、用户设的跟进不到这里（wakeForEvents 在前面单独处理）。要等时排一个定时器，到点再派发。
+  function wakePaceHolds(): boolean {
+    const minutes = getWakePace(db).coldBatchMinutes;
+    if (minutes <= 0 && !wakePaceWait) return false;
+    const pending = leadInput.pendingMessages();
+    const arrived = pending.map((event) => Date.parse(event.receivedAt)).filter(Number.isFinite);
+    let warmMs = PREFIX_WARM_MS;
+    try {
+      const config = loadLeadModelConfig(opts.dataDir);
+      if (cacheRetentionOf(config, parseLeadModelSpec(leadModelName).provider) === "long") warmMs = PREFIX_WARM_LONG_MS;
+    } catch {
+      // 读不到配置时按缺省的缓存时长算。
+    }
+    // 测试把一分钟和缓存的时长调短（PLC_WAKE_PACE_MINUTE_MS、PLC_LEAD_CACHE_WARM_MS），每次现读。
+    const minuteMs = Number(process.env.PLC_WAKE_PACE_MINUTE_MS ?? 60_000);
+    if (process.env.PLC_LEAD_CACHE_WARM_MS) warmMs = Number(process.env.PLC_LEAD_CACHE_WARM_MS);
+    const decision = wakePaceDecision({
+      now: Date.now(), coldBatchMs: minutes * minuteMs, lastModelCallAt: lastLeadModelCallAt, warmMs,
+      firstWaitingAt: arrived.length ? Math.min(...arrived) : null,
+      urgent: pending.some((event) => event.level === "interrupt" || handoffLaneOf(event) <= 1),
+    });
+    if (decision.wake) {
+      if (wakePaceWait) {
+        clearTimeout(wakePaceWait.timer);
+        log(schedulerLine("pace.release", { why: decision.why, events: pending.length }));
+        wakePaceWait = null;
+      }
+      return false;
+    }
+    if (!wakePaceWait || wakePaceWait.at !== decision.at) {
+      if (wakePaceWait) clearTimeout(wakePaceWait.timer);
+      else log(schedulerLine("pace.wait", { events: pending.length, wait_s: Math.round((decision.at - Date.now()) / 1000), window_min: minutes }));
+      const timer = setTimeout(() => dispatchLeadWork(), Math.max(0, decision.at - Date.now()) + 5);
+      timer.unref?.();
+      wakePaceWait = { at: decision.at, timer };
+    }
+    return true;
+  }
+
   // 外部的人在等（L1）：为排在最前面的那个对话开一轮（一次一个对话，按排队的顺序，工单 10），这个单元一开始就是 L1。
   // 日志写明等了多久、按 L1 的时限算了多久（用户的单元在跑的时间不算，laneClockMs）、后面还排着几件别的事。
   // 没有时返回 false。
-  function wakeForPeople(): boolean {
+  function wakeForPeople(pastBudget: { pastBudget?: true } = {}): boolean {
     const next = leadInput.queue()[0];
     if (!next) return false;
     const people = leadInput.queuedMessages(next.key);
@@ -5624,7 +5688,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       lane: "L1", events: people.length, waitedMs, countedMs, deadlineMs,
       overdue: deadlineMs !== null && countedMs > deadlineMs, behind: pending.length - people.length,
     }));
-    void runTurn(EVENT_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, deliverEvents: true, only: people, lane: 1 });
+    void runTurn(EVENT_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, deliverEvents: true, only: people, lane: 1, ...pastBudget });
     return true;
   }
 

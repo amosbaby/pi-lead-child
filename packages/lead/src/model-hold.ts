@@ -34,6 +34,17 @@ import { schedulerLine } from "./scheduler/core.js";
 /** 暂停期间决策模型的 LLM 后端给调用方的错误。 */
 export const MODEL_HOLD_ERROR = "model hold: the Lead model account failed; automatic model calls wait for the user's next message";
 
+/**
+ * The same error for the kind of hold that is on. On 2026-11-16 a budget pause was reported as an account failure.
+ */
+export function modelHoldError(state: Pick<ModelHoldState, "kind" | "retryAt"> | null | undefined): string {
+  if (!state || state.kind === "account") return MODEL_HOLD_ERROR;
+  const until = state.retryAt === null ? "later" : new Date(state.retryAt).toISOString();
+  return state.kind === "budget"
+    ? `model hold: the budget for automatic model calls is used up; automatic model calls wait until ${until}`
+    : `model hold: model calls keep failing; the next automatic model call is at ${until}`;
+}
+
 /** 谁的失败让系统进入暂停。 */
 export type ModelHoldSource = "turn" | "compaction" | "decision";
 
@@ -53,6 +64,8 @@ export interface ModelHoldState {
 /** smart-model.ts 用的那一面：能不能调、调完的结果。 */
 export interface ModelHoldPort {
   readonly held: boolean;
+  /** 现在的暂停（给错误文字用：账号级、熔断还是预算）。没有暂停时是 null。 */
+  readonly state?: Pick<ModelHoldState, "kind" | "retryAt"> | null;
   /**
    * 一次模型调用失败。返回调用以后是不是在暂停。
    * alternative：这次失败以后系统换到了另一个模型（model-failover.ts）。账号级的失败这时不进暂停，只算一次连续失败。

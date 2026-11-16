@@ -174,6 +174,8 @@ describe("the rule-change flag in the catalog", () => {
       "host_bypass.enable",
       // Lead 忙时你发的消息怎么放（2026-11-09）：设置页的选项。
       "busy_placement.set",
+      // How soon Lead wakes for ordinary system events when its cache is cold (user 2026-11-16): a settings option.
+      "wake_pace.set",
       // 信号源（2026-11-12）：开、改、停、删一个订阅，以及能不能代用户处理。试跑和马上跑一次不改规则。
       "signal_sources.create", "signal_source.update", "signal_source.pause", "signal_source.resume", "signal_source.delete",
       // External agenda feeds (2026-11-12): create, change, pause, resume, delete a feed. Snapshots and per-entry mutes do not.

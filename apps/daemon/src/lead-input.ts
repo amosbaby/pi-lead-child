@@ -222,6 +222,8 @@ export interface SituationContext {
   queuedNotifications?: number;
   // Lead 的上下文用了多少（lead 的 contextUsageLine，lead-self-routing spec C）：写在「关于你自己」一节的第一行。
   contextUsage?: string | null;
+  // 系统自己调了几次模型、普通系统事件的节奏（lead 的 autoCallUsageLine，2026-11-16）：写在上面那一行后面。
+  autoCallUsage?: string | null;
 }
 
 interface RunState {
@@ -711,7 +713,10 @@ export class LeadInput {
       unread,
       leadFailure: this.latestLeadFailure(),
       sinceSeq: this.cursorSeq,
-      self: [...(context.contextUsage ? [context.contextUsage] : []), ...leadSelfLines(selfEvents)],
+      self: [
+        ...(context.contextUsage ? [context.contextUsage] : []), ...(context.autoCallUsage ? [context.autoCallUsage] : []),
+        ...leadSelfLines(selfEvents),
+      ],
       lanes: [...lanes.values()],
     }, this.options.budgetTokens ?? DEFAULT_SITUATION_BUDGET_TOKENS);
     return rendered.text;

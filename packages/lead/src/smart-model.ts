@@ -11,7 +11,7 @@ import {
   type CreateSmartModelOptions, type SmartModel, type SmartTextComplete,
 } from "@pi-lead-child/engine";
 import type { LeadModelConfig } from "./model-config.js";
-import { MODEL_HOLD_ERROR, type ModelHoldPort } from "./model-hold.js";
+import { modelHoldError, type ModelHoldPort } from "./model-hold.js";
 
 const SMART_MODEL_SPEC = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[^\s/][^\s]{0,199}$/;
 const FAST_MODEL = /haiku/i;
@@ -176,7 +176,7 @@ export function createLeadSmartModel(input: {
   // 一个都注册不到时没有 LLM 后端（和以前一样）：不因为设置页选了模型就多出一个总是失败的后端。
   const llm = resolved
     ? async (prompt: string, signal: AbortSignal | undefined, maxTokens: number) => {
-      if (input.hold?.held) throw new SmartModelBackendError(LLM_BACKEND, MODEL_HOLD_ERROR, "unconfigured");
+      if (input.hold?.held) throw new SmartModelBackendError(LLM_BACKEND, modelHoldError(input.hold.state), "unconfigured");
       const target = chosen() ?? resolved;
       try {
         return replyText(await input.modelRuntime.completeSimple(
