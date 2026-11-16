@@ -267,10 +267,17 @@ describe('only this message', () => {
 });
 
 describe('the model picker on a phone', () => {
-  it('opens from the model in the top bar as a bottom sheet with collapsible connections', async () => {
+  it('opens from the model row in the plus sheet as a bottom sheet with collapsible connections', async () => {
     viewport.wide = false;
     setup({ compact: true });
-    await act(async () => { fireEvent.click(await screen.findByTestId('home-model')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-plus')); });
+    const row = await screen.findByTestId('lead-plus-model');
+    // 加号面板里「模型」一行写着正在用的模型和接入。
+    expect(row.textContent).toContain('gpt-5.5');
+    expect(row.textContent).toContain('Codex');
+    await act(async () => { fireEvent.click(row); });
+    // 加号面板收起，换模型的面板升起：同一时间只开一个。
+    await waitFor(() => expect(screen.queryByTestId('lead-plus-model')).toBeNull());
     await waitFor(() => expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy());
     expect(screen.getByTestId('lead-model-picker-content')).toBeTruthy();
     // 主用所在的接入先展开。
@@ -282,10 +289,11 @@ describe('the model picker on a phone', () => {
     expect(screen.getByTestId('lead-model-only-this')).toBeTruthy();
   });
 
-  it('has no model row in the plus sheet any more', async () => {
+  it('writes no model in the top bar', async () => {
     viewport.wide = false;
     setup({ compact: true });
-    await act(async () => { fireEvent.click(screen.getByTestId('composer-plus')); });
-    expect(screen.queryByTestId('lead-plus-model')).toBeNull();
+    // 顶栏正常时什么字都不写（主题 H-2，用户 2026-11-16「不要放顶栏」）。
+    await screen.findByTestId('composer-plus');
+    expect(screen.queryByTestId('home-model')).toBeNull();
   });
 });

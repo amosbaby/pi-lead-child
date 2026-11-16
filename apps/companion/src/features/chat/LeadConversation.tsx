@@ -277,7 +277,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const queueTray = useComposerQueueTray({ leadName, actions: canSteerQueued });
   // daemon 收图片时，输入框才有「+」和粘贴图片（protocol 的 chat-images.ts）。
   const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
-  // Lead 现在用的模型（模型配置方案 C 的 S4）：写在最新一条回答的头上，点开换模型（LeadModelPicker）；手机上写在顶部。
+  // Lead 现在用的模型（模型配置方案 C 的 S4）：桌面上写在最新一条回答的头上，点开换模型（LeadModelPicker）；手机上在加号面板里。
   // 只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
   const leadModel = useControlPlaneStore((state) => state.overview?.model);
   const modelAccounts = useModelAccounts();
@@ -394,13 +394,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
     <Density zone="conversation"><KeyboardArea testID="lead-conversation" bg={compact ? 'page' : 'surface'}>
       {/* 手机上没有顶栏，是两颗悬浮圆钮（主题 11.20 H-2，2026-11-14 方案 F）。 */}
       {compact ? (
-        <HomeTopBar
-          waitingCount={waiting.length}
-          onOpenMenu={() => setMenuOpen(true)}
-          onOpenWaiting={openWaiting}
-          modelText={leadModelTriggerText(leadModel, modelAccounts, locale)}
-          onOpenModel={() => setPicker({ anchor: null })}
-        />
+        <HomeTopBar waitingCount={waiting.length} onOpenMenu={() => setMenuOpen(true)} onOpenWaiting={openWaiting} />
       ) : (
       <Row
         minH={compact ? 64 : 60}
@@ -526,6 +520,9 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           onClose={() => setPlusOpen(false)}
           // 只放现在能用的：daemon 收图片、这台设备能选图片时才有「图片」。拍照和文件还没有（主题 H-7）。
           tiles={canSendImages && canPickImages ? [{ id: 'photos', icon: 'camera', label: homeText.photos, onPress: () => composerRef.current?.pickImages() }] : []}
+          // 手机上换模型从这里进（主题 H-7、11.18，用户 2026-11-16）：加号面板收起，换模型的底部面板升起。
+          modelText={leadModelTriggerText(leadModel, modelAccounts, locale)}
+          onOpenModel={() => setPicker({ anchor: null })}
         />
       ) : null}
       <LeadModelPicker
