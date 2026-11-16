@@ -52,6 +52,7 @@ import {
 } from "./model-config.js";
 import { promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
 import { createLeadSmartModel } from "./smart-model.js";
+import type { ModelHoldPort } from "./model-hold.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
 import { handbookGuardExtension } from "./handbook-guard.js";
@@ -234,6 +235,8 @@ export async function createLeadSession(opts: {
   decisionModel?: CreateSmartModelOptions["decisionModel"];
   // 设置页选的「直觉都用不了时问大脑的哪个模型」（config.json 的 decision.llmFallback）。每次判断时读。
   llmFallback?: () => string | null;
+  // 模型暂停（model-hold.ts）：决策模型的 LLM 后端据此停调模型，账号级的失败也报给它。daemon 建一个，所有会话共用。
+  modelHold?: ModelHoldPort;
   // 「你运行的环境」一节里 daemon 提供的部分：决策模型的设置和记忆服务的状态（工单 13）。不给时那两行写「没有提供」。
   environment?: () => LeadDaemonEnvironment;
   // 用户给 agent 装的 skill 的目录（userSkillDirs）。daemon 的入口传；不传时只有 Lead 自带的。
@@ -304,6 +307,7 @@ export async function createLeadSession(opts: {
       modelRuntime, config: leadModels, leadSpec: spec, dataDir: opts.dataDir,
       ...(opts.decisionModel ? { decisionModel: opts.decisionModel } : {}),
       ...(opts.llmFallback ? { llmFallback: opts.llmFallback } : {}),
+      ...(opts.modelHold ? { hold: opts.modelHold } : {}),
       // 每次调用写一条 decision_model.called 事件（工单 13）：get_system_usage 的数字从事件日志来。
       // 写不进去只记一行日志，判断照常返回。
       onCall: (call) => {

@@ -35,6 +35,7 @@ import {
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { isInterruptedForSteer } from "@pi-lead-child/lead";
+import { ModelHold, type ModelHoldPort } from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
@@ -556,6 +557,8 @@ export interface DaemonOpts {
     decisionModel?: () => DecisionModelCredentials | readonly DecisionModelCredentials[] | null;
     // 直觉都用不了时问大脑的哪个模型（config.json 的 decision.llmFallback）。每次判断时读。
     llmFallback?: () => string | null;
+    // 模型暂停（lead 的 model-hold.ts）：决策模型的 LLM 后端据此停调模型。
+    modelHold?: ModelHoldPort;
     connections?: LeadDeps["connections"];
     // 外部通道（slack-takeover 工单 04；统一消息事件工单 05 以后是处理消息事件的通用工具：派活、告诉用户、记下已处理、读对话）。
     channelCards?: LeadDeps["channelCards"];
@@ -822,10 +825,25 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         if (typeof session.compact !== "function") return Promise.reject(new Error("the session cannot compact"));
         return session.compact(instructions);
       },
+      // 子进程写摘要失败：账号级的失败进入模型暂停（modelHold 在下面建，到用的时候已经有了）。
+      modelFailed: (error) => { modelHold.failed("compaction", error); },
     },
   });
   // 回收区的删除（engine 的 workspace.ts）开始以前等 Lead 空闲（core 的 waitForHostIdle）。
   setHostIdleGate((job) => idleLane.gate(job));
+  // 模型暂停（lead 的 model-hold.ts，2026-11-15）：Lead 的一轮、压缩或者决策模型的 LLM 后端以账号级的失败结束（认证失败、
+  // 账号被停用、欠费）时，系统暂停所有自动的模型调用：不为事件、提醒、摘要、通知、挂起的单元自动开一轮（runTurn、
+  // dispatchLeadWork、maybeWakeForDigest、wakeForSuspended），不排重试（leadWakeRetry），空闲车道不开要调模型的活。
+  // 事件留在日志里，游标不动。用户本人的消息照常开一轮；答上了就解除（runTurnNow 的 finally），排着的事接着交给 Lead。
+  // 暂停只在内存里：daemon 重启以后是清的，第一次自动调用碰到同样的错误就重新进入（理由见 model-hold.ts 开头）。
+  const modelHold = new ModelHold({
+    log,
+    onChange: (held) => {
+      idleLane.modelHold(held);
+      // 顶栏的健康状态：暂停期间不写「下一次自动调用」的时间（nextScheduledAttempt），重发一次。
+      leadHealth.refresh();
+    },
+  });
   // 上一个单元的结局（整理笔记那一轮让路了没有：runPrecipitation 据此告诉空闲车道）。
   let lastUnitOutcome: UnitOutcome | null = null;
   // 排着的外部消息的推送（工单 10，publishLeadQueue）：上一次推的样子、合并变化的定时器、daemon 在停（不再推）。
@@ -2962,6 +2980,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 直觉的整条分工（设置 → 模型，2026-10-29）：SmartModel 按顺序问，都失败时问 LLM。
     ...(memoryControl ? { decisionModel: () => memoryControl.decisionChainCredentials() } : {}),
     llmFallback: () => loadDecisionModels(opts.dataDir).llmFallback,
+    // 决策模型的 LLM 后端走 Lead 的账号：暂停期间不调，账号级的失败也报进来（lead 的 smart-model.ts）。
+    modelHold,
     dataDir: opts.dataDir, dbPath: opts.dbPath, db,
     onCompactionProgress: (progress: CompactionProgress) => compactionProgress(progress),
     ...(opts.skillDirs ? { skillDirs: opts.skillDirs } : {}),
@@ -3410,6 +3430,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const scheduledLeadAttempts: Array<() => number | null> = [];
   const leadHealth = createLeadHealthTracker({
     nextScheduledAttempt: () => {
+      // 模型暂停期间系统不会自己调模型：不给时间。
+      if (modelHold.held) return null;
       const times = scheduledLeadAttempts.map((next) => next()).filter((at): at is number => at !== null);
       return times.length ? new Date(Math.min(...times)) : null;
     },
@@ -3621,11 +3643,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         log(`compaction failed (${reason}): ${outcome.detail}`);
       } else {
         log(`compaction failed (${reason}): ${outcome.detail}`);
+        // 压缩共用的退避（idle-lane.ts「失败以后的退避」）：退避期间 pi 到了压缩线只推迟，daemon 也不补压缩。
+        idleLane.compactionFailed(reason === "overflow" || reason === "threshold" ? reason : "manual");
         // 自动压缩失败：下一轮开始以前 daemon 自己压缩一次，带上长度预算（recoverLeadContext）。
         if (reason === "overflow" || reason === "threshold") compactionDue = compactionDue === "overflow" ? "overflow" : reason;
         // 溢出恢复的压缩失败了：这一轮的回答已经被截成空的，pi 不再重试。这一轮是失败的一轮（2026-10-28）：
         // 游标不动，交给它的事件下一轮再交；按上下文溢出算（模型切换）。
         if (reason === "overflow" && sched.busy) activeTurnError = presentLeadTurnError(leadContextFullError(outcome.detail));
+        modelHold.failed("compaction", outcome.detail);
         leadHealth.compactionFailed(outcome.detail);
         recordLeadSelfEvent("compaction failed", () => recordLeadCompactionFailed(db, {
           reason, detail: outcome.detail, timedOut,
@@ -3641,6 +3666,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   async function recoverLeadContext(): Promise<void> {
     const due = compactionDue;
     if (due === null || typeof session.compact !== "function") return;
+    // 压缩刚失败过（不管是谁发起的）：退避到时以前不补压缩，compactionDue 留着，到时的那一轮再补（2026-11-15 的重试风暴：
+    // 模型一直出错时，每一轮开头都补压缩一次、失败一次）。溢出照常补：不压缩这一轮就答不了。
+    const retryAt = idleLane.compactionRetryAt();
+    if (due !== "overflow" && retryAt !== null) {
+      log(`compaction before the turn skipped: the last compaction failed, next try in ${Math.round((retryAt - Date.now()) / 1000)} s`);
+      return;
+    }
     let failure = "";
     for (const level of ["normal", "strict"] as const) {
       recoveringCompaction = true;
@@ -3662,6 +3694,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
     }
     const detail = `上下文压缩失败：${failure}`;
+    idleLane.compactionFailed("manual");
+    modelHold.failed("compaction", detail);
     leadHealth.compactionFailed(detail);
     recordLeadSelfEvent("compaction failed", () => recordLeadCompactionFailed(db, { reason: "manual", detail, timedOut: false }));
     if (due !== "overflow") return;
@@ -4078,6 +4112,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   async function runTurn(message: string, options: RunTurnOptions = {}): Promise<TurnOutcome> {
     if (options.system) {
       const skipped: TurnOutcome = { ok: false, voiced: false, systemTurnId: null };
+      // 模型暂停：系统不自己调模型。和「有一轮在跑」一样算没开成，调用方不当失败，事件留着，解除以后再开。
+      if (modelHold.held) return { ...skipped, deferred: true };
       // 能不能开、什么时候探网络，由调度器定（lead 的 scheduler/placement.ts 的 admitSystemUnit）。
       if (admitSystemUnit(schedulerAdmission()) === "deferred") return { ...skipped, deferred: true };
       sched.dispatch({ type: "starting", on: true });
@@ -4355,6 +4391,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
       if (!interrupted && !networkFailure) noteLeadModelFailure(error);
+      // 账号级的失败（认证、账号被停用、欠费）：进入模型暂停，系统不再自动调模型。
+      if (!interrupted && !networkFailure) modelHold.failed("turn", error);
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn
@@ -4430,8 +4468,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       }
       if (digested) log(`digest: ${digested} event(s) digested`);
       if (deliveredInboxIds.length) outcome.inboxIds = deliveredInboxIds;
+      // 这一轮答上了：模型账号是好的，解除模型暂停（暂停期间只有用户本人的消息能开一轮）。下面的 dispatchLeadWork 接着交排着的事。
+      if (succeeded) modelHold.lift(options.system ? "lead_turn" : "user_turn");
       if (carriedEvents && !offline && !interrupted) {
-        if (succeeded) {
+        if (succeeded || modelHold.held) {
+          // 模型暂停：不排重试，事件留在游标后面，解除以后再交。
           leadWakeRetry = null;
         } else {
           const failures = (leadWakeRetry?.failures ?? 0) + 1;
@@ -4450,7 +4491,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       handoffs.endUnit(unitId);
       publishLeadStep(null);
       sched.closeUnit(unitOutcome);
-      idleLane.unitClosed();
+      // 结局交给空闲车道：单元失败了（多半是模型出错）就不开要调模型的空闲活，按退避再看（2026-11-15 的重试风暴）。
+      idleLane.unitClosed(unitOutcome);
       publishLeadQueue();
       // 这一轮结束：插进来的系统事件不再找得到。会话不报告输入送到的时刻时，交出去的用户消息也一样
       // （成功时它们在这一轮里被看到了，失败时上面已经找回了还在队列里的）。会话报告时，还在 pi 队列里的
@@ -5154,7 +5196,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const reuseTurnId = dueNotes.length ? voicingTurns.get(dueNotes[0]!.id) : undefined;
       const userNotes = dueNotes.filter((notification) => voicingTurns.get(notification.id) === reuseTurnId);
       // lead 正忙时不往当前回合里塞 followUp：那只是排进队列，等它空下来再开一轮。
-      if (userNotes.length && !sched.busy && !sched.draining && !incapacity && network.online) {
+      if (userNotes.length && !sched.busy && !sched.draining && !incapacity && network.online && !modelHold.held) {
         for (const notification of userNotes) deliveringNotifications.add(notification.id);
         const listed = userNotes.map((n) => `- [#${n.id}] ${n.title}${n.body ? `：${n.body}` : ""}`);
         const noteText = attended
@@ -5257,6 +5299,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
     retryWaitingUserTurn();
     if (sched.busy || !network.online) return;
+    // 模型暂停：事件和摘要都等用户的一轮答上（model-hold.ts）。
+    if (modelHold.held) return;
     if (leadInput.pendingMessages().length && !(leadWakeRetry && leadWakeRetry.at > Date.now())) {
       wakeForEvents();
       return;
@@ -5332,7 +5376,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     + "交接包现成，再用一句话告诉用户；已经不需要了，resume_unit(id, action=\"drop\")。用户在等的事，做完或者交出去以后告诉用户。）";
 
   function wakeForSuspended(): void {
-    if (sched.busy || sched.starting || sched.draining) return;
+    if (sched.busy || sched.starting || sched.draining || modelHold.held) return;
     if (leadInput.pendingMessages().length || carryOverTurns.length || queuedInputs.length) return;
     const next = handoffs.nextWake();
     if (!next) return;
@@ -5877,7 +5921,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     + "纯知悉的简要记录即可。同一个根因合并进来的几件事说一次就够了。"
     + `处理完如果没有需要用户知道的事，只回复 ${QUIET_REPLY}（不写别的字），会话里不会留下这一轮；有要告诉用户的事才正常说。）`;
   function maybeWakeForDigest(options: { patrol?: boolean } = {}): void {
-    if (sched.busy || sched.starting || sched.draining || !network.online) return;
+    if (sched.busy || sched.starting || sched.draining || !network.online || modelHold.held) return;
     // 带着事的那一轮刚失败过、还在退避：也等到点，不另外再调模型（发布评审 f796c1c 的 B1）。
     if (leadWakeRetry && leadWakeRetry.at > Date.now()) return;
     if (digestRetry && digestRetry.at > Date.now()) return;

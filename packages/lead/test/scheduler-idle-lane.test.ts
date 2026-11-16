@@ -1,7 +1,7 @@
 // 空闲车道的决策层（lead-scheduler spec D8，P4）：假时钟、表驱动，覆盖每一种决定。
 import { describe, expect, it } from "vitest";
 import {
-  DEFAULT_IDLE_LANE_LIMITS, idleLaneLimitsFromEnv, idleLaneStep, initialIdleLaneState, inlineDecision, nextIdleCheckAt, promoteLine,
+  compactionRetryAt, DEFAULT_IDLE_LANE_LIMITS, idleLaneLimitsFromEnv, idleLaneStep, initialIdleLaneState, inlineDecision, nextIdleCheckAt, promoteLine,
   type IdleLaneEffect, type IdleLaneEvent, type IdleLaneLimits, type IdleLaneState,
 } from "../src/scheduler/index.js";
 
@@ -289,5 +289,125 @@ describe("idle lane: limits and timers", () => {
     const released = run([[20_000, tick(0.1)]], LIMITS, state);
     expect(released.kinds).toEqual(["gate.release"]);
     expect(released.state.gated).toBe(0);
+  });
+});
+
+// 2026-11-14/15 的重试风暴：模型一直返回 403，上下文过了压缩线。推迟到时以后 pi 每个单元都就地压缩一次，daemon 每一轮开头
+// 又补压缩一次，整理笔记每空闲 15 秒开一次，每一次都失败、都写事件（每小时约 800 条）。压缩不管是谁发起的，失败以后共用
+// 一个退避；模型连续失败时，空闲车道不开要调模型的活。
+describe("idle lane: one backoff while compaction or the model keeps failing", () => {
+  const busy = (unitId: string): IdleLaneEvent => ({ type: "busy", unitId, lane: 2 });
+  const threshold: IdleLaneEvent = { type: "inline", reason: "threshold", ready: false };
+
+  it.each([
+    // [说明, 原因, 忙着, 第一次推迟以来, 离重试还有, 期望]
+    ["threshold in a unit past the deadline, in backoff: defer", "threshold", true, 300_000, 60_000, "defer"],
+    ["threshold while idle, in backoff: defer", "threshold", false, null, 60_000, "defer"],
+    ["threshold past the deadline, backoff over: compact anyway", "threshold", true, 300_000, 0, "allow"],
+    ["overflow in backoff: still compact (the turn cannot answer without it)", "overflow", true, null, 60_000, "allow"],
+  ] as const)("%s", (_name, reason, isBusy, deferredFor, retryIn, expected) => {
+    const now = 1_000_000;
+    const base = initialIdleLaneState(0);
+    const state: IdleLaneState = {
+      ...base,
+      ...(isBusy ? { busyUnit: "unit_u", busyLane: 0 as const, busySince: 0, idleSince: null } : {}),
+      compact: {
+        ...base.compact, failures: 1, retryAt: now + retryIn,
+        deferredSince: deferredFor === null ? null : now - deferredFor, deferrals: deferredFor === null ? 0 : 3,
+      },
+    };
+    expect(inlineDecision(state, reason, false, now, LIMITS)).toBe(expected);
+  });
+
+  it("backs off pi's in-place compaction after it fails, doubling each time, and resets after a success", () => {
+    const { kinds, state } = run([
+      [0, busy("unit_a")],
+      [1_000, threshold],
+      [2_000, { type: "compact.failed", error: "403", ms: 900 }],
+      [301_000, threshold],
+      [302_000, { type: "compact.inline_failed", reason: "threshold" }],
+      [303_000, { type: "idle", outcome: "failed" }],
+      [310_000, busy("unit_b")],
+      [320_000, threshold],
+      [330_000, threshold],
+    ]);
+    // 推迟到时就地压缩了一次（inline allow）；它失败以后，下一个单元里只推迟，不再就地压缩。
+    expect(kinds).toEqual(["inline", "compact.start", "inline", "inline", "inline"]);
+    expect(state.compact.failures).toBe(2);
+    expect(state.compact.retryAt).toBe(302_000 + 2 * LIMITS.retryMs);
+    expect(inlineDecision(state, "threshold", false, 330_000, LIMITS)).toBe("defer");
+    expect(inlineDecision(state, "threshold", false, 302_000 + 2 * LIMITS.retryMs, LIMITS)).toBe("allow");
+    const after = run([[600_000, { type: "compacted", how: "threshold" }]], LIMITS, state);
+    expect(after.state.compact).toMatchObject({ failures: 0, retryAt: null });
+  });
+
+  it("says when the next compaction may run, for the daemon's own compaction before a turn", () => {
+    const { state } = run([[1_000, { type: "compact.inline_failed", reason: "manual" }]]);
+    expect(compactionRetryAt(state, 1_000 + LIMITS.retryMs - 1)).toBe(1_000 + LIMITS.retryMs);
+    expect(compactionRetryAt(state, 1_000 + LIMITS.retryMs)).toBeNull();
+    expect(compactionRetryAt(initialIdleLaneState(0), 0)).toBeNull();
+  });
+
+  it("starts no notes or summary while units keep failing, and resumes after the backoff or an answered unit", () => {
+    const failing = run([
+      [0, busy("unit_a")],
+      [1_000, { type: "idle", outcome: "failed" }],
+      [20_000, tick(0.9)],
+      [60_000, tick(0.9)],
+    ]);
+    expect(failing.kinds).toEqual([]);
+    expect(failing.state.model).toEqual({ failures: 1, retryAt: 1_000 + LIMITS.retryMs });
+    // 计时器在退避结束时醒来。
+    expect(nextIdleCheckAt(failing.state, LIMITS, 60_000)).toBe(1_000 + LIMITS.retryMs);
+    expect(run([[1_000 + LIMITS.retryMs, tick(0.9)]], LIMITS, failing.state).kinds).toEqual(["precipitate.start"]);
+
+    const twice = run([[70_000, busy("unit_b")], [71_000, { type: "idle", outcome: "failed" }]], LIMITS, failing.state);
+    expect(twice.state.model).toEqual({ failures: 2, retryAt: 71_000 + 2 * LIMITS.retryMs });
+
+    const answered = run([[80_000, busy("unit_c")], [81_000, { type: "idle", outcome: "answered" }], [96_000, tick(0.9)]], LIMITS, twice.state);
+    expect(answered.state.model).toEqual({ failures: 0, retryAt: null });
+    expect(answered.kinds).toEqual(["precipitate.start"]);
+  });
+
+  it("keeps a yielded or interrupted unit out of the count", () => {
+    const { state } = run([[0, busy("unit_a")], [1_000, { type: "idle", outcome: "yielded" }], [2_000, busy("unit_b")], [3_000, { type: "idle", outcome: "interrupted" }]]);
+    expect(state.model).toEqual({ failures: 0, retryAt: null });
+  });
+
+  it("still applies a summary that is already written while the model fails (it calls no model)", () => {
+    const base = initialIdleLaneState(0);
+    const state: IdleLaneState = {
+      ...base, model: { failures: 1, retryAt: 500_000 },
+      compact: { ...base.compact, phase: "ready", id: "idle_compact_x", readyAt: 0 },
+    };
+    expect(run([[20_000, tick(0.9)]], LIMITS, state).kinds).toEqual(["compact.apply"]);
+  });
+});
+
+// 模型暂停（lead 的 model-hold.ts，2026-11-15）：账号级的失败以后，daemon 让空闲车道停下要调模型的活（整理笔记、写摘要），
+// 没有时限，也没有定时器为它醒来；daemon 解除时才接着做。答完的单元不解除它（解除是 daemon 的事）。
+describe("idle lane: the model hold", () => {
+  const busy = (unitId: string): IdleLaneEvent => ({ type: "busy", unitId, lane: 2 });
+
+  it("starts no notes or summary while held, for as long as it is held, and starts them after the hold lifts", () => {
+    const held = run([
+      [0, { type: "model.hold", held: true }],
+      [20_000, tick(0.9)],
+      [10 * 60_000, tick(0.9)],
+      [10 * 60_000 + 1, { type: "inline", reason: "threshold", ready: false }],
+      [11 * 60_000, busy("unit_a")],
+      [11 * 60_000 + 1_000, { type: "idle", outcome: "answered" }],
+      [11 * 60_000 + 1_001, tick(0.9, { boundary: true })],
+      [12 * 60_000, tick(0.9)],
+    ]);
+    expect(held.kinds).toEqual(["inline"]);
+    expect(held.state.compact.phase).toBe("idle");
+    expect(held.state.accountHold).toBe(true);
+    expect(held.logs.filter((entry) => entry.startsWith("[sched] idle.hold why=model_hold"))).toHaveLength(1);
+    // 没有为暂停排的醒来时刻（只有空闲满 graceMs 的那一次，已经过了）。
+    expect(nextIdleCheckAt(held.state, LIMITS, 12 * 60_000)).toBeNull();
+
+    const lifted = run([[12 * 60_000 + 1, { type: "model.hold", held: false }], [12 * 60_000 + 2, tick(0.9)]], LIMITS, held.state);
+    expect(lifted.kinds).toEqual(["precipitate.start"]);
   });
 });

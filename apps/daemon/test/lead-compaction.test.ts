@@ -39,7 +39,9 @@ afterEach(async () => {
 type Compaction = { kind: "ok" } | { kind: "fail"; errorMessage: string } | { kind: "hang" } | { kind: "chunked"; parts: number; partMs: number };
 
 // 不调用模型的 Lead。每一轮先回答一句话，再按 plan 的下一项做一次压缩（整理笔记那一轮只回 NO_REPLY，不压缩）。
-function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean } = {}) {
+// compactError：会话有 compact（daemon 在一轮开头的补压缩用它），每次都按这句话失败；compacts 记它被调了几次。
+function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean; compactError?: string } = {}) {
+  const compacts: number[] = [];
   const listeners: Array<(event: any) => void> = [];
   const prompts: string[] = [];
   const emit = (event: unknown) => { for (const listener of listeners) listener(event); };
@@ -101,12 +103,18 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
           emit({ type: "compaction_end", reason: "threshold", result: undefined, aborted: true, willRetry: false });
         }
       },
+      ...(options.compactError ? {
+        async compact() {
+          compacts.push(Date.now());
+          throw new Error(options.compactError);
+        },
+      } : {}),
       async steer() {},
       async followUp() {},
       dispose() {},
     },
   });
-  return { factory, prompts, aborts };
+  return { factory, prompts, aborts, compacts };
 }
 
 async function start(lead: ReturnType<typeof stubLead>) {
@@ -219,6 +227,26 @@ describe("a failed compaction", () => {
     expect(lead.aborts).toEqual([]);
     expect(logs.filter((line) => /part \d\/4 written/.test(line))).toHaveLength(4);
     expect(logs.some((line) => line.includes("compaction failed"))).toBe(false);
+  });
+});
+
+// 2026-11-14/15 的重试风暴：模型一直返回 403。每一轮里 pi 的压缩失败一次，下一轮开头 daemon 又补压缩一次、失败一次，
+// 每次都写一条 lead.compaction_failed。压缩失败以后共用一个退避：退避期间 daemon 不补压缩，到时再补。
+describe("the compaction backoff", () => {
+  it("skips the compaction before the next turn while the last compaction failure is still backing off", async () => {
+    const lead = stubLead(
+      [{ kind: "fail", errorMessage: "Auto-compaction failed: 403 disabled" }],
+      { compactError: "Summarization failed: 403 disabled" },
+    );
+    const { logs, chat } = await start(lead);
+    await chat("看一下 #77");
+    await vi.waitFor(() => expect(logs.some((line) => line.includes("compaction failed (threshold)"))).toBe(true));
+    await chat("再看一下");
+    await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(2));
+    expect(lead.compacts).toHaveLength(0);
+    expect(logs.some((line) => line.includes("compaction before the turn skipped"))).toBe(true);
+    const failures = db.prepare("SELECT count(*) AS n FROM events WHERE kind = 'lead.compaction_failed'").get() as { n: number };
+    expect(failures.n).toBe(1);
   });
 });
 

@@ -24,6 +24,15 @@
 //   · 兜底时限：从第一次推迟算起超过 deferMaxMs 还没压缩成，就让 pi 照常就地压缩，写一条 idle.compact.forced。
 //   · 上下文溢出（overflow）不推迟：不压缩这一轮就答不了。有写好的摘要时用它。
 //
+// 失败以后的退避（2026-11-15 的重试风暴：模型一直返回 403，上下文过了压缩线，每小时写下约 800 条事件）：
+//   · 压缩不管是谁发起的（空闲车道的摘要、pi 的就地压缩、daemon 在一轮开头的补压缩），失败以后共用 compact 的退避
+//     （retryMs 起，每次翻倍，最多 retryMaxMs）。退避期间 pi 到了压缩线只推迟，兜底时限到了也不就地压缩；
+//     daemon 读 compactionRetryAt，不补压缩。溢出照常压缩。任何一次压缩成功，退避清零。
+//   · Lead 的单元失败了（多半是模型出错）：model 的退避，同样的时长。退避期间不开要调模型的活（整理笔记、写摘要）；
+//     接上已经写好的摘要和放行后台重活不调模型，照常做。一个单元答完了，退避清零。让路、被打断的单元不算。
+//   · 模型暂停（lead 的 model-hold.ts，账号级的失败）：accountHold。和 model 的退避一样不开要调模型的活，但没有时限：
+//     daemon 解除暂停（用户本人的一轮答上了）时才接着做。暂停期间没有定时器为它醒来。
+//
 // 每个决定写一条 [sched] idle.* 日志（D12）：决定了什么、为什么、依据的数字、作业编号（idle_…）和单元编号。不写原文。
 import { schedulerLine } from "./core.js";
 import { laneName, type Lane } from "./lanes.js";
@@ -122,6 +131,10 @@ export interface IdleLaneState {
   stepMax: number;
   compact: CompactJobState;
   precipitate: PrecipitateJobState;
+  // Lead 的单元连续失败了几次、什么时候再开要调模型的空闲活（见文件开头「失败以后的退避」）。
+  model: { failures: number; retryAt: number | null };
+  // 模型暂停（model-hold.ts）：在暂停时不开要调模型的活，直到 daemon 解除。
+  accountHold: boolean;
   // 在等 Lead 空闲的没人等的后台重活（回收区的删除）。
   gated: number;
   // 作业编号的计数。
@@ -133,6 +146,8 @@ export function initialIdleLaneState(now: number): IdleLaneState {
     busyUnit: null, busyLane: null, busySince: null, idleSince: now, ratio: null, stepMax: 0,
     compact: idleCompactJob(0),
     precipitate: { phase: "idle", id: null, done: false, yields: 0, unitId: null, startedAt: null, yieldRequested: false },
+    model: { failures: 0, retryAt: null },
+    accountHold: false,
     gated: 0, seq: 0,
   };
 }
@@ -150,8 +165,8 @@ export type InlineCompactionReason = "threshold" | "overflow" | "manual";
 export type IdleLaneEvent =
   // 一个单元开了（Lead 开始忙）。
   | { type: "busy"; unitId: string; lane: Lane }
-  // 单元结束了（Lead 空闲了）。
-  | { type: "idle" }
+  // 单元结束了（Lead 空闲了）。outcome：单元的结局（daemon 的 UnitOutcome）；failed 算进 model 的退避，answered 清零。
+  | { type: "idle"; outcome?: string }
   // 看一次该不该开始什么：上下文水位、有没有排着的更高车道的事、会话现在能不能碰。boundary：一个单元刚结束（会话空着）。
   // thresholdRatio：pi 自己的压缩线占窗口的比例（窗口减 reserveTokens），不知道时为 null。
   | { type: "tick"; ratio: number | null; pendingInput: boolean; starting: boolean; boundary?: boolean; thresholdRatio?: number | null }
@@ -163,6 +178,10 @@ export type IdleLaneEvent =
   | { type: "compact.ready"; ms: number; chars: number; chunks: number }
   // 写摘要失败（模型出错、超时、子进程异常退出）。
   | { type: "compact.failed"; error: string; ms: number }
+  // 别处的压缩失败了：pi 的就地压缩（threshold、overflow），或者 daemon 在一轮开头的补压缩（manual）。
+  | { type: "compact.inline_failed"; reason: InlineCompactionReason }
+  // daemon 的模型暂停进入（held）或解除（model-hold.ts）。
+  | { type: "model.hold"; held: boolean }
   // 取对话失败（会话不让压缩，例如刚压缩过）。
   | { type: "compact.skipped"; why: string }
   // 写好的摘要接上了。
@@ -235,8 +254,20 @@ export function nextIdleCheckAt(state: IdleLaneState, limits: IdleLaneLimits, la
   const grace = state.idleSince + limits.graceMs;
   const times = [grace];
   if (state.compact.retryAt !== null) times.push(Math.max(state.compact.retryAt, grace));
+  if (state.model.retryAt !== null) times.push(Math.max(state.model.retryAt, grace));
   const pending = times.filter((at) => at > lastCheckAt);
   return pending.length ? Math.min(...pending) : null;
+}
+
+/** 压缩失败以后的退避还没到时：下一次可以压缩的时间。没有退避或者已经到时为 null。daemon 的补压缩据此跳过。 */
+export function compactionRetryAt(state: IdleLaneState, now: number): number | null {
+  const at = state.compact.retryAt;
+  return at !== null && now < at ? at : null;
+}
+
+/** Lead 的单元连续失败的退避还没到时：不开要调模型的空闲活。 */
+function modelHeld(state: IdleLaneState, now: number): boolean {
+  return state.accountHold || (state.model.retryAt !== null && now < state.model.retryAt);
 }
 
 /** 压缩作业在 pi 想压缩时该怎么办（不改状态，给测试和快照看）。 */
@@ -245,6 +276,8 @@ export function inlineDecision(
 ): "allow" | "defer" | "supply" {
   if (ready) return "supply";
   if (reason !== "threshold") return "allow";
+  // 压缩刚失败过：退避期间只推迟，空闲时和兜底时限到了也一样（不然每个单元都就地失败一次）。
+  if (compactionRetryAt(state, now) !== null) return "defer";
   if (state.busyUnit === null) return "allow";
   const since = state.compact.deferredSince;
   return since !== null && now - since >= limits.deferMaxMs ? "allow" : "defer";
@@ -293,6 +326,15 @@ function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { typ
     next = { ...next, compact: { ...next.compact, phase: "applying" } };
     effects.push(line("idle.apply", { job: "compact", id, readyForMs: next.compact.readyAt === null ? null : now - next.compact.readyAt }));
     effects.push({ type: "compact.apply", id });
+    return { state: next, effects };
+  }
+  // 模型连续失败：整理笔记和写摘要都要调模型，等退避到时再看（nextIdleCheckAt 在那一刻叫醒）。后台重活不调模型，照常放行。
+  if (modelHeld(next, now)) {
+    if (next.gated > 0 && !event.pendingInput && idleLongEnough(next, now, limits)) {
+      effects.push(line("idle.release", { job: "trash", count: next.gated, idleMs: now - next.idleSince! }));
+      effects.push({ type: "gate.release" });
+      next = { ...next, gated: 0 };
+    }
     return { state: next, effects };
   }
   const ratio0 = next.ratio;
@@ -386,7 +428,7 @@ function onInline(state: IdleLaneState, event: Extract<IdleLaneEvent, { type: "i
     compact: { ...compact, deferredSince: compact.deferredSince ?? now, deferrals: compact.deferrals + 1 },
   };
   const first = compact.deferrals === 0;
-  const canStart = compact.phase === "idle" && (compact.retryAt === null || now >= compact.retryAt);
+  const canStart = compact.phase === "idle" && (compact.retryAt === null || now >= compact.retryAt) && !modelHeld(state, now);
   if (canStart) {
     const made = nextId(next, "compact", now);
     next = { ...made.state, compact: { ...next.compact, phase: "preparing", id: made.id, promoted: true, startedAt: now, readyAt: null, yieldLogged: false } };
@@ -422,8 +464,17 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
       }
       return { state: next, effects: [] };
     }
-    case "idle":
-      return { state: { ...state, busyUnit: null, busyLane: null, busySince: null, idleSince: now }, effects: [] };
+    case "idle": {
+      const next: IdleLaneState = { ...state, busyUnit: null, busyLane: null, busySince: null, idleSince: now };
+      if (event.outcome === "answered") return { state: { ...next, model: { failures: 0, retryAt: null } }, effects: [] };
+      if (event.outcome !== "failed") return { state: next, effects: [] };
+      const failures = state.model.failures + 1;
+      const retryAt = now + retryDelay(failures, limits);
+      return {
+        state: { ...next, model: { failures, retryAt } },
+        effects: [line("idle.hold", { why: "unit_failed", failures, retryInMs: retryAt - now, unit: state.busyUnit ?? "-" })],
+      };
+    }
     case "tick":
       return startIdleWork(state, event, now, limits);
     case "inline":
@@ -462,6 +513,20 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
           line("idle.fail", { job: "compact", id: compact.id, ms: event.ms, failures, retryInMs: retryAt - now, error: event.error.slice(0, 200) }),
           record(compact.id, "compact", "failed", { ms: event.ms, failures, error: event.error.slice(0, 200) }),
         ],
+      };
+    }
+    case "model.hold": {
+      if (state.accountHold === event.held) return { state, effects: [] };
+      const next: IdleLaneState = { ...state, accountHold: event.held };
+      return { state: next, effects: event.held ? [line("idle.hold", { why: "model_hold", until: "lifted" })] : [] };
+    }
+    case "compact.inline_failed": {
+      // 别处的压缩失败：只记进退避，正在写的摘要照常写（它在子进程里，结果自己报）。
+      const failures = compact.failures + 1;
+      const retryAt = now + retryDelay(failures, limits);
+      return {
+        state: { ...state, compact: { ...compact, failures, retryAt } },
+        effects: [line("idle.compact.backoff", { reason: event.reason, failures, retryInMs: retryAt - now, ...busyFields(state) })],
       };
     }
     case "compact.skipped": {

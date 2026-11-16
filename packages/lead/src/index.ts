@@ -11,6 +11,7 @@ export { findPullRequestRef, parsePullRequestRef, type PullRequestRef } from "./
 export * from "./environment.js";
 export * from "./model-config.js";
 export * from "./model-failover.js";
+export * from "./model-hold.js";
 export * from "./model-switch.js";
 export * from "./precipitate.js";
 export * from "./compaction-settings.js";

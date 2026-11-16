@@ -45,7 +45,12 @@ export function isLeadTransportFailure(raw: string): boolean {
 }
 // auth_unavailable、no auth available 本身不算：代理在所有账号冷却、或者上游暂时 5xx 时也这么回，那是短暂的故障，
 // 系统应该自己再试（发布评审）。带着上游的 401、403 时，靠后面的上游错误认出来。
-const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|invalid[ _-]?(?:x-)?api[ _-]?key|authentication failed|认证失败/i;
+const AUTH = /\b40[13]\b|unauthori[sz]ed|forbidden|invalid[ _-]?(?:x-)?api[ _-]?key|authentication(?: failed|_error)|认证失败/i;
+// 账号被停用、欠费、额度用完（2026-11-15：provider 回「service has been disabled in this account for violation of Terms of
+// Service」）。也算 auth：再试也一样，要有人检查账号。provider 回 429 insufficient_quota 时状态码像限流，所以排在限流前面。
+const ACCOUNT = /terms of service|violat\w* (?:of )?(?:our |the )?(?:terms|usage polic|acceptable use)|(?:has been|account(?: is| was)?) (?:disabled|suspended|deactivated)|insufficient[ _-]?quota|exceeded your (?:current )?quota|\bbilling\b/i;
+// 只写「quota exceeded」的：带 429 时多半是每分钟的限额（一会儿就好），按限流算；不带 429 时才算账号的额度用完。
+const ACCOUNT_QUOTA = /quota exceeded/i;
 // 到模型服务的路被拦了：Anthropic 按请求的来源（地区）拒绝，回 403 forbidden "Request not allowed"。代理的
 // 503 auth_unavailable 里也会带着它。2026-11-06：Mac 休眠中短暂唤醒时 DNS 通了，流量却没有走 VPN；同一条路上
 // 不带 key 的请求回 401（地区放行了，只是缺 key）。这不是账号的问题，换模型也一样（所有模型走同一条路）：
@@ -63,16 +68,25 @@ const CONFIG = /\b404\b|model[ _-]?not[ _-]?found|unknown[ _-]?model|invalid[ _-
 export function classifyLeadModelError(raw: string): LeadModelFailureKind {
   // 上下文满了排在最前面：原文里带着压缩时遇到的 503、超时一类的字样，也不能当成连不上（再试也一样）。
   if (CONTEXT.test(raw)) return "context";
+  if (ACCOUNT.test(raw)) return "auth";
   if (BUSY.test(raw)) return "busy";
   // 路被拦了排在认证前面：原文里带着 403 和 forbidden。daemon 探测过、路是通的（加了 UPSTREAM_PREFIX），就是模型服务的问题。
   if (ROUTE_BLOCK.test(raw)) return raw.startsWith(UPSTREAM_PREFIX) ? "unavailable" : "network";
   // 认证排在"连不上"前面。代理的 503 auth_unavailable 里包着上游的 401：状态码是 503，可再试也一样，要有人检查账号。
-  if (AUTH.test(raw)) return "auth";
+  if (AUTH.test(raw) || ACCOUNT_QUOTA.test(raw)) return "auth";
   if (raw.startsWith(UPSTREAM_PREFIX)) return "unavailable";
   if (NETWORK.test(raw) && !LOOPBACK.test(raw)) return "network";
   if (UNAVAILABLE.test(raw)) return "unavailable";
   if (CONFIG.test(raw)) return "config";
   return "unknown";
+}
+
+/**
+ * 账号级的失败：认证失败、没有权限、账号被停用、欠费、额度用完（kind=auth）。再试也一样，自动再试还会让账号看起来在滥用。
+ * daemon 据此暂停所有自动的模型调用，等用户本人的下一条消息答上（daemon 的 model hold）。路被拦了（403 "Request not allowed"）不算。
+ */
+export function isLeadAccountFailure(raw: string): boolean {
+  return classifyLeadModelError(raw) === "auth";
 }
 
 // 系统自己再试也好不了的失败：要有人检查登录或配置。顶栏不承诺自动重试。

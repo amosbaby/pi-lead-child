@@ -70,12 +70,13 @@ function stubLead(
           emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "我看过了，" } });
           emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "已经处理。" } });
         }
+        // 失败用模型服务暂时连不上（系统会按退避再试）。账号级的失败（401）会让系统暂停自动调用（model-hold.ts），测不到退避。
         if (response === "speak-then-error") {
           emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "我先看看" } });
-          emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "401 Unauthorized", content: [] } });
+          emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "503 Service Unavailable", content: [] } });
         }
         if (response === "error") {
-          emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "401 Unauthorized", content: [] } });
+          emit({ type: "message_end", message: { role: "assistant", stopReason: "error", errorMessage: "503 Service Unavailable", content: [] } });
         }
         if (response === "hang") await new Promise<void>((resolve) => { release = resolve; });
         if (response === "tools-only") {
@@ -304,7 +305,7 @@ describe("a blocker wake-up", () => {
     await vi.waitFor(() => expect(turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker)).toHaveLength(1));
     const [turnId] = turnsWithOrigin(plc.events, SYSTEM_TURN_ORIGINS.blocker);
     await vi.waitFor(() => expect(plc.events.find((event) => event.type === "notice.created" && event.turnId === turnId))
-      .toMatchObject({ audienceBindingId: null, payload: { message: "401 Unauthorized" } }));
+      .toMatchObject({ audienceBindingId: null, payload: { message: "503 Service Unavailable" } }));
     expect(db.prepare("SELECT state FROM channel_turns WHERE id=?").get(turnId)).toEqual({ state: "failed" });
   });
 });

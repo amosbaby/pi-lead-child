@@ -7,10 +7,11 @@
 //   3. 否则是 Lead 自己正在用的模型。
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import {
-  createSmartModel, decisionPurpose, LLM_BACKEND, smartModelDecisionLogPath,
+  createSmartModel, decisionPurpose, LLM_BACKEND, SmartModelBackendError, smartModelDecisionLogPath,
   type CreateSmartModelOptions, type SmartModel, type SmartTextComplete,
 } from "@pi-lead-child/engine";
 import type { LeadModelConfig } from "./model-config.js";
+import { MODEL_HOLD_ERROR, type ModelHoldPort } from "./model-hold.js";
 
 const SMART_MODEL_SPEC = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\/[^\s/][^\s]{0,199}$/;
 const FAST_MODEL = /haiku/i;
@@ -116,6 +117,11 @@ export function createLeadSmartModel(input: {
    * 所以调用方要在打 backend 那一行之前接上它，否则日志里看不到原因。
    */
   onNote?: (note: string) => void;
+  /**
+   * 模型暂停（model-hold.ts）。LLM 后端走 Lead 的 provider 和账号：暂停期间不调模型，抛 MODEL_HOLD_ERROR（kind=unconfigured，
+   * 调用方按没有 LLM 后端处理）；调用以账号级的失败结束时进入暂停。决策模型（Jev）是另一个服务、另一个 key，不受影响。
+   */
+  hold?: ModelHoldPort;
 }): LeadSmartModel {
   const env = input.env ?? process.env;
   const notes: string[] = [];
@@ -170,12 +176,18 @@ export function createLeadSmartModel(input: {
   // 一个都注册不到时没有 LLM 后端（和以前一样）：不因为设置页选了模型就多出一个总是失败的后端。
   const llm = resolved
     ? async (prompt: string, signal: AbortSignal | undefined, maxTokens: number) => {
+      if (input.hold?.held) throw new SmartModelBackendError(LLM_BACKEND, MODEL_HOLD_ERROR, "unconfigured");
       const target = chosen() ?? resolved;
-      return replyText(await input.modelRuntime.completeSimple(
-        target,
-        { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
-        { ...(signal ? { signal } : {}), maxTokens },
-      ));
+      try {
+        return replyText(await input.modelRuntime.completeSimple(
+          target,
+          { messages: [{ role: "user", content: prompt, timestamp: Date.now() }] },
+          { ...(signal ? { signal } : {}), maxTokens },
+        ));
+      } catch (error) {
+        input.hold?.failed("decision", errorMessage(error));
+        throw error;
+      }
     }
     : null;
   const smartModel = createSmartModel({

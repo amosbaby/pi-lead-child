@@ -13,11 +13,13 @@ import { typedFailure, type RuntimeCapabilities } from "@pi-lead-child/runtime";
 import {
   createSmartModel,
   setModelCatalogForTesting,
+  SmartModelBackendError,
   smartModelDecisionLogPath,
   type ModelCatalog,
   type RuntimeCatalog,
 } from "@pi-lead-child/engine";
 import { normalizeLeadModelConfig } from "../src/model-config.js";
+import { MODEL_HOLD_ERROR, ModelHold } from "../src/model-hold.js";
 import { LEAD_SYSTEM_PROMPT } from "../src/prompt.js";
 import { LEAD_QUIET_TOOLS } from "../src/session.js";
 import {
@@ -203,6 +205,50 @@ describe("createLeadSmartModel", () => {
       modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {},
     });
     await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/429 rate limited/);
+  });
+});
+
+// 模型暂停（model-hold.ts，2026-11-15）：LLM 后端走 Lead 的 provider 和账号。账号级的失败让系统进入暂停；暂停期间 LLM 后端
+// 不调模型，调用方拿到 MODEL_HOLD_ERROR（和没有 LLM 后端时一样是 SmartModelBackendError），按各自没有后端时的办法处理。
+describe("createLeadSmartModel under the model hold", () => {
+  const DISABLED = "403 This service has been disabled in this account for violation of Terms of Service.";
+
+  it("enters the hold on an account-level failure and then stops calling the model", async () => {
+    const { runtime, calls } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], { stopReason: "error", errorMessage: DISABLED });
+    const lines: string[] = [];
+    const hold = new ModelHold({ log: (line) => lines.push(line) });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {}, hold,
+    });
+    await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/disabled in this account/);
+    expect(hold.state).toMatchObject({ source: "decision" });
+    expect(calls).toHaveLength(1);
+
+    // 暂停期间：判断和自由文本补全都不调模型，错误说明是暂停。
+    const held = await built.smartModel!.decide("state", YES_NO).catch((error: unknown) => error);
+    expect(held).toBeInstanceOf(SmartModelBackendError);
+    expect((held as SmartModelBackendError).message).toBe(MODEL_HOLD_ERROR);
+    expect((held as SmartModelBackendError).kind).toBe("unconfigured");
+    await expect(built.complete!("整理这个线程", { purpose: "channel_memory" })).rejects.toThrow(MODEL_HOLD_ERROR);
+    expect(calls).toHaveLength(1);
+    expect(lines.filter((line) => line.includes("model.hold action=entered"))).toHaveLength(1);
+
+    // 用户的一轮答上了、暂停解除以后，又调模型。
+    hold.lift("user_turn");
+    await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/disabled in this account/);
+    expect(calls).toHaveLength(2);
+  });
+
+  it("does not enter the hold on a failure that is not about the account", async () => {
+    const { runtime, calls } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], { stopReason: "error", errorMessage: "429 rate limited" });
+    const hold = new ModelHold({ log: () => {} });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {}, hold,
+    });
+    await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/429/);
+    await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/429/);
+    expect(hold.held).toBe(false);
+    expect(calls).toHaveLength(2);
   });
 });
 

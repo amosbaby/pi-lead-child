@@ -188,3 +188,21 @@ describe("the idle lane: Lead's notes turn yields to new input", () => {
     await vi.waitFor(() => expect(notesCalls).toBe(2), { timeout: 5_000 });
   }, 30_000);
 });
+
+// 2026-11-14/15 的重试风暴：模型一直返回 403。带着事件的那一轮失败以后，daemon 按退避再叫醒 Lead；在这之间 Lead 空闲，
+// 空闲车道每次都开整理笔记（也要调模型），每一次都失败、都写事件。单元失败以后，空闲车道按退避不开要调模型的活。
+describe("the idle lane while the model keeps failing", () => {
+  it("starts no notes turn after a failed unit until the backoff ends", async () => {
+    vi.stubEnv("PLC_LEAD_WAKE_RETRY_MS", "60000");
+    addInbox(db, {
+      itemId: createItem(db, { title: "依赖升级卡住了", brief: "b", createdBy: "system" }),
+      severity: "blocker", source: "structural", summary: "依赖升级卡住了", lossless: true,
+    });
+    const { lead, logs } = await boot(() => ({ error: "403 This service has been disabled in this account" }));
+    await vi.waitFor(() => expect(lead.calls.some((call) => has(call, "依赖升级卡住了"))).toBe(true), { timeout: 5_000 });
+    // 空闲满 50 毫秒好多次了：整理笔记一次也没开，日志写明为什么。
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    expect(lead.calls.filter((call) => has(call, NOTES))).toHaveLength(0);
+    expect(logs.some((line) => /\[sched\] idle\.hold why=unit_failed failures=1/u.test(line))).toBe(true);
+  }, 30_000);
+});

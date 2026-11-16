@@ -26,6 +26,8 @@ export interface LeadHealthTracker {
   // 上下文压缩失败或超时（compactionEndOutcome）。显示降级，原因写成压缩失败，到下一次成功的模型调用为止。
   // 不算进 failures：Lead 的模型调用可能还是好的，停摆兜底（server.ts 的 leadIncapacity）只看模型调用的失败。
   compactionFailed(detail: string): void;
+  // 不改任何记录，只重发一次现在的状态（模型暂停进入、解除时：下一次自动调用的时间变了）。
+  refresh(): void;
 }
 
 // 上下文压缩失败时顶栏的原因。name 是 Lead 的名字（设置 → 身份与风格），locale 是用户现在选的语言。
@@ -172,6 +174,9 @@ export function createLeadHealthTracker(options: {
     compactionFailed(detail) {
       compaction = { since: compaction?.since ?? now(), detail: redactSecretText(detail.trim()) || detail };
       latest = "compaction";
+      options.onChange(status());
+    },
+    refresh() {
       options.onChange(status());
     },
     patrolled() {

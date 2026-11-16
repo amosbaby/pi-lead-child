@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  classifyLeadModelError, isLeadRouteBlock, isLeadTransportFailure, LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser,
+  classifyLeadModelError, isLeadAccountFailure, isLeadRouteBlock, isLeadTransportFailure, LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser,
   leadModelFailureReason, leadOutageCause, leadTurnFailureSentence, leadTurnWaitingSentence, markUpstreamFailure,
 } from "../src/index.ts";
 
@@ -51,6 +51,37 @@ describe("classifyLeadModelError", () => {
     expect(leadModelFailureReason("context", "Fairy")).toBe("Fairy 的上下文满了，压缩没有成功");
     expect(leadModelFailureNeedsUser("context")).toBe(false);
     expect(leadOutageCause("context")).toBe("上下文满了，压缩没有成功");
+  });
+
+  // 2026-11-15：provider 停用了账号（违反服务条款），每次调用都回 403。这类失败是账号级的：系统自己再试只会让账号看起来在滥用。
+  // isLeadAccountFailure 认它们；daemon 据此暂停所有自动的模型调用（model-hold）。
+  it("knows account-level failures, with or without a status code", () => {
+    const disabled = "403 This service has been disabled in this account for violation of Terms of Service.";
+    for (const raw of [
+      disabled,
+      "This service has been disabled in this account for violation of Terms of Service.",
+      "Your account has been suspended",
+      '429 {"error":{"type":"insufficient_quota","message":"You exceeded your current quota, please check your plan and billing details."}}',
+      "Billing hard limit has been reached",
+      "quota exceeded for this account",
+      '401 {"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}',
+      "Invalid API key",
+    ]) {
+      expect(classifyLeadModelError(raw), raw).toBe("auth");
+      expect(isLeadAccountFailure(raw), raw).toBe(true);
+    }
+    // 这些不是账号的问题：限流、路被拦、断网、连不上、上下文满了。
+    for (const raw of [
+      "429 Too Many Requests",
+      '429 {"error":{"message":"Quota exceeded for quota metric requests per minute"}}',
+      '403: {"type":"forbidden","message":"Request not allowed"}',
+      "getaddrinfo ENOTFOUND api.example.com",
+      "503 Service Unavailable",
+      "Context overflow: 上下文满了，回答被截成空的",
+      "the model refused the tool schema",
+    ]) {
+      expect(isLeadAccountFailure(raw), raw).toBe(false);
+    }
   });
 
   it("separates rate limits, auth failures, network errors and the rest", () => {

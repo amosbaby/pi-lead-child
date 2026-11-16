@@ -16,8 +16,8 @@ import type { ExtensionContext, ExtensionFactory, SessionBeforeCompactEvent, Ses
 import type { IdleLaneSnapshot } from "@pi-lead-child/protocol";
 import { schedulerLine } from "./core.js";
 import {
-  idleLaneLimitsFromEnv, idleLaneStep, idleLongEnough, initialIdleLaneState, nextIdleCheckAt,
-  type IdleLaneEffect, type IdleLaneEvent, type IdleLaneLimits, type IdleLaneState, type IdleRecordPayload,
+  compactionRetryAt, idleLaneLimitsFromEnv, idleLaneStep, idleLongEnough, initialIdleLaneState, nextIdleCheckAt,
+  type IdleLaneEffect, type InlineCompactionReason, type IdleLaneEvent, type IdleLaneLimits, type IdleLaneState, type IdleRecordPayload,
 } from "./idle-lane.js";
 import {
   serializablePreparation, summarizeInChild, type IdleCompactRequest, type SummarizeInChildOptions, type SummarizeInChildResult,
@@ -53,6 +53,8 @@ export interface IdleLaneHost {
   yieldUnit(by: Lane): void;
   // pi 的 session.compact(说明)。
   compact(instructions: string): Promise<unknown>;
+  // 子进程写摘要失败了（原文）：daemon 交给模型暂停（model-hold.ts），账号级的失败进入暂停。
+  modelFailed?(error: string): void;
 }
 
 export interface IdleLaneRuntimeOptions {
@@ -154,10 +156,31 @@ export class IdleLaneRuntime {
     this.dispatch({ type: "busy", unitId, lane });
   }
 
-  /** 单元结束了：会话空着的这一刻看一眼（上下文快满时马上开始写摘要，见 idle-lane.ts 的提级）。 */
-  unitClosed(): void {
-    this.dispatch({ type: "idle" });
+  /**
+   * 单元结束了：会话空着的这一刻看一眼（上下文快满时马上开始写摘要，见 idle-lane.ts 的提级）。
+   * outcome 是单元的结局：failed 让空闲车道退避，answered 清零（idle-lane.ts「失败以后的退避」）。
+   */
+  unitClosed(outcome?: string): void {
+    this.dispatch({ type: "idle", ...(outcome ? { outcome } : {}) });
     this.check({ boundary: true });
+  }
+
+  /** 空闲车道以外的压缩失败了（pi 的就地压缩、daemon 的补压缩）：记进压缩共用的退避。 */
+  compactionFailed(reason: InlineCompactionReason): void {
+    this.dispatch({ type: "compact.inline_failed", reason });
+  }
+
+  /**
+   * daemon 的模型暂停（lead 的 model-hold.ts）进入或解除。暂停期间不开要调模型的活；解除时马上看一眼，排着的活接着做。
+   */
+  modelHold(held: boolean): void {
+    this.dispatch({ type: "model.hold", held });
+    if (!held) this.check();
+  }
+
+  /** 压缩失败以后的退避还没到时：下一次可以压缩的时间；没有退避时为 null。 */
+  compactionRetryAt(): number | null {
+    return compactionRetryAt(this.#state, this.#now());
   }
 
   /**
@@ -526,6 +549,7 @@ export class IdleLaneRuntime {
       const { response, ms } = result;
       if (!response.ok) {
         this.dispatch({ type: "compact.failed", error: response.error, ms });
+        this.#host.modelFailed?.(response.error);
         return;
       }
       this.#ready = {
