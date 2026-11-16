@@ -1,4 +1,3 @@
-import type { LeadModelChoice } from '@pi-lead-child/protocol';
 import { subscribeWithSelector } from 'zustand/middleware';
 import { createStore } from 'zustand/vanilla';
 
@@ -14,10 +13,6 @@ import type {
 } from '../types';
 
 export interface WorkspaceStoreState extends WorkspaceData {
-  // 「只这一条」（模型配置方案 C 的 D8）：这个页面发出的、带单轮模型的消息开的那一轮用的模型，按轮次。
-  // 那一轮的回答头上写它（daemon 不记每一轮用的模型）。只在内存里：重新加载以后只有最新的回答写模型。
-  turnModelByTurnId: Readonly<Record<string, LeadModelChoice>>;
-  rememberTurnModel(turnId: string, choice: LeadModelChoice): void;
   selectTicket(ticketId: number | null): void;
   selectSession(sessionId: string | null): void;
   selectAttempt(attemptId: number | null): void;
@@ -84,10 +79,6 @@ export function createInitialWorkspaceData(hydrated = false): WorkspaceData {
 export function createWorkspaceStore() {
   return createStore<WorkspaceStoreState>()(subscribeWithSelector((set, get) => ({
     ...createInitialWorkspaceData(),
-    turnModelByTurnId: {},
-    rememberTurnModel: (turnId, choice) => {
-      set({ turnModelByTurnId: { ...get().turnModelByTurnId, [turnId]: { model: choice.model, effort: choice.effort } } });
-    },
     selectTicket: (ticketId) => {
       if (get().selectedTicketId === ticketId) return;
       set({ selectedTicketId: ticketId });
@@ -240,7 +231,7 @@ export function createWorkspaceStore() {
       // 视图面板在桌面上是一栏，在手机宽度上盖住会话（P16.1、P16.3）：换宽度时收起，不带到另一种布局里。
       if (current.viewsOpen) set({ viewsOpen: false });
     },
-    resetForForget: () => set({ ...createInitialWorkspaceData(get().hydrated), turnModelByTurnId: {} }),
+    resetForForget: () => set({ ...createInitialWorkspaceData(get().hydrated) }),
   })));
 }
 

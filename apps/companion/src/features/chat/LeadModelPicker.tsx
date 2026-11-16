@@ -19,7 +19,7 @@ import {
 } from './leadModelGroups';
 
 // 会话里换模型（模型配置方案 C 的 S4、S5，画板 C-Picker-Desktop / C-Picker-Mobile，用户 2026-11-16 定）。
-// 输入框上不再放模型。入口有三个：回答头上的模型名（LeadModelHeaderTrigger）、在输入框里输入 /model、手机首页顶部的模型名。
+// 入口：桌面上输入框工具栏右边的模型名（LeadModelComposerTrigger）；手机上加号面板里的「模型」一行；两边都能在输入框里输入 /model。
 // 桌面上是锚定的浮层（PopoverPanel，P2），手机上是悬浮底部面板（FloatingSheet，P13.2）。打开浮层不改变会话列表（P1）。
 //   · 头：正在用的模型，下面一行「接入 · 账号 · 正在用」（账号按会话此刻挂着的模型，inSession）；推理强度的分段；搜索全部模型。
 //   · 左栏（桌面）：接入，分「订阅」和「API key」两组；订阅带 5 小时额度的小条，API key 写模型数。手机上是能收起的一段一段。
@@ -685,30 +685,39 @@ export function leadModelTriggerText(spec: string | null | undefined, accounts: 
   return [label.id, label.effort ? m.effortName(label.effort) : null, base ? connectionName(base) : parsed.provider].filter(Boolean).join(' · ');
 }
 
-// 回答头上的模型名（主题 11.10）：安静的一段小字，鼠标放上去出浅灰底，点开换模型。和消息头一样高，
-// 出现、消失都不改变这一行的高度（P1）。
-export function LeadModelHeaderTrigger({ text, onOpen, testID = 'lead-model-trigger' }: {
-  text: string;
+// 输入框工具栏右边、发送按钮前面的模型名（主题 11.18，2026-11-16 用户：「desktop 你还是放在消息输入框原来的位置」）。
+// 和改版以前一样：平时只是文字（模型 id，后面淡一点的推理强度），鼠标放上去出现圆角的浅灰底，知道这里能点。
+// 点开换模型的浮层，对着这个按钮。外面一层由工具栏垂直居中，和左边的「+」、右边的发送按钮对齐。
+export function LeadModelComposerTrigger({ current, accounts, onOpen }: {
+  current: string | null | undefined;
+  accounts: ReadonlyMap<string, string | null>;
   onOpen: (anchor: PopoverAnchor) => void;
-  testID?: string;
 }) {
   const m = useMessages(leadModelMessages);
+  const locale = useLocale();
   const ref = useRef<PopoverAnchorHandle>(null);
+  const text = leadModelTriggerText(current, accounts, locale);
+  // daemon 还不知道用哪个模型时（hello 里是 unknown）不写。
+  if (!current?.trim() || current === 'unknown' || !text) return null;
+  const parsed = parseLeadModelSpec(current);
+  const label = leadModelLabel(current, accounts.get(parsed.model) ?? accounts.get(subscriptionSlotSpec(parsed.model)) ?? null);
   return (
     <PopoverAnchorView ref={ref} layout="shrink">
       <Pressable
-        testID={testID}
+        testID="lead-model-button"
         aria-label={m.triggerLabel(text)}
         aria-haspopup="dialog"
-        feedback="highlight"
+        feedback="none"
         onPress={() => ref.current?.measure(onOpen)}
+        // spacing-exempt: 按钮的规格，左右 8、上下 6，高 28（文字行高 16），和改版以前一样
+        px={8}
+        py={6}
         rounded="sm"
-        px="pill-x"
         bg={{ default: 'transparent', hover: 'surface-muted' }}
       >
         <Row items="center" gap="icon-label" minW={0}>
-          <Text size="meta" tone="secondary" numberOfLines={1} shrink={1} minW={0}>{text}</Text>
-          <Icon name="chevron-down" size={10} color="text-secondary" />
+          <Text testID="composer-model" size="label" tone="secondary" numberOfLines={1} shrink={1} minW={0}>{label.id}</Text>
+          {label.effort ? <Text testID="composer-model-effort" size="label" tone="muted" numberOfLines={1} shrink={0}>{label.effort}</Text> : null}
         </Row>
       </Pressable>
     </PopoverAnchorView>

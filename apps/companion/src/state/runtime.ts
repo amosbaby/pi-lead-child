@@ -627,8 +627,6 @@ export class CompanionStateRuntime {
       optimisticMessageId: outboxMessageId(entry.clientMessageId),
     });
     markTurnDelivered(this.control, entry.turnId);
-    // 「只这一条」：记下这一轮用的模型，这一轮的回答头上写它（会话里换模型的入口）。只记在这个页面里。
-    if (entry.turnModel) this.workspace.getState().rememberTurnModel(entry.turnId, entry.turnModel);
     if (entry.ticketId === null) void this.refresh();
     else void this.ensureResource(RESOURCE_KEYS.ticketConversation(entry.ticketId), true).catch(() => {});
   }

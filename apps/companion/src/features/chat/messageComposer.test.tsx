@@ -189,11 +189,12 @@ describe('the message composer', () => {
     expect(thumbnails()).toHaveLength(0);
   });
 
-  // 模型配置方案 C 的 S4（2026-11-16）：输入框上不放模型。
-  it('does not show the model on the composer', () => {
+  // 2026-11-16 用户：桌面上的模型放回输入框原来的位置（工具栏右边、发送按钮前面）。
+  it('shows the model on the toolbar, before the send button', () => {
     setup();
-    expect(screen.queryByTestId('composer-model')).toBeNull();
-    expect(screen.queryByTestId('lead-model-button')).toBeNull();
+    const button = screen.getByTestId('lead-model-button');
+    const send = screen.getByTestId('send-message');
+    expect(button.compareDocumentPosition(send) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   // /model 是界面自己的命令：打开换模型的浮层，从不发给 Lead。

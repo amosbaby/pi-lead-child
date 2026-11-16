@@ -27,6 +27,8 @@ type MessageComposerProps = {
   onModelCommand?: () => void;
   // 输入区上面的小标签，例如「只这一条」的单轮模型（TurnModelChip）。
   chip?: ReactNode;
+  // 工具栏右边、发送按钮前面的模型名（桌面上的 Lead 会话：LeadModelComposerTrigger，写着模型 id 和推理强度，点开换模型）。
+  modelControl?: ReactNode;
   // Lead 正忙时，这条消息插话还是排队（工单 04，spec D6）。给出时，输入框上面多一个选择。
   placement?: { value: ChatPlacement; onChange: (value: ChatPlacement) => void };
   // 那一行右边的状态（工单 10：Lead 忙时排着的外部消息，LeadQueueBar）。只和 placement 一起出现，不让那一行变高。
@@ -81,7 +83,7 @@ export function MessageComposer(props: MessageComposerProps) {
 // 中间是文字（缺省一行高，内容多了自动长高），下面一行工具栏：左边「+」选图片，右边模型名和圆形的发送按钮。
 // web 上 Enter 发送、Shift+Enter 换行；可以粘贴剪贴板里的图片。草稿按 contextKey 存在工作区里，失去焦点时保存（图片不存）。
 function MessageComposerField({
-  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, chip, tray,
+  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, chip, modelControl, tray,
   float = false, onPlus, ref,
 }: MessageComposerProps) {
   const locale = useLocale();
@@ -279,6 +281,7 @@ function MessageComposerField({
         ) : null}
         {preparing > 0 ? <Text testID="composer-preparing" size="note" tone="muted">{m.preparingImages}</Text> : null}
         <Spacer />
+        {modelControl ?? null}
         {sendButton}
       </Row>
     </Column>

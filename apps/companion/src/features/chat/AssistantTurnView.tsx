@@ -28,8 +28,6 @@ type AssistantTurnViewProps = {
   header?: string;
   // 消息头前面的标记：主会话里是 Fairy（主题 F-5）。在跑时它代替摘要前面的小转圈。
   headerMark?: ReactNode;
-  // 消息头后面的东西：主会话里是这一轮用的模型名，点开换模型（LeadModelPicker 的 LeadModelHeaderTrigger）。
-  headerAccessory?: ReactNode;
   // card：任务卡单独一张（工单对话）。inline：工具摘要并进消息头，灰色小字（主会话，方案 A）。
   taskVariant?: 'card' | 'inline';
 };
@@ -46,7 +44,6 @@ export function AssistantTurnView({
   renderReply,
   header,
   headerMark,
-  headerAccessory,
   taskVariant = 'card',
 }: AssistantTurnViewProps) {
   const parts = useMessageParts(messageId);
@@ -88,11 +85,10 @@ export function AssistantTurnView({
   return (
     <>
       {header && !(inline && turn.card) ? (
-        headerMark || headerAccessory ? (
-          <Row items="center" gap="inline-item" minW={0}>
-            {headerMark ?? null}
-            <Text size="meta" weight="semibold" tone="secondary" align="left" shrink={0}>{header}</Text>
-            {headerAccessory ?? null}
+        headerMark ? (
+          <Row items="center" gap="inline-item">
+            {headerMark}
+            <Text size="meta" weight="semibold" tone="secondary" align="left">{header}</Text>
           </Row>
         ) : <Text size="meta" weight="semibold" tone="secondary" align="left">{header}</Text>
       ) : null}
@@ -102,7 +98,6 @@ export function AssistantTurnView({
           variant={taskVariant}
           {...(inline && header ? { leading: header } : {})}
           {...(inline && header && headerMark ? { leadingMark: headerMark } : {})}
-          {...(inline && header && headerAccessory ? { leadingAccessory: headerAccessory } : {})}
           status={turn.card.status}
           runningTitle={runningTitle}
           steps={turn.card.steps}

@@ -127,8 +127,8 @@ function setup(options: { applied?: 'now' | 'after_turn'; capabilities?: string[
   return { runtime, client, switched, sendChat };
 }
 
-async function openFromHeader() {
-  await act(async () => { fireEvent.click(await screen.findByTestId('lead-model-trigger')); });
+async function openFromComposer() {
+  await act(async () => { fireEvent.click(await screen.findByTestId('lead-model-button')); });
   await waitFor(() => expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy());
 }
 
@@ -138,13 +138,13 @@ const connectionKeys = () => Array.from(screen.getByTestId('lead-model-connectio
 
 beforeEach(() => { viewport.wide = true; });
 
-describe('the model on the latest reply', () => {
-  it('writes the model, not on the composer, and opens the picker anchored there', async () => {
+// 2026-11-16 用户：「我没说过要把模型选择放在 agent 这条系统信息旁边啊，desktop 你还是放在消息输入框原来的位置啊」。
+describe('the model in the composer on a computer', () => {
+  it('writes the model id and effort before the send button, not on the reply, and opens the picker anchored there', async () => {
     setup();
-    expect(screen.queryByTestId('composer-model')).toBeNull();
-    // 目录读到以后：模型 id 和接入。
-    await waitFor(() => expect(screen.getByTestId('lead-model-trigger').textContent).toBe('gpt-5.5 · Codex'));
-    await openFromHeader();
+    await waitFor(() => expect(screen.getByTestId('composer-model').textContent).toBe('gpt-5.5'));
+    expect(screen.queryByTestId('lead-model-trigger')).toBeNull();
+    await openFromComposer();
     expect(screen.getByTestId('lead-model-picker-panel')).toBeTruthy();
   });
 });
@@ -152,7 +152,7 @@ describe('the model on the latest reply', () => {
 describe('the model picker', () => {
   it('lists subscriptions before API keys, with the quota of the account in use, and the true account in the header', async () => {
     setup();
-    await openFromHeader();
+    await openFromComposer();
     expect(connectionKeys()).toEqual(['openai-codex', 'github-copilot', 'vibeproxy']);
     // 会话此刻挂在第 2 个账号（Home）上：额度条写它用了多少（100 - 9 = 91）。
     expect(screen.getByTestId('lead-model-connection-openai-codex').getAttribute('aria-label')).toBe('Codex, 91% of the 5-hour quota used');
@@ -170,7 +170,7 @@ describe('the model picker', () => {
 
   it('shows the models of the connection you pick, with backup tags and a blocked model', async () => {
     setup();
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     expect(screen.getByTestId('lead-model-connection-vibeproxy').getAttribute('aria-pressed')).toBe('true');
     expect(screen.getByTestId('lead-model-role-vibeproxy/claude-opus-5-5').textContent).toBe('Backup');
@@ -180,7 +180,7 @@ describe('the model picker', () => {
 
   it('searches all models across connections', async () => {
     setup();
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'SONNET' } }); });
     expect(screen.getByTestId('lead-model-option-vibeproxy/claude-sonnet-5')).toBeTruthy();
     expect(screen.getByTestId('lead-model-option-github-copilot/claude-sonnet-5')).toBeTruthy();
@@ -191,7 +191,7 @@ describe('the model picker', () => {
 
   it('makes the chosen model and effort the primary', async () => {
     const { switched } = setup();
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
@@ -202,7 +202,7 @@ describe('the model picker', () => {
 
   it('keeps the panel open and says when the switch starts after this answer', async () => {
     setup({ applied: 'after_turn' });
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5-mini')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
     await waitFor(() => expect(screen.getByTestId('lead-model-notice').textContent).toBe('GPT-5.5 Mini starts after this answer ends.'));
@@ -210,7 +210,7 @@ describe('the model picker', () => {
 
   it('pins a subscription account by switching to <base>-<n>/<id>, and goes back to automatic', async () => {
     const { switched } = setup();
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-account-menu-openai-codex')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-account-openai-codex-2')); });
     expect(screen.getByTestId('lead-model-account-menu-openai-codex').textContent).toBe('Home');
@@ -224,7 +224,7 @@ describe('the model picker', () => {
 describe('only this message', () => {
   it('puts a removable chip above the composer and sends the next message once with that model', async () => {
     const { sendChat, switched } = setup();
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
@@ -243,7 +243,7 @@ describe('only this message', () => {
 
   it('removes the chip with its ×', async () => {
     setup();
-    await openFromHeader();
+    await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5-mini')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-only-this')); });
     await act(async () => { fireEvent.click(screen.getByTestId('turn-model-chip-remove')); });
@@ -252,14 +252,14 @@ describe('only this message', () => {
 
   it('is not offered by an old daemon', async () => {
     setup({ capabilities: [] });
-    await openFromHeader();
+    await openFromComposer();
     expect(screen.queryByTestId('lead-model-only-this')).toBeNull();
     expect(screen.getByTestId('lead-model-make-primary')).toBeTruthy();
   });
 
   it('cannot be the model already in use', async () => {
     setup();
-    await openFromHeader();
+    await openFromComposer();
     // 打开时选着的就是正在用的模型：「只这一条」没有意义。
     const button = screen.getByTestId('lead-model-only-this');
     expect(button.getAttribute('aria-disabled') === 'true' || button.hasAttribute('disabled')).toBe(true);
@@ -287,6 +287,15 @@ describe('the model picker on a phone', () => {
     expect(screen.queryByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeNull();
     expect(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')).toBeTruthy();
     expect(screen.getByTestId('lead-model-only-this')).toBeTruthy();
+  });
+
+  // 2026-11-16 用户：「模型选择在移动端的入口保持之前移动端输入框的 plus icon button 里面」。
+  it('writes no model on the phone composer', async () => {
+    viewport.wide = false;
+    setup({ compact: true });
+    await screen.findByTestId('composer-plus');
+    expect(screen.queryByTestId('lead-model-button')).toBeNull();
+    expect(screen.queryByTestId('composer-model')).toBeNull();
   });
 
   it('writes no model in the top bar', async () => {

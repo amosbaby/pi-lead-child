@@ -14,7 +14,7 @@ import {
   type TicketSummary,
   validateUiSurface,
 } from '@pi-lead-child/protocol';
-import { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { ticketsNeedingUser } from '@pi-lead-child/protocol';
 
@@ -64,7 +64,7 @@ import { presentOutage } from './outagePresentation';
 import { failureActionLabels, presentTurnFailure, turnFailureGroupKey, type FailureAction } from './failurePresentation';
 import { InterventionCard } from './InterventionCard';
 import {
-  LeadModelHeaderTrigger, LeadModelPicker, LeadModelResendLink, leadModelTriggerText, TurnModelChip, useModelAccounts,
+  LeadModelComposerTrigger, LeadModelPicker, LeadModelResendLink, leadModelTriggerText, TurnModelChip, useModelAccounts,
 } from './LeadModelPicker';
 import { MessageComposer, type MessageComposerHandle } from './MessageComposer';
 import { AssistantTurnView } from './AssistantTurnView';
@@ -277,21 +277,16 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const queueTray = useComposerQueueTray({ leadName, actions: canSteerQueued });
   // daemon 收图片时，输入框才有「+」和粘贴图片（protocol 的 chat-images.ts）。
   const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
-  // Lead 现在用的模型（模型配置方案 C 的 S4）：桌面上写在最新一条回答的头上，点开换模型（LeadModelPicker）；手机上在加号面板里。
+  // Lead 现在用的模型：桌面上写在输入框工具栏右边、发送按钮前面（2026-11-16 用户），点开换模型（LeadModelPicker）；手机上在加号面板里。
   // 只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
   const leadModel = useControlPlaneStore((state) => state.overview?.model);
   const modelAccounts = useModelAccounts();
-  // 换模型的浮层：桌面上对着点开它的那个东西（回答头上的模型名，或者输入框），手机上是底部面板。同一时间只开一个（P2.8）。
+  // 换模型的浮层：桌面上对着点开它的那个东西（输入框上的模型名，或者输入 /model 时的输入框），手机上是底部面板。同一时间只开一个（P2.8）。
   const [picker, setPicker] = useState<{ anchor: PopoverAnchor | null } | null>(null);
   // 「只这一条」（D8）：下一条消息用的单轮模型。daemon 宣布了 chat.turn-model.v1 才有。
   const canTurnModel = useControlPlaneStore((state) => state.capabilities.includes(CHAT_TURN_MODEL_CAPABILITY));
   const [turnModel, setTurnModel] = useState<LeadModelChoice | null>(null);
   const composerAnchorRef = useRef<PopoverAnchorHandle>(null);
-  const modelTrigger = useMemo<LeadModelTriggerState>(() => ({
-    current: leadModel ?? null,
-    accounts: modelAccounts,
-    open: (anchor) => setPicker({ anchor }),
-  }), [leadModel, modelAccounts]);
   // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
@@ -390,7 +385,6 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
 
   // 会话按外观偏好里会话区域的密度（缺省标准）。
   return (
-    <LeadModelTriggerContext.Provider value={modelTrigger}>
     <Density zone="conversation"><KeyboardArea testID="lead-conversation" bg={compact ? 'page' : 'surface'}>
       {/* 手机上没有顶栏，是两颗悬浮圆钮（主题 11.20 H-2，2026-11-14 方案 F）。 */}
       {compact ? (
@@ -504,7 +498,9 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           chip={canTurnModel && turnModel ? (
             <TurnModelChip text={leadModelTriggerText(leadModelSpec(turnModel), modelAccounts, locale) ?? turnModel.model} onRemove={() => setTurnModel(null)} />
           ) : null}
-          {...(compact ? { float: true, onPlus: () => setPlusOpen(true), ref: composerRef } : {})}
+          {...(compact
+            ? { float: true, onPlus: () => setPlusOpen(true), ref: composerRef }
+            : { modelControl: <LeadModelComposerTrigger current={leadModel} accounts={modelAccounts} onOpen={(anchor) => setPicker({ anchor })} /> })}
           // 新 daemon：排着的事在输入卡片上半截的状态栏里（主题 11.13）。
           // 旧 daemon（没有 Steer 和取消）：照旧在发送前选「插话/排队」，排着的外部消息在那一行的右边（工单 10）。
           {...(canSteerQueued
@@ -540,18 +536,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         />
       ) : null}
     </KeyboardArea></Density>
-    </LeadModelTriggerContext.Provider>
   );
 }
-
-// 回答头上的模型名要的东西（模型配置方案 C 的 S4）：Lead 现在用的模型、模型的账号前缀，和打开浮层。
-// 用 context 传，不放进 rowContext：模型变了只重画头上写着模型的那几条。
-type LeadModelTriggerState = {
-  current: string | null;
-  accounts: ReadonlyMap<string, string | null>;
-  open: (anchor: PopoverAnchor) => void;
-};
-const LeadModelTriggerContext = createContext<LeadModelTriggerState | null>(null);
 
 const NO_ROWS: LeadConversationRow[] = [];
 const conversationRowKey = (row: LeadConversationRow) => row.key;
@@ -688,10 +674,6 @@ function ConversationMessage({
       && other.state === 'completed' && other.createdAt > turn.createdAt)));
   const delivered = useControlPlaneStore((state) => Boolean(message?.turnId && state.deliveredTurnIds[message.turnId]));
   const cardSlots = useTurnCardSlots(cardIds, cardsById, dispatchScopes);
-  // 回答头上的模型名（模型配置方案 C 的 S4）：「只这一条」的那一轮写它用的模型（这个页面记下的）；
-  // 别的回答只有最新的一条写 Lead 现在用的模型（daemon 不记每一轮用的模型）。
-  const modelTrigger = useContext(LeadModelTriggerContext);
-  const recordedTurnModel = useWorkspaceStore((state) => (message?.turnId ? state.turnModelByTurnId[message.turnId] : undefined));
   if (!message) return null;
   if (isHiddenUserMessage(message)) return null;
 
@@ -738,11 +720,6 @@ function ConversationMessage({
   const replying = message.state === 'streaming' || message.state === 'queued';
   const fairyMark = !user && !systemNotice && !compact
     ? <MessageLeadAvatar name={leadName} latest={latest} replying={replying} />
-    : null;
-  const headerModelSpec = recordedTurnModel ? leadModelSpec(recordedTurnModel) : latest ? modelTrigger?.current ?? null : null;
-  const headerModelText = fairyMark && modelTrigger ? leadModelTriggerText(headerModelSpec, modelTrigger.accounts, locale) : null;
-  const headerModel = headerModelText && modelTrigger
-    ? <LeadModelHeaderTrigger testID={latest ? 'lead-model-trigger' : `lead-model-trigger-${message.turnId}`} text={headerModelText} onOpen={modelTrigger.open} />
     : null;
   // 气泡上的时间（2026-11-09）：你的话是发出的时刻，Lead 的回答是开始回答的时刻，和它在会话里的位置一致
   // （conversationMessageTimes）；回答用了多久写在回合头上。以前写结束的时刻，排序改了以后时间会前后颠倒。
@@ -855,7 +832,6 @@ function ConversationMessage({
             renderReply={(reply) => <LeadReply reply={reply} />}
             {...(showHeader ? { header: `${sender} · ${stateCopy}` } : {})}
             {...(showHeader && fairyMark ? { headerMark: fairyMark } : {})}
-            {...(showHeader && headerModel ? { headerAccessory: headerModel } : {})}
             taskVariant="inline"
           />
         </Column>
