@@ -84,6 +84,9 @@ export interface RequestPrefix {
   thinkingLevel?: string;
   // Send prompt_cache_key with the summary request too (same rule as promptCacheKeyExtension).
   promptCacheKey: boolean;
+  // When the last message of this prefix went to or came from the provider (ms). The provider's cache holds the prefix
+  // for a short time after that (compaction-chunks.ts, chooseSummaryRoute). Absent in prefixes from older code.
+  at?: number;
   // LLM messages: the system messages (prompt and tools) and the conversation, ending with a finished assistant reply.
   messages: Message[];
 }
@@ -106,10 +109,13 @@ export class RequestPrefixRecorder {
   #model: { provider: string; id: string } | null = null;
   #sessionId: string | null = null;
   #thinkingLevel: string | undefined;
+  #at = 0;
   readonly #promptCacheKey: (provider: string) => boolean;
+  readonly #now: () => number;
 
-  constructor(options: { promptCacheKey?: (provider: string) => boolean } = {}) {
+  constructor(options: { promptCacheKey?: (provider: string) => boolean; now?: () => number } = {}) {
     this.#promptCacheKey = options.promptCacheKey ?? (() => false);
+    this.#now = options.now ?? Date.now;
   }
 
   /** Called with the final transcript of each request (pi's context_with_system). */
@@ -119,11 +125,14 @@ export class RequestPrefixRecorder {
     this.#model = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : null;
     this.#sessionId = ctx.sessionManager.getSessionId();
     this.#thinkingLevel = ctx.thinkingLevel;
+    this.#at = this.#now();
   }
 
   /** Called for each message that ends after the request (the reply, tool results, queued input). */
   recordMessage(message: AgentMessage): void {
-    if (this.#transcript) this.#tail.push(message);
+    if (!this.#transcript) return;
+    this.#tail.push(message);
+    this.#at = this.#now();
   }
 
   clear(): void {
@@ -146,6 +155,7 @@ export class RequestPrefixRecorder {
       sessionId: this.#sessionId,
       ...(this.#thinkingLevel ? { thinkingLevel: this.#thinkingLevel } : {}),
       promptCacheKey: this.#promptCacheKey(model.provider),
+      at: this.#at,
       messages: convertToLlm(all) as Message[],
     };
   }

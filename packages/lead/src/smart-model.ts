@@ -31,7 +31,7 @@ export function isValidSmartModelSpec(spec: string): boolean {
 
 /** Lead 的 provider 配置里列出的模型，按 provider 的顺序；registered 补上 discover 拉到的模型。 */
 export function configuredLeadModelSpecs(
-  config: LeadModelConfig,
+  config: Pick<LeadModelConfig, "providers">,
   registered: (provider: string) => readonly string[] = () => [],
 ): string[] {
   const specs: string[] = [];

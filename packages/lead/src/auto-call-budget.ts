@@ -34,6 +34,16 @@ const DAY = 24 * HOUR;
 const RESUME_RATIO = 0.8;
 
 /** config.json 的 lead.autoBudget：只取写对的数字（非负整数），别的用缺省。 */
+/** The input of one model call that the provider did not serve from its cache: pi's usage.input plus usage.cacheWrite. */
+export function uncachedTokens(usage: unknown): number {
+  if (!usage || typeof usage !== "object") return 0;
+  const used = (key: string) => {
+    const value = (usage as Record<string, unknown>)[key];
+    return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+  };
+  return used("input") + used("cacheWrite");
+}
+
 export function autoCallBudgetLimits(configured: unknown): AutoCallBudgetLimits {
   const limits = { ...DEFAULT_AUTO_CALL_BUDGET };
   if (!configured || typeof configured !== "object") return limits;

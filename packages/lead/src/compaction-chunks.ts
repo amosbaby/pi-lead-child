@@ -19,6 +19,12 @@
 //   - One compaction reads at most one model window of history (capToWindow). Older messages are left out and a note
 //     says how many; the previous summary still covers them.
 //
+// Which model writes the summary (chooseSummaryRoute, 2026-11-16). A summary on the session prefix is cheap only while
+// the provider still holds that prefix in its cache: then the request reads the history at the cache price. After the
+// cache has expired, the same request pays the full write price for the whole context on Lead's model, which is often
+// the most expensive one. So: a warm prefix goes to Lead's model; otherwise a cheaper summary model writes the summary
+// in a separate request, when there is one. If the cheaper model fails, Lead's model writes it.
+//
 // Summary on the session prefix (prompt cache, 2026-11-12). pi's summary request uses its own system prompt and a
 // serialized copy of the history, so no provider can serve any of it from cache: every compaction paid for the whole
 // history again. When the prefix of the last Lead request is known (prompt-cache.ts, RequestPrefixRecorder), the summary
@@ -374,8 +380,43 @@ export interface CompactionChunksOptions {
   skip?: (event: SessionBeforeCompactEvent) => boolean;
   // The prefix of the last Lead request (prompt-cache.ts). When it is there, the summary is written on it first.
   prefix?: (model: { provider: string; id: string }) => RequestPrefix | null | undefined;
+  // A cheaper model for a summary that cannot use the provider's cache (chooseSummaryRoute). Returns undefined when
+  // there is none, or when it is Lead's own model.
+  summaryModel?: (main: SummaryModel) => SummaryModel | undefined;
+  // How many tokens of history one compaction reads at most. Default: the window of Lead's model. The idle child
+  // gets it from the daemon, because there the summary model can be the only model it knows.
+  historyCap?: number;
+  // How long after its last message a prefix counts as held in the provider's cache. Default PREFIX_WARM_MS.
+  prefixWarmMs?: number;
+  now?: () => number;
   // Tests replace the prefix summary call.
   complete?: CompleteFn;
+}
+
+/**
+ * A prefix counts as warm this long after its last message. Anthropic's default cache lifetime is 5 minutes, and each
+ * read starts it again; the margin covers the time the request itself takes.
+ */
+export const PREFIX_WARM_MS = 4.5 * 60_000;
+
+/**
+ * How to write the summary. prefix: try the session prefix first, on Lead's model. model: who writes a separate
+ * request (when there is no prefix to try, or the prefix request did not work).
+ * - The prefix is warm: the prefix (the history is read at the cache price); then the cheaper model, when there is one.
+ * - The prefix is cold or missing, and there is a cheaper model: that model, in a separate request.
+ * - No cheaper model: as before (Lead's model, on the prefix when there is one).
+ * A prefix without a time (older code, tests) counts as warm. Pure function.
+ */
+export function chooseSummaryRoute<M extends { provider: string; id: string }>(input: {
+  main: M; cheap: M | undefined; prefix: RequestPrefix | null | undefined; now: number; warmMs?: number;
+}): { prefix: RequestPrefix | null; model: M; reason: "warm_prefix" | "cheap_model" | "main_model" } {
+  const { main } = input;
+  const prefix = input.prefix && input.prefix.provider === main.provider && input.prefix.model === main.id ? input.prefix : null;
+  const cheap = input.cheap && !(input.cheap.provider === main.provider && input.cheap.id === main.id) ? input.cheap : undefined;
+  const warm = prefix !== null && (prefix.at === undefined || input.now - prefix.at <= (input.warmMs ?? PREFIX_WARM_MS));
+  if (warm) return { prefix, model: cheap ?? main, reason: "warm_prefix" };
+  if (cheap) return { prefix: null, model: cheap, reason: "cheap_model" };
+  return { prefix, model: main, reason: "main_model" };
 }
 
 /**
@@ -385,18 +426,46 @@ export interface CompactionChunksOptions {
 export async function compactInChunks(
   event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">, options: CompactionChunksOptions = {},
 ): Promise<{ compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; usage?: SummaryUsage; details: unknown } } | undefined> {
-  const model = ctx.model;
-  if (!model) return undefined;
-  const { preparation } = event;
+  const main = ctx.model;
+  if (!main) return undefined;
   const instructions = event.customInstructions ?? options.instructions;
-  const onPrefix = await compactOnPrefix(event, model, ctx, instructions, options);
-  if (onPrefix) return onPrefix;
+  const route = chooseSummaryRoute({
+    main, cheap: options.summaryModel?.(main) as typeof main | undefined, prefix: options.prefix?.(main),
+    now: (options.now ?? Date.now)(), ...(options.prefixWarmMs !== undefined ? { warmMs: options.prefixWarmMs } : {}),
+  });
+  if (route.prefix) {
+    const onPrefix = await compactOnPrefix(event, main, route.prefix, ctx, instructions, options);
+    if (onPrefix) return onPrefix;
+  }
+  if (route.model !== main) {
+    options.log?.(`[lead] compaction: the summary cannot use the provider's cache (${route.reason === "warm_prefix" ? "the request on the session prefix did not work" : "the session prefix is cold or missing"}); ${route.model.provider}/${route.model.id} writes it`);
+    try {
+      return await compactSeparately(event, route.model, main, ctx, instructions, options);
+    } catch (error) {
+      if (event.signal.aborted) throw error;
+      options.log?.(`[lead] compaction: ${route.model.provider}/${route.model.id} did not write the summary (${error instanceof Error ? error.message : String(error)}); using ${main.provider}/${main.id}`);
+    }
+  }
+  return compactSeparately(event, main, main, ctx, instructions, options);
+}
+
+// The summary in a separate request (pi's serialized history), in parts when it does not fit in one request.
+// model writes it; main is Lead's model: the cap on how much history one compaction reads follows Lead's window.
+async function compactSeparately(
+  event: SessionBeforeCompactEvent,
+  model: NonNullable<ExtensionContext["model"]>,
+  main: NonNullable<ExtensionContext["model"]>,
+  ctx: Pick<ExtensionContext, "modelRegistry">,
+  instructions: string | undefined,
+  options: CompactionChunksOptions,
+): Promise<{ compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; usage?: SummaryUsage; details: unknown } } | undefined> {
+  const { preparation } = event;
   // 切在一轮中间时，那一轮的前半段也并进历史一起摘要：分段时不再单独写「这一轮的前情」。
   const history = [...preparation.messagesToSummarize, ...(preparation.isSplitTurn ? preparation.turnPrefixMessages : [])];
   const budget = chunkTokenBudget(model.contextWindow, preparation.settings.reserveTokens);
   // 没有得到回复的系统唤醒不是历史；一次压缩最多读一个模型窗口的历史（文件开头，2026-11-16）。
   const answered = dropUnansweredWakes(history);
-  const capped = capToWindow(answered.messages, Math.max(budget, model.contextWindow));
+  const capped = capToWindow(answered.messages, Math.max(budget, options.historyCap ?? main.contextWindow));
   const note = leftOutNote(answered.dropped, capped.omitted, capped.omittedTokens);
   const messages = note ? [note, ...capped.messages] : capped.messages;
   const tokens = messages.reduce((total, message) => total + messageTokens(message), 0);
@@ -406,7 +475,8 @@ export async function compactInChunks(
   // pi 自己触发的压缩不带要求（customInstructions 是空的）：有要给它的要求时由这里来写，放得进一次请求也一样。
   // 略去了东西时也由这里来写：pi 自己的压缩会把略去的部分照样发出去。
   const ours = event.customInstructions === undefined && options.instructions !== undefined;
-  if (tokens <= budget && !ours && !note) return undefined;
+  // 交回给 pi 时是 Lead 的模型来写：换了模型时由这里写。
+  if (tokens <= budget && !ours && !note && model === main) return undefined;
 
   const chunks = tokens <= budget ? [messages] : planCompactionChunks(messages, budget);
   if (chunks.length > 1) {
@@ -436,6 +506,7 @@ export async function compactInChunks(
       ...(usage ? { usage } : {}),
       details: {
         ...files, chunks: chunks.length,
+        ...(model === main ? {} : { model: `${model.provider}/${model.id}` }),
         ...(note ? { unansweredWakes: answered.dropped, omittedMessages: capped.omitted, omittedTokens: capped.omittedTokens } : {}),
       },
     },
@@ -447,13 +518,12 @@ export async function compactInChunks(
 async function compactOnPrefix(
   event: SessionBeforeCompactEvent,
   model: NonNullable<ExtensionContext["model"]>,
+  prefix: RequestPrefix,
   ctx: Pick<ExtensionContext, "modelRegistry">,
   instructions: string | undefined,
   options: CompactionChunksOptions,
 ): Promise<{ compaction: { summary: string; firstKeptEntryId: string; tokensBefore: number; usage?: SummaryUsage; details: unknown } } | undefined> {
   if (event.reason === "overflow") return undefined;
-  const prefix = options.prefix?.(model);
-  if (!prefix || prefix.provider !== model.provider || prefix.model !== model.id) return undefined;
   const { preparation } = event;
   const maxTokens = prefixSummaryMaxTokens(model, preparation.settings.reserveTokens, preparation.tokensBefore);
   if (maxTokens === null) {

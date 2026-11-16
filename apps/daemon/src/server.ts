@@ -35,7 +35,7 @@ import {
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { isInterruptedForSteer } from "@pi-lead-child/lead";
-import { AutoCallBudget, autoCallBudgetLimits, ModelHold, modelBreakerLimitsFromEnv, type ModelHoldPort } from "@pi-lead-child/lead";
+import { AutoCallBudget, autoCallBudgetLimits, ModelHold, modelBreakerLimitsFromEnv, uncachedTokens, type ModelHoldPort } from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
@@ -3586,8 +3586,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (event.message?.role === "assistant") {
         // 系统自己发起的单元里的一次模型调用（成功、失败都算；被中断的不算）：记进自动调用的预算，超了就暂停。
         if (sched.unit?.source === "system" && event.message.stopReason !== "aborted") {
-          const used = (key: string) => (typeof event.message.usage?.[key] === "number" ? event.message.usage[key] as number : 0);
-          const over = autoBudget.record(used("input") + used("cacheWrite"));
+          const over = autoBudget.record(uncachedTokens(event.message.usage));
           if (over) modelHold.pause(over.until, over.detail);
         }
         // 一次模型回复是一步（lead-scheduler spec D3）：单元结束时的日志和记录带上步数。
@@ -3694,6 +3693,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 空闲车道取消的（取对话、推迟到空闲）不是压缩中止；它自己写了 [sched] idle.* 日志。接上的摘要照常算一次压缩成功。
       const idle = idleLane.compactionEnded(event);
       if (idle.ours && !idle.applied) return;
+      // 压缩也是系统发起的模型调用（2026-11-16：一次压缩发了 394 万 token）：成功的按它的用量记进自动调用的预算，
+      // 失败的记一次调用。被中止的不算。超了就暂停，和上面一样。
+      if (outcome.kind !== "aborted") {
+        const over = autoBudget.record(uncachedTokens(event.result?.usage));
+        if (over) modelHold.pause(over.until, over.detail);
+      }
       if (outcome.kind === "succeeded") {
         // 新压缩周期：整理笔记重新武装（空闲车道 compactionEnded 里做）。
         coreMemoryDirty = true; // 压缩摘要不保真核心记忆，下一轮重新注入

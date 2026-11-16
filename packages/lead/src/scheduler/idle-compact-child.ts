@@ -45,6 +45,7 @@ export async function runIdleCompact(request: IdleCompactRequest, options: RunId
       const result = await compactInChunks(event, ctx, {
         instructions: leadCompactionInstructions(level),
         ...(request.prefix ? { prefix: () => request.prefix } : {}),
+        ...(typeof request.historyCap === "number" ? { historyCap: request.historyCap } : {}),
         ...(options.log ? { log: options.log } : {}),
         ...(options.summarize ? { summarize: options.summarize } : {}),
         ...(options.complete ? { complete: options.complete } : {}),

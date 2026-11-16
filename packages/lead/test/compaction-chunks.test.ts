@@ -2,7 +2,8 @@
 // 完整的一跳（真实的 pi 会话、模型拒绝超长请求）在 compaction-chunks-session.test.ts。
 import { describe, expect, it, vi } from "vitest";
 import {
-  capToWindow, chunkTokenBudget, compactInChunks, dropUnansweredWakes, messageTokens, planCompactionChunks, shrinkMessage,
+  capToWindow, chooseSummaryRoute, chunkTokenBudget, compactInChunks, dropUnansweredWakes, messageTokens, planCompactionChunks, PREFIX_WARM_MS,
+  shrinkMessage,
 } from "../src/compaction-chunks.js";
 
 const user = (text: string) => ({ role: "user" as const, content: text, timestamp: 0 });
@@ -70,6 +71,38 @@ describe("capToWindow", () => {
     const result = capToWindow(history as never, 100, chars as never);
     expect(result.messages).toEqual([history[1]]);
     expect(result.omitted).toBe(1);
+  });
+});
+
+describe("chooseSummaryRoute", () => {
+  const main = { provider: "gw", id: "big" };
+  const cheap = { provider: "gw", id: "small" };
+  const prefix = (at?: number) => ({ provider: "gw", model: "big", sessionId: "s", promptCacheKey: false, messages: [], ...(at === undefined ? {} : { at }) });
+  const now = 1_000_000;
+
+  it("writes on the session prefix while the provider still holds it", () => {
+    const warm = prefix(now - PREFIX_WARM_MS);
+    expect(chooseSummaryRoute({ main, cheap, prefix: warm, now })).toEqual({ prefix: warm, model: cheap, reason: "warm_prefix" });
+    expect(chooseSummaryRoute({ main, cheap: undefined, prefix: warm, now })).toEqual({ prefix: warm, model: main, reason: "warm_prefix" });
+  });
+
+  it("gives a cold or missing prefix to the cheaper model, in a separate request", () => {
+    const cold = prefix(now - PREFIX_WARM_MS - 1);
+    expect(chooseSummaryRoute({ main, cheap, prefix: cold, now })).toEqual({ prefix: null, model: cheap, reason: "cheap_model" });
+    expect(chooseSummaryRoute({ main, cheap, prefix: null, now })).toEqual({ prefix: null, model: cheap, reason: "cheap_model" });
+    // A prefix of another model is no prefix.
+    expect(chooseSummaryRoute({ main, cheap, prefix: { ...prefix(now), model: "other" }, now }).reason).toBe("cheap_model");
+  });
+
+  it("stays as before when there is no cheaper model, or it is Lead's own model", () => {
+    const cold = prefix(now - 3_600_000);
+    expect(chooseSummaryRoute({ main, cheap: undefined, prefix: cold, now })).toEqual({ prefix: cold, model: main, reason: "main_model" });
+    expect(chooseSummaryRoute({ main, cheap: { ...main }, prefix: cold, now })).toEqual({ prefix: cold, model: main, reason: "main_model" });
+    expect(chooseSummaryRoute({ main, cheap: undefined, prefix: null, now })).toEqual({ prefix: null, model: main, reason: "main_model" });
+  });
+
+  it("counts a prefix without a time as warm", () => {
+    expect(chooseSummaryRoute({ main, cheap, prefix: prefix(), now }).reason).toBe("warm_prefix");
   });
 });
 
@@ -251,6 +284,91 @@ describe("compactInChunks", () => {
     expect(seen.text()).toContain(`更早的 ${details.omittedMessages} 条消息（约 ${details.omittedTokens} token）没有读`);
     // The first request still carries the summary of the compaction before this one.
     expect((seen.summarize.mock.calls[0] as unknown[])[7]).toBe("上一次的摘要");
+  });
+
+  describe("with a cheaper summary model", () => {
+    const small = { contextWindow: 8_000, maxTokens: 2_000, provider: "stub", id: "small" };
+    const history = Array.from({ length: 12 }, (_, index) => (index % 2 ? assistant : user)(`第 ${index} 条 ${"内容".repeat(600)}`));
+    const models = (calls: unknown[][]) => calls.map((call) => (call[1] as { id: string }).id);
+
+    // The incident: no prefix (the last call had failed), so the whole summary went to Lead's model, the most expensive one.
+    it("gives a summary without a prefix to the cheaper model, in parts that fit its window", async () => {
+      const seen = recorder();
+      const context = ctx(500_000);
+      const result = await compactInChunks(event(history) as never, context as never, {
+        summarize: seen.summarize as never, summaryModel: () => small as never,
+      });
+      const calls = seen.summarize.mock.calls as unknown as unknown[][];
+      expect(calls.length).toBeGreaterThan(1);
+      expect(new Set(models(calls))).toEqual(new Set(["small"]));
+      const budget = chunkTokenBudget(small.contextWindow, 20_480);
+      for (const chunk of seen.sent) expect(chunk.reduce<number>((total, message) => total + messageTokens(message as never), 0)).toBeLessThanOrEqual(budget);
+      // The key is the cheaper model's.
+      expect(context.modelRegistry.getApiKeyAndHeaders).toHaveBeenCalledWith(small);
+      // The cap on the history follows Lead's window, not the small one: nothing is left out here.
+      expect(result!.compaction.details).toMatchObject({ model: "stub/small", chunks: calls.length });
+      expect((result!.compaction.details as { omittedMessages?: number }).omittedMessages).toBeUndefined();
+    });
+
+    it("uses Lead's model when the cheaper model fails", async () => {
+      const calls: string[] = [];
+      const summarize = vi.fn(async (_chunk: unknown[], model: { id: string }) => {
+        calls.push(model.id);
+        if (model.id === "small") throw new Error("404 model not found");
+        return { text: "摘要", usage: usage0 };
+      });
+      const logs: string[] = [];
+      // pi's own compaction (no customInstructions): Lead writes it with its instructions.
+      const own = { ...event(history), customInstructions: undefined };
+      const result = await compactInChunks(own as never, ctx(500_000) as never, {
+        summarize: summarize as never, summaryModel: () => small as never, log: (line) => logs.push(line), instructions: "最多 8000 字",
+      });
+      expect(calls).toEqual(["small", "m"]);
+      expect(result!.compaction.summary.startsWith("摘要")).toBe(true);
+      expect((result!.compaction.details as { model?: string }).model).toBeUndefined();
+      expect(logs.join("\n")).toContain("stub/small did not write the summary (404 model not found); using stub/m");
+    });
+
+    it("does not try Lead's model after a cancel", async () => {
+      const controller = new AbortController();
+      const summarize = vi.fn(async () => {
+        controller.abort();
+        throw new Error("Compaction cancelled");
+      });
+      const cancelled = { ...event(history), signal: controller.signal };
+      await expect(compactInChunks(cancelled as never, ctx(500_000) as never, { summarize: summarize as never, summaryModel: () => small as never }))
+        .rejects.toThrow("Compaction cancelled");
+      expect(summarize).toHaveBeenCalledTimes(1);
+    });
+
+    it("writes on a warm session prefix with Lead's model, and gives a cold prefix to the cheaper model", async () => {
+      const prefix = (at: number) => ({
+        provider: "stub", model: "m", sessionId: "s", promptCacheKey: false, at,
+        messages: [{ role: "system", content: "prompt" }, { role: "user", content: "hi", timestamp: 0 }],
+      });
+      const reply = { role: "assistant", content: [{ type: "text", text: "前缀上的摘要" }], stopReason: "stop", usage: usage0 };
+      const complete = vi.fn(async () => reply);
+      const now = 10_000_000;
+      const options = (at: number, seen: ReturnType<typeof recorder>) => ({
+        summarize: seen.summarize as never, summaryModel: () => small as never, complete: complete as never, now: () => now,
+        prefix: () => prefix(at) as never,
+      });
+
+      // A model with room for a summary on the prefix (the output cap must be at least PREFIX_MIN_OUTPUT_TOKENS).
+      const big = () => ({ ...ctx(500_000), model: { contextWindow: 500_000, maxTokens: 32_000, provider: "stub", id: "m" } });
+      const warm = recorder();
+      const onPrefix = await compactInChunks(event(history) as never, big() as never, options(now - 60_000, warm));
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect((complete.mock.calls[0] as unknown as [{ id: string }])[0].id).toBe("m");
+      expect(warm.summarize).not.toHaveBeenCalled();
+      expect(onPrefix!.compaction.details).toMatchObject({ prefix: true });
+
+      const cold = recorder();
+      const separate = await compactInChunks(event(history) as never, big() as never, options(now - 10 * 60_000, cold));
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(new Set(models(cold.summarize.mock.calls as unknown as unknown[][]))).toEqual(new Set(["small"]));
+      expect(separate!.compaction.details).toMatchObject({ model: "stub/small" });
+    });
   });
 
   it("writes the compaction itself when it left something out, so that pi does not send it", async () => {

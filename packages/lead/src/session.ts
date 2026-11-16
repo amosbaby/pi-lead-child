@@ -3,7 +3,7 @@ import type { LeadEngine } from "./engine.js";
 import {
   SOL_PI_ENTRY_ENV, solPiPinnedCommit, solPiSettings, solPiSource, type SolPiSettings,
 } from "@pi-lead-child/engine";
-import { envConfigPath, projectRoot, runtimeAsset } from "@pi-lead-child/core";
+import { envConfigPath, loadPlcConfig, projectRoot, runtimeAsset } from "@pi-lead-child/core";
 import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import {
@@ -51,7 +51,7 @@ import {
   type LeadModelConfig,
 } from "./model-config.js";
 import { promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
-import { createLeadSmartModel } from "./smart-model.js";
+import { configuredLeadModelSpecs, createLeadSmartModel, isValidSmartModelSpec, selectSmartModelSpec } from "./smart-model.js";
 import type { ModelHoldPort } from "./model-hold.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
@@ -291,6 +291,22 @@ export async function createLeadSession(opts: {
   // The prefix of the last request: compaction writes its summary on it (prompt-cache.ts, compaction-chunks.ts).
   const requestPrefix = new RequestPrefixRecorder({ promptCacheKey: sendPromptCacheKey });
   const prefixFor = (current: { provider: string; id: string }) => requestPrefix.snapshot(current);
+  // 写压缩摘要的便宜模型（compaction-chunks.ts 的 chooseSummaryRoute）：只在摘要用不上服务商的缓存时用它。每次压缩时读：
+  //   0. config.json 的 lead.compactionModel（"main" 是总用 Lead 自己的模型）；
+  //   1. 否则按 SmartModel 的选法（PLC_SMART_MODEL，或者名字带 haiku 的最新模型）。
+  // 选出来的就是 Lead 的模型、或者没有注册时，没有便宜模型。
+  const summaryModelFor = <M extends { provider: string; id: string }>(main: M): M | undefined => {
+    const setting = loadPlcConfig(opts.dataDir).lead?.compactionModel?.trim();
+    if (setting === "main") return undefined;
+    const leadSpec = `${main.provider}/${main.id}`;
+    const chosen = setting && isValidSmartModelSpec(setting) ? setting : selectSmartModelSpec({
+      configuredSpecs: configuredLeadModelSpecs(providerSettings, (provider) => modelRuntime.getModels(provider).map((model) => model.id)),
+      leadSpec,
+    }).spec;
+    if (chosen === leadSpec) return undefined;
+    const { provider, id } = parseModelName(chosen);
+    return modelRuntime.getModel(provider, id) as M | undefined;
+  };
   for (const note of await registerLeadProviders(modelRuntime, leadModels)) {
     console.error(`[lead] ${note}`);
   }
@@ -466,7 +482,7 @@ export async function createLeadSession(opts: {
       },
       // 空闲车道（scheduler/idle-runtime.ts，P4）：pi 在单元中间想压缩时推迟到空闲，或者用子进程写好的摘要。
       // 排在分段压缩之前：它取消时 pi 不再问后面的扩展；它接上时分段压缩跳过（skip）。
-      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, { prefix: prefixFor }) }] : []),
+      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, { prefix: prefixFor, summaryModel: summaryModelFor }) }] : []),
       // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
       // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {
@@ -476,6 +492,7 @@ export async function createLeadSession(opts: {
           log: (line) => console.error(line),
           instructions: leadAutoCompactionInstructions(),
           prefix: prefixFor,
+          summaryModel: summaryModelFor,
           ...(opts.idleLane ? { skip: (event) => opts.idleLane!.claims(event) } : {}),
         }),
       },

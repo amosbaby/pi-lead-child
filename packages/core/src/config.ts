@@ -247,6 +247,9 @@ export interface PlcConfigFile {
     // 系统自己发起的模型调用的预算（lead 的 auto-call-budget.ts）。不写时用缺省：每小时 120 次、每天 1,500 次、
     // 每天没命中缓存的输入 5,000 万 token。0 是不限。
     autoBudget?: { callsPerHour?: number; callsPerDay?: number; uncachedTokensPerDay?: number };
+    // 写压缩摘要的便宜模型（lead 的 compaction-chunks.ts，chooseSummaryRoute）：provider/model。只在摘要用不上服务商的缓存时用它。
+    // 不写时按 SmartModel 的选法（PLC_SMART_MODEL，或者名字带 haiku 的最新模型）；"main" 是总用 Lead 自己的模型。
+    compactionModel?: string;
   };
   // Lead 的记忆（设置页「Lead → 记忆」，daemon 的 memory-controller.ts）。不含密钥：密钥加密存在保险库里。
   memory?: PlcMemoryConfig;

@@ -1,6 +1,6 @@
 // 自动调用的预算（auto-call-budget.ts，2026-11-16）：系统自己发起的模型调用超过每小时、每天的上限时返回超的那一条和暂停到的时间。
 import { describe, expect, it } from "vitest";
-import { AutoCallBudget, autoCallBudgetLimits, DEFAULT_AUTO_CALL_BUDGET } from "../src/auto-call-budget.js";
+import { AutoCallBudget, autoCallBudgetLimits, DEFAULT_AUTO_CALL_BUDGET, uncachedTokens } from "../src/auto-call-budget.js";
 
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
@@ -62,5 +62,14 @@ describe("AutoCallBudget", () => {
       .toEqual({ callsPerHour: 30, callsPerDay: 1_500, uncachedTokensPerDay: 0 });
     const { made } = budget({ callsPerHour: 0, callsPerDay: 0, uncachedTokensPerDay: 0 });
     for (let i = 0; i < 3_000; i += 1) expect(made.record(1_000_000)).toBeNull();
+  });
+});
+
+describe("uncachedTokens", () => {
+  it("adds the input and the cache write of a usage record, and ignores what is not a count", () => {
+    expect(uncachedTokens({ input: 1_200, cacheWrite: 233_000, cacheRead: 900_000, output: 4_000 })).toBe(234_200);
+    expect(uncachedTokens({ input: 10 })).toBe(10);
+    expect(uncachedTokens({ input: "12", cacheWrite: -5 })).toBe(0);
+    expect(uncachedTokens(undefined)).toBe(0);
   });
 });

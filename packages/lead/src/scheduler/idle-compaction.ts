@@ -38,6 +38,9 @@ export interface IdleCompactRequest {
   // The prefix of the last Lead request (prompt-cache.ts). With it, the child writes the summary on the session prefix,
   // so the provider can serve the prefix from its cache. Optional: without it the child serializes the history.
   prefix?: RequestPrefix;
+  // How many tokens of history the summary reads at most: the window of Lead's model (compaction-chunks.ts). model can
+  // be a cheaper summary model with a smaller window.
+  historyCap?: number;
 }
 
 export type IdleCompactResponse =

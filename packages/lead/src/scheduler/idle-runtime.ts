@@ -24,6 +24,7 @@ import {
 } from "./idle-compaction.js";
 import type { Lane } from "./lanes.js";
 import type { RequestPrefix } from "../prompt-cache.js";
+import { chooseSummaryRoute } from "../compaction-chunks.js";
 
 export const IDLE_PROBE_INSTRUCTIONS = "[plc idle lane: prepare]";
 export const IDLE_APPLY_INSTRUCTIONS = "[plc idle lane: apply]";
@@ -119,6 +120,7 @@ export class IdleLaneRuntime {
   #inlineAction: "allow" | "defer" | "supply" | null = null;
   #pendingPrep: {
     event: SessionBeforeCompactEvent; ctx: Pick<ExtensionContext, "model" | "modelRegistry">; prefix: RequestPrefix | null;
+    historyCap: number | null;
   } | null = null;
   #sweepHeldLogged = false;
   #stopped = false;
@@ -295,12 +297,14 @@ export class IdleLaneRuntime {
   /** pi 想压缩。返回给 pi 的结果：cancel、compaction，或者 undefined（照常）。 */
   async beforeCompact(
     event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">, prefix?: RequestPrefix | null,
+    // ctx.model 是写摘要的模型，可以不是 Lead 的模型（idleLaneExtension）。historyCap 是 Lead 的模型的窗口。
+    historyCap?: number | null,
   ): Promise<CompactionResult> {
     const marker = event.customInstructions;
     if (marker === IDLE_PROBE_INSTRUCTIONS) {
       this.#probeReached = true;
       const compact = this.#state.compact;
-      if (compact.phase === "preparing" && compact.id) this.#startChild(compact.id, event, ctx, prefix ?? null);
+      if (compact.phase === "preparing" && compact.id) this.#startChild(compact.id, event, ctx, prefix ?? null, historyCap ?? null);
       this.#cancelled += 1;
       return { cancel: true };
     }
@@ -338,7 +342,7 @@ export class IdleLaneRuntime {
       return this.#supply(event);
     }
     this.#inlineAction = null;
-    this.#pendingPrep = { event, ctx, prefix: prefix ?? null };
+    this.#pendingPrep = { event, ctx, prefix: prefix ?? null, historyCap: historyCap ?? null };
     try {
       this.dispatch({ type: "inline", reason: event.reason, ready: valid });
     } finally {
@@ -425,7 +429,7 @@ export class IdleLaneRuntime {
       case "compact.start": {
         const prep = this.#pendingPrep;
         if (prep) {
-          this.#startChild(effect.id, prep.event, prep.ctx, prep.prefix);
+          this.#startChild(effect.id, prep.event, prep.ctx, prep.prefix, prep.historyCap);
           return;
         }
         this.#probe(effect.id);
@@ -502,6 +506,7 @@ export class IdleLaneRuntime {
 
   #startChild(
     id: string, event: SessionBeforeCompactEvent, ctx: Pick<ExtensionContext, "model" | "modelRegistry">, prefix: RequestPrefix | null,
+    historyCap: number | null = null,
   ): void {
     const model = ctx.model;
     if (!model) {
@@ -533,6 +538,7 @@ export class IdleLaneRuntime {
           },
           preparation,
           ...(prefix ? { prefix } : {}),
+          ...(historyCap !== null ? { historyCap } : {}),
         };
         result = await this.#summarize(request, {
           id, timeoutMs: this.#timeoutMs, signal: controller.signal,
@@ -594,10 +600,23 @@ export class IdleLaneRuntime {
  * prefix gives the prefix of the last Lead request (prompt-cache.ts) for the summary child.
  */
 export function idleLaneExtension(
-  runtime: IdleLaneRuntime, options: { prefix?: (model: { provider: string; id: string }) => RequestPrefix | null } = {},
+  runtime: IdleLaneRuntime, options: {
+    prefix?: (model: { provider: string; id: string }) => RequestPrefix | null;
+    // A cheaper model for a summary that cannot use the provider's cache (compaction-chunks.ts, chooseSummaryRoute).
+    summaryModel?: (main: NonNullable<ExtensionContext["model"]>) => ExtensionContext["model"];
+    now?: () => number;
+  } = {},
 ): ExtensionFactory {
   return (pi) => {
-    pi.on("session_before_compact", (event, ctx) =>
-      runtime.beforeCompact(event, ctx, ctx.model && options.prefix ? options.prefix(ctx.model) : null));
+    pi.on("session_before_compact", (event, ctx) => {
+      const main = ctx.model;
+      if (!main) return runtime.beforeCompact(event, ctx, null);
+      const route = chooseSummaryRoute({
+        main, cheap: options.summaryModel?.(main), prefix: options.prefix?.(main) ?? null, now: (options.now ?? Date.now)(),
+      });
+      // 有前缀可试时交给 Lead 的模型（子进程里前缀不成就由它自己写）；没有时交给便宜的模型。
+      if (route.prefix || route.model === main) return runtime.beforeCompact(event, ctx, route.prefix);
+      return runtime.beforeCompact(event, { model: route.model, modelRegistry: ctx.modelRegistry }, null, main.contextWindow);
+    });
   };
 }
