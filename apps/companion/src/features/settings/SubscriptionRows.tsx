@@ -8,6 +8,7 @@ import { SubscriptionDetailPanel } from './SubscriptionDetail';
 import { subscriptionsMessages } from './subscriptions.messages';
 import { accountName, activeAccount, quotaBars, subscriptionsOf, subscriptionSummary, subscriptionUse } from './subscriptionsModel';
 import { QuotaLine, SubscriptionMark } from './SubscriptionParts';
+import { useInSessionModel } from './useInSessionModel';
 
 // 设置 → 模型的接入列表里「订阅」一组（模型配置方案 C 的 S3，画板 C-Settings-Desktop）。
 // 一种订阅一行：标志、名字、账号数和换号方式、右边模型数和在分工里的位置。下面一个账号一行：名字、额度小条和已用的比例、「正在用」。
@@ -42,7 +43,7 @@ function SubscriptionRow({ dto, subscription, first, locale, onOpen }: {
 }) {
   const m = subscriptionsMessages(locale);
   const { tablet } = useBreakpoint();
-  const active = activeAccount(dto, subscription);
+  const active = activeAccount(dto, subscription, useInSessionModel(dto));
   const base = subscription.base;
   return (
     <Pressable

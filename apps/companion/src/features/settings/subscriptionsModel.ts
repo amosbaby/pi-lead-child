@@ -92,10 +92,10 @@ export function resetLabel(iso: string, now: Date, locale: Locale): string {
 
 /**
  * 正在用的账号：大脑现在的模型就是这个账号的（<base>-<n>/<id>），或者写的是 <base>/<id> 而这种订阅只有一个登录了的账号。
- * 有几个账号时 pi-multi-pass 在 pool 里自己换号，daemon 不知道它这一刻用哪一个：这时不标。
+ * 有几个账号时 pi-multi-pass 在 pool 里自己换号：给了会话此刻的模型（inSession，模型目录）时按它标，没给时不标。
  */
-export function activeAccount(dto: ModelSettingsDto, subscription: Subscription): string | null {
-  const current = dto.brain.current.model;
+export function activeAccount(dto: ModelSettingsDto, subscription: Subscription, inSession: string | null = null): string | null {
+  const current = inSession ?? dto.brain.current.model;
   const slash = current.indexOf('/');
   const provider = slash > 0 ? current.slice(0, slash) : current;
   const account = subscriptionAccountOf(provider);

@@ -17,6 +17,7 @@ import {
 } from './subscriptionsModel';
 import { useSubscriptionLogin, type LoginTarget } from './SubscriptionLogin';
 import { DrawerFooter, QuotaLine, SubscriptionMark, type PanelFooter } from './SubscriptionParts';
+import { useInSessionModel } from './useInSessionModel';
 import { useModelAction } from './useModelAction';
 
 // 订阅详情（模型配置方案 C 的 S3，画板 C-Sub-Detail）：点接入列表里的一种订阅打开。桌面上是设置页右边的抽屉（和「添加模型」同一个），
@@ -145,7 +146,7 @@ function SubscriptionAccounts({ dto, subscription, locale, onLogin }: {
   onLogin: (target: LoginTarget) => void;
 }) {
   const m = subscriptionsMessages(locale);
-  const active = activeAccount(dto, subscription);
+  const active = activeAccount(dto, subscription, useInSessionModel(dto));
   const scheduled = subscription.strategy === 'scheduled';
   return (
     <Column gap="page-section">

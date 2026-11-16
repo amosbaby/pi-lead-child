@@ -139,6 +139,8 @@ describe('the rules of the subscription rows', () => {
     expect(activeAccount(settings([codex]), codex)).toBe('openai-codex-2');
     // <base>/<id> with two accounts: pi-multi-pass picks the account in its pool, so no account is marked.
     expect(activeAccount(settings([codex], [], 'openai-codex/gpt-5.5'), codex)).toBeNull();
+    // 会话此刻挂着的模型（模型目录的 inSession）说出 pool 里正在用的账号。
+    expect(activeAccount(settings([codex], [], 'openai-codex/gpt-5.5'), codex, 'openai-codex-2/gpt-5.5')).toBe('openai-codex-2');
     expect(activeAccount(settings([copilot], [], 'github-copilot/claude-sonnet-5.5'), copilot)).toBe('github-copilot');
     expect(activeAccount(settings([copilot], [], 'magpie/auto/fast'), copilot)).toBeNull();
   });
