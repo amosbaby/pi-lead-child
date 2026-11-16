@@ -152,3 +152,37 @@ describe("a rate limit on one subscription account", () => {
     expect(listEvents(db, { kind: "lead.model_switched" })).toMatchObject([{ payload: { from: "openai-codex/gpt-5.5", to: "p/b" } }]);
   });
 });
+
+// 合进模型暂停（model-hold.ts）以后：账号级的失败（账号被停用）马上让系统停止自动调模型，除非还有别的可换。
+// 账号级的失败在这一轮里不再试（protocol 的 leadModelRetryClass），下一轮开始前换账号。
+// 同一种订阅里还有能用的账号，就是有别的可换：换账号，不暂停。账号都失败、分工里也没有下一格时，照常暂停。
+describe("an account-level failure on one subscription account", () => {
+  const DISABLED = "403 This service has been disabled in this account for violation of Terms of Service.";
+
+  it("moves the next turn to the next account and does not hold automatic model calls", async () => {
+    const lead = stubLead(["openai-codex/gpt-5.5"], (model) => (model === "openai-codex/gpt-5.5" ? DISABLED : null));
+    const { logs, chat } = await start(lead);
+
+    const first = await chat("在吗");
+    await vi.waitFor(() => expect(turnState(first)).toBe("failed"));
+    await vi.waitFor(() => expect(logs.some((line) => line.includes("the next turn uses openai-codex-2"))).toBe(true));
+    const second = await chat("现在呢");
+    await vi.waitFor(() => expect(turnState(second)).toBe("completed"));
+    expect(lead.switches).toEqual(["openai-codex-2/gpt-5.5"]);
+    expect(logs.some((line) => line.includes("model.hold action=entered"))).toBe(false);
+  });
+
+  it("holds automatic model calls when every account failed and the chain has no other model", async () => {
+    const lead = stubLead(["openai-codex/gpt-5.5"], (model) => (model.startsWith("openai-codex") ? DISABLED : null));
+    const { logs, chat } = await start(lead);
+
+    const first = await chat("在吗");
+    await vi.waitFor(() => expect(turnState(first)).toBe("failed"));
+    expect(logs.some((line) => line.includes("model.hold action=entered"))).toBe(false);
+    await vi.waitFor(() => expect(logs.some((line) => line.includes("the next turn uses openai-codex-2"))).toBe(true));
+    const second = await chat("现在呢");
+    await vi.waitFor(() => expect(turnState(second)).toBe("failed"));
+    expect(lead.switches).toEqual(["openai-codex-2/gpt-5.5"]);
+    await vi.waitFor(() => expect(logs.some((line) => line.includes("model.hold action=entered"))).toBe(true));
+  });
+});
