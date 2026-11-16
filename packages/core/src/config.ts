@@ -244,6 +244,9 @@ export interface PlcConfigFile {
     // 额度按周重置的一类模型（2026-10-19，lead 的 model-failover.ts）：额度用尽后，下一次重置以前跳过模型名里含 match 的模型。
     // 例如 [{ "match": "claude-", "weekday": 1, "time": "16:00" }]：每周一 16:00（本机时区）重置。不写时用这一条。
     quotaResets?: Array<{ match: string; weekday: number; time: string }>;
+    // 系统自己发起的模型调用的预算（lead 的 auto-call-budget.ts）。不写时用缺省：每小时 120 次、每天 1,500 次、
+    // 每天没命中缓存的输入 5,000 万 token。0 是不限。
+    autoBudget?: { callsPerHour?: number; callsPerDay?: number; uncachedTokensPerDay?: number };
   };
   // Lead 的记忆（设置页「Lead → 记忆」，daemon 的 memory-controller.ts）。不含密钥：密钥加密存在保险库里。
   memory?: PlcMemoryConfig;

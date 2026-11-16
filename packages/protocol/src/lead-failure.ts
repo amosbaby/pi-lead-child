@@ -89,6 +89,45 @@ export function isLeadAccountFailure(raw: string): boolean {
   return classifyLeadModelError(raw) === "auth";
 }
 
+/**
+ * 一次失败的模型调用能不能自动再试（2026-11-16：模型两天不可用，daemon 自动调了 7,028 次，其中 4,652 次的回答写着账号已被停用）。
+ *   · account：账号级的失败（认证、没有权限、账号被停用、欠费）。一次都不再试，等用户处理（lead 的 model-hold.ts）。
+ *   · request：这个请求本身不行（模型名不存在、不支持、内容被过滤、上下文满了）。同一个请求不再试；换模型或者先压缩。
+ *   · wait：限流、过载、额度到点重置。到 provider 说的时间以前不再调。
+ *   · transient：连不上、超时、5xx、断网。一轮里再试两次；连续失败由熔断接手（model-hold.ts）。
+ *   · unknown：认不出来的。一轮里再试一次。
+ * 看的是回答里的上游错误，不是外层的状态码：代理把「账号已被停用」包在 503 里，按状态码看像是可以再试。
+ */
+export type LeadModelRetryClass = "account" | "request" | "wait" | "transient" | "unknown";
+
+const REQUEST_REFUSED = /content[ _-]?filter/i;
+
+export function leadModelRetryClass(raw: string): LeadModelRetryClass {
+  const kind = classifyLeadModelError(raw);
+  if (kind === "auth") return "account";
+  if (kind === "config" || kind === "context" || REQUEST_REFUSED.test(raw)) return "request";
+  if (kind === "busy") return "wait";
+  if (kind === "network" || kind === "unavailable") return "transient";
+  return "unknown";
+}
+
+/** 一轮里第 attempt 次再试（从 1 数）要不要做。account、request、wait 一次都不做；transient 做两次；unknown 做一次。 */
+export function leadModelRetryInTurn(raw: string, attempt: number): boolean {
+  const retryClass = leadModelRetryClass(raw);
+  if (retryClass === "transient") return attempt <= 2;
+  if (retryClass === "unknown") return attempt <= 1;
+  return false;
+}
+
+/**
+ * provider 明说账号被停用、被封、欠费（"disabled in this account for violation of Terms of Service" 一类）。
+ * 比一般的认证失败（401、403，可能只是代理在换 token）更重：再调一次都可能被当成滥用。model-failover.ts 据此把这个模型
+ * 停用到用户处理，不按恢复时间换回去。
+ */
+export function isLeadAccountDisabled(raw: string): boolean {
+  return ACCOUNT.test(raw);
+}
+
 // 系统自己再试也好不了的失败：要有人检查登录或配置。顶栏不承诺自动重试。
 export function leadModelFailureNeedsUser(kind: LeadModelFailureKind): boolean {
   return kind === "auth" || kind === "config";

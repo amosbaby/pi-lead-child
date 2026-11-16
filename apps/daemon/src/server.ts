@@ -35,12 +35,13 @@ import {
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { isInterruptedForSteer } from "@pi-lead-child/lead";
-import { ModelHold, type ModelHoldPort } from "@pi-lead-child/lead";
+import { AutoCallBudget, autoCallBudgetLimits, ModelHold, modelBreakerLimitsFromEnv, type ModelHoldPort } from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
+import { leadHealthMessages } from "./lead-health.messages.js";
 import { serverMessages } from "./server.messages.js";
-import { dnsProbe, keylessProbe, NetworkMonitor, type NetworkProbe } from "./network.js";
+import { dnsProbe, keylessProbe, NetworkMonitor, serviceReachable, type NetworkProbe } from "./network.js";
 import { DEFAULT_MODEL_CATALOG_REFRESH_MS, startModelCatalogWatch } from "./model-catalog-watch.js";
 import { recordRunFinished, recordRunFinishedAtTerminalEvent } from "./run-finished.js";
 import { recordConnectionAttention } from "./connection-attention.js";
@@ -125,7 +126,7 @@ import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-le
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
-  classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
+  classifyLeadModelError, isLeadRestartInterruption, isLeadTransportFailure, leadModelRetryClass, leadModelRetryInTurn, isLocalSocketCommand, isSystemTurnOrigin, LEAD_DRAIN_TIMEOUT_MS,
   LEAD_RESTART_INTERRUPTED_ERROR, leadOutageCause, leadOutageHeadline, markUpstreamFailure,
   partialUiSurface,
   PRESENCE_IDLE_MS, QUIET_REPLY, redactAndCap, redactSecretText, userFacingBacklogText,
@@ -838,12 +839,51 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 暂停只在内存里：daemon 重启以后是清的，第一次自动调用碰到同样的错误就重新进入（理由见 model-hold.ts 开头）。
   const modelHold = new ModelHold({
     log,
+    breaker: modelBreakerLimitsFromEnv(process.env),
+    // 熔断放一次调用以前先免费看一眼（2026-11-16）：模型服务的地址连不连得上（一次 TCP 连接，不调模型）。
+    // 模型代理关着的时候，一次模型调用都不发。
+    reachable: () => {
+      try {
+        const provider = loadLeadModelConfig(opts.dataDir).providers[parseLeadModelSpec(leadModelName).provider];
+        return provider ? serviceReachable(provider.baseUrl) : Promise.resolve(true);
+      } catch {
+        return Promise.resolve(true);
+      }
+    },
     onChange: (held) => {
       idleLane.modelHold(held);
-      // 顶栏的健康状态：暂停期间不写「下一次自动调用」的时间（nextScheduledAttempt），重发一次。
+      // 顶栏的健康状态：暂停期间「下一次自动调用」的时间变了（nextScheduledAttempt），重发一次。
       leadHealth.refresh();
+      noticeModelHold();
     },
   });
+  // 进入暂停时告诉用户一次（2026-11-16：以前模型两天不可用，系统一直自己再试，用户不知道）。熔断每次放调用失败会再进一次暂停，
+  // 不重复通知；暂停完全解除以后才重新算。通知直接标成已送达：不叫 Lead 来转述，那要调模型。
+  let modelHoldNoticed = false;
+  function noticeModelHold(): void {
+    const state = modelHold.state;
+    if (!state) {
+      modelHoldNoticed = false;
+      return;
+    }
+    if (modelHoldNoticed || !modelHold.held) return;
+    modelHoldNoticed = true;
+    try {
+      const m = leadHealthMessages(getLocale(db));
+      const name = leadDisplayName(db);
+      const title = m.holdTitle(name, state.kind);
+      const body = m.holdBody(name, state.kind, state.error, state.retryAt === null ? null : localIso(new Date(state.retryAt)));
+      const now = new Date();
+      const id = addNotification(db, { kind: "lead_model_hold", urgency: "immediate", title, body, createdAt: now.toISOString() });
+      markNotificationDelivered(db, id, "fallback", now);
+      broadcast({ type: "notice", text: `[通知] ${title}` });
+      if (clientCount() === 0) notifyDesktop(title);
+    } catch (error: any) {
+      log(`model hold: telling the user failed: ${error?.message ?? String(error)}`);
+    }
+  }
+  // 自动调用的预算（lead 的 auto-call-budget.ts，2026-11-16）：系统自己发起的模型调用超过每小时、每天的上限时暂停，告诉用户。
+  const autoBudget = new AutoCallBudget({ limits: autoCallBudgetLimits(loadPlcConfig(opts.dataDir).lead?.autoBudget) });
   // 上一个单元的结局（整理笔记那一轮让路了没有：runPrecipitation 据此告诉空闲车道）。
   let lastUnitOutcome: UnitOutcome | null = null;
   // 排着的外部消息的推送（工单 10，publishLeadQueue）：上一次推的样子、合并变化的定时器、daemon 在停（不再推）。
@@ -3430,8 +3470,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const scheduledLeadAttempts: Array<() => number | null> = [];
   const leadHealth = createLeadHealthTracker({
     nextScheduledAttempt: () => {
-      // 模型暂停期间系统不会自己调模型：不给时间。
-      if (modelHold.held) return null;
+      // 模型暂停期间系统不会自己调模型：账号级的不给时间；熔断给放下一次调用的时间，预算给时间窗结束的时间。
+      if (modelHold.held) {
+        const at = modelHold.nextAttemptAt();
+        return at === null ? null : new Date(at);
+      }
       const times = scheduledLeadAttempts.map((next) => next()).filter((at): at is number => at !== null);
       return times.length ? new Date(Math.min(...times)) : null;
     },
@@ -3474,7 +3517,23 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       onUserInputDelivered(userMessageText(event.message));
     }
     if (event.type === "auto_retry_start") {
-      leadHealth.retrying(Number(event.delayMs ?? 0), String(event.errorMessage ?? ""));
+      const retryError = String(event.errorMessage ?? "");
+      const attempt = Number(event.attempt ?? 1);
+      // pi 自己的再试只看状态码（503 就再试）。按失败的类别管（protocol 的 leadModelRetryInTurn，2026-11-16）：账号级的、
+      // 请求本身不行的、限流的不再试；连不上的再试两次。上一个单元已经失败过、或者系统在暂停里时也不再试：
+      // 模型出着问题，一个单元只调一次。pi 在发完这个事件以后才开始等，所以晚一拍再取消。
+      if (modelHold.state !== null || modelHold.failures > 0 || !leadModelRetryInTurn(retryError, attempt)) {
+        log(`lead model retry ${attempt} cancelled (${leadModelRetryClass(retryError)}): ${redactSecretText(retryError).slice(0, 160)}`);
+        setImmediate(() => {
+          try {
+            (session as { abortRetry?: () => void }).abortRetry?.();
+          } catch (error: any) {
+            log(`lead model retry cancel failed: ${error?.message ?? String(error)}`);
+          }
+        });
+      } else {
+        leadHealth.retrying(Number(event.delayMs ?? 0), retryError);
+      }
     }
     if (event.type === "message_update" && event.assistantMessageEvent?.type === "text_delta") {
       const delta = String(event.assistantMessageEvent.delta ?? "");
@@ -3525,6 +3584,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 改日程的 Lead 工具自己发刷新事件（经过操作层的由操作层发），这里不再按工具名另发一份（ui-action-parity P04）。
     if (event.type === "message_end") {
       if (event.message?.role === "assistant") {
+        // 系统自己发起的单元里的一次模型调用（成功、失败都算；被中断的不算）：记进自动调用的预算，超了就暂停。
+        if (sched.unit?.source === "system" && event.message.stopReason !== "aborted") {
+          const used = (key: string) => (typeof event.message.usage?.[key] === "number" ? event.message.usage[key] as number : 0);
+          const over = autoBudget.record(used("input") + used("cacheWrite"));
+          if (over) modelHold.pause(over.until, over.detail);
+        }
         // 一次模型回复是一步（lead-scheduler spec D3）：单元结束时的日志和记录带上步数。
         sched.dispatch({ type: "step.end" });
         // 中断时 Lead 常在跑工具：pi 等工具做完，再开始下一次模型调用，准备请求那一步（取凭证）看到已经中断就抛
@@ -4029,8 +4094,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // Lead 的一轮失败了：问 model-failover.ts 要不要换模型。要换时记下原因，下一轮开始前换（syncLeadModel）。
   // 顶栏的技术详情里写上下一轮用哪个模型（复用 leadHealth.reclassify：只改原文，不改失败次数和开始时间）。
   // 所有模型都失败时不再换：健康状态留在降级，停摆流程（leadIncapacity）照常接手。
-  function noteLeadModelFailure(error: string): void {
-    if (!modelFailover) return;
+  // 返回这次失败以后有没有换到另一个模型：换了的话，账号级的失败不让系统整体暂停（model-hold.ts 的 alternative）。
+  function noteLeadModelFailure(error: string): boolean {
+    if (!modelFailover) return false;
     const decision = modelFailover.turnFailed(error);
     if (decision.kind === "switch") {
       pendingModelSwitch = { reason: decision.reason, restoreAt: decision.restoreAt };
@@ -4040,6 +4106,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     } else if (decision.kind === "exhausted") {
       log(`every Lead model failed (${decision.reason}); tried ${decision.tried.join(", ")}: no model left to switch to`);
     }
+    return decision.kind === "switch";
   }
 
   // 两轮之间换模型：上一轮定下要换的，或者限流的恢复时间到了要换回第一个。换好以后写日志，并在这一轮开头告诉 Lead。
@@ -4390,9 +4457,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         }
       }
       // 限流或者连续溢出：下一轮换模型（spec D9）。断网和被重启打断不是模型的问题。
-      if (!interrupted && !networkFailure) noteLeadModelFailure(error);
-      // 账号级的失败（认证、账号被停用、欠费）：进入模型暂停，系统不再自动调模型。
-      if (!interrupted && !networkFailure) modelHold.failed("turn", error);
+      const switched = !interrupted && !networkFailure ? noteLeadModelFailure(error) : false;
+      // 记进模型暂停（model-hold.ts）：连续失败到 3 次熔断；账号级的失败（认证、账号被停用、欠费）马上暂停，
+      // 除非刚才换到了另一个模型：那个模型停用了，系统用备用的接着做事。
+      if (!interrupted && !networkFailure) modelHold.failed("turn", error, { alternative: switched });
       // 被重启打断、还没落成一轮的系统回合也一样：不留失败卡片，灌进去的事下面交回 pending，下一个 daemon 接着做。
       // 上下文满了的系统回合也不留（2026-10-28）：每次按退避再试都会失败一次，顶栏的降级和停摆通知已经告诉用户。
       const quietNotes = options.system === SYSTEM_TURN_ORIGINS.precipitate && !activeChannelTurn

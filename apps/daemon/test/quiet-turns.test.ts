@@ -140,6 +140,8 @@ describe("note keeping", () => {
     const lead = stubLead((prompt) => prompt.includes("沉淀检查")
       ? { text: answer, tool: true }
       : { text: "", tool: "get_ticket", error: "503 Service Unavailable" }, { contextFull: true });
+    // 用户的那一轮失败以后，空闲车道按退避等一会儿再开要调模型的活（2026-11-15，idle-lane.ts「失败以后的退避」，缺省 2 分钟）；这里不等。
+    vi.stubEnv("PLC_LEAD_IDLE_RETRY_MS", "50");
     const { events, chat } = await start(lead);
 
     chat("cmd-1", "trace 的 PR 合了吗");

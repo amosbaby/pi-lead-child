@@ -307,3 +307,32 @@ describe("a Lead turn that fails for a reason other than a rate limit", () => {
     expect(second.switches).toEqual(["vibeproxy/gemini-3.8", "vibeproxy/claude-sonnet-5-5"]);
   });
 });
+
+// 备用模型（2026-11-16）。一个模型的账号出了问题（provider 停用了账号）、另一个账号上的备用模型是好的。
+// 以前：恢复时间一到，daemon 又换回出问题的模型去试，一次次调一个已经停用的账号；2026-11-15 的第一版暂停则是系统整体停下，
+// 用户不在时重要的事没人处理。现在：出问题的模型停用到用户处理，系统换到备用的模型接着做事，换模型的事照常告诉用户；不整体暂停。
+describe("an account-level failure with a working backup model", () => {
+  const DISABLED = '403: {"code":403,"message":"This service has been disabled in this account for violation of Terms of Service."}';
+
+  it("stops using the failed model and keeps working on the backup without a hold", async () => {
+    const lead = stubLead(["p/a", "q/b"], (model) => model === "p/a" ? DISABLED : null);
+    const { logs, chat, overview } = await start(lead);
+
+    const first = await chat("在吗");
+    // 账号级的失败不替用户重发（再试也一样）：这一轮失败。系统没有整体暂停。
+    await vi.waitFor(() => expect(turnState(first).state).toBe("failed"));
+    expect(logs.some((line) => line.includes("lead model failover") && line.includes("用户处理以前不再用它"))).toBe(true);
+    expect(logs.some((line) => line.includes("model.hold action=entered"))).toBe(false);
+
+    // 下一轮开始以前换到备用的模型：用户的下一条消息答上了。
+    const second = await chat("还在吗");
+    await vi.waitFor(() => expect(turnState(second)).toEqual({ state: "completed", assistant_text: "收到。" }), { timeout: 10_000 });
+    expect(lead.switches).toEqual(["q/b"]);
+    expect((await overview()).model).toBe("q/b");
+    // 系统自己开的一轮（把换模型的事交给 Lead 去告诉用户）也在备用的模型上跑：自动的工作没有停。
+    await vi.waitFor(() => expect(lead.turns.some((turn) => turn.model === "q/b" && turn.prompt.includes("这件事必须告诉用户"))).toBe(true), { timeout: 10_000 });
+    expect(lead.turns.find((turn) => turn.prompt.includes("这件事必须告诉用户"))!.prompt).toContain("用户处理以前不再用它");
+    // 出问题的模型一共只调了一次。
+    expect(lead.turns.filter((turn) => turn.model === "p/a")).toHaveLength(1);
+  });
+});

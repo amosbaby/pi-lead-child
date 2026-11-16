@@ -10,6 +10,7 @@
 // 2026-11-06：DNS 通了，到模型服务的路不一定通。短暂唤醒时流量没有走 VPN，Anthropic 按来源地区回
 // 403 "Request not allowed"。模型回了这一种错误时，用不带 key 的探测（routeProbe）确认，路通了才接着调模型。
 import { lookup, Resolver } from "node:dns/promises";
+import { connect } from "node:net";
 import { schedLine } from "@pi-lead-child/core";
 import { isLeadRouteBlock } from "@pi-lead-child/protocol";
 
@@ -210,4 +211,31 @@ export class NetworkMonitor {
     }, delay);
     this.timer.unref();
   }
+}
+
+/**
+ * 一个服务的地址连不连得上：只做一次 TCP 连接，连上就关，不发任何请求（2026-11-16）。
+ * 模型熔断（lead 的 model-hold.ts）放一次模型调用以前用它：本机的模型代理关着时，连接马上被拒，一次模型调用都不用发。
+ * 地址解析不了、端口不对、超时都算连不上。
+ */
+export function serviceReachable(baseUrl: string, timeoutMs = 2_000): Promise<boolean> {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return Promise.resolve(false);
+  }
+  const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
+  const host = url.hostname.replace(/^\[|\]$/gu, "");
+  return new Promise((resolve) => {
+    const socket = connect({ host, port });
+    const done = (up: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(up);
+    };
+    socket.setTimeout(timeoutMs, () => done(false));
+    socket.once("connect", () => done(true));
+    socket.once("error", () => done(false));
+  });
 }

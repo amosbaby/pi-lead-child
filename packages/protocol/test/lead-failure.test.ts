@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   classifyLeadModelError, isLeadAccountFailure, isLeadRouteBlock, isLeadTransportFailure, LEAD_RESTART_INTERRUPTED_ERROR, leadModelFailureNeedsUser,
-  leadModelFailureReason, leadOutageCause, leadTurnFailureSentence, leadTurnWaitingSentence, markUpstreamFailure,
+  leadModelFailureReason, leadModelRetryClass, leadModelRetryInTurn, leadOutageCause, leadTurnFailureSentence, leadTurnWaitingSentence, markUpstreamFailure,
 } from "../src/index.ts";
 
 // 代理返回 503 auth_unavailable，里面包着上游的 403 forbidden "Request not allowed"。
@@ -215,5 +215,57 @@ describe("the failure sentences in English", () => {
       .toBe("The model account of Paimon failed authentication. The system cannot recover by itself. Check the model account of Paimon.");
     expect(leadTurnWaitingSentence(LEAD_RESTART_INTERRUPTED_ERROR, "model", "Paimon", "en"))
       .toBe("Paimon is restarting. This message has no answer yet. It gets an answer automatically after the restart.");
+  });
+});
+
+// 2026-11-16：模型两天不可用，daemon 自动调了 7,028 次。每一类失败能不能自动再试，按这张表（原文是那两天会话里出现过的）。
+describe("leadModelRetryClass", () => {
+  it("never retries an account-level failure, also when a proxy wraps it in a 503", () => {
+    for (const raw of [
+      '403: {"code":403,"message":"This service has been disabled in this account for violation of Terms of Service. Please submit an appeal to continue using this product.","status":"PERMISSION_DENIED"}',
+      '503: {"message":"auth_unavailable: no auth available (providers=example, model=model-a; last upstream error: { \\"error\\": { \\"code\\": 403, \\"message\\": \\"This service has been disabled in this account for violation of Terms of Service.\\" } })","type":"server_error"}',
+      "401 Unauthorized: invalid x-api-key",
+    ]) {
+      expect(leadModelRetryClass(raw), raw).toBe("account");
+      expect(leadModelRetryInTurn(raw, 1), raw).toBe(false);
+    }
+  });
+
+  it("never retries the same request when the request itself is wrong", () => {
+    for (const raw of [
+      '400: {"message":"unknown provider for model model-a(high)","type":"invalid_request_error","code":"model_not_found","param":"model"}',
+      '400: {"error":{"message":"The requested model is not supported.","code":"model_not_supported"}}',
+      "Provider finish_reason: content_filter",
+      "Context overflow: 上下文满了，回答被截成空的",
+    ]) {
+      expect(leadModelRetryClass(raw), raw).toBe("request");
+      expect(leadModelRetryInTurn(raw, 1), raw).toBe(false);
+    }
+  });
+
+  it("waits when the provider says when to come back", () => {
+    for (const raw of [
+      '429: {"code":"model_cooldown","last_upstream_error":"rate_limit_error: This request would exceed your account\'s rate limit. Please try again later."}',
+      '429: {"code":429,"message":"Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 4h59m8s.","status":"RESOURCE_EXHAUSTED"}',
+      "529 overloaded",
+    ]) expect(leadModelRetryClass(raw), raw).toBe("wait");
+  });
+
+  it("retries a transient failure twice in the turn, and an unknown one once", () => {
+    for (const raw of [
+      "Connection error.: connect ECONNREFUSED 127.0.0.1:8317",
+      '504: {"message":"Post \\"https://models.example.com/v1/stream\\": dial tcp 192.0.2.4:443: i/o timeout"}',
+      "Request timed out.",
+      "getaddrinfo ENOTFOUND api.example.com",
+    ]) {
+      expect(leadModelRetryClass(raw), raw).toBe("transient");
+      expect(leadModelRetryInTurn(raw, 1), raw).toBe(true);
+      expect(leadModelRetryInTurn(raw, 2), raw).toBe(true);
+      expect(leadModelRetryInTurn(raw, 3), raw).toBe(false);
+    }
+    const unknown = "the model refused the tool schema";
+    expect(leadModelRetryClass(unknown)).toBe("unknown");
+    expect(leadModelRetryInTurn(unknown, 1)).toBe(true);
+    expect(leadModelRetryInTurn(unknown, 2)).toBe(false);
   });
 });

@@ -21,7 +21,7 @@
 // 并告诉用户（server.ts 的 syncLeadModel 写一条要告诉用户的 lead.model_switched）。
 // 自动切换不改 config.json：switch_lead_model 改的是用户排好的顺序，还要重启 daemon；限流是一时的，
 // 改了顺序就回不到用户的第一个模型了。
-import { classifyLeadModelError } from "@pi-lead-child/protocol";
+import { classifyLeadModelError, isLeadAccountDisabled } from "@pi-lead-child/protocol";
 import { localIso } from "@pi-lead-child/core";
 
 export type LeadModelFailureCause = "rate_limit" | "context_overflow" | "quota" | "auth" | "unavailable" | "model";
@@ -42,6 +42,9 @@ export const DEFAULT_LEAD_QUOTA_RESETS: readonly LeadModelQuotaReset[] = [{ matc
 export const DEFAULT_LEAD_MODEL_RESTORE_MS = 30 * 60_000;
 // 换回第一个模型一再失败时，等待每次加倍，最长这么久。
 export const MAX_LEAD_MODEL_RESTORE_MS = 4 * 60 * 60_000;
+// provider 明说账号被停用、被封、欠费（protocol 的 isLeadAccountDisabled）以后这个模型停用多久（2026-11-16）。再试也一样，自动再试还会让账号看起来在滥用，
+// 所以实际上是「到用户处理为止」：用户在输入框或者设置里重新选它，或者用 clear_lead_model_quota 清掉，就马上恢复。
+export const LEAD_ACCOUNT_BLOCK_MS = 30 * 24 * 60 * 60_000;
 
 /** 额度用尽、在重置以前跳过的模型：模型名 → 到什么时候（毫秒时间戳）。daemon 存在 kv 里，重启不丢。 */
 export interface LeadModelQuotaStore {
@@ -279,6 +282,14 @@ export function createLeadModelFailover(options: {
     return until;
   };
 
+  // 账号级的失败：这个模型停用到用户处理（LEAD_ACCOUNT_BLOCK_MS）。和额度一样存下来，重启以后也不再调它。
+  const blockForAccount = (spec: string, now: number): number => {
+    const until = now + LEAD_ACCOUNT_BLOCK_MS;
+    blocked[spec] = Math.max(blocked[spec] ?? 0, until);
+    saveBlocked();
+    return blocked[spec]!;
+  };
+
   // 从现在的模型往后按顺序找（到末尾后从头开始），跳过这次故障里失败过的和额度还没重置的。
   const next = (now: number): number | null => {
     for (let step = 1; step < models.length; step += 1) {
@@ -331,7 +342,10 @@ export function createLeadModelFailover(options: {
       // 刚换回第一个模型它就失败了：下次多等一倍。
       if (desired === 0 && justRestored) failedRestores += 1;
       justRestored = false;
-      const quotaUntil = cause === "quota" ? blockForQuota(from, rawError, now) : null;
+      // provider 明说账号被停用、被封、欠费：这个模型停用到用户处理。一般的认证失败（401、403，可能只是代理在换 token）
+      // 照旧按恢复时间再试第一个模型（30 分钟起加倍，最长 4 小时）。
+      const disabled = cause === "auth" && isLeadAccountDisabled(rawError);
+      const quotaUntil = cause === "quota" ? blockForQuota(from, rawError, now) : disabled ? blockForAccount(from, now) : null;
       // 第一个模型失败时记下什么时候再试它（每次都重新记，不留上一次的）：服务端给的恢复时间；
       // 额度用尽时是重置时间；都没有时等 restoreAfterMs。
       if (desired === 0) {
@@ -340,7 +354,9 @@ export function createLeadModelFailover(options: {
       }
       const reason = cause === "quota" && quotaUntil !== null
         ? `${from}${CAUSE_LABELS[cause]}（${brief(rawError)}），${localIso(new Date(quotaUntil))} 以前不再用它`
-        : `${from}${CAUSE_LABELS[cause]}（${brief(rawError)}）`;
+        : disabled
+          ? `${from}${CAUSE_LABELS[cause]}（${brief(rawError)}），用户处理以前不再用它`
+          : `${from}${CAUSE_LABELS[cause]}（${brief(rawError)}）`;
       return advance(from, cause, reason, now);
     },
     turnSucceeded() {

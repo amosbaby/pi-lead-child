@@ -246,3 +246,34 @@ describe("the Lead model failover", () => {
     expect(failover.turnFailed(AUTH_503, minutes(800))).toMatchObject({ kind: "switch", from: "p/a", to: "p/b", restoreAt: minutes(830) });
   });
 });
+
+// 2026-11-16：provider 停用了账号（403 "disabled ... Terms of Service"）以后，daemon 每过一段恢复时间又换回这个模型去试。
+// 账号级的失败再试也一样：这个模型停用到用户处理，恢复时间到了也不换回去；系统用备用的模型接着做事。
+describe("an account-level failure of one model", () => {
+  const DISABLED = '403: {"code":403,"message":"This service has been disabled in this account for violation of Terms of Service."}';
+
+  it("switches to the backup and does not go back until the user clears it", () => {
+    let now = 0;
+    const saved: Array<Record<string, number>> = [];
+    const store: LeadModelQuotaStore = { load: () => ({}), save: (blocked) => { saved.push(blocked); } };
+    const failover = createLeadModelFailover({ models: ["p/a", "q/b"], now: () => now, quotaStore: store });
+    const decision = failover.turnFailed(DISABLED);
+    expect(decision).toMatchObject({ kind: "switch", from: "p/a", to: "q/b", cause: "auth" });
+    expect(decision.kind === "switch" && decision.reason).toContain("用户处理以前不再用它");
+    // 存下来了：重启以后也不调它。
+    expect(saved.at(-1)).toHaveProperty(["p/a"]);
+    // 过了一天：恢复时间到了也不换回去。
+    now += 24 * 60 * 60_000;
+    expect(failover.restore()).toBeNull();
+    expect(failover.desired()).toBe("q/b");
+    expect(failover.blockedModels().map((entry) => entry.model)).toEqual(["p/a"]);
+    // 用户处理好了（重新选它，或者清掉）：换回去。
+    expect(failover.clearBlocked("p/a")).toEqual(["p/a"]);
+    expect(failover.restore()).toMatchObject({ kind: "switch", to: "p/a" });
+  });
+
+  it("is exhausted when the only model has an account-level failure", () => {
+    const failover = createLeadModelFailover({ models: ["p/a"] });
+    expect(failover.turnFailed(DISABLED)).toMatchObject({ kind: "exhausted", cause: "auth" });
+  });
+});
