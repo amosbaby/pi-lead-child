@@ -1,7 +1,7 @@
 import { fireEvent, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import { Avatar, Badge, EmptyState, Link, List, ListItem, MessageBubble, ProgressBar, safeLink, Text } from '../src';
+import { Avatar, Badge, Card, CardDefaults, EmptyState, Link, List, ListItem, MessageBubble, ProgressBar, safeLink, Text } from '../src';
 import { cssVar, renderUI } from './render';
 
 describe('Badge', () => {
@@ -115,5 +115,28 @@ describe('Link', () => {
     expect(safeLink('javascript:alert(1)')).toBeNull();
     expect(safeLink('file:///etc/passwd')).toBeNull();
     expect(safeLink('not a url')).toBeNull();
+  });
+});
+
+describe('Card border', () => {
+  // 2026-11-16 回归：桌面上所有卡片变成又黑又粗的边框。Card 给 CardFrame 显式传了 borderWidth / borderColor = undefined，
+  // 盖掉了 1px 和 border 色，浏览器退回 medium（3px）和文字色。
+  it('keeps the thin border when the caller sets no border', () => {
+    renderUI(<Card testID="card" p="row-x"><Text>x</Text></Card>);
+    const style = getComputedStyle(screen.getByTestId('card'));
+    expect(style.borderTopWidth).toBe('1px');
+    expect(style.borderTopColor).toBe(cssVar('--c-border'));
+  });
+
+  it('keeps a border the caller sets', () => {
+    renderUI(<Card testID="card" borderColor="accent" borderWidth={2}><Text>x</Text></Card>);
+    const style = getComputedStyle(screen.getByTestId('card'));
+    expect(style.borderTopWidth).toBe('2px');
+    expect(style.borderTopColor).toBe(cssVar('--c-accent'));
+  });
+
+  it('draws no border on a floating card, also when the caller sets one', () => {
+    renderUI(<CardDefaults variant="float"><Card testID="card" borderColor="accent" borderWidth={1}><Text>x</Text></Card></CardDefaults>);
+    expect(getComputedStyle(screen.getByTestId('card')).borderTopWidth).toBe('0px');
   });
 });

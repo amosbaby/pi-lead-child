@@ -53,12 +53,14 @@ export const Card = forwardRef<TamaguiElement, CardProps>(function Card({ varian
   const resolved = variant ?? fallback;
   const floating = resolved === 'float';
   const { borderWidth, borderColor, rounded, ...rest } = props as CardProps & { rounded?: CardProps['rounded'] };
+  // 只传调用方写了的值：显式的 undefined 会盖掉 1px 和 border 色，web 上退回 3px 的文字色边框（2026-11-16 回归）。
   return (
     <DensityCard
       ref={ref}
       variant={resolved}
       {...rest}
-      {...(floating ? {} : { borderWidth, borderColor })}
+      {...(floating || borderWidth === undefined ? {} : { borderWidth })}
+      {...(floating || borderColor === undefined ? {} : { borderColor })}
       {...(floating && variant === undefined ? {} : rounded !== undefined ? { rounded } : {})}
     />
   );
