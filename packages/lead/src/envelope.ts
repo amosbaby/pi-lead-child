@@ -278,8 +278,14 @@ export function leadEventBlock(event: LeadEventLike): string {
 // 别人写的话关不上外部标签，也冒充不了系统事件或者用户的话。系统提示词里有一段说明这个标签（prompt.ts）。
 const EXTERNAL_TAG = "untrusted_external_text";
 
-/** 每条外部消息事件里的一句：怎样处理写在 skill channel-replies 里。 */
-export const CHANNEL_SKILL_HINT = "怎样处理见 skill channel-replies（上下文里没有它的全文时，先用 read 读）。";
+/**
+ * 写发到 Slack 的话（回复、代发、卡上的草稿）之前读 skill slack-messaging。写话的工具说明和外部消息事件都直接点名它：
+ * 以前只有 channel-replies 里的一行指向它，11-14 以后 Lead 在 Slack 发了二十多次话，一次也没读（2026-11-17）。
+ */
+export const SLACK_WRITING_HINT = "写发到 Slack 的话之前，先读 skill slack-messaging（上下文里没有它的全文时，用 read 读）：格式、排版、什么时候进 thread、什么时候回表情就够了。";
+
+/** 每条外部消息事件里的一句：怎样处理写在 skill channel-replies 里，回复的话怎样写在 skill slack-messaging 里。 */
+export const CHANNEL_SKILL_HINT = "怎样处理见 skill channel-replies；要回复或者写草稿时，话怎样写见 skill slack-messaging（上下文里没有它们的全文时，先用 read 读）。";
 
 /** 把外部的原话包进外部标签。 */
 // part、quote：这段原话不是一条新消息，是某处的一部分。part="quote" 是用户在 App 里引用了它，quote 是引用的编号（P17.9）。

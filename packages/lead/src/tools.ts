@@ -4661,7 +4661,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         title: Type.String({ minLength: 1, maxLength: 200, description: "一句话：发生了什么、要他做什么" }),
         body: Type.Optional(Type.String({ maxLength: 2_000, description: "原因、影响、你已经做了什么" })),
         event: Type.Optional(Type.Integer({ minimum: 1, description: "外部消息事件的编号（「消息事件 #N」）" })),
-        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "给对方的回复草稿（带 event 时必填）" })),
+        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "给对方的回复草稿（带 event 时必填）。写之前读 skill slack-messaging" })),
         ticket_id: Type.Optional(Type.Integer({ minimum: 1 })),
         notification_ids: Type.Optional(Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 50 })),
         approval_id: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -4990,7 +4990,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "外部消息不能 deferred。",
       parameters: Type.Object({
         event_ids: Type.Array(Type.Integer({ minimum: 1 }), { minItems: 1, maxItems: 50 }),
-        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "told_user 外部消息时给对方的回复草稿" })),
+        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "told_user 外部消息时给对方的回复草稿。写之前读 skill slack-messaging" })),
         disposition: Type.Union([
           Type.Literal("handled"), Type.Literal("told_user"), Type.Literal("deferred"), Type.Literal("no_action"),
         ]),

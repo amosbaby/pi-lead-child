@@ -10,7 +10,8 @@ import { describe, expect, it } from "vitest";
 import { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { openDb } from "@pi-lead-child/store";
-import { CHANNEL_SKILL_HINT, leadMessageEventBlock } from "../src/envelope.js";
+import { CHANNEL_SKILL_HINT, SLACK_WRITING_HINT, leadMessageEventBlock } from "../src/envelope.js";
+import { createChannelActionTools } from "../src/ui-action-tools.js";
 import { LEAD_SYSTEM_PROMPT } from "../src/prompt.js";
 import { LEAD_SKILLS_DIR } from "../src/session.js";
 import { createLeadTools, type LeadDeps } from "../src/tools.js";
@@ -129,5 +130,30 @@ describe("skills split out of the Lead system prompt", () => {
     } as never);
     expect(block).toContain(CHANNEL_SKILL_HINT);
     expect(CHANNEL_SKILL_HINT).toContain("skill channel-replies");
+  });
+
+  // 2026-11-17：11-14 以后 Lead 在 Slack 里发了二十多次话，一次也没读 slack-messaging。以前只有 channel-replies 的第 73 行
+  // 指向它，用户在自己这一轮让 Lead 代发时连 channel-replies 也没人点名。写 Slack 话的地方都要直接点名它。
+  it("points every place that writes Slack text at slack-messaging", () => {
+    expect(CHANNEL_SKILL_HINT).toContain("skill slack-messaging");
+    const dir = tempDir("plc-split-skills-slack-");
+    const db = openDb(join(dir, "plc.db"));
+    const deps = { db, dbPath: join(dir, "plc.db"), dataDir: dir } as LeadDeps;
+    const tools = [...createLeadTools(deps), ...createChannelActionTools(deps as never)] as any[];
+    const byName = (name: string) => tools.find((tool) => tool.name === name);
+    for (const name of ["reply_to_source", "send_channel_message"]) {
+      expect(byName(name)?.description, name).toContain(SLACK_WRITING_HINT);
+    }
+    for (const name of ["notify_user", "record_disposition"]) {
+      expect(byName(name)?.parameters?.properties?.draft?.description, name).toContain("skill slack-messaging");
+    }
+    db.close();
+  });
+
+  // 2026-11-17：卡 #512 的第一条是 @here 公告，Lead 只看了最后一条（别人之间的答话）就关了卡；卡 #505 已经回了 ✅，Lead 又回了一个 ❤️。
+  it("tells Lead to judge a card by all its messages and not to stack reactions", () => {
+    const skill = skillText("channel-replies");
+    expect(skill).toContain("按整张卡判断，从开卡的第一条看起，不要只看最后一条");
+    expect(skill).toContain("已经有这个 ✅ 时不要再回别的表情");
   });
 });

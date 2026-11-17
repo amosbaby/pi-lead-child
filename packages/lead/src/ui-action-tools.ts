@@ -18,6 +18,7 @@ import {
 import { isUserActionRequest, UI_ACTION_IDS, UI_ACTION_TARGET_TYPES, type UiActionTargetType, type UserActionRequest } from "@pi-lead-child/protocol";
 import { getEvent, type Db } from "@pi-lead-child/store";
 import { externalMessageOf } from "./channel-tools.js";
+import { SLACK_WRITING_HINT } from "./envelope.js";
 import { EXTERNAL_TURN_WIDGET_SOURCE_REFUSAL, handsBlockedInTurn } from "./hands.js";
 import {
   authorityTurnId, externalContentOf, ruleChangeRefusedResult, setTimerInTurn, turnOriginOf, type LeadTurnOrigin,
@@ -212,7 +213,8 @@ export function createReplyToSourceTool(deps: UiActionToolDeps): ToolDefinition<
       + `（「${AUTHORITY_REFUSAL_TEXT}」），不过信心检验，带 auto-reply 署名，留撤回窗口；你不能自己写拒绝的话。`
       + "授权表没让拒绝、发信人是外部客户、对话和外部组织共享时会被拒绝：改用 notify_user 告诉用户。拒绝以后告诉用户一声。"
       + "event 和 conversation 都照这条消息事件上写的填：回复只能回到这条消息所在的对话，两样对不上时不发（防止把给别的对话写的话发到这里）。"
-      + "回复只按这个对话里的消息写：别的对话里的消息、你和用户在会话里聊的事，不是这个对话的前文，不能拿来回答这条消息。",
+      + "回复只按这个对话里的消息写：别的对话里的消息、你和用户在会话里聊的事，不是这个对话的前文，不能拿来回答这条消息。"
+      + SLACK_WRITING_HINT,
     parameters: Type.Object({
       event: Type.Integer({ minimum: 1, description: "消息事件的编号（交给你的消息写着「消息事件 #N」）" }),
       conversation: Type.String({
@@ -280,6 +282,7 @@ export function createChannelActionTools(deps: UiActionToolDeps): ToolDefinition
         + "转告用户口述的事时，位置、名字、数字、步骤照用户说的写；你认为用户说错了，先在会话里指出、问一句，确认后再发。"
         + "这条消息做的是另一个对话里那张卡上的事（例如用户让你照卡上的话转告别人）时，card_id 填那张卡：卡结束，在对方的消息上回 ✅。"
         + "写法：像平时聊天。一件事的第一条消息称呼对方一次；接着说同一件事、或者对方刚和用户说过话时，不加称呼。"
+        + SLACK_WRITING_HINT
         + "结果里的 openCards 是还在等用户的卡：这一轮做的事处理了其中哪张，就用 mark_channel_card_handled 结束它。"
         + "替一张工单问人（child 的决定请求你答不了，去问工单里写的对接人）时，填 ticket_id 和 decision_id：系统在工单上记一笔，"
         + "对方在这个对话里回复时叫醒你，带着工单和你问的话，不用你设跟进。一个问题最多发 6 条，从第一次问起最长等 1 天；"
