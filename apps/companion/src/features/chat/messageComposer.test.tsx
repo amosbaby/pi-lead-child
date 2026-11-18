@@ -217,6 +217,31 @@ describe('the message composer', () => {
     expect(sendChat).toHaveBeenCalledTimes(1);
     expect(sendChat.mock.calls[0]![0]).toBe('/model please use opus');
   });
+
+  // 2026-11-18: /compact compacts Lead's context (POST /v1/lead/compact). It is not a message to Lead, and Lead's model stays.
+  it('never sends /compact to Lead: it asks the daemon to compact, and says what happens', async () => {
+    const { runtime, sendChat } = setup();
+    const compact = vi.spyOn(runtime, 'compactLeadContext').mockResolvedValue({
+      applied: 'after_turn', model: 'acme/gpt-6-luna', tokensBefore: 180_000, existing: false, reason: null,
+    });
+    await act(async () => { type('/compact acme/gpt-6-luna keep the details of ticket 12'); });
+    await act(async () => { enter(); });
+    expect(compact).toHaveBeenCalledWith({ model: 'acme/gpt-6-luna', instructions: 'keep the details of ticket 12' });
+    expect(sendChat).not.toHaveBeenCalled();
+    expect(input().value).toBe('');
+    expect((await screen.findByTestId('composer-command-notice')).textContent)
+      .toBe('The context is compacted with acme/gpt-6-luna after the current turn. The result shows in the conversation.');
+
+    // A failure shows the reason; the next message clears the line.
+    compact.mockRejectedValueOnce(new Error('the model acme/x is not configured'));
+    await act(async () => { type('/compact acme/x'); });
+    await act(async () => { enter(); });
+    expect((await screen.findByTestId('composer-command-notice')).textContent).toBe('Could not compact the context: the model acme/x is not configured');
+    await act(async () => { type('hello'); });
+    await act(async () => { enter(); });
+    expect(sendChat).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('composer-command-notice')).toBeNull();
+  });
 });
 
 describe('images in the conversation', () => {

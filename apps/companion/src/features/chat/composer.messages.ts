@@ -12,6 +12,16 @@ export const composerMessages = defineMessages({
     plus: 'Add images, or change the model',
     preparingImages: 'Processing images…',
     tooManyImages: (max: number) => `A message can have at most ${max} images. The extra images were not added.`,
+    // /compact in the message box: compact Lead's context (the summary model can differ; Lead's model stays).
+    compact: {
+      sending: 'Asking to compact the context…',
+      now: (model: string) => `Compacting the context now with ${model}. The result shows in the conversation.`,
+      afterTurn: (model: string) => `The context is compacted with ${model} after the current turn. The result shows in the conversation.`,
+      joined: 'A compaction already waits or runs. This request joined it.',
+      nothing: 'Nothing new to compact since the last compaction.',
+      held: 'The context was not compacted: the Lead model is on hold. Name another model, for example /compact provider/model.',
+      failed: (error: string) => `Could not compact the context: ${error}`,
+    },
     queue: {
       moveNext: { idle: 'Move to next', busy: 'Moving…', detail: 'Handle it first after this turn' },
       remove: { idle: 'Remove from queue', busy: 'Removing…', detail: 'You handle it yourself. The card ends.' },
@@ -49,6 +59,15 @@ export const composerMessages = defineMessages({
     plus: '添加图片，或者换模型',
     preparingImages: '正在处理图片…',
     tooManyImages: (max) => `一条消息最多带 ${max} 张图片，多出来的没有加上`,
+    compact: {
+      sending: '正在请求压缩上下文…',
+      now: (model) => `正在用 ${model} 压缩上下文，结果会出现在会话里`,
+      afterTurn: (model) => `这一轮结束以后用 ${model} 压缩上下文，结果会出现在会话里`,
+      joined: '已经有一次压缩在等或者在做，这次请求并进了它',
+      nothing: '上一次压缩以后没有新内容，不用压缩',
+      held: '没有压缩：Lead 的模型在暂停中。可以点名另一个模型，例如 /compact provider/model',
+      failed: (error) => `没能压缩上下文：${error}`,
+    },
     queue: {
       moveNext: { idle: '排到下一个', busy: '正在排…', detail: '这一轮结束以后先处理它' },
       remove: { idle: '移出队列', busy: '正在移出…', detail: '你自己处理，卡结束' },

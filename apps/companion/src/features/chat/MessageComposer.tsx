@@ -2,7 +2,8 @@ import {
   Box, ChatInput, Column, elevation, IconButton, ImageThumbnail, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
 } from '@pi-lead-child/components';
 import {
-  CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, type ChatImageInput, type ChatPlacement,
+  CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, parseCompactCommand, type ChatImageInput, type ChatPlacement,
+  type CompactLeadContextRequest,
 } from '@pi-lead-child/protocol';
 import { useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
@@ -25,6 +26,9 @@ type MessageComposerProps = {
   attachImages?: boolean;
   // 输入 /model 发送时（只有 Lead 的会话给）：不发给 Lead，在输入框上方打开换模型的浮层（模型配置方案 C 的 S4）。
   onModelCommand?: () => void;
+  // /compact [provider/id] [instructions] (only Lead's conversation gives it): compact Lead's context, do not send it to Lead.
+  // Resolves to one line for the user under the input; rejects with the error to show.
+  onCompactCommand?: (request: CompactLeadContextRequest) => Promise<string>;
   // 输入区上面的小标签，例如「只这一条」的单轮模型（TurnModelChip）。
   chip?: ReactNode;
   // 工具栏右边、发送按钮前面的模型名（桌面上的 Lead 会话：LeadModelComposerTrigger，写着模型 id 和推理强度，点开换模型）。
@@ -83,7 +87,8 @@ export function MessageComposer(props: MessageComposerProps) {
 // 中间是文字（缺省一行高，内容多了自动长高），下面一行工具栏：左边「+」选图片，右边模型名和圆形的发送按钮。
 // web 上 Enter 发送、Shift+Enter 换行；可以粘贴剪贴板里的图片。草稿按 contextKey 存在工作区里，失去焦点时保存（图片不存）。
 function MessageComposerField({
-  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, chip, modelControl, tray,
+  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, onCompactCommand,
+  chip, modelControl, tray,
   float = false, onPlus, ref,
 }: MessageComposerProps) {
   const locale = useLocale();
@@ -95,6 +100,8 @@ function MessageComposerField({
   const { images, notice } = attachments;
   // 正在处理（读取、缩小）的图片张数：处理完之前不能发送。
   const [preparing, setPreparing] = useState(0);
+  // What the last /compact did: a status line, or the error (tone danger). Cleared by the next send.
+  const [commandNotice, setCommandNotice] = useState<{ text: string; tone: 'muted' | 'danger' } | null>(null);
   const canAttach = attachImages && canPickImages && !minimal;
   const ready = !disabled && preparing === 0 && (text.trim().length > 0 || images.length > 0);
   const inputRef = useRef<ChatInputHandle>(null);
@@ -108,6 +115,19 @@ function MessageComposerField({
       onModelCommand();
       return;
     }
+    const compactRequest = onCompactCommand && images.length === 0 ? parseCompactCommand(text) : null;
+    if (onCompactCommand && compactRequest) {
+      setText('');
+      workspace.getState().clearComposerDraft(contextKey);
+      setCommandNotice({ text: m.compact.sending, tone: 'muted' });
+      onCompactCommand(compactRequest).then(
+        (line) => setCommandNotice({ text: line, tone: 'muted' }),
+        (error: unknown) => setCommandNotice({ text: m.compact.failed(error instanceof Error ? error.message : String(error)), tone: 'danger' }),
+      );
+      inputRef.current?.focus();
+      return;
+    }
+    setCommandNotice(null);
     onSend(text.trim(), images.map(({ mimeType, data }) => ({ mimeType, data })));
     setText('');
     setAttachments(EMPTY_ATTACHMENTS);
@@ -191,6 +211,7 @@ function MessageComposerField({
           </Row>
         ) : null}
         {notice ? <Text testID="composer-notice" size="note" tone="danger" px="inline-item">{notice}</Text> : null}
+        {commandNotice ? <Text testID="composer-command-notice" size="note" tone={commandNotice.tone} px="inline-item">{commandNotice.text}</Text> : null}
         {chip ? <Box px="inline-item" pt="inline-item">{chip}</Box> : null}
         <Box px="inline-item" py="inline-item">{input}</Box>
         <Row items="center" gap="inline-item">
@@ -264,6 +285,7 @@ function MessageComposerField({
         </Row>
       ) : null}
       {notice ? <Text testID="composer-notice" size="note" tone="danger">{notice}</Text> : null}
+      {commandNotice ? <Text testID="composer-command-notice" size="note" tone={commandNotice.tone}>{commandNotice.text}</Text> : null}
       {chip ?? null}
       {input}
       <Row items="center" gap="inline-item">

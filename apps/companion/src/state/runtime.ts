@@ -4,6 +4,8 @@ import type {
   LeadModelCatalog,
   LeadModelChoice,
   LeadModelSwitchResult,
+  CompactLeadContextRequest,
+  CompactLeadContextResult,
   ChatPlacement,
   AdminBinding,
   BindingDto,
@@ -229,7 +231,7 @@ export type CompanionTransport = Pick<
   | 'getTicketReviewer' | 'getTicketDeliveries' | 'getTicketUsage'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
   | 'getChatImage' | 'getTicketAttachments' | 'getTicketAttachment'
-  | 'getLeadModels' | 'switchLeadModel'
+  | 'getLeadModels' | 'switchLeadModel' | 'compactLeadContext'
 >>;
 
 export interface CompanionRuntimeDependencies {
@@ -487,6 +489,13 @@ export class CompanionStateRuntime {
       this.control.setState({ overview: { ...overview, model: leadModelSpec(result.selected) } });
     }
     return result;
+  }
+
+  // Compact Lead's context (/compact in the message box). Lead's model does not change.
+  async compactLeadContext(request: CompactLeadContextRequest): Promise<CompactLeadContextResult> {
+    const compactLeadContext = this.dependencies.client.compactLeadContext;
+    if (!compactLeadContext) throw new Error(this.messages().noLeadCompaction);
+    return compactLeadContext.call(this.dependencies.client, request);
   }
 
   // 用户发给 Lead 的一张图片（会话快照里的 id）。
