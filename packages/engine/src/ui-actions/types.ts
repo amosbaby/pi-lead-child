@@ -5,7 +5,7 @@
 import type { RuntimeDisabledBy, RuntimeId, RuntimeSwitchBy } from "@pi-lead-child/core";
 import type {
   ActionPermission, ChannelCardAction, ConnectionDto, LocalMcpLaunch, StartConnectionResponse, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
-  FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
+  CompactLeadContextRequest, CompactLeadContextResult, FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
   SchedulerSnapshot, SetFastChainRequest, SignalSourceDto, TimerOrigin, UiActionTargetType, UserActionRequest,
@@ -65,6 +65,8 @@ export interface UiActionServices {
   channelHandbookRehearsal?: { rehearse(request: HandbookRehearsalRequest): Promise<HandbookRehearsal> };
   // Lead 自己的模型（daemon 的 lead-models.ts）。Lead 的会话建好以后才有。
   leadModels?: LeadModelService;
+  // Lead's context: compact it on request (daemon's server.ts, 2026-11-18). Only after Lead's session is built.
+  leadContext?: LeadContextService;
   // Lead 忙时排着的外部消息（daemon 的 lead-input.ts，工单 10）。Lead 的会话建好以后才有。
   leadQueue?: LeadQueueService;
   // Lead 忙时用户排着的追问（daemon 的 server.ts，用户 2026-10-28）。Lead 的会话建好以后才有。
@@ -301,6 +303,14 @@ export interface LeadModelService {
   // Lead 的会话此刻挂着的模型（provider/id），带订阅的账号（protocol 的 LeadModelCatalog.inSession）。不知道时为 null。
   // 没有它的服务（测试的替身）：GET /v1/lead/models?live=1 不给这个字段。
   inSession?(): string | null;
+}
+
+export interface LeadContextService {
+  // The model Lead uses now (provider/id) and about how many tokens its context has (null: not known).
+  state(): { model: string; tokens: number | null };
+  // Compact now or after the current unit (lead_context / compact). byUser: the user asked for it (the page, or Lead in the
+  // user's own live turn); the hold rule reads it (lead's manualCompactionHold). An unknown model throws invalid_input.
+  compact(request: CompactLeadContextRequest, options: { byUser: boolean }): Promise<CompactLeadContextResult>;
 }
 
 export interface ChannelPolicyTestService {

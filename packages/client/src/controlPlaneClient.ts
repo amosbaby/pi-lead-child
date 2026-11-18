@@ -202,6 +202,9 @@ import {
   type TicketAttachmentList,
   LeadModelCatalogSchema,
   LeadModelSwitchResultSchema,
+  CompactLeadContextResultSchema,
+  type CompactLeadContextRequest,
+  type CompactLeadContextResult,
   LEAD_QUEUE_OPT_IN,
   LEAD_STEP_OPT_IN,
   LeadQueueSchema,
@@ -1343,6 +1346,17 @@ export class ControlPlaneClient {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ model: choice.model, effort: choice.effort }),
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  // Compact Lead's context now or after its current unit (the same operation as Lead's compact_lead_context). An older
+  // daemon has no such route (404).
+  async compactLeadContext(request: CompactLeadContextRequest, signal?: AbortSignal): Promise<CompactLeadContextResult> {
+    return this.request<CompactLeadContextResult>('/v1/lead/compact', CompactLeadContextResultSchema, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(request),
       ...(signal ? { signal } : {}),
     });
   }

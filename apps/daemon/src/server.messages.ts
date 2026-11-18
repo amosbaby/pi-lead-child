@@ -3,6 +3,10 @@
 // 给 Lead 的系统事件和提示不在这里，照旧是中文。
 import { defineMessages } from "@pi-lead-child/protocol";
 
+// Token counts in a line for people: 48,000 in English, 4.8 万 in Chinese.
+const enTokens = (tokens: number) => Math.round(tokens).toLocaleString("en-US");
+const zhTokens = (tokens: number) => (tokens < 10_000 ? String(Math.round(tokens)) : `${(tokens / 10_000).toFixed(1).replace(/\.0$/u, "")} 万`);
+
 export const serverMessages = defineMessages({
   en: {
     outage: {
@@ -65,6 +69,18 @@ export const serverMessages = defineMessages({
       restartUnavailable: (name: string) =>
         `${name} did not continue after an abort, and the system could not start a new session or restart the background service. Quit the app and open it again.`,
     },
+    // A requested compaction of Lead's context ended (/compact, compact_lead_context, 2026-11-18): one line in the conversation.
+    compaction: {
+      applied: (name: string, before: number | null, after: number | null, model: string) =>
+        before !== null && after !== null
+          ? `${name}'s context is compacted: about ${enTokens(before)} → ${enTokens(after)} tokens. The summary was written by ${model}.`
+          : `${name}'s context is compacted. The summary was written by ${model}.`,
+      failed: (name: string, model: string, error: string) =>
+        `The compaction of ${name}'s context with ${model} did not succeed: ${error}. The context did not change.`,
+      nothing: (name: string) => `${name}'s context has nothing new to compact since the last compaction.`,
+      superseded: (name: string) => `Another compaction compacted ${name}'s context before this request finished.`,
+      held: (name: string) => `${name}'s context was not compacted: ${name}'s model went on hold before the compaction started.`,
+    },
     // 被迫交接（lead-scheduler spec H6）：系统停下这一轮、Lead 交出去了却没说话时，系统写这一句；没交出去、单元挂起时写另一句。
     handoff: {
       handedOff: (ticketId: number) =>
@@ -123,6 +139,16 @@ export const serverMessages = defineMessages({
       replacedAfterStop: (name) => `用 /stop 以后这一轮没有停下。系统给 ${name} 换了一个新会话。`,
       restartRequested: (name) => `${name} 中止以后没有停下，系统也没能换一个新会话。系统已经请后台服务重启。`,
       restartUnavailable: (name) => `${name} 中止以后没有停下，系统没能换一个新会话，也没能重启后台服务。请退出 App 再打开。`,
+    },
+    compaction: {
+      applied: (name, before, after, model) =>
+        before !== null && after !== null
+          ? `${name} 的上下文压缩好了：约 ${zhTokens(before)} → ${zhTokens(after)} token，摘要由 ${model} 写。`
+          : `${name} 的上下文压缩好了，摘要由 ${model} 写。`,
+      failed: (name, model, error) => `用 ${model} 压缩 ${name} 的上下文没有成功：${error}。上下文没有变。`,
+      nothing: (name) => `${name} 的上下文自上一次压缩以后没有新内容，不用压缩。`,
+      superseded: (name) => `这次请求完成以前，另一次压缩已经压缩了 ${name} 的上下文。`,
+      held: (name) => `没有压缩 ${name} 的上下文：开始以前 ${name} 的模型进入了暂停。`,
     },
     handoff: {
       handedOff: (ticketId) => `这件事交给了后台 agent #${ticketId}，大约 3–5 分钟有结果。你可以接着说别的。`,

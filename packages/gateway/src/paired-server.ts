@@ -45,7 +45,7 @@ import {
   LEAD_AVATAR_CAPABILITY,
   CHAT_SEND_MAX_BYTES,
   ChatPlacementSchema,
-  LeadModelChoiceSchema, LeadQueueActionRequestSchema,
+  CompactLeadContextRequestSchema, LeadModelChoiceSchema, LeadQueueActionRequestSchema,
   TicketChatAnswererSchema,
   TICKET_REPLY_ACTIONS_INCLUDE,
   type ChatPlacement,
@@ -1617,6 +1617,19 @@ export async function startPairedServer(
         const outcome = await performUiActionAsUser(req, auth, {
           target: { type: "lead_model", id: "lead" }, action: "switch", input: body,
         });
+        json(req, res, 200, outcome.result);
+        return;
+      }
+
+      // Compact Lead's context (/compact in the message box, protocol's lead-context.ts, 2026-11-18): lead_context / compact,
+      // the same operation as Lead's compact_lead_context. Unknown model: 400 with the valid choices.
+      if (req.method === "POST" && url.pathname === "/v1/lead/compact") {
+        const auth = requireAuth(req, uiActionDefinition("lead_context", "compact")!.scope);
+        const body = parseJson(await readBody(req, maxBodyBytes));
+        if (!Value.Check(CompactLeadContextRequestSchema, body)) {
+          throw new HttpError(400, "invalid_request", "model must be provider/id, and instructions a short text");
+        }
+        const outcome = await performUiActionAsUser(req, auth, { target: { type: "lead_context", id: "lead" }, action: "compact", input: body });
         json(req, res, 200, outcome.result);
         return;
       }

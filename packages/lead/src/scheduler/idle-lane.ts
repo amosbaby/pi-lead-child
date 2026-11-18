@@ -33,6 +33,18 @@
 //   · 模型暂停（lead 的 model-hold.ts，账号级的失败）：accountHold。和 model 的退避一样不开要调模型的活，但没有时限：
 //     daemon 解除暂停（用户本人的一轮答上了）时才接着做。暂停期间没有定时器为它醒来。
 //
+// A compaction that someone asks for (the user's /compact, Lead's compact_lead_context, 2026-11-18):
+//   · It does not wait for the ratio, graceMs or pending input. Lead idle: the summary starts at once. Lead busy: the request
+//     waits, and the summary starts at the next unit boundary, before the next unit gets the session (manual in the state).
+//   · The summary can use another model than Lead's (model). Lead's model does not change.
+//   · It ignores the backoffs of automatic work (compact, model) and the hold flag (accountHold): they stop loops that nobody
+//     asked for. The daemon decides the hold rule before the request reaches this lane (manualCompactionHold below).
+//     A failed request is not retried. It counts in the shared compact backoff only when it used Lead's own model.
+//   · A second request while one waits or runs joins it. A request while an automatic summary runs joins that summary,
+//     unless it names a model and that summary is still being written: then the automatic one is dropped.
+//   · Every request ends with one manual.done effect: applied, failed, nothing (nothing to compact) or superseded (another
+//     compaction compacted the context first). The daemon shows it in the conversation.
+//
 // 每个决定写一条 [sched] idle.* 日志（D12）：决定了什么、为什么、依据的数字、作业编号（idle_…）和单元编号。不写原文。
 import { schedulerLine } from "./core.js";
 import { laneName, type Lane } from "./lanes.js";
@@ -101,6 +113,44 @@ export interface CompactJobState {
   yieldLogged: boolean;
   failures: number;
   retryAt: number | null;
+  // The request this job runs for (someone asked for this compaction). null: an automatic job.
+  manual: ManualCompactRequest | null;
+}
+
+/** A compaction that the user or Lead asked for (see the file header). */
+export interface ManualCompactRequest {
+  // The id of the job that runs it (idle_compact_…).
+  id: string;
+  // The model for the summary (provider/id). null: Lead's own model.
+  model: string | null;
+  // model is not Lead's current model: the hold and backoffs of Lead's model do not apply to it.
+  overrideModel: boolean;
+  // Extra instructions for the summary. null: none.
+  instructions: string | null;
+  // The user asked (the page, or Lead in the user's own live turn): it does not count as an automatic call (the budget), and
+  // it passes the hold of Lead's model (manualCompactionHold). Otherwise it counts like any automatic call.
+  byUser: boolean;
+  // The request joined an automatic job that was already running: that job keeps its own route (model, prefix) and has no
+  // instructions. The request only waits for its result.
+  joinedAutomatic: boolean;
+  requestedAt: number;
+}
+
+export type ManualCompactOutcome = "applied" | "failed" | "nothing" | "superseded" | "held";
+
+/**
+ * The hold rule for a compaction that someone asked for (2026-11-18). The model hold (model-hold.ts: account failure,
+ * breaker, budget) is about Lead's model and about calls that the system makes by itself. Its job is to stop runaway loops.
+ *   · Another model than Lead's: pass. The hold says nothing about that model, and one explicit request is not a loop.
+ *   · Lead's own model, no hold: pass.
+ *   · Lead's own model during a hold, asked by the user (the page, or Lead in the user's own live turn): pass. This is the same
+ *     rule as for the user's own message: one request, one call. It is not retried when it fails.
+ *   · Lead's own model during a hold, in any other turn (an event, a timer, an external message woke it): refuse. The caller
+ *     gets a structured result that says what to do next: name another model, or wait for the user.
+ */
+export function manualCompactionHold(input: { overrideModel: boolean; held: boolean; byUser: boolean }): "pass" | "refuse" {
+  if (input.overrideModel || !input.held || input.byUser) return "pass";
+  return "refuse";
 }
 
 export interface PrecipitateJobState {
@@ -135,6 +185,8 @@ export interface IdleLaneState {
   model: { failures: number; retryAt: number | null };
   // 模型暂停（model-hold.ts）：在暂停时不开要调模型的活，直到 daemon 解除。
   accountHold: boolean;
+  // A compaction someone asked for while Lead was busy: it starts at the next unit boundary.
+  manual: ManualCompactRequest | null;
   // 在等 Lead 空闲的没人等的后台重活（回收区的删除）。
   gated: number;
   // 作业编号的计数。
@@ -148,6 +200,7 @@ export function initialIdleLaneState(now: number): IdleLaneState {
     precipitate: { phase: "idle", id: null, done: false, yields: 0, unitId: null, startedAt: null, yieldRequested: false },
     model: { failures: 0, retryAt: null },
     accountHold: false,
+    manual: null,
     gated: 0, seq: 0,
   };
 }
@@ -156,6 +209,7 @@ function idleCompactJob(failures: number, retryAt: number | null = null, deferra
   return {
     phase: "idle", id: null, promoted: false, startedAt: null, readyAt: null,
     deferredSince: deferral?.deferredSince ?? null, deferrals: deferral?.deferrals ?? 0, yieldLogged: false, failures, retryAt,
+    manual: null,
   };
 }
 
@@ -184,8 +238,10 @@ export type IdleLaneEvent =
   | { type: "model.hold"; held: boolean }
   // 取对话失败（会话不让压缩，例如刚压缩过）。
   | { type: "compact.skipped"; why: string }
-  // 写好的摘要接上了。
-  | { type: "compact.applied"; tokensBefore: number | null }
+  // 写好的摘要接上了。tokensAfter: pi's estimate of the context after the compaction (estimatedTokensAfter).
+  | { type: "compact.applied"; tokensBefore: number | null; tokensAfter?: number | null }
+  // Someone asked for a compaction (see the file header). starting: the session cannot be touched now (host.starting()).
+  | { type: "compact.request"; request: Pick<ManualCompactRequest, "model" | "overrideModel" | "instructions" | "byUser">; starting: boolean }
   // 写好的摘要用不上了（会话在这期间压缩过，或者保留的起点不在了）。
   | { type: "compact.stale"; why: string }
   // 会话压缩成了（不管是谁压缩的）：新的周期。how 是 pi 的原因或者 idle。
@@ -222,7 +278,12 @@ export type IdleLaneEffect =
   // 让正在跑的 L4 单元在下一个让出点停下。
   | { type: "yield.unit"; by: Lane; unitId: string }
   // 放行在等空闲的后台重活。
-  | { type: "gate.release" };
+  | { type: "gate.release" }
+  // A requested compaction ended (see the file header). tokensBefore and tokensAfter only for applied.
+  | {
+    type: "manual.done"; request: ManualCompactRequest; outcome: ManualCompactOutcome;
+    tokensBefore: number | null; tokensAfter: number | null; error: string | null;
+  };
 
 export interface IdleLaneStep {
   state: IdleLaneState;
@@ -255,9 +316,14 @@ export function nextIdleCheckAt(state: IdleLaneState, limits: IdleLaneLimits, la
   const times = [grace];
   if (state.compact.retryAt !== null) times.push(Math.max(state.compact.retryAt, grace));
   if (state.model.retryAt !== null) times.push(Math.max(state.model.retryAt, grace));
+  // A requested compaction waits for the session (a system turn probes the network): look again in a second. While an
+  // automatic job runs, its end (applied, failed, skipped) changes the state, and the check after it starts the request.
+  if (state.manual !== null && state.compact.phase === "idle") times.push(lastCheckAt + MANUAL_RECHECK_MS);
   const pending = times.filter((at) => at > lastCheckAt);
   return pending.length ? Math.min(...pending) : null;
 }
+
+const MANUAL_RECHECK_MS = 1_000;
 
 /** 压缩失败以后的退避还没到时：下一次可以压缩的时间。没有退避或者已经到时为 null。daemon 的补压缩据此跳过。 */
 export function compactionRetryAt(state: IdleLaneState, now: number): number | null {
@@ -314,6 +380,94 @@ function retryDelay(failures: number, limits: IdleLaneLimits): number {
 
 // ── 状态机 ───────────────────────────────────────────────────────────────────
 
+function manualDone(
+  request: ManualCompactRequest, outcome: ManualCompactOutcome,
+  extra: { tokensBefore?: number | null; tokensAfter?: number | null; error?: string | null } = {},
+): IdleLaneEffect[] {
+  return [
+    line("idle.manual.done", {
+      job: "compact", id: request.id, outcome, model: request.model ?? "lead", tokensBefore: extra.tokensBefore ?? null,
+      tokensAfter: extra.tokensAfter ?? null, ...(extra.error ? { error: extra.error.slice(0, 200) } : {}),
+    }),
+    {
+      type: "manual.done", request, outcome, tokensBefore: extra.tokensBefore ?? null, tokensAfter: extra.tokensAfter ?? null,
+      error: extra.error ?? null,
+    },
+  ];
+}
+
+/**
+ * The hold rule again when a waiting request starts: a request from another turn than the user's, admitted before Lead's model
+ * went on hold, must not start during the hold (manualCompactionHold).
+ */
+function manualHeldNow(state: IdleLaneState, request: ManualCompactRequest): boolean {
+  return manualCompactionHold({ overrideModel: request.overrideModel, held: state.accountHold, byUser: request.byUser }) === "refuse";
+}
+
+/** Start the job for a requested compaction: probe the session now (Lead is idle), write the summary in a child process. */
+function startManual(state: IdleLaneState, request: ManualCompactRequest, now: number, why: string): IdleLaneStep {
+  const next: IdleLaneState = {
+    ...state,
+    manual: null,
+    compact: {
+      ...state.compact, phase: "preparing", id: request.id, promoted: true, startedAt: now, readyAt: null, yieldLogged: false,
+      manual: request,
+    },
+  };
+  return {
+    state: next,
+    effects: [
+      line("idle.start", {
+        job: "compact", id: request.id, manual: true, model: request.model ?? "lead", why, ratio: ratioText(state.ratio),
+        waitedMs: now - request.requestedAt,
+      }),
+      record(request.id, "compact", "started", { manual: true, why, model: request.model, override: request.overrideModel }),
+      { type: "compact.start", id: request.id, promoted: true },
+    ],
+  };
+}
+
+/** Someone asked for a compaction (see the file header). */
+function onManualRequest(state: IdleLaneState, event: Extract<IdleLaneEvent, { type: "compact.request" }>, now: number): IdleLaneStep {
+  const pending = state.manual ?? state.compact.manual;
+  if (pending) {
+    return {
+      state,
+      effects: [line("idle.manual.joined", { job: "compact", id: pending.id, phase: state.manual ? "waiting" : state.compact.phase })],
+    };
+  }
+  const made = nextId(state, "compact", now);
+  const request: ManualCompactRequest = { ...event.request, id: made.id, joinedAutomatic: false, requestedAt: now };
+  let next = made.state;
+  const effects: IdleLaneEffect[] = [];
+  const compact = next.compact;
+  if (compact.phase !== "idle" && compact.id) {
+    // An automatic job runs. It is the compaction the request wants, unless the request names a model and the summary is
+    // still being written: then drop it and write the summary with that model.
+    if (event.request.model === null || compact.phase !== "summarizing") {
+      // The automatic job writes with Lead's route, whatever model the request named: the request reports that model.
+      const joined: ManualCompactRequest = { ...request, id: compact.id, model: null, overrideModel: false, instructions: null, joinedAutomatic: true };
+      return {
+        state: { ...state, compact: { ...compact, manual: joined } },
+        effects: [line("idle.manual.joined", { job: "compact", id: compact.id, phase: compact.phase, automatic: true })],
+      };
+    }
+    effects.push(
+      line("idle.discard", { job: "compact", id: compact.id, why: "manual_model", phase: compact.phase }),
+      record(compact.id, "compact", "discarded", { why: "manual_model" }),
+      { type: "compact.cancel", id: compact.id, why: "manual_model" },
+    );
+    next = { ...next, compact: idleCompactJob(compact.failures, compact.retryAt, compact) };
+  }
+  if (next.busyUnit === null && !event.starting) {
+    const started = startManual(next, request, now, "idle");
+    return { state: started.state, effects: [...effects, ...started.effects] };
+  }
+  effects.push(line("idle.manual.wait", { job: "compact", id: request.id, why: event.starting ? "starting" : "lead_busy", ...busyFields(next) }));
+  effects.push(record(request.id, "compact", "requested", { model: request.model, override: request.overrideModel, waiting: true }));
+  return { state: { ...next, manual: request }, effects };
+}
+
 /** 空闲时开始该开始的活。按先后：接上写好的摘要（几毫秒，不等 graceMs）、放行后台重活、整理笔记、开始写摘要。 */
 function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { type: "tick" }>, now: number, limits: IdleLaneLimits): IdleLaneStep {
   const effects: IdleLaneEffect[] = [];
@@ -327,6 +481,17 @@ function startIdleWork(state: IdleLaneState, event: Extract<IdleLaneEvent, { typ
     effects.push(line("idle.apply", { job: "compact", id, readyForMs: next.compact.readyAt === null ? null : now - next.compact.readyAt }));
     effects.push({ type: "compact.apply", id });
     return { state: next, effects };
+  }
+  // A requested compaction that waited for this boundary: start it now. It ignores the backoffs, the hold flag, the ratio,
+  // graceMs and pending input (see the file header).
+  if (next.manual && next.compact.phase === "idle") {
+    if (manualHeldNow(next, next.manual)) {
+      effects.push(...manualDone(next.manual, "held", { error: "Lead's model is on hold" }));
+      next = { ...next, manual: null };
+    } else {
+      const started = startManual(next, next.manual, now, event.boundary ? "boundary" : "after_turn");
+      return { state: started.state, effects: [...effects, ...started.effects] };
+    }
   }
   // 模型连续失败：整理笔记和写摘要都要调模型，等退避到时再看（nextIdleCheckAt 在那一刻叫醒）。后台重活不调模型，照常放行。
   if (modelHeld(next, now)) {
@@ -428,6 +593,31 @@ function onInline(state: IdleLaneState, event: Extract<IdleLaneEvent, { type: "i
     compact: { ...compact, deferredSince: compact.deferredSince ?? now, deferrals: compact.deferrals + 1 },
   };
   const first = compact.deferrals === 0;
+  // A requested compaction waits for this unit to end: run it now with this preparation (its model, its instructions), not an
+  // automatic job. Otherwise the automatic job would compact first and the request would end superseded.
+  const waiting = state.manual;
+  if (waiting && compact.phase === "idle") {
+    if (manualHeldNow(state, waiting)) {
+      effects.push(...manualDone(waiting, "held", { error: "Lead's model is on hold" }));
+      next = { ...next, manual: null };
+    } else {
+      next = {
+        ...next,
+        manual: null,
+        compact: {
+          ...next.compact, phase: "preparing", id: waiting.id, promoted: true, startedAt: now, readyAt: null, yieldLogged: false, manual: waiting,
+        },
+      };
+      effects.push(line("idle.defer", {
+        job: "compact", id: waiting.id, reason: event.reason, ...busyFields(state), deferrals: next.compact.deferrals,
+        dueMs: now - next.compact.deferredSince!, deferMaxMs: limits.deferMaxMs, promoted: true, manual: true, model: waiting.model ?? "lead",
+      }));
+      effects.push(record(waiting.id, "compact", "started", { manual: true, why: "inline", model: waiting.model, override: waiting.overrideModel }));
+      effects.push({ type: "inline", action: "defer" });
+      effects.push({ type: "compact.start", id: waiting.id, promoted: true });
+      return { state: next, effects };
+    }
+  }
   const canStart = compact.phase === "idle" && (compact.retryAt === null || now >= compact.retryAt) && !modelHeld(state, now);
   if (canStart) {
     const made = nextId(next, "compact", now);
@@ -479,6 +669,8 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
       return startIdleWork(state, event, now, limits);
     case "inline":
       return onInline(state, event, now, limits);
+    case "compact.request":
+      return onManualRequest(state, event, now);
     case "compact.summarizing": {
       if (compact.phase !== "preparing" || !compact.id) return { state, effects: [] };
       return {
@@ -505,6 +697,17 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
     }
     case "compact.failed": {
       if (!compact.id || (compact.phase !== "summarizing" && compact.phase !== "preparing")) return { state, effects: [] };
+      // A requested summary with another model: its failure says nothing about Lead's model, so the shared backoff stays.
+      if (compact.manual?.overrideModel) {
+        return {
+          state: { ...state, compact: idleCompactJob(compact.failures, compact.retryAt, compact) },
+          effects: [
+            line("idle.fail", { job: "compact", id: compact.id, ms: event.ms, manual: true, model: compact.manual.model, error: event.error.slice(0, 200) }),
+            record(compact.id, "compact", "failed", { ms: event.ms, manual: true, error: event.error.slice(0, 200) }),
+            ...manualDone(compact.manual, "failed", { error: event.error }),
+          ],
+        };
+      }
       const failures = compact.failures + 1;
       const retryAt = now + retryDelay(failures, limits);
       return {
@@ -512,6 +715,7 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         effects: [
           line("idle.fail", { job: "compact", id: compact.id, ms: event.ms, failures, retryInMs: retryAt - now, error: event.error.slice(0, 200) }),
           record(compact.id, "compact", "failed", { ms: event.ms, failures, error: event.error.slice(0, 200) }),
+          ...(compact.manual ? manualDone(compact.manual, "failed", { error: event.error }) : []),
         ],
       };
     }
@@ -531,6 +735,16 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
     }
     case "compact.skipped": {
       if (!compact.id || compact.phase !== "preparing") return { state, effects: [] };
+      // A requested compaction found nothing to compact: say so. The automatic schedule does not change.
+      if (compact.manual) {
+        return {
+          state: { ...state, compact: idleCompactJob(compact.failures, compact.retryAt, compact) },
+          effects: [
+            line("idle.skip", { job: "compact", id: compact.id, why: event.why, manual: true }),
+            ...manualDone(compact.manual, "nothing", { error: event.why }),
+          ],
+        };
+      }
       // 没有要压缩的（刚压缩过、会话太小）：这个周期不再空闲压缩，等下一次压缩成功或者水位再变。
       return {
         state: { ...state, compact: idleCompactJob(compact.failures, now + limits.retryMs, compact) },
@@ -540,27 +754,39 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
     case "compact.applied": {
       if (!compact.id) return { state, effects: [] };
       const ms = compact.startedAt === null ? null : now - compact.startedAt;
+      const tokensAfter = event.tokensAfter ?? null;
       return {
         // 新的周期：推迟的计数清零，整理笔记重新武装。水位要等下一次回答才知道。
         state: {
           ...state,
           ratio: null,
+          manual: null,
           compact: idleCompactJob(0),
           precipitate: { ...state.precipitate, done: false, yields: 0 },
         },
         effects: [
           line("idle.applied", { job: "compact", id: compact.id, totalMs: ms, tokensBefore: event.tokensBefore, deferrals: compact.deferrals, ...busyFields(state) }),
-          record(compact.id, "compact", "applied", { totalMs: ms, tokensBefore: event.tokensBefore, deferrals: compact.deferrals, promoted: compact.promoted }),
+          record(compact.id, "compact", "applied", {
+            totalMs: ms, tokensBefore: event.tokensBefore, deferrals: compact.deferrals, promoted: compact.promoted,
+            ...(compact.manual ? { manual: true, tokensAfter } : {}),
+          }),
+          ...(compact.manual ? manualDone(compact.manual, "applied", { tokensBefore: event.tokensBefore, tokensAfter }) : []),
+          ...(state.manual ? manualDone(state.manual, "superseded") : []),
         ],
       };
     }
     case "compact.stale": {
       if (!compact.id) return { state, effects: [] };
+      // A requested summary that cannot be applied: the session was compacted since (superseded), or applying it failed.
+      const manualEnd = compact.manual
+        ? manualDone(compact.manual, event.why.startsWith("session_compacted") ? "superseded" : "failed", { error: event.why })
+        : [];
       return {
         state: { ...state, compact: idleCompactJob(compact.failures, null, compact) },
         effects: [
           line("idle.discard", { job: "compact", id: compact.id, why: event.why }),
           record(compact.id, "compact", "discarded", { why: event.why }),
+          ...manualEnd,
         ],
       };
     }
@@ -575,8 +801,11 @@ export function idleLaneStep(state: IdleLaneState, event: IdleLaneEvent, now: nu
         effects.push(record(compact.id, "compact", "discarded", { why: `compacted_by_${event.how}` }));
         if (compact.phase !== "ready") effects.push({ type: "compact.cancel", id: compact.id, why: `compacted_by_${event.how}` });
       }
+      // Requested compactions: another compaction compacted the context first.
+      if (compact.manual) effects.push(...manualDone(compact.manual, "superseded", { error: `compacted_by_${event.how}` }));
+      if (state.manual) effects.push(...manualDone(state.manual, "superseded", { error: `compacted_by_${event.how}` }));
       return {
-        state: { ...state, ratio: null, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
+        state: { ...state, ratio: null, manual: null, compact: idleCompactJob(0), precipitate: { ...state.precipitate, done: false, yields: 0 } },
         effects,
       };
     }

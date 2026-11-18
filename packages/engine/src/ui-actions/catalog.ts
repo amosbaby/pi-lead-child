@@ -33,6 +33,7 @@ import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { WAKE_PACE_ACTIONS, WAKE_PACE_TARGET } from "./wake-pace.js";
+import { LEAD_CONTEXT_ACTIONS, LEAD_CONTEXT_TARGET } from "./lead-context.js";
 import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
 } from "./agenda-feeds.js";
@@ -1233,6 +1234,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   channel_conversation: CHANNEL_CONVERSATION_TARGET,
   channel_policy: CHANNEL_POLICY_TARGET,
   lead_model: LEAD_MODEL_TARGET,
+  lead_context: LEAD_CONTEXT_TARGET,
   reminder: REMINDER_TARGET,
   workspace: WORKSPACE_TARGET,
   milestone: MILESTONE_TARGET,
@@ -1275,6 +1277,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   channel_conversation: CHANNEL_CONVERSATION_ACTIONS,
   channel_policy: CHANNEL_POLICY_ACTIONS,
   lead_model: LEAD_MODEL_ACTIONS,
+  // Compact Lead's context on request (2026-11-18), optionally with another model. Defined in lead-context.ts.
+  lead_context: LEAD_CONTEXT_ACTIONS,
   reminder: REMINDER_ACTIONS,
   workspace: WORKSPACE_ACTIONS,
   milestone: MILESTONE_ACTIONS,

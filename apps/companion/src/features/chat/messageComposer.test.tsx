@@ -217,6 +217,44 @@ describe('the message composer', () => {
     expect(sendChat).toHaveBeenCalledTimes(1);
     expect(sendChat.mock.calls[0]![0]).toBe('/model please use opus');
   });
+
+  // 2026-11-18: /compact compacts Lead's context (POST /v1/lead/compact). It is not a message to Lead, and Lead's model stays.
+  it('never sends /compact to Lead: it asks the daemon to compact, and says what happens', async () => {
+    const { runtime, sendChat } = setup();
+    const compact = vi.spyOn(runtime, 'compactLeadContext').mockResolvedValue({
+      applied: 'after_turn', model: 'acme/gpt-6-luna', tokensBefore: 180_000, existing: false, requestApplied: true, candidates: [], reason: null,
+    });
+    await act(async () => { type('/compact acme/gpt-6-luna -- keep the details of ticket 12'); });
+    await act(async () => { enter(); });
+    expect(compact).toHaveBeenCalledWith({ model: 'acme/gpt-6-luna', instructions: 'keep the details of ticket 12' });
+    expect(sendChat).not.toHaveBeenCalled();
+    expect(input().value).toBe('');
+    expect((await screen.findByTestId('composer-command-notice')).textContent)
+      .toBe('The context is compacted with acme/gpt-6-luna after the current turn. The result shows in the conversation.');
+
+    // Review 2026-11-18 (items 1 and 7): the user's own words name the model. Several matches: one short line with the
+    // candidates, not the catalog. A failed request: the page's own text by the status, never the server's text.
+    compact.mockResolvedValueOnce({
+      applied: 'model_ambiguous', model: 'gpt 6 luna', tokensBefore: 180_000, existing: false, requestApplied: false,
+      candidates: ['auto/gpt-6-luna', 'codex/gpt-6-luna'], reason: 'several models match',
+    });
+    await act(async () => { type('/compact gpt 6 luna'); });
+    await act(async () => { enter(); });
+    expect(compact).toHaveBeenLastCalledWith({ model: 'gpt 6 luna' });
+    await waitFor(() => expect(screen.getByTestId('composer-command-notice').textContent)
+      .toBe('Several models match "gpt 6 luna": auto/gpt-6-luna, codex/gpt-6-luna. Write the full name, for example /compact auto/gpt-6-luna.'));
+
+    compact.mockRejectedValueOnce(Object.assign(new Error('the Lead session cannot compact'), { status: 409, code: 'conflict' }));
+    await act(async () => { type('/compact'); });
+    await act(async () => { enter(); });
+    await waitFor(() => expect(screen.getByTestId('composer-command-notice').textContent).toBe('Lead cannot compact the context now. Try again in a moment.'));
+
+    // The next message clears the line.
+    await act(async () => { type('hello'); });
+    await act(async () => { enter(); });
+    expect(sendChat).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId('composer-command-notice')).toBeNull();
+  });
 });
 
 describe('images in the conversation', () => {

@@ -5,6 +5,7 @@ import { defineMessages } from '@pi-lead-child/protocol';
 export const runtimeMessages = defineMessages({
   en: {
     noLeadModelSwitch: 'This daemon cannot change the Lead model yet.',
+    noLeadCompaction: 'This daemon cannot compact the Lead context yet.',
     noBannerAck: 'This client version cannot acknowledge the banner.',
     noReminderMove: 'This client version cannot change the reminder time.',
     noAction: 'This client version cannot do this action.',
@@ -20,6 +21,7 @@ export const runtimeMessages = defineMessages({
   },
   zh: {
     noLeadModelSwitch: '这个 daemon 还不能换 Lead 的模型',
+    noLeadCompaction: '这个 daemon 还不能压缩 Lead 的上下文',
     noBannerAck: '这个版本的客户端不能确认横幅',
     noReminderMove: '这个版本的客户端不能改提醒的时间',
     noAction: '这个版本的客户端不能做这个操作',

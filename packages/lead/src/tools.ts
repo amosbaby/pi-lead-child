@@ -3002,6 +3002,40 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
       },
     }),
 
+    // Compact Lead's own context on request (2026-11-18). The same operation as /compact in the message box
+    // (lead_context / compact). On 2026-11-18 Lead had no such tool: it wrote a hand-off document, switched its model twice,
+    // and said the context was compressed when it was not.
+    defineTool({
+      name: "compact_lead_context",
+      label: "Compact Lead Context",
+      description:
+        "压缩你自己的上下文（compact / compress the context）。用户说「压缩一下上下文」「精简上下文」「用 xx 模型压缩上下文」「compact your context」时调用它。"
+        + "model 可选：写这一次摘要的模型，写 list_lead_models 列出的 provider/id，也可以照用户的原话写（例如 gpt 6 luna），系统按模型目录对上唯一的一个；"
+        + "对上好几个或者对不上时不压缩，结果里给出候选，这时按用户的意思选一个完整的 provider/id 再调，看不出来就问用户。"
+        + "不给时用你现在的模型。它只用来写这一次的摘要：你的模型不变，不要为了压缩去调 switch_lead_model。"
+        + "instructions 可选：对摘要的额外要求，例如「保留工单 12 的细节」。"
+        + "你空闲时马上开始；在你这一轮里调用时，这一轮结束后、下一轮之前压缩。结果（压缩前后的 token 数和用的模型）作为系统通知出现在会话里。"
+        + "不要写交接文档来代替压缩，也不要在压缩真的完成以前说已经压缩了：调用以后只说已经开始或者会在这一轮之后压缩。"
+        + "和用户在输入框里输入 /compact 是同一个操作。",
+      parameters: Type.Object({
+        model: Type.Optional(Type.String({ minLength: 1, maxLength: 300, description: "provider/id，例如 vibeproxy/as4/claude-haiku-5，或者用户说的模型名；不给用你现在的模型" })),
+        instructions: Type.Optional(Type.String({ minLength: 1, maxLength: 2000, description: "对摘要的额外要求（可选）" })),
+        reason: Type.String({ minLength: 1, maxLength: 2000, description: "为什么压缩，例如「用户说压缩一下上下文，用便宜的模型」" }),
+      }),
+      execute: async (_id, params: { model?: string; instructions?: string; reason: string }) => {
+        const reason = typeof params.reason === "string" ? params.reason.trim() : "";
+        if (!reason) throw new Error("compact_lead_context：要写 reason（为什么压缩，例如「用户说……」）");
+        const model = params.model?.trim() ? parseLeadModelSpec(params.model).model : undefined;
+        const instructions = params.instructions?.trim() || undefined;
+        return performLeadUiAction(deps, {
+          target: { type: "lead_context", id: "lead" },
+          action: "compact",
+          input: { ...(model ? { model } : {}), ...(instructions ? { instructions } : {}) },
+          reason,
+        });
+      },
+    }),
+
     defineTool({
       name: "spawn_child",
       label: "Spawn Child",
