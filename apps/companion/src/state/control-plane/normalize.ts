@@ -394,7 +394,7 @@ type TurnProjection = {
 };
 
 function projectTurn(previous: ConversationProjection, sessionId: string, item: ConversationTurn): TurnProjection {
-  const hasUserText = item.userText.trim().length > 0 || (item.images?.length ?? 0) > 0;
+  const hasUserText = item.userText.trim().length > 0 || (item.images?.length ?? 0) > 0 || (item.quotes?.length ?? 0) > 0;
   const userMessageId = `${sessionId}:${item.id}:user`;
   const assistantMessageId = `${sessionId}:${item.id}:assistant`;
   const userTextPartId = `${userMessageId}:text`;
@@ -474,6 +474,15 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     const data = prior?.kind === 'image' && (prior.imageId === undefined || prior.imageId === image.id) ? prior.data : undefined;
     return { kind: 'image', id, mimeType: image.mimeType, imageId: image.id, ...(data === undefined ? {} : { data }) };
   });
+  // 用户这条消息带的引用（include=quotes）。快照没带 quotes（旧 daemon，或者退回了少要几项的请求）时，留着已有的。
+  const previousQuoteParts = (previous.partIdsByMessage[userMessageId] ?? []).flatMap((partId) => {
+    const part = previous.messagePartsById[partId];
+    return part?.kind === 'quote' ? [part] : [];
+  });
+  const userQuoteParts: MessagePart[] = item.quotes === undefined ? previousQuoteParts : item.quotes.map((quote, index) => ({
+    kind: 'quote', id: `${userMessageId}:quote:${index}`, source: quote.source, text: quote.text, author: quote.author,
+    ...(quote.note ? { note: quote.note } : {}), ...(quote.anchor ? { anchor: quote.anchor } : {}),
+  }));
   const assistantTextPart: MessagePart = {
     kind: 'text',
     id: assistantTextPartId,
@@ -503,6 +512,7 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
   const parts: MessagePart[] = [
     reuseValue(previous.messagePartsById[userTextPartId], userTextPart),
     ...userImageParts.map((part) => reuseValue(previous.messagePartsById[part.id], part)),
+    ...userQuoteParts.map((part) => reuseValue(previous.messagePartsById[part.id], part)),
     reuseValue(previous.messagePartsById[assistantTextPartId], assistantTextPart),
     ...liveAssistantPartIds.map((partId) => previous.messagePartsById[partId]!),
   ];
@@ -522,7 +532,7 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     parts,
     userPartIds: reuseArray(
       previous.partIdsByMessage[userMessageId] ?? [],
-      [userTextPartId, ...userImageParts.map((part) => part.id)],
+      [userTextPartId, ...userImageParts.map((part) => part.id), ...userQuoteParts.map((part) => part.id)],
     ),
     // 快照里的工具调用按开始的先后排在文字后面；快照还没见到的实时 part（快照取得早于这些事件）接在后面。
     assistantPartIds: reuseArray(

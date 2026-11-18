@@ -70,6 +70,9 @@ export function MessagePartView({
   // 你发的图片画在气泡上面一排（LeadConversation 的 UserMessageImages），不在气泡里。
   if (part.kind === 'image') return null;
 
+  // 你引用的几段话由气泡自己画在正文上面（LeadConversation 的 QuoteBlock），不在这里画。
+  if (part.kind === 'quote') return null;
+
   return (
     <InfoRow
       icon="agent"

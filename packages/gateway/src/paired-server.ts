@@ -36,6 +36,10 @@ import {
   TICKET_ATTACHMENT_ID_PATTERN,
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
+  CHAT_QUOTES_CAPABILITY,
+  CHAT_QUOTES_INCLUDE,
+  ChatQuotesInputSchema,
+  type ChatQuoteInput,
   CONVERSATION_ANSWER_STARTED_INCLUDE,
   CONVERSATION_INTERRUPTED_INCLUDE,
   LEAD_AVATAR_CAPABILITY,
@@ -258,7 +262,11 @@ export interface PairedBridge {
     images?: ChatImageData[];
     // 「只这一条」：只用这个模型答这一条（provider/id，带推理强度的后缀）。只在 chatTurnModel 为 true 时有。
     turnModel?: string;
+    // 引用（protocol 的 chat-quotes.ts），网关已经校验形状。只有 Lead 的会话收；daemon 核对原文在不在来源里。
+    quotes?: ChatQuoteInput[];
   }) => { mode: ChatSendMode; turnId: string };
+  // chatV2 收引用（protocol 的 CHAT_QUOTES_CAPABILITY）。为 true 时网关在 hello.v2 里宣布这个能力，客户端据此才带 quotes。
+  chatQuotes?: boolean;
   // chatV2 收「只这一条」的单轮模型（protocol 的 CHAT_TURN_MODEL_CAPABILITY）。为 true 时网关在 hello.v2 里宣布这个能力，
   // 客户端据此才带 turnModel。
   chatTurnModel?: boolean;
@@ -1189,7 +1197,7 @@ export async function startPairedServer(
   function executeChatCommand(
     input: {
       id: string; message: string; context?: { ticketId?: number };
-      clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice;
+      clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[];
     },
     binding: Binding,
   ): { mode: ChatSendMode; turnId: string; duplicate?: true } {
@@ -1212,8 +1220,15 @@ export async function startPairedServer(
       if (!decoded.ok) throw new PairedCommandError("invalid_request", decoded.error);
       images = decoded.images;
     }
-    // 只带图片的消息可以没有文字；文字和图片都没有时拒收。
-    if (!input.message.trim() && !images) throw new PairedCommandError("invalid_request", "message is required");
+    // 引用（protocol 的 chat-quotes.ts）：只有 Lead 的会话收，daemon 也要说它收。
+    if (input.quotes !== undefined) {
+      if (input.context?.ticketId !== undefined) {
+        throw new PairedCommandError("invalid_request", "quotes are only accepted in the Lead conversation");
+      }
+      if (!bridge.chatV2 || !bridge.chatQuotes) throw new PairedCommandError("invalid_request", "this daemon does not accept quotes");
+    }
+    // 只带图片或引用的消息可以没有文字；文字、图片、引用都没有时拒收。
+    if (!input.message.trim() && !images && !input.quotes?.length) throw new PairedCommandError("invalid_request", "message is required");
     // 「只这一条」：只有 Lead 的会话收，daemon 也要说它收（CHAT_TURN_MODEL_CAPABILITY）。
     if (input.turnModel !== undefined) {
       if (input.context?.ticketId !== undefined) {
@@ -1232,7 +1247,7 @@ export async function startPairedServer(
   function startChatTurn(
     input: {
       id: string; message: string; context?: { ticketId?: number }; mode?: ChatPlacement; images?: ChatImageData[];
-      turnModel?: LeadModelChoice;
+      turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[];
     },
     binding: Binding,
   ): { mode: ChatSendMode; turnId: string } {
@@ -1256,6 +1271,7 @@ export async function startPairedServer(
           ...(input.mode ? { mode: input.mode } : {}),
           ...(input.images ? { images: input.images } : {}),
           ...(input.turnModel ? { turnModel: leadModelSpec(input.turnModel) } : {}),
+          ...(input.quotes?.length ? { quotes: input.quotes } : {}),
         })
       : {
           mode: bridge.chat(input.message, { label: `paired:${binding.kind}:${binding.display_name}` }),
@@ -1267,13 +1283,13 @@ export async function startPairedServer(
     body: Record<string, unknown>,
   ): {
     id: string; message: string; context?: { ticketId?: number };
-    clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice;
+    clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[];
   } {
     if (typeof body.id !== "string" || !body.id.trim()) {
       throw new HttpError(400, "invalid_request", "id is required");
     }
-    // 只带图片的消息可以没有文字（executeChatCommand 再查一次文字和图片是不是都没有）。
-    if (typeof body.message !== "string" || (!body.message.trim() && body.images === undefined)) {
+    // 只带图片或引用的消息可以没有文字（executeChatCommand 再查一次文字、图片、引用是不是都没有）。
+    if (typeof body.message !== "string" || (!body.message.trim() && body.images === undefined && body.quotes === undefined)) {
       throw new HttpError(400, "invalid_request", "message is required");
     }
     if (body.clientMessageId !== undefined && !Value.Check(ClientMessageIdSchema, body.clientMessageId)) {
@@ -1285,12 +1301,16 @@ export async function startPairedServer(
     if (body.turnModel !== undefined && !Value.Check(LeadModelChoiceSchema, body.turnModel)) {
       throw new HttpError(400, "invalid_request", "turnModel must be a model and an effort");
     }
+    if (body.quotes !== undefined && !Value.Check(ChatQuotesInputSchema, body.quotes)) {
+      throw new HttpError(400, "invalid_request", "quotes must be 1 to 10 quotes, each with a source and the quoted text");
+    }
     const parsed = {
       id: body.id, message: body.message,
       ...(body.clientMessageId === undefined ? {} : { clientMessageId: body.clientMessageId as string }),
       ...(body.mode === undefined ? {} : { mode: body.mode as ChatPlacement }),
       ...(body.images === undefined ? {} : { images: body.images }),
       ...(body.turnModel === undefined ? {} : { turnModel: body.turnModel as LeadModelChoice }),
+      ...(body.quotes === undefined ? {} : { quotes: body.quotes as ChatQuoteInput[] }),
     };
     const context = body.context;
     if (context === undefined || context === null) return parsed;
@@ -2680,7 +2700,7 @@ export async function startPairedServer(
         // ?include=interrupted：回答写到一半被插话打断的轮次带上 interrupted（2026-11-10）。
         const known = new Set([
           "tool_calls", "surfaces", "placement", TICKET_REPLY_ACTIONS_INCLUDE, CHAT_IMAGES_INCLUDE, CONVERSATION_ANSWER_STARTED_INCLUDE,
-          CONVERSATION_INTERRUPTED_INCLUDE,
+          CONVERSATION_INTERRUPTED_INCLUDE, CHAT_QUOTES_INCLUDE,
         ]);
         if (include.some((value) => !known.has(value))) {
           throw new HttpError(400, "invalid_request", "invalid include");
@@ -2693,6 +2713,7 @@ export async function startPairedServer(
           ...(include.includes("placement") ? { placement: true } : {}),
           ...(include.includes(TICKET_REPLY_ACTIONS_INCLUDE) ? { replyActions: true } : {}),
           ...(include.includes(CHAT_IMAGES_INCLUDE) ? { images: true } : {}),
+          ...(include.includes(CHAT_QUOTES_INCLUDE) ? { quotes: true } : {}),
           ...(include.includes(CONVERSATION_ANSWER_STARTED_INCLUDE) ? { answerStarted: true } : {}),
           ...(include.includes(CONVERSATION_INTERRUPTED_INCLUDE) ? { interrupted: true } : {}),
         };
@@ -3491,6 +3512,7 @@ export async function startPairedServer(
           ...(bridge.chatV2 && bridge.chatPlacementPreference ? [CHAT_PLACEMENT_PREFERENCE_CAPABILITY] : []),
           // 「只这一条」的单轮模型（daemon 说它收时）。
           ...(bridge.chatV2 && bridge.chatTurnModel ? [CHAT_TURN_MODEL_CAPABILITY] : []),
+          ...(bridge.chatV2 && bridge.chatQuotes ? [CHAT_QUOTES_CAPABILITY] : []),
           // Lead 的会话收图片（只有 chatV2 的桥接收）。
           ...(bridge.chatV2 ? [CHAT_IMAGES_CAPABILITY] : []),
           // Lead 的形象（/v1/lead/avatar 的路由，protocol 的 lead-avatar.ts）。这个网关总有这些路由。

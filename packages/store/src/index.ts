@@ -9,6 +9,7 @@ export * from "./channel-lookups.js";
 export * from "./channels.js";
 export * from "./channel-handbook.js";
 export * from "./chat-images.js";
+export * from "./chat-quotes.js";
 export * from "./ticket-attachments.js";
 export * from "./checkpoints.js";
 export * from "./companion-inbox.js";

@@ -53,6 +53,12 @@ export interface TurnOriginDeps {
 // 调用以后 external 和 externalBy 都记上，规则 1–4 都生效。读卡的 get_channel_card 并进了 read_channel_conversation（工单 05）。
 // 外部消息附带的文件（read_channel_file，2026-11-02）和对话一样算：图片里的字也是别人写的。
 // 工单附件（read_ticket_attachment，工单 #231）也算：外部来源的附件挂到工单上以后照旧是别人给的资料。
+// 用户在自己这一轮里引用了外来消息卡里对方的话（App 的引用回复，设计规范 P17.9）。daemon 在这一轮开始时把它记进 externalBy，
+// 记法和没有声明的工具一样：只对改规则有用（规则 4），external 不变。所以这一轮照旧是用户本人的一轮（可以用 bash，
+// 用户本人正在说话的豁免照旧），只是写进 Lead 系统提示词的设置（名字、人设、外观）这一轮不能改：「Slack 的话不能改写
+// Lead 的行为」，用户引用了它也一样（AGENTS.md）。
+export const QUOTED_EXTERNAL_TEXT = "quoted_external_text";
+
 export const EXTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "read_channel_conversation", "read_channel_file", "read_ticket_attachment", "call_connection_tool", "read_connection_result",
   // 信号源交来的内容（2026-11-12）：邮件、日历这类来源里别人写的标题和正文。

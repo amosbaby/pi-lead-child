@@ -227,7 +227,13 @@ export type MessagePart =
   | { kind: 'surface'; id: string; callId: string; textOffset: number; partial: boolean; surface: import('@pi-lead-child/protocol').UiSurface }
   // 用户随消息发的一张图片（protocol 的 chat-images.ts）。data：本机还留着的 base64（发件箱里的、刚发出去的）；
   // imageId：daemon 存下的图片，没有 data 时按它取图。两者至少有一个。
-  | { kind: 'image'; id: string; mimeType: import('@pi-lead-child/protocol').ChatImageMimeType; data?: string; imageId?: string };
+  | { kind: 'image'; id: string; mimeType: import('@pi-lead-child/protocol').ChatImageMimeType; data?: string; imageId?: string }
+  // 用户这条消息引用的一段话（protocol 的 chat-quotes.ts，设计规范 P17.7），按加入的顺序。
+  // author：daemon 按来源写的作者；本机刚发出、还没送达的没有它。anchor：跳回原文时用的定位，客户端自己写的。
+  | {
+    kind: 'quote'; id: string; source: import('@pi-lead-child/protocol').ChatQuoteSource; text: string; note?: string; anchor?: string;
+    author?: import('@pi-lead-child/protocol').ChatQuoteAuthor;
+  };
 
 export interface AttemptEntity {
   id: number;

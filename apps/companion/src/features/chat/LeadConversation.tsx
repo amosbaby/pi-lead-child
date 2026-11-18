@@ -6,7 +6,7 @@ import {
   Text,
 } from '@pi-lead-child/components';
 import {
-  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
+  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
   ownerActionRefOfTurn, SYSTEM_TURN_ORIGINS, ticketNeedsUser,
   ticketNeedsUserLabel, ticketTurn, type ChatPlacement, type KernelTicketWorkItemV2,
   type ChannelCardDto,
@@ -55,6 +55,8 @@ import {
   useWorkItems,
 } from '../../state/hooks';
 import type { ConversationCardEntity, LeadTurnEntity, MessageEntity, MessagePart } from '../../state/types';
+import { QuoteBlock } from './QuoteViews';
+import { useQuoteJump } from './quoteNavigation';
 import { RESOURCE_KEYS } from '../../state/types';
 
 import { CheckpointCard } from './CheckpointCard';
@@ -652,11 +654,18 @@ function ConversationMessage({
   const message = useMessage(messageId);
   const partIds = useMessagePartIds(messageId);
   const parts = useMessageParts(messageId);
+  // 点气泡里的引用跳回原文（quoteNavigation.ts）。hook 放在最前面：后面有提前返回。
+  const jumpToQuoteSource = useQuoteJump();
   const textPart = useMessagePart(`${messageId}:text`);
   const turn = useTurn(message?.turnId ?? '');
   const turnUserPart = useMessagePart(turn ? `${turn.userMessageId}:text` : '');
   // 这一轮你发的图片：「重发」时连图片一起发。
-  const turnUserImages = useMessageParts(turn ? turn.userMessageId : '').filter(isImagePart);
+  const turnUserParts = useMessageParts(turn ? turn.userMessageId : '');
+  const turnUserImages = turnUserParts.filter(isImagePart);
+  // 重发时引用一起带上（设计规范 P17）：原文、说明、来源都和第一次一样，daemon 再核对一次。
+  const turnUserQuotes: ChatQuoteInput[] = turnUserParts.filter(isQuotePart).map((part) => ({
+    source: part.source, text: part.text, ...(part.note ? { note: part.note } : {}), ...(part.anchor ? { anchor: part.anchor } : {}),
+  }));
   // Lead 的状态和模型只在这一轮失败时用到（失败的说法、「换个模型重发」）。没失败的消息不订阅它们：
   // Lead 降级重试时 overview 一直在变，订阅了就每条消息都跟着重画（2026-11-14）。
   const failed = Boolean(message?.failure);
@@ -764,13 +773,14 @@ function ConversationMessage({
   // turnModel：「换个模型重发」里点了「只这一条」时，重发的这一次用的模型。
   const resend = (turnModel?: LeadModelChoice) => {
     const text = turnUserPart?.kind === 'text' ? turnUserPart.text : '';
+    const quotes = turnUserQuotes.length ? turnUserQuotes : undefined;
     if (!turnUserImages.length) {
-      if (text.trim()) void (turnModel ? runtime.sendChat(text, undefined, undefined, undefined, turnModel) : runtime.sendChat(text)).catch(() => {});
+      if (text.trim() || quotes) void runtime.sendChat(text, undefined, undefined, undefined, turnModel, quotes).catch(() => {});
       return;
     }
     void Promise.all(turnUserImages.map((part): Promise<ChatImageInput> | ChatImageInput =>
       part.data !== undefined ? { mimeType: part.mimeType, data: part.data } : runtime.loadChatImage(part.imageId ?? '')))
-      .then((images) => runtime.sendChat(text, undefined, undefined, images, turnModel))
+      .then((images) => runtime.sendChat(text, undefined, undefined, images, turnModel, quotes))
       .catch(() => {});
   };
   // 一个字也没说的助手消息不画内容区，失败了就只显示错误。和工单对话（TicketThread）同一条规则。
@@ -778,7 +788,9 @@ function ConversationMessage({
   const bubble = user || hasContent || message.state === 'streaming';
   // 你发的图片排在气泡上面。只发了图片的消息没有气泡。
   const userImages = user ? parts.filter(isImagePart) : [];
-  const userBubble = user && (rawText.trim().length > 0 || userImages.length === 0);
+  // 你引用的几段话画在气泡里、正文上面（设计规范 P17.7）。只带了引用的消息也有气泡。
+  const userQuotes = user ? parts.filter(isQuotePart) : [];
+  const userBubble = user && (rawText.trim().length > 0 || userQuotes.length > 0 || userImages.length === 0);
 
   return (
     <Column
@@ -799,6 +811,11 @@ function ConversationMessage({
       {userImages.length ? <UserMessageImages images={userImages} /> : null}
       {bubble && userBubble ? (
         <MessageBubble testID="user-bubble">
+          {userQuotes.length ? (
+            <Column gap="card-row" testID="user-message-quotes">
+              {userQuotes.map((quote) => <QuoteBlock key={quote.id} quote={quote} {...(jumpToQuoteSource ? { onJump: () => jumpToQuoteSource(quote) } : {})} />)}
+            </Column>
+          ) : null}
           {partIds.map((partId) => (
             <MessagePartView
               key={partId}
@@ -879,6 +896,11 @@ type ImagePart = Extract<MessagePart, { kind: 'image' }>;
 
 function isImagePart(part: MessagePart): part is ImagePart {
   return part.kind === 'image';
+}
+
+type QuotePart = Extract<MessagePart, { kind: 'quote' }>;
+function isQuotePart(part: MessagePart): part is QuotePart {
+  return part.kind === 'quote';
 }
 
 // 你随消息发的图片：气泡上面右对齐的一排小图（和输入框里待发的图片一样大）。

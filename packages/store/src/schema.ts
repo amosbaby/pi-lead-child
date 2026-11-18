@@ -1637,6 +1637,26 @@ CREATE TABLE IF NOT EXISTS chat_images (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_images_turn ON chat_images(turn_id, position);
+-- 用户消息带的引用（chat.send 的 quotes，protocol 的 chat-quotes.ts；设计规范 P17），按轮次存，position 是加入的顺序。
+-- 来源是一轮（source_turn_id + source_role）或一张外来消息卡（source_card_id）；author 由 daemon 按来源写。
+-- external 是外来消息卡引用的来源说明（JSON：source、sender、conversation），交给 Lead 时写进外部内容的标签；别的来源是 NULL。
+-- 交给 Lead 时（新的一轮、插话、排队、重试、重启后再答）按轮次取出；会话快照（include=quotes）列出它们。
+-- 由 SCHEMA 建，新库老库一样，不占迁移号（和 chat_images 一样）。turn_id 不设外键，理由同 chat_images。
+CREATE TABLE IF NOT EXISTS chat_quotes (
+  turn_id         TEXT NOT NULL,
+  position        INTEGER NOT NULL,
+  source_kind     TEXT NOT NULL,
+  source_turn_id  TEXT,
+  source_role     TEXT,
+  source_card_id  INTEGER,
+  author          TEXT NOT NULL,
+  text            TEXT NOT NULL,
+  note            TEXT,
+  anchor          TEXT,
+  external        TEXT,
+  created_at      TEXT NOT NULL,
+  PRIMARY KEY (turn_id, position)
+);
 -- 工单附件（工单 #231，protocol 的 ticket-attachments.ts）：Lead 挂到工单上的图片和文本。文件在数据目录的 attachments/ 下，
 -- storage_path 是相对数据目录的路径，sha256 读的时候核对。来源：origin_kind 是 external（外部消息里的文件）或 user（用户在
 -- App 对话里发的图片）；source_ref 是来源里的文件编号，同一张工单同一个编号只挂一次。外部来源的附件是别人给的资料。

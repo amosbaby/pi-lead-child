@@ -1,4 +1,4 @@
-import { foldToolCall, isSystemTurnOrigin, surfaceShadowedByFinal, surfacesReplacedBy, type ChatImageInput } from '@pi-lead-child/protocol';
+import { foldToolCall, isSystemTurnOrigin, surfaceShadowedByFinal, surfacesReplacedBy, type ChatImageInput, type ChatQuoteInput } from '@pi-lead-child/protocol';
 
 import type { ControlPlaneMutation } from './eventReducer';
 import type { ControlPlaneStore } from './store';
@@ -246,14 +246,22 @@ export function createOptimisticUserMessage(
 	    replaceMessageId?: string;
 	    // 随消息发的图片：画在文字上面（LeadConversation 的 UserMessageImages）。
 	    images?: readonly ChatImageInput[];
+	    // 引用的几段话：画在气泡里正文的上面（设计规范 P17.7）。
+	    quotes?: readonly ChatQuoteInput[];
 	  },
 ): string {
   const state = store.getState();
 	  const messageId = optimisticUserMessageId(input.commandId);
 	  const partId = `${messageId}:text`;
-	  const imageParts: MessagePart[] = (input.images ?? []).map((image, index) => ({
-	    kind: 'image', id: `${messageId}:image:${index}`, mimeType: image.mimeType, data: image.data,
-	  }));
+	  const imageParts: MessagePart[] = [
+	    ...(input.images ?? []).map((image, index): MessagePart => ({
+	      kind: 'image', id: `${messageId}:image:${index}`, mimeType: image.mimeType, data: image.data,
+	    })),
+	    ...(input.quotes ?? []).map((quote, index): MessagePart => ({
+	      kind: 'quote', id: `${messageId}:quote:${index}`, source: quote.source, text: quote.text,
+	      ...(quote.note ? { note: quote.note } : {}), ...(quote.anchor ? { anchor: quote.anchor } : {}),
+	    })),
+	  ];
 	  const entity: MessageEntity = {
 	    id: messageId,
 	    sessionId: input.sessionId,
@@ -327,10 +335,14 @@ export function resolveOptimisticUserMessage(
   const optimisticPart = optimisticPartIds[0] ? state.messagePartsById[optimisticPartIds[0]] : null;
   const text = optimisticPart?.kind === 'text' ? optimisticPart.text : '';
   // 图片留着本机的数据，送达以后不用再向 daemon 取一次。快照（include=images）补上 daemon 给的 id。
-  const imageParts = optimisticPartIds.flatMap((id) => {
-    const part = state.messagePartsById[id];
-    return part?.kind === 'image' ? [part] : [];
-  }).map((part, index): MessagePart => ({ ...part, id: `${targetId}:image:${index}` }));
+  // 引用一样搬过去，快照（include=quotes）补上 daemon 写的作者。
+  const optimisticParts = optimisticPartIds.map((id) => state.messagePartsById[id]);
+  const imageParts = [
+    ...optimisticParts.flatMap((part) => (part?.kind === 'image' ? [part] : []))
+      .map((part, index): MessagePart => ({ ...part, id: `${targetId}:image:${index}` })),
+    ...optimisticParts.flatMap((part) => (part?.kind === 'quote' ? [part] : []))
+      .map((part, index): MessagePart => ({ ...part, id: `${targetId}:quote:${index}` })),
+  ];
   const messagesById = { ...state.messagesById };
   const messagePartsById = { ...state.messagePartsById };
   const partIdsByMessage = { ...state.partIdsByMessage };

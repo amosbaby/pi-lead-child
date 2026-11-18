@@ -1,5 +1,6 @@
 import type {
   ChatImageInput,
+  ChatQuoteInput,
   TicketAttachment,
   LeadModelCatalog,
   LeadModelChoice,
@@ -462,11 +463,13 @@ export class CompanionStateRuntime {
   // mode：Lead 正忙时插话还是排队（工单 04），缺省插话。工单对话的消息一律交给工单的 agent（2026-10-19）。
   // images：发给 Lead 的图片（只有 Lead 的会话收，protocol 的 chat-images.ts）。
   // turnModel：「只这一条」的单轮模型（protocol 的 CHAT_TURN_MODEL_CAPABILITY）。只在 daemon 宣布了这个能力时由界面给。
+  // quotes：引用回复（protocol 的 CHAT_QUOTES_CAPABILITY），按加入的顺序。只在 daemon 宣布了这个能力时由界面给。
   async sendChat(
     message: string, ticketId?: number, mode?: ChatPlacement, images?: readonly ChatImageInput[], turnModel?: LeadModelChoice,
+    quotes?: readonly ChatQuoteInput[],
   ): Promise<{ clientMessageId: string }> {
     await this.loadOutbox();
-    const entry = await this.outbox.enqueue(message, ticketId, mode, images, turnModel);
+    const entry = await this.outbox.enqueue(message, ticketId, mode, images, turnModel, quotes);
     return { clientMessageId: entry.clientMessageId };
   }
 
@@ -561,6 +564,7 @@ export class CompanionStateRuntime {
         ...(entry.mode === undefined ? {} : { mode: entry.mode }),
         ...(entry.images?.length ? { images: entry.images } : {}),
         ...(entry.turnModel ? { turnModel: entry.turnModel } : {}),
+        ...(entry.quotes?.length ? { quotes: entry.quotes } : {}),
       }),
       isConnected: () => this.control.getState().connectionState === 'connected',
       now: () => this.dependencies.now?.() ?? new Date(),
@@ -602,6 +606,7 @@ export class CompanionStateRuntime {
           ...(entry.ticketId === null ? {} : { ticketId: entry.ticketId }),
           createdAt: entry.createdAt,
           ...(entry.images?.length ? { images: entry.images } : {}),
+          ...(entry.quotes?.length ? { quotes: entry.quotes } : {}),
         });
       }
       setOutboxMessageState(this.control, messageId, { state: entry.state, error: entry.error });

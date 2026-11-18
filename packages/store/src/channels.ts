@@ -6,7 +6,7 @@
 // 这里不出现任何具体来源的名字。
 import {
   CHANNEL_AUTO_REPLY_DEFAULT, CHANNEL_CARD_OPEN_STATES, CHANNEL_CONFIDENCE_DEFAULTS, CHANNEL_INTENT_PERMISSION_RANK, CHANNEL_INTENTS,
-  isDelegationCategory, isSenderTrust, validStandingOrderRuleParams,
+  isDelegationCategory, isSenderTrust, redactSecretText, validStandingOrderRuleParams,
   type ChannelAuthorityTable, type ChannelCardState, type ChannelConfidenceParams, type ChannelPolicyParams, type ChannelDeliveryMode, type ChannelIntent, type ChannelIntentAuthority,
   type DelegationCategory, type SenderTrust, type StandingOrder,
   type StandingOrderCondition, type StandingOrderRef,
@@ -299,6 +299,28 @@ function parseCard(row: CardRow): ChannelCard {
 export function getChannelCard(db: Db, id: number): ChannelCard | undefined {
   const row = db.prepare("SELECT * FROM channel_cards WHERE id = ?").get(id) as CardRow | undefined;
   return row ? parseCard(row) : undefined;
+}
+
+/**
+ * 用户在 App 里引用这张卡里对方的话（protocol 的 chat-quotes.ts，设计规范 P17）：daemon 核对引用的原文时用的来源。
+ * texts 是这张卡的 seq 范围里对方说的每一条（和卡的 recent 同一个范围，不只最近 5 条），加上摘录，都去掉了密钥；
+ * source、sender、conversation 写进交给 Lead 的外部标签。没有这张卡时为 null。
+ */
+export function channelCardQuoteSource(
+  db: Db, cardId: number,
+): { texts: string[]; source: string; sender: string; conversation: string } | null {
+  const card = getChannelCard(db, cardId);
+  if (!card) return null;
+  const lane = getChannelLaneById(db, card.laneId);
+  const texts = (lane?.context ?? [])
+    .filter((message) => message.role === "them" && message.seq !== null && message.seq >= card.firstSeq && message.seq <= card.lastSeq)
+    .map((message) => redactSecretText(message.text));
+  return {
+    texts: [...texts, redactSecretText(card.excerpt)],
+    source: card.source,
+    sender: card.sender.name || card.sender.id,
+    conversation: lane?.label ?? card.objectKey,
+  };
 }
 
 /** 这个对话没结束的卡（最多一张）。 */

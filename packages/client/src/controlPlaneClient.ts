@@ -186,6 +186,9 @@ import {
   CHAT_CLIENT_MESSAGE_ID_CAPABILITY,
   CHAT_IMAGES_CAPABILITY,
   CHAT_TURN_MODEL_CAPABILITY,
+  CHAT_QUOTES_CAPABILITY,
+  CHAT_QUOTES_INCLUDE,
+  type ChatQuoteInput,
   LEAD_MODELS_LIVE_QUERY,
   CHAT_IMAGES_INCLUDE,
   CONVERSATION_ANSWER_STARTED_INCLUDE,
@@ -437,6 +440,8 @@ export interface SendChatCommandInput {
   // 「只这一条」（protocol 的 CHAT_TURN_MODEL_CAPABILITY）：只用这个模型答这一条。daemon 没有宣布这个能力时不带
   // （界面也不给选）：这条照常用现在的模型答。
   turnModel?: LeadModelChoice;
+  // 引用回复（protocol 的 chat-quotes.ts）。daemon 没有宣布 CHAT_QUOTES_CAPABILITY 时不发，报拒收（界面也不给引用）。
+  quotes?: ChatQuoteInput[];
 }
 
 export interface SendChatCommandResult {
@@ -1283,7 +1288,9 @@ export class ControlPlaneClient {
     // 用户发的图片（include=images）总是先要：页面打开时快照在 hello.v2 之前就取了，那时还不知道 daemon 的能力。
     // 开始回答的时刻（include=answer_started，2026-11-09）也先要：旧 daemon 回 400，退回不带它的一档。
     // 被插话打断的轮次（include=interrupted，2026-11-10）同样：旧 daemon 回 400，退回不带它的一档。
+    // 用户消息带的引用（include=quotes，2026-11-18）同样。
     const includes = [
+      `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE},${CONVERSATION_INTERRUPTED_INCLUDE},${CHAT_QUOTES_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE},${CONVERSATION_INTERRUPTED_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE}`, full, 'tool_calls,surfaces,placement', 'tool_calls,surfaces',
@@ -2362,6 +2369,11 @@ export class ControlPlaneClient {
     if (images && !this.capabilities.has(CHAT_IMAGES_CAPABILITY)) {
       throw new ControlPlaneClientError('the daemon does not accept images yet', 'invalid_request');
     }
+    // 引用同理：只发文字会丢掉用户引用的那几段，意思就变了。
+    const quotes = input.quotes?.length ? input.quotes : undefined;
+    if (quotes && !this.capabilities.has(CHAT_QUOTES_CAPABILITY)) {
+      throw new ControlPlaneClientError('the daemon does not accept quotes yet', 'invalid_request');
+    }
     const command: WsCommand = {
       type: 'chat.send',
       id: input.id,
@@ -2374,6 +2386,7 @@ export class ControlPlaneClient {
         : {}),
       ...(input.mode !== undefined && this.capabilities.has(CHAT_PLACEMENT_CAPABILITY) ? { mode: input.mode } : {}),
       ...(images ? { images } : {}),
+      ...(quotes ? { quotes } : {}),
       ...(input.turnModel !== undefined && input.ticketId === undefined && this.capabilities.has(CHAT_TURN_MODEL_CAPABILITY)
         ? { turnModel: { model: input.turnModel.model, effort: input.turnModel.effort } }
         : {}),
@@ -2426,6 +2439,7 @@ export class ControlPlaneClient {
           ...(command.mode === undefined ? {} : { mode: command.mode }),
           ...(command.images === undefined ? {} : { images: command.images }),
           ...(command.turnModel === undefined ? {} : { turnModel: command.turnModel }),
+          ...(command.quotes === undefined ? {} : { quotes: command.quotes }),
         }),
         signal: controller.signal,
       }) as Record<string, unknown>;

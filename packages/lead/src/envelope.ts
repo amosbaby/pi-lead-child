@@ -44,19 +44,49 @@ export function leadSystemEvent(
   return `<system_event${attributes({ kind, source: "daemon", ...extra })}>\n${body(text)}\n</system_event>`;
 }
 
+// 用户这条消息引用的一段话（App 的引用回复，protocol 的 chat-quotes.ts，设计规范 P17）。
+// author：lead 是 Lead 自己说过的话，user 是用户自己说过的话，external 是外来消息卡里对方的话。
+// 外部的原话放进外部标签（P17.9：用户引用了它，它也不变成用户的话）；另外两种放进 <quoted_text>。
+// 用户对每段的说明是用户的话，写在 <user_message> 的正文里，按编号对上。
+export interface LeadUserQuote {
+  author: "lead" | "user" | "external";
+  text: string;
+  note?: string;
+  turnId?: string;
+  external?: { source: string; sender: string; conversation: string };
+}
+
+function quoteBlock(quote: LeadUserQuote, n: number): string {
+  if (quote.author === "external") {
+    const external = quote.external ?? { source: "external", sender: "unknown", conversation: "" };
+    return leadExternalText({ ...external, part: "quote", quote: n }, quote.text);
+  }
+  return `<quoted_text${attributes({ n, author: quote.author, turn: quote.turnId })}>\n${body(quote.text)}\n</quoted_text>`;
+}
+
 // images：用户随这条消息发了几张图片（App 的输入框，protocol 的 chat-images.ts）。图片作为同一条消息里的图片块跟在这段文字后面；
 // 只发了图片时正文是空的。imageIds：这些图片的编号，按顺序（2026-10-28：Lead 用编号指一张图，例如 set_lead_avatar 换形象）。
 // 编号只有 CHAT_IMAGE_ID_PATTERN 里的字符，不按 120 个字截断：8 张图的编号也要完整。
+// quotes：这条消息引用的几段话，按加入的顺序。引用块排在 <user_message> 前面，<user_message> 带 quotes=N，
+// 正文先按编号写用户对每段的说明（没写说明的不列），再是用户这条消息本身的话。
 export function leadUserMessage(
-  source: { via: string; channel: string; sender?: string; thread?: string; images?: number; imageIds?: readonly string[] },
+  source: {
+    via: string; channel: string; sender?: string; thread?: string; images?: number; imageIds?: readonly string[];
+    quotes?: readonly LeadUserQuote[];
+  },
   text: string,
 ): string {
   const ids = (source.imageIds ?? []).filter((id) => CHAT_IMAGE_ID_PATTERN.test(id));
   const images = source.images || ids.length;
+  const quotes = source.quotes ?? [];
   const head = attributes({ from: "user", via: source.via, channel: source.channel, sender: source.sender, thread: source.thread })
     + (ids.length ? ` image_ids="${ids.join(" ")}"` : "")
-    + attributes({ images: images ? images : undefined });
-  return `<user_message${head}>\n${body(text)}\n</user_message>`;
+    + attributes({ images: images ? images : undefined, quotes: quotes.length ? quotes.length : undefined });
+  const notes = quotes
+    .map((quote, index) => (quote.note?.trim() ? `对引用 ${index + 1}：${quote.note.trim()}` : null))
+    .filter((line): line is string => line !== null);
+  const message = `<user_message${head}>\n${body([...notes, text].filter((part) => part.trim()).join("\n\n"))}\n</user_message>`;
+  return quotes.length ? [...quotes.map((quote, index) => quoteBlock(quote, index + 1)), message].join("\n") : message;
 }
 
 // ── 系统交给 Lead 的一条 inbox 行（工单 03，spec D8）──────────────────────────────────────────
@@ -231,10 +261,14 @@ const EXTERNAL_TAG = "untrusted_external_text";
 export const CHANNEL_SKILL_HINT = "怎样处理见 skill channel-replies（上下文里没有它的全文时，先用 read 读）。";
 
 /** 把外部的原话包进外部标签。 */
+// part、quote：这段原话不是一条新消息，是某处的一部分。part="quote" 是用户在 App 里引用了它，quote 是引用的编号（P17.9）。
 export function leadExternalText(
-  attrs: { source: string; sender: string; trust?: string; conversation?: string }, text: string,
+  attrs: { source: string; sender: string; trust?: string; conversation?: string; part?: string; quote?: number }, text: string,
 ): string {
-  const head = attributes({ from: "external", source: attrs.source, sender: attrs.sender, trust: attrs.trust, conversation: attrs.conversation });
+  const head = attributes({
+    from: "external", source: attrs.source, sender: attrs.sender, trust: attrs.trust, conversation: attrs.conversation,
+    part: attrs.part, quote: attrs.quote,
+  });
   return `<${EXTERNAL_TAG}${head}>\n${body(text)}\n</${EXTERNAL_TAG}>`;
 }
 

@@ -67,6 +67,20 @@ describe('ChatOutbox', () => {
     expect(reloaded.sends[0]).toMatchObject({ message: '想深一点', turnModel: { model: 'vibeproxy/claude-opus-5-5', effort: 'high' } });
   });
 
+  // 引用回复（protocol 的 chat-quotes.ts）：引用和文字存在一起，重新加载以后照样带；读不懂的引用整条丢掉，不发一半。
+  it('keeps quotes across a reload', async () => {
+    const storage = new MemoryStorage();
+    const quotes = [{ source: { kind: 'card' as const, cardId: 3 }, text: '明天能上线吗', note: '能答应吗' }];
+    const first = harness({ storage, connected: false });
+    await first.outbox.load();
+    await first.outbox.enqueue('', undefined, undefined, undefined, undefined, quotes);
+    expect(storage.saved[0]).toMatchObject({ message: '', quotes });
+    const reloaded = harness({ storage });
+    await reloaded.outbox.load();
+    await vi.waitFor(() => expect(reloaded.sends).toHaveLength(1));
+    expect(reloaded.sends[0]).toMatchObject({ quotes });
+  });
+
   // 工单 04：Lead 正忙时选了排队的消息，重发、重新加载以后照样按排队发；旧版本存下的条目没有它，照旧按插话发。
   it('keeps the placement the user chose across a reload, and reads entries saved without one', async () => {
     const storage = new MemoryStorage();

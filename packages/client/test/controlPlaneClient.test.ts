@@ -1527,6 +1527,20 @@ describe('a link that may be dead', () => {
     current.client.disconnect();
   });
 
+  // 引用回复（protocol 的 chat-quotes.ts）：旧 daemon 不认识 quotes，只发文字会丢掉引用、意思就变了，所以整条拒收。
+  it('sends quotes only to a daemon that advertises them, and refuses to drop them for an old daemon', async () => {
+    const quotes = [{ source: { kind: 'turn' as const, turnId: 'turn-a', role: 'assistant' as const }, text: '空闲时提前压缩', note: '能调吗' }];
+    const old = await connectedClient(['chat.client-message-id.v1']);
+    await expect(old.client.sendChatCommand({ id: 'cmd-1', message: '看这里', clientMessageId: 'msg_1', quotes }))
+      .rejects.toThrow(/does not accept quotes/);
+    old.client.disconnect();
+
+    const current = await connectedClient(['chat.client-message-id.v1', 'chat.quotes.v1']);
+    void current.client.sendChatCommand({ id: 'cmd-2', message: '看这里', clientMessageId: 'msg_2', quotes }).catch(() => {});
+    expect(JSON.parse(current.sockets[0]!.sent.at(-1)!)).toMatchObject({ id: 'cmd-2', quotes });
+    current.client.disconnect();
+  });
+
   // 2026-10-19：工单对话一律交给工单的 agent。即使 daemon 还宣布 chat.ticket-answerer.v1（工单 08 第一版），
   // 客户端也只带工单号，不带回答者。
   it('sends only the ticket id as the chat context', async () => {

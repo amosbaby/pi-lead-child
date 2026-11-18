@@ -95,6 +95,9 @@ import { activeRun, getRun, updateRun } from "@pi-lead-child/store";
 import { repairNonBudgetRetryExhaustion } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
 import { insertChatImages, listChatImageRefs, listTurnChatImages } from "@pi-lead-child/store";
+import { channelCardQuoteSource, insertChatQuotes, listChatQuoteRefs, listTurnChatQuotes, type StoredChatQuote } from "@pi-lead-child/store";
+import { chatQuoteAppearsIn, type ChatQuoteInput } from "@pi-lead-child/protocol";
+import { QUOTED_EXTERNAL_TEXT, type LeadUserQuote } from "@pi-lead-child/lead";
 import {
   addInbox, appendEvent, escalateLeadBacklog, expireLeadWaits, flushCommittedEvents, listInbox, listLeadBacklog,
   purgeLeadWaits, recordDueLeadFollowUps, recordUserRequestExpired, subscribeCommittedEvents,
@@ -1183,19 +1186,72 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 工单的 agent，不再新建这种轮次；库里留下的、重启后还要答的旧轮次照旧带上下文。turnId 是这一轮自己，最近的消息里不列它。
   // imageIds：用户随这条消息发的图片的编号，信封里写着（Lead 用编号指一张图，例如 set_lead_avatar）。
   // 图片本身在 leadTurnImages 里按轮次取，交给 pi 时带上。
+  // quoteTurnId：这一轮的编号，用来取这条消息带的引用（chat_quotes，leadUserQuotes）。
   function userTurnPrompt(args: {
     via: string; channel: string; itemId: number | null; message: string; turnId?: string; imageIds?: readonly string[];
+    quoteTurnId?: string;
   }): string {
     const item = args.itemId === null ? undefined : getItem(db, args.itemId);
     const itemContext = item ? leadSystemEvent("context", ticketChatContext(item, args.turnId ?? null)) : "";
-    const source = { via: args.via, channel: args.channel, ...(args.imageIds?.length ? { imageIds: args.imageIds } : {}) };
+    const quotes = leadUserQuotes(args.quoteTurnId ?? args.turnId ?? null);
+    const source = {
+      via: args.via, channel: args.channel, ...(args.imageIds?.length ? { imageIds: args.imageIds } : {}), ...(quotes.length ? { quotes } : {}),
+    };
     return [itemContext, leadUserMessage(source, args.message)].filter(Boolean).join("\n");
   }
 
-  // 写进摘要的用户的话。只发了图片的消息没有文字，写「[图片]」。
+  // 写进摘要的用户的话。只发了图片的消息没有文字，写「[图片]」；只带了引用的写「[引用]」。
   function userTurnText(turn: { id: string; user_text: string }): string {
     if (turn.user_text.trim()) return turn.user_text;
-    return listChatImageRefs(db, [turn.id]).has(turn.id) ? "[图片]" : turn.user_text;
+    if (listChatImageRefs(db, [turn.id]).has(turn.id)) return "[图片]";
+    return listChatQuoteRefs(db, [turn.id]).has(turn.id) ? "[引用]" : turn.user_text;
+  }
+
+  // 一轮带的引用，交给 Lead 的格式（envelope.ts 的 leadUserMessage）。按轮次存在库里，重启、重试后再答时也从这里取。
+  function leadUserQuotes(turnId: string | null): LeadUserQuote[] {
+    if (!turnId) return [];
+    return listTurnChatQuotes(db, turnId).map((quote) => ({
+      author: quote.author, text: quote.text,
+      ...(quote.note ? { note: quote.note } : {}),
+      ...(quote.source.kind === "turn" ? { turnId: quote.source.turnId } : {}),
+      ...(quote.external ? { external: quote.external } : {}),
+    }));
+  }
+
+  // 这一轮引用了外来消息卡里对方的话（P17.9，turn-origin.ts 的 QUOTED_EXTERNAL_TEXT）。
+  function turnQuotesExternalText(turnId: string): boolean {
+    return listTurnChatQuotes(db, turnId).some((quote) => quote.author === "external");
+  }
+
+  // 核对 chat.send 带的引用（protocol 的 chat-quotes.ts，设计规范 P17.2）：来源要在 Lead 的会话里，原文要真的在来源里。
+  // 对不上的整条消息拒收，原因写明是第几段。作者和外部来源说明由这里按来源写，客户端给不了。
+  function resolveChatQuotes(quotes: readonly ChatQuoteInput[]): StoredChatQuote[] {
+    return quotes.map((quote, index) => {
+      const n = index + 1;
+      const base = {
+        source: quote.source, text: quote.text,
+        ...(quote.note?.trim() ? { note: quote.note.trim() } : {}),
+        ...(quote.anchor ? { anchor: quote.anchor } : {}),
+      };
+      if (quote.source.kind === "turn") {
+        const row = db.prepare("SELECT user_text, assistant_text, item_id, origin_kind FROM channel_turns WHERE id = ?")
+          .get(quote.source.turnId) as { user_text: string; assistant_text: string; item_id: number | null; origin_kind: string } | undefined;
+        if (!row || row.item_id !== null || row.origin_kind.includes(":ticket")) {
+          throw new PairedCommandError("invalid_request", `quote ${n}: the quoted turn is not in the Lead conversation`);
+        }
+        const sourceText = quote.source.role === "assistant" ? row.assistant_text : row.user_text;
+        if (!chatQuoteAppearsIn(quote.text, [sourceText])) {
+          throw new PairedCommandError("invalid_request", `quote ${n}: the quoted text is not in that message`);
+        }
+        return { ...base, author: quote.source.role === "assistant" ? "lead" : "user" };
+      }
+      const card = channelCardQuoteSource(db, quote.source.cardId);
+      if (!card) throw new PairedCommandError("invalid_request", `quote ${n}: the quoted message card was not found`);
+      if (!chatQuoteAppearsIn(quote.text, card.texts)) {
+        throw new PairedCommandError("invalid_request", `quote ${n}: the quoted text is not in that message card`);
+      }
+      return { ...base, author: "external", external: { source: card.source, sender: card.sender, conversation: card.conversation } };
+    });
   }
 
   // 用户的一轮带的图片（App 的输入框，protocol 的 chat-images.ts），交给 pi 的格式。图片按轮次存在库里：
@@ -1276,6 +1332,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     userTurnPrompts.set(row.id, userTurnPrompt({
       via: binding?.display_name ?? "unknown", channel: row.origin_kind, itemId: row.item_id, message: row.user_text,
       turnId: row.id, imageIds: (listChatImageRefs(db, [row.id]).get(row.id) ?? []).map((image) => image.id),
+      quoteTurnId: row.id,
     }));
     userTurnRetries.set(row.id, { at: null });
   }
@@ -4481,6 +4538,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         ...withExternalEvents(runOrigin, deliveredEvents),
         timer: channelTurn ? null : userTimerOf(deliveredEvents),
       };
+      // 用户这一轮引用了外来消息里对方的话（P17.9）：记进 externalBy，只对改规则有用，external 不变（turn-origin.ts）。
+      if (channelTurn && turnQuotesExternalText(channelTurn.turn.id)) {
+        runOrigin = withExternalContent(runOrigin, { via: "tool", tool: QUOTED_EXTERNAL_TEXT });
+      }
       // 交给这一轮的事里有外部的人的消息：有人在等，车道是 L1（lead-scheduler spec D2）。用户的单元不降级。
       if ((runOrigin.externalBy ?? []).some((source) => source.via === "message") && (sched.unit?.lane ?? 0) > 1) {
         sched.dispatch({ type: "unit.lane", lane: 1, why: "external_message" });
@@ -6395,6 +6456,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       throw new PairedCommandError("not_found", `item #${command.itemId} not found`);
     }
     const originKind = `paired:${command.bindingKind}`;
+    // 引用（chat-quotes.ts）：只在 Lead 的会话里。先核对，对不上的整条拒收，什么都不存。
+    if (command.quotes?.length && command.itemId !== undefined) {
+      throw new PairedCommandError("invalid_request", "quotes are only accepted in the Lead conversation");
+    }
+    const quotes = command.quotes?.length ? resolveChatQuotes(command.quotes) : [];
     // 图片和这一轮一起存（同一个事务）：交给 Lead 时按轮次取（leadTurnImages）。
     const images = command.images ?? [];
     let imageIds: string[] = [];
@@ -6408,11 +6474,14 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         state: sched.busy || sched.draining ? "queued" : "streaming",
       });
       if (images.length) imageIds = insertChatImages(db, created.id, images).map((image) => image.id);
+      if (quotes.length) insertChatQuotes(db, created.id, quotes);
       return created;
     })();
     const prompt = [
       options.context ? leadSystemEvent("context", options.context) : "",
-      userTurnPrompt({ via: command.bindingName, channel: originKind, itemId: item?.id ?? null, message: command.message, imageIds }),
+      userTurnPrompt({
+        via: command.bindingName, channel: originKind, itemId: item?.id ?? null, message: command.message, imageIds, quoteTurnId: turn.id,
+      }),
     ].filter(Boolean).join("\n");
     // 这一轮要是因为断网或临时故障没答上，自动再试一次时用同一段原文（waitToRetry）。
     userTurnPrompts.set(turn.id, prompt);
@@ -6457,6 +6526,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (userMessagePlacement({ ...placementFacts(), followUp: mode === "followUp" }) === "own_turn_after") {
       // 这一轮带着外部内容（lead-tools-and-routing spec D16，user-placement.ts）：不插进去，等它结束后开一轮只属于用户的。
       holdForOwnTurn(prompt, entryOf());
+      sched.noteInput({ kind: "user", turnId: turn.id, placement: "own_turn_after" });
+      return { mode: "queued", turnId: turn.id };
+    }
+    // 引用了外来消息卡里对方的话（P17.9）：Lead 忙时不插进、不排进别的一轮，等它结束后单独开一轮。
+    // 这一轮开始时记下引用了外部内容（runTurn 里的 QUOTED_EXTERNAL_TEXT），只算在这一轮上。
+    if (sched.busy && quotes.some((quote) => quote.author === "external")) {
+      holdForOwnTurn(prompt, entryOf(), "it quotes an external message");
       sched.noteInput({ kind: "user", turnId: turn.id, placement: "own_turn_after" });
       return { mode: "queued", turnId: turn.id };
     }
@@ -6589,6 +6665,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         chatPlacementPreference: true,
         // 「只这一条」的单轮模型（acceptChatMessage、runTurnNow）：网关据此宣布 CHAT_TURN_MODEL_CAPABILITY。
         chatTurnModel: true,
+        chatQuotes: true,
         ticketMessageV2: handleTicketMessage,
         addClient: (send) => { senders.add(send); return () => senders.delete(send); },
         recheckRuntimes: (runtime) => healthRecovery.recheck({ runtime }),
