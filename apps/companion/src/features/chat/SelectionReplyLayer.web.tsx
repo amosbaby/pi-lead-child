@@ -29,7 +29,12 @@ interface Picked {
   text: string;
   anchor: string;
   spot: Spot;
+  range: Range;
 }
+
+// 正在写说明的新的一段在原文上的位置：浮层里的输入框拿到焦点以后，浏览器的选区就没了，
+// 这一段改用加深的标记画出来（Q-2「选区保持高亮」）。
+let pendingRange: Range | null = null;
 
 const QUOTE_TEXT_LIMIT = 4000;
 const REPLY_DELAY_MS = 170;
@@ -61,7 +66,7 @@ function readSelection(): Picked | null {
   if (!text || !canQuote(key, text)) return null;
   const rect = range.getBoundingClientRect();
   if (!rect.width && !rect.height) return null;
-  return { key, text, anchor: anchorOfOccurrence(occurrenceOfRange(container, range, text)), spot: spotOf(rect) };
+  return { key, text, anchor: anchorOfOccurrence(occurrenceOfRange(container, range, text)), spot: spotOf(rect), range: range.cloneRange() };
 }
 
 // ── 原文上的标记（Q-3）──────────────────────────────────────────────────────────────────────────
@@ -133,6 +138,7 @@ export function SelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; 
   const open = useCallback((choice: Picked) => {
     const source = quoteSourceOf(choice.key);
     if (!source) return;
+    pendingRange = choice.range;
     quoteDrafts.getState().begin({ source, text: choice.text, anchor: choice.anchor });
     setPanelSpot(choice.spot);
     setPicked(null);
@@ -164,7 +170,8 @@ export function SelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; 
       ranges.current = rangesOfDrafts(state.drafts);
       const focusId = state.pending?.editingId ?? state.activeId;
       const pendingRanges = [...ranges.current].filter(([id]) => id !== focusId).map(([, range]) => range);
-      const activeRange = focusId ? ranges.current.get(focusId) : undefined;
+      if (!state.pending || state.pending.editingId) pendingRange = null;
+      const activeRange = focusId ? ranges.current.get(focusId) : pendingRange ?? undefined;
       api.registry.set(HIGHLIGHT_PENDING, new api.Highlight(...pendingRanges));
       api.registry.set(HIGHLIGHT_ACTIVE, new api.Highlight(...(activeRange ? [activeRange] : [])));
     };
@@ -238,7 +245,7 @@ export function SelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; 
       if (picked) setPicked(readSelection());
       const editing = quoteDrafts.getState().pending;
       if (panelSpot && editing) {
-        const range = editing.editingId ? ranges.current.get(editing.editingId) : window.getSelection()?.rangeCount ? window.getSelection()!.getRangeAt(0) : null;
+        const range = editing.editingId ? ranges.current.get(editing.editingId) : pendingRange;
         if (range) setPanelSpot(spotOf(range.getBoundingClientRect()));
       }
       setTick((tick) => tick + 1);

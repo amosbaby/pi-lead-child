@@ -9,8 +9,8 @@ import { Box, Icon } from '@pi-lead-child/components';
 import { useMessages } from '@/i18n';
 
 import { quoteMessages } from './quote.messages';
-import { quoteDrafts } from './quoteDrafts';
-import { QuoteGesturesContext, QuoteSourceContext } from './quoteSources';
+import { quoteDrafts, useQuoteDrafts } from './quoteDrafts';
+import { QuoteGesturesContext, QuoteSourceContext, quoteSourceKey } from './quoteSources';
 
 // Q-7：最多跟手 56，过 44 算数，回弹 220。
 const MAX_SHIFT = 56;
@@ -22,6 +22,9 @@ export function QuotableBlock({ text, children }: { text: string; children: Reac
   const gestures = useContext(QuoteGesturesContext);
   const m = useMessages(quoteMessages);
   const shift = useRef(new Animated.Value(0)).current;
+  // 正在引用的就是这一段：淡淡标出（主题 Q-3，手机上正在引用的整段）。
+  const quoting = useQuoteDrafts((state) => Boolean(source && state.pending && state.pending.context === text
+    && quoteSourceKey(state.pending.source) === quoteSourceKey(source)));
   const passed = useRef(false);
   const begin = () => {
     if (!source || !gestures) return;
@@ -55,7 +58,7 @@ export function QuotableBlock({ text, children }: { text: string; children: Reac
   const iconScale = shift.interpolate({ inputRange: [0, MAX_SHIFT], outputRange: [0.6, 1], extrapolate: 'clamp' });
   const iconOpacity = shift.interpolate({ inputRange: [0, 12, MAX_SHIFT], outputRange: [0, 1, 1], extrapolate: 'clamp' });
   return (
-    <Box position="relative" testID="quotable-block">
+    <Box position="relative" testID="quotable-block" rounded="sm" {...(quoting ? { bg: 'accent-wash' } as const : {})}>
       <Animated.View
         pointerEvents="none"
         style={{ position: 'absolute', left: 0, top: 0, opacity: iconOpacity, transform: [{ scale: iconScale }] }}
