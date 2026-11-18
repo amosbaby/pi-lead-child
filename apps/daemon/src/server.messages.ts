@@ -79,6 +79,7 @@ export const serverMessages = defineMessages({
         `The compaction of ${name}'s context with ${model} did not succeed: ${error}. The context did not change.`,
       nothing: (name: string) => `${name}'s context has nothing new to compact since the last compaction.`,
       superseded: (name: string) => `Another compaction compacted ${name}'s context before this request finished.`,
+      held: (name: string) => `${name}'s context was not compacted: ${name}'s model went on hold before the compaction started.`,
     },
     // 被迫交接（lead-scheduler spec H6）：系统停下这一轮、Lead 交出去了却没说话时，系统写这一句；没交出去、单元挂起时写另一句。
     handoff: {
@@ -147,6 +148,7 @@ export const serverMessages = defineMessages({
       failed: (name, model, error) => `用 ${model} 压缩 ${name} 的上下文没有成功：${error}。上下文没有变。`,
       nothing: (name) => `${name} 的上下文自上一次压缩以后没有新内容，不用压缩。`,
       superseded: (name) => `这次请求完成以前，另一次压缩已经压缩了 ${name} 的上下文。`,
+      held: (name) => `没有压缩 ${name} 的上下文：开始以前 ${name} 的模型进入了暂停。`,
     },
     handoff: {
       handedOff: (ticketId) => `这件事交给了后台 agent #${ticketId}，大约 3–5 分钟有结果。你可以接着说别的。`,

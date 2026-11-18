@@ -415,8 +415,8 @@ describe("idle lane: the model hold", () => {
 
 // A compaction someone asked for (2026-11-18: the user typed 「压缩一下上下文，用 gpt 6 luna」 and Lead had no tool for it).
 describe("idle lane: a requested compaction", () => {
-  const ask = (model: string | null = null, starting = false): IdleLaneEvent => ({
-    type: "compact.request", starting, request: { model, overrideModel: model !== null, instructions: model ? "keep ticket 12" : null },
+  const ask = (model: string | null = null, starting = false, byUser = true): IdleLaneEvent => ({
+    type: "compact.request", starting, request: { model, overrideModel: model !== null, instructions: model ? "keep ticket 12" : null, byUser },
   });
   const done = (effects: Array<{ effect: IdleLaneEffect }>) => effects.flatMap(({ effect }) => (effect.type === "manual.done" ? [effect] : []));
 
@@ -527,6 +527,61 @@ describe("idle lane: a requested compaction", () => {
     ]);
     expect(done(effects)).toEqual([expect.objectContaining({ outcome: "superseded" })]);
     expect(state.manual).toBeNull();
+  });
+
+  // Review 2026-11-18 (item 2): Lead busy, an automatic summary runs, the user names a model. The request drops the automatic
+  // summary and waits; pi asks to compact again in the same unit. Before: a new automatic job started and the request ended
+  // superseded. Now the waiting request runs with that preparation.
+  it("runs a waiting request when pi asks to compact in the same unit, instead of a new automatic job", () => {
+    const { effects, state, kinds } = run([
+      [0, { type: "busy", unitId: "u1", lane: 1 }],
+      [10, { type: "inline", reason: "threshold", ready: false }],
+      [20, { type: "compact.summarizing", tokens: 180_000, messages: 10 }],
+      [30, ask("acme/cheap-model")],
+      [40, { type: "inline", reason: "threshold", ready: false }],
+      [50, { type: "compact.summarizing", tokens: 180_000, messages: 10 }],
+      [60, { type: "idle", outcome: "answered" }],
+      [70, tick(0.9, { boundary: true, thresholdRatio: 0.92 })],
+      [80, { type: "compact.ready", ms: 5, chars: 100, chunks: 1 }],
+      [90, { type: "compact.applied", tokensBefore: 180_000, tokensAfter: 9_000 }],
+    ]);
+    expect(kinds).toEqual(["inline", "compact.start", "compact.cancel", "inline", "compact.start", "compact.apply", "manual.done"]);
+    expect(done(effects)).toEqual([expect.objectContaining({
+      outcome: "applied", request: expect.objectContaining({ model: "acme/cheap-model", instructions: "keep ticket 12" }),
+    })]);
+    expect(state.manual).toBeNull();
+  });
+
+  // Review item 4: a request with a model that joins an automatic job keeps that job's route, and says so.
+  it("joins an automatic job that prepares without changing its route", () => {
+    const { state } = run([[0, tick(0.95)], [10, ask("acme/cheap-model")]]);
+    expect(state.compact.manual).toMatchObject({ joinedAutomatic: true, model: null, overrideModel: false, instructions: null });
+  });
+
+  // Review item 3: a request that the user did not make, admitted before a hold, does not start during the hold.
+  it("checks the hold again when a waiting request from another turn starts", () => {
+    const steps = (byUser: boolean): Array<[number, IdleLaneEvent]> => [
+      [0, { type: "busy", unitId: "u1", lane: 2 }],
+      [10, ask(null, false, byUser)],
+      [20, { type: "model.hold", held: true }],
+      [30, { type: "idle", outcome: "answered" }],
+      [40, tick(0.3, { boundary: true })],
+    ];
+    const lead = run(steps(false));
+    expect(lead.kinds).toEqual(["manual.done"]);
+    expect(done(lead.effects)).toEqual([expect.objectContaining({ outcome: "held" })]);
+    expect(lead.state.manual).toBeNull();
+    expect(run(steps(true)).kinds).toEqual(["compact.start"]);
+    // Another model passes the hold of Lead's model, from any turn.
+    expect(run([[0, { type: "model.hold", held: true }], [10, ask("acme/cheap-model", false, false)]]).kinds).toEqual(["compact.start"]);
+  });
+
+  // Review item 8: no polling every second while a request waits behind a running automatic job.
+  it("looks again in a second only while the session cannot be touched, not behind a running job", () => {
+    const waiting = idleLaneStep(initialIdleLaneState(0), ask(null, true), 0, LIMITS).state;
+    expect(nextIdleCheckAt(waiting, LIMITS, 0)).toBe(1_000);
+    const behindJob: IdleLaneState = { ...waiting, compact: { ...waiting.compact, phase: "summarizing", id: "idle_compact_x" } };
+    expect(nextIdleCheckAt(behindJob, LIMITS, 0)).toBe(LIMITS.graceMs);
   });
 });
 

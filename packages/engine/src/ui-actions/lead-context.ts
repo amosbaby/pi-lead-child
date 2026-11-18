@@ -46,6 +46,12 @@ function nextFor(result: CompactLeadContextResult): string {
     case "held":
       return "没有压缩：你自己的模型现在在暂停中。可以让用户点名另一个模型（model 写 list_lead_models 列出的 provider/id）再压缩，"
         + "或者等用户本人发话。";
+    case "model_ambiguous":
+      return `没有压缩：「${result.model}」对得上好几个模型（candidates）。按用户的原话从里面选一个，用完整的 provider/id 再调；`
+        + "看不出用户指的是哪一个时问用户，不要自己猜，也不要退回用你自己的模型。";
+    case "model_unknown":
+      return `没有压缩：「${result.model}」对不上任何模型。candidates 是最接近的几个；先用 list_lead_models 核对，`
+        + "用完整的 provider/id 再调。对不上时问用户，不要退回用你自己的模型。";
   }
 }
 
@@ -56,7 +62,8 @@ export const LEAD_CONTEXT_ACTIONS = {
     permission: "lead_allowed", changesRules: false, external: false, irreversible: false,
     where: LEAD_CONTEXT_WHERE,
     hint: "用户要你压缩、精简、整理你自己的上下文时用（target_id 是 lead），例如「压缩一下上下文」「用便宜的模型压缩上下文」。"
-      + "model 写 list_lead_models 列出的 provider/id，不带推理强度；不给时用你现在的模型。它只用来写这一次的摘要，你的模型不变。"
+      + "model 写 list_lead_models 列出的 provider/id，不带推理强度，也可以写用户的原话（例如 gpt 6 luna），系统按模型目录对上唯一的一个；"
+      + "对上好几个或者一个都对不上时不压缩，结果里列出候选。不给时用你现在的模型。它只用来写这一次的摘要，你的模型不变。"
       + "instructions 是对摘要的额外要求（可选）。你空闲时马上开始；你正在回答时（包括在这一轮里调它）这一轮结束后开始。"
       + "不要用写交接文档或者换模型来代替它。",
     defaultReason: "在输入框里要求压缩 Lead 的上下文",

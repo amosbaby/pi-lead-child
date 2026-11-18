@@ -1210,6 +1210,11 @@ describe("lead tools", () => {
       model: "vibeproxy/gpt-6-luna(high)", instructions: "保留工单 12 的细节", reason: "用户说压缩一下上下文，用 gpt 6 luna",
     });
     expect(compactions.at(-1)).toEqual({ request: { model: "vibeproxy/gpt-6-luna", instructions: "保留工单 12 的细节" }, byUser: true });
+    // Review item 1: the user's own words for the model go to the operation, which resolves them against the catalog.
+    expect(toolParams("compact_lead_context")).toEqual(["model", "instructions", "reason"]);
+    await tool("compact_lead_context").execute("compact", { model: "gpt 6 luna", reason: "用户说压缩一下上下文，用 gpt 6 luna" });
+    expect(compactions.at(-1)).toEqual({ request: { model: "gpt 6 luna" }, byUser: true });
+    expect(description).toContain("gpt 6 luna");
     // It never switches Lead's model.
     expect(switches).toEqual([]);
   });

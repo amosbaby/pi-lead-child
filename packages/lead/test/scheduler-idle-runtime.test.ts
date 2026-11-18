@@ -12,6 +12,7 @@ import {
   type IdleCompactRequest, type IdleLaneHost, type ManualCompactReport, type SummarizeInChildOptions, type SummarizeInChildResult,
 } from "../src/scheduler/index.js";
 import { vi } from "vitest";
+import type { IdleLaneRuntime as IdleLaneRuntimeType } from "../src/scheduler/index.js";
 
 // 窗口 8000，预留 2000：pi 的压缩线是 6000 token。一条 4000 字的消息约 1000 token。
 const WINDOW = 8_000;
@@ -286,7 +287,8 @@ describe("a requested compaction on a real pi session", () => {
     for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
     // The context is low (no automatic compaction would start), and Lead is idle.
     h.host.ratio = 0.3;
-    const ticket = h.runtime.requestCompaction({ model: "plc-idle-test/faux-cheap", overrideModel: true, instructions: "keep ticket 12" });
+    const ticket = h.runtime.requestCompaction({ model: "plc-idle-test/faux-cheap", overrideModel: true, instructions: "keep ticket 12", byUser: true });
+    if ("refused" in ticket) throw new Error("refused");
     expect(ticket).toMatchObject({ applied: "now", existing: false, model: "plc-idle-test/faux-cheap" });
     await until(() => h.pending.length === 1);
     const request = h.requests[0]!;
@@ -297,7 +299,9 @@ describe("a requested compaction on a real pi session", () => {
     expect(request.prefix).toBeUndefined();
     expect(request.historyCap).toBe(WINDOW);
     // A second request while it runs joins it.
-    expect(h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null })).toMatchObject({ id: ticket.id, existing: true });
+    // Its own model and instructions do not apply (requestApplied false).
+    expect(h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null, byUser: true }))
+      .toMatchObject({ id: ticket.id, existing: true, requestApplied: false });
     h.pending[0]!.resolve("CHEAP SUMMARY");
     await until(() => h.reports.length === 1);
     expect(compactions(h).at(-1)?.summary).toBe("CHEAP SUMMARY");
@@ -315,7 +319,7 @@ describe("a requested compaction on a real pi session", () => {
     harness = await boot({}, { resolveModel: () => undefined });
     const h = harness;
     for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
-    h.runtime.requestCompaction({ model: "acme/unknown", overrideModel: true, instructions: null });
+    h.runtime.requestCompaction({ model: "acme/unknown", overrideModel: true, instructions: null, byUser: true });
     await until(() => h.reports.length === 1);
     expect(h.reports[0]).toMatchObject({ outcome: "failed", error: "the model acme/unknown is not available in Lead's session" });
     expect(h.runtime.compactionRetryAt()).toBeNull();
@@ -326,9 +330,59 @@ describe("a requested compaction on a real pi session", () => {
     const h = harness;
     for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
     await h.session.compact("manual compaction elsewhere");
-    const ticket = h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null });
+    const ticket = h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null, byUser: true });
+    if ("refused" in ticket) throw new Error("refused");
     await h.runtime.sessionFree();
     expect(h.runtime.manualCompactionReport(ticket.id)).toMatchObject({ outcome: "nothing" });
     expect(h.pending).toHaveLength(0);
+  }, 30_000);
+
+  // Review item 3: only a compaction that the user asked for is exempt from the budget for automatic calls.
+  it("tells the daemon whether an applied summary was the user's own request", async () => {
+    for (const byUser of [true, false]) {
+      harness?.close();
+      harness = await boot();
+      const h = harness;
+      for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
+      const ended = vi.spyOn(h.runtime, "compactionEnded");
+      h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null, byUser });
+      await until(() => h.pending.length === 1);
+      h.pending[0]!.resolve("SUMMARY");
+      await until(() => h.reports.length === 1);
+      expect(h.reports[0]!.requested.byUser).toBe(byUser);
+      const applied = ended.mock.results.map((result) => result.value as ReturnType<IdleLaneRuntimeType["compactionEnded"]>).find((value) => value.applied);
+      expect(applied).toMatchObject({ ours: true, applied: true, manualByUser: byUser });
+    }
+  }, 30_000);
+
+  // Review item 4: a request that joins an automatic job while the session is probed does not change that job's route.
+  it("keeps the automatic route (the cheap summary model) when a request joins it", async () => {
+    // No notes turn first (precipitateRatio high): the automatic compaction starts at once.
+    harness = await boot({ precipitateRatio: 0.99 }, {
+      summaryModel: () => harness!.faux.getModel("faux-cheap") as never,
+      resolveModel: () => undefined,
+    });
+    const h = harness;
+    for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
+    h.host.ratio = 0.82;
+    h.runtime.check();
+    expect(h.runtime.state.compact.phase).toBe("preparing");
+    const ticket = h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: "keep ticket 12", byUser: true });
+    expect(ticket).toMatchObject({ existing: true, requestApplied: false, model: null });
+    await until(() => h.pending.length === 1);
+    expect(h.requests[0]!.model).toMatchObject({ id: "faux-cheap" });
+    expect(h.requests[0]!.instructions).toBeUndefined();
+  }, 30_000);
+
+  // Review item 5: a waiting or running request is not lost silently when the daemon stops; a stopped lane refuses.
+  it("reports a waiting request as failed on stop, and refuses a request after stop", async () => {
+    harness = await boot();
+    const h = harness;
+    h.runtime.unitOpened("unit_busy", 0);
+    h.host.unit = "unit_busy";
+    h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null, byUser: true });
+    h.runtime.stop();
+    expect(h.reports).toEqual([expect.objectContaining({ outcome: "failed", error: expect.stringContaining("restarted") })]);
+    expect(h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null, byUser: true })).toEqual({ refused: "stopped" });
   }, 30_000);
 });

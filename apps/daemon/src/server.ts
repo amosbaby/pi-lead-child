@@ -40,6 +40,7 @@ import {
   PREFIX_WARM_MS, uncachedTokens, wakePaceDecision, type ModelHoldPort,
 } from "@pi-lead-child/lead";
 import { manualCompactionHold, modelHoldError, type IdleLaneRuntimeOptions, type ManualCompactReport } from "@pi-lead-child/lead";
+import { resolveCompactModel } from "@pi-lead-child/protocol";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
@@ -842,7 +843,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 子进程写摘要失败：账号级的失败进入模型暂停（modelHold 在下面建，到用的时候已经有了）。
       modelFailed: (error) => { modelHold.failed("compaction", error); },
       // A requested compaction ended (/compact, compact_lead_context): one line in the conversation.
-      manualCompactionDone: (report) => noteManualCompaction(report),
+      manualCompactionDone: (report) => {
+        // A request that the user did not make counts in the budget for automatic calls. A failure with another model counts
+        // one call here: it does not reach compaction_end, and it does not go to the breaker of Lead's model.
+        if (report.outcome === "failed" && report.requested.overrideModel && !report.requested.byUser && report.called) {
+          const over = autoBudget.record(0);
+          if (over) modelHold.pause(over.until, over.detail);
+        }
+        noteManualCompaction(report);
+      },
     },
   });
   // 回收区的删除（engine 的 workspace.ts）开始以前等 Lead 空闲（core 的 waitForHostIdle）。
@@ -1629,7 +1638,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       const text = report.outcome === "applied" ? m.applied(name, report.tokensBefore, report.tokensAfter, model)
         : report.outcome === "nothing" ? m.nothing(name)
         : report.outcome === "superseded" ? m.superseded(name)
-        : m.failed(name, model, (report.error ?? "unknown").slice(0, 300));
+        : report.outcome === "held" ? m.held(name)
+        : m.failed(name, model, redactSecretText(report.error ?? "unknown").slice(0, 300));
       publishSystemNotice(SYSTEM_TURN_ORIGINS.contextNotice, text, { id: `turn_context_${report.id}` });
     } catch (error: any) {
       log(`requested compaction: telling the user failed: ${error?.message ?? String(error)}`);
@@ -3394,40 +3404,64 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const leadContextService: LeadContextService = {
     state: () => ({ model: leadSessionModelSpec(), tokens: currentContextUsage()?.tokens ?? null }),
     async compact(request, { byUser }) {
+      // Detail for logs and Lead; the page shows its own text by the error code (composer.messages.ts).
       if (typeof session.compact !== "function") throw new UiActionError("unavailable", "the Lead session cannot compact");
       const leadSpec = leadSessionModelSpec();
-      // A model without an effort suffix: the summary call has no effort setting. A suffix is ignored.
-      const requested = request.model?.trim() ? parseLeadModelSpec(request.model).model : null;
-      if (requested) {
-        try {
-          await assertConfiguredLeadModel(requested, loadLeadModelConfig(opts.dataDir));
-        } catch (error) {
-          throw new UiActionError("invalid_input", error instanceof Error ? error.message : String(error));
-        }
+      const tokensBefore = currentContextUsage()?.tokens ?? null;
+      const refused = (applied: "model_ambiguous" | "model_unknown", words: string, candidates: string[]) => {
+        log(`requested compaction refused: the model words match ${applied === "model_ambiguous" ? `${candidates.length} models` : "no model"}`);
+        return {
+          applied, model: words, tokensBefore, existing: false, requestApplied: false, candidates,
+          reason: applied === "model_ambiguous" ? "several models match" : "no model matches",
+        };
+      };
+      // The model: an exact provider/id, or words that name one model of the catalog (resolveCompactModel). Several or none:
+      // refuse, nothing starts. On 2026-11-18 the user's words were 「用 gpt 6 luna」.
+      let requested: string | null = null;
+      const words = request.model?.trim() ?? "";
+      if (words) {
+        const config = loadLeadModelConfig(opts.dataDir);
+        const catalog = await leadModelCatalog(config).then((result) => result.models, () => [] as LeadCatalogModel[]);
+        const choices = [
+          ...catalog.map((model) => ({ spec: `${model.provider}/${model.id}`, name: model.name ?? null })),
+          ...config.models.map((spec) => ({ spec: parseLeadModelSpec(spec).model })),
+        ];
+        const exact = parseLeadModelSpec(words).model;
+        // A subscription account (<base>-<n>/<id>) is the same slot as <base>/<id> in the catalog.
+        const slot = exact.includes("/") && choices.some((choice) => choice.spec === subscriptionSlotSpec(exact));
+        const resolved = slot ? { kind: "one" as const, spec: exact } : resolveCompactModel(words, choices);
+        if (resolved.kind === "many") return refused("model_ambiguous", words, resolved.candidates);
+        if (resolved.kind === "none") return refused("model_unknown", words, resolved.candidates);
+        requested = resolved.spec;
       }
       const overrideModel = requested !== null && subscriptionSlotSpec(requested) !== subscriptionSlotSpec(leadSpec);
       const model = overrideModel ? requested! : leadSpec;
-      const tokensBefore = currentContextUsage()?.tokens ?? null;
       // The hold rule (lead's manualCompactionHold): another model, or the user's own request, passes the hold of Lead's model.
       if (manualCompactionHold({ overrideModel, held: modelHold.held, byUser }) === "refuse") {
         log(`requested compaction refused: Lead's model is on hold (${modelHold.state?.kind ?? "-"})`);
-        return { applied: "held", model, tokensBefore, existing: false, reason: modelHoldError(modelHold.state) };
+        return {
+          applied: "held", model, tokensBefore, existing: false, requestApplied: false, candidates: [], reason: modelHoldError(modelHold.state),
+        };
       }
       const ticket = idleLane.requestCompaction({
-        model: overrideModel ? requested : null, overrideModel, instructions: request.instructions?.trim() || null,
+        model: overrideModel ? requested : null, overrideModel, instructions: request.instructions?.trim() || null, byUser,
       });
-      log(`requested compaction ${ticket.id}: ${ticket.applied}${ticket.existing ? " (joined)" : ""}, model ${model}, by ${byUser ? "the user" : "Lead"}`);
+      if ("refused" in ticket) throw new UiActionError("unavailable", "the background service is stopping; the compaction did not start");
+      // The model that writes the summary: the joined job's or request's (null there is Lead's own model).
+      const usedModel = ticket.existing ? ticket.model ?? leadSpec : model;
+      const joined = ticket.existing ? ` (joined${ticket.requestApplied ? "" : "; its model and instructions do not apply"})` : "";
+      log(`requested compaction ${ticket.id}: ${ticket.applied}${joined}, model ${usedModel}, by ${byUser ? "the user" : "Lead"}`);
       if (ticket.applied === "now" && !ticket.existing) {
         // Lead is idle: the probe takes a few milliseconds. It tells at once when there is nothing to compact.
         await idleLane.sessionFree();
         const report = idleLane.manualCompactionReport(ticket.id);
         if (report?.outcome === "nothing") {
-          return { applied: "nothing_to_compact", model, tokensBefore, existing: false, reason: report.error };
+          return { applied: "nothing_to_compact", model, tokensBefore, existing: false, requestApplied: true, candidates: [], reason: report.error };
         }
       }
       return {
-        applied: ticket.applied, model: ticket.existing && ticket.model ? ticket.model : model, tokensBefore, existing: ticket.existing,
-        reason: null,
+        applied: ticket.applied, model: usedModel, tokensBefore, existing: ticket.existing, requestApplied: ticket.requestApplied, candidates: [],
+        reason: ticket.requestApplied ? null : "joined a compaction that was already running; the model and instructions of this request do not apply",
       };
     },
   };
@@ -3858,8 +3892,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (idle.ours && !idle.applied) return;
       // 压缩也是系统发起的模型调用（2026-11-16：一次压缩发了 394 万 token）：成功的按它的用量记进自动调用的预算，
       // 失败的记一次调用。被中止的不算。超了就暂停，和上面一样。
-      // A requested compaction is not an automatic call: someone asked for it (lead_context / compact).
-      if (outcome.kind !== "aborted" && !idle.manual) {
+      // A compaction that the user asked for is not an automatic call (lead_context / compact). Lead's own request counts.
+      if (outcome.kind !== "aborted" && !idle.manualByUser) {
         const over = autoBudget.record(uncachedTokens(event.result?.usage));
         if (over) modelHold.pause(over.until, over.detail);
       }

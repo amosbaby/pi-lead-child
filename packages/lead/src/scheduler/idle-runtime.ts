@@ -66,8 +66,12 @@ export interface IdleLaneHost {
 export interface ManualCompactReport {
   id: string;
   outcome: ManualCompactOutcome;
-  requested: { model: string | null; instructions: string | null; overrideModel: boolean };
+  requested: {
+    model: string | null; instructions: string | null; overrideModel: boolean; byUser: boolean; joinedAutomatic: boolean;
+  };
   model: string | null;
+  // A child process was started to write the summary (one model call), whatever the outcome.
+  called: boolean;
   tokensBefore: number | null;
   tokensAfter: number | null;
   error: string | null;
@@ -80,6 +84,13 @@ export interface ManualCompactTicket {
   existing: boolean;
   // The model of the joined job or request (provider/id); null: Lead's own model.
   model: string | null;
+  // false: the request joined a job or request with another model or other instructions, so its own do not apply.
+  requestApplied: boolean;
+}
+
+/** The lane is stopped (the daemon stops or restarts): nothing would run the request. */
+export interface ManualCompactRefusal {
+  refused: "stopped";
 }
 
 export interface IdleLaneRuntimeOptions {
@@ -212,7 +223,10 @@ export class IdleLaneRuntime {
    * Someone asked for a compaction (idle-lane.ts, the file header). Lead idle: the probe starts now. Lead busy: it starts at
    * the next unit boundary. The caller decides the hold rule first (manualCompactionHold). Never throws.
    */
-  requestCompaction(request: { model: string | null; overrideModel: boolean; instructions: string | null }): ManualCompactTicket {
+  requestCompaction(request: {
+    model: string | null; overrideModel: boolean; instructions: string | null; byUser: boolean;
+  }): ManualCompactTicket | ManualCompactRefusal {
+    if (this.#stopped) return { refused: "stopped" };
     let starting = false;
     try {
       starting = this.#host.starting();
@@ -220,24 +234,22 @@ export class IdleLaneRuntime {
       starting = true;
     }
     const before = this.#state.manual ?? this.#state.compact.manual;
-    const automatic = this.#state.compact.phase !== "idle" ? this.#state.compact.id : null;
     this.dispatch({
       type: "compact.request", starting,
-      request: { model: request.model, overrideModel: request.overrideModel, instructions: request.instructions },
+      request: { model: request.model, overrideModel: request.overrideModel, instructions: request.instructions, byUser: request.byUser },
     });
     const waiting = this.#state.manual;
     const running = this.#state.compact.manual;
     const current = before ?? running ?? waiting;
-    if (!current) {
-      // The lane is stopped. Report it as waiting: nothing will run it.
-      return { id: "-", applied: "after_turn", existing: false, model: request.model };
-    }
+    if (!current) return { refused: "stopped" };
+    // Joined: a request that was there, or the automatic job that was running (joinedAutomatic).
+    const existing = before !== null || current.joinedAutomatic;
     return {
       id: current.id,
       applied: waiting && waiting.id === current.id ? "after_turn" : "now",
-      // Joined: a request that was there, or the automatic job that was running.
-      existing: before !== null || (automatic !== null && current.id === automatic),
+      existing,
       model: current.model,
+      requestApplied: !existing || (current.model === request.model && (request.instructions === null || request.instructions === current.instructions)),
     };
   }
 
@@ -246,10 +258,17 @@ export class IdleLaneRuntime {
     return this.#manualReports.get(id) ?? null;
   }
 
-  /** The requested compaction that the next probe is for (the extension reads the model and the instructions). */
-  manualJob(): Pick<ManualCompactRequest, "id" | "model" | "instructions"> | null {
+  /**
+   * The requested compaction that this session_before_compact may start (the extension routes its model):
+   *   · probe: the request whose job is preparing (not one that joined an automatic job: that job keeps its own route);
+   *   · pi's own compaction in a unit: the request that waits for the unit to end (idle-lane.ts onInline runs it now).
+   */
+  manualRoute(probe: boolean): Pick<ManualCompactRequest, "id" | "model" | "instructions"> | null {
     const job = this.#state.compact;
-    return job.manual && job.phase === "preparing" ? { id: job.manual.id, model: job.manual.model, instructions: job.manual.instructions } : null;
+    const request = probe
+      ? (job.manual && job.phase === "preparing" && !job.manual.joinedAutomatic ? job.manual : null)
+      : (this.#state.manual && job.phase === "idle" ? this.#state.manual : null);
+    return request ? { id: request.id, model: request.model, instructions: request.instructions } : null;
   }
 
   /** 压缩失败以后的退避还没到时：下一次可以压缩的时间；没有退避时为 null。 */
@@ -356,6 +375,14 @@ export class IdleLaneRuntime {
   /** 停机：停掉写摘要的子进程、定时器，放行在等的后台重活。 */
   stop(): void {
     if (this.#stopped) return;
+    // A requested compaction that waits or runs ends here: tell the user (the conversation notice), do not lose it silently.
+    for (const request of [this.#state.manual, this.#state.compact.manual]) {
+      if (!request) continue;
+      this.#run({
+        type: "manual.done", request, outcome: "failed", tokensBefore: null, tokensAfter: null,
+        error: "the background service stopped or restarted before the compaction finished",
+      });
+    }
     this.#child?.abort();
     this.#child = null;
     if (this.#timer) clearTimeout(this.#timer);
@@ -440,8 +467,8 @@ export class IdleLaneRuntime {
    */
   compactionEnded(event: { reason?: unknown; aborted?: unknown; result?: unknown; errorMessage?: unknown }): {
     ours: boolean; applied: boolean;
-    // The applied summary was a requested one (someone asked for it): it is not an automatic model call.
-    manual?: boolean;
+    // The applied summary was one that the user asked for: it is not an automatic model call (the budget skips it).
+    manualByUser?: boolean;
   } {
     const succeeded = Boolean(event.result) && !event.aborted && !event.errorMessage;
     if (this.#supplied) {
@@ -450,13 +477,14 @@ export class IdleLaneRuntime {
       this.#claimed = null;
       if (succeeded) {
         const result = event.result as { tokensBefore?: unknown; estimatedTokensAfter?: unknown };
-        const manual = this.#state.compact.manual !== null;
+        const request = this.#state.compact.manual;
+        const manualByUser = request !== null && request.byUser && !request.joinedAutomatic;
         this.dispatch({
           type: "compact.applied",
           tokensBefore: typeof result.tokensBefore === "number" ? result.tokensBefore : null,
           tokensAfter: typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : null,
         });
-        return { ours: true, applied: true, manual };
+        return { ours: true, applied: true, manualByUser };
       }
       this.#host.log(schedulerLine("idle.apply_failed", { job: "compact", id, error: String(event.errorMessage ?? (event.aborted ? "aborted" : "unknown")).slice(0, 200) }));
       this.dispatch({ type: "compact.stale", why: "apply_failed" });
@@ -540,8 +568,12 @@ export class IdleLaneRuntime {
       case "manual.done": {
         const report: ManualCompactReport = {
           id: effect.request.id, outcome: effect.outcome,
-          requested: { model: effect.request.model, instructions: effect.request.instructions, overrideModel: effect.request.overrideModel },
+          requested: {
+            model: effect.request.model, instructions: effect.request.instructions, overrideModel: effect.request.overrideModel,
+            byUser: effect.request.byUser, joinedAutomatic: effect.request.joinedAutomatic,
+          },
           model: this.#childModel?.id === effect.request.id ? this.#childModel.model : effect.request.model,
+          called: this.#childModel?.id === effect.request.id,
           tokensBefore: effect.tokensBefore, tokensAfter: effect.tokensAfter, error: effect.error,
         };
         this.#manualReports.set(report.id, report);
@@ -639,7 +671,7 @@ export class IdleLaneRuntime {
           preparation,
           ...(prefix ? { prefix } : {}),
           ...(historyCap !== null ? { historyCap } : {}),
-          ...(manual?.instructions ? { instructions: manual.instructions } : {}),
+          ...(manual?.instructions && !manual.joinedAutomatic ? { instructions: manual.instructions } : {}),
         };
         result = await this.#summarize(request, {
           id, timeoutMs: this.#timeoutMs, signal: controller.signal,
@@ -718,7 +750,7 @@ export function idleLaneExtension(
       const main = ctx.model;
       if (!main) return runtime.beforeCompact(event, ctx, null);
       // A requested compaction (compact_lead_context): the model it names, or Lead's own model. Lead's model never changes.
-      const manual = event.customInstructions === IDLE_PROBE_INSTRUCTIONS ? runtime.manualJob() : null;
+      const manual = event.customInstructions === IDLE_APPLY_INSTRUCTIONS ? null : runtime.manualRoute(event.customInstructions === IDLE_PROBE_INSTRUCTIONS);
       if (manual) {
         if (manual.model && manual.model !== `${main.provider}/${main.id}`) {
           const model = options.resolveModel?.(manual.model);

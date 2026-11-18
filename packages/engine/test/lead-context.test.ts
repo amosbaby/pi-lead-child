@@ -26,7 +26,7 @@ const leadContext: LeadContextService = {
 beforeEach(() => {
   db = openDb(join(tempDir("plc-lead-context-"), "plc.db"));
   calls = [];
-  answer = { applied: "now", model: "acme/cheap-model", tokensBefore: 180_000, existing: false, reason: null };
+  answer = { applied: "now", model: "acme/cheap-model", tokensBefore: 180_000, existing: false, requestApplied: true, candidates: [], reason: null };
 });
 
 const target = { type: "lead_context", id: "lead" } as const;
@@ -75,10 +75,29 @@ describe("lead_context.compact", () => {
   });
 
   it("tells Lead what to do when the hold refused it", async () => {
-    answer = { applied: "held", model: "acme/lead-model", tokensBefore: null, existing: false, reason: "model hold" };
+    answer = { applied: "held", model: "acme/lead-model", tokensBefore: null, existing: false, requestApplied: false, candidates: [], reason: "model hold" };
     const outcome = await runUiAction(db, { target, action: "compact", input: {}, reason: "上下文快满了", services: { leadContext }, caller: { kind: "lead", turnId: null } });
     expect(outcome.forLead).toMatchObject({ applied: "held" });
     expect(String((outcome.forLead as { next?: string }).next)).toContain("另一个模型");
+  });
+
+  // Review item 1: words that match several models start nothing; Lead is told to pick one or ask, never to fall back.
+  it("tells Lead to pick a candidate or ask when the model words are ambiguous or unknown", async () => {
+    answer = {
+      applied: "model_ambiguous", model: "gpt 6 luna", tokensBefore: 180_000, existing: false, requestApplied: false,
+      candidates: ["auto/gpt-6-luna", "codex/gpt-6-luna"], reason: "several models match",
+    };
+    const ambiguous = await runUiAction(db, {
+      target, action: "compact", input: { model: "gpt 6 luna" }, reason: "用户说用 gpt 6 luna 压缩", services: { leadContext }, caller: { kind: "lead", turnId: null },
+    });
+    expect(calls.at(-1)?.request).toEqual({ model: "gpt 6 luna" });
+    expect(ambiguous.forLead).toMatchObject({ applied: "model_ambiguous", candidates: ["auto/gpt-6-luna", "codex/gpt-6-luna"] });
+    expect(String((ambiguous.forLead as { next?: string }).next)).toContain("不要退回用你自己的模型");
+    answer = { ...answer, applied: "model_unknown", candidates: [] };
+    const unknown = await runUiAction(db, {
+      target, action: "compact", input: { model: "luna" }, reason: "r", services: { leadContext }, caller: { kind: "lead", turnId: null },
+    });
+    expect(String((unknown.forLead as { next?: string }).next)).toContain("list_lead_models");
   });
 
   it("takes only a model and instructions", async () => {

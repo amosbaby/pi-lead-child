@@ -26,7 +26,10 @@ let daemon: Awaited<ReturnType<typeof startDaemon>> | null = null;
 const CHEAP = "acme/cheap-model";
 const CONFIG = {
   lead: {
-    providers: { acme: { api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1", discover: false, models: ["lead-model", "cheap-model"] } },
+    providers: {
+      acme: { api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1", discover: false, models: ["lead-model", "cheap-model", "gpt-6-luna"] },
+      other: { api: "openai-completions", baseUrl: "http://127.0.0.1:9/v1", discover: false, models: ["gpt-6-luna"] },
+    },
     models: ["acme/lead-model"],
   },
 };
@@ -63,8 +66,13 @@ async function boot(script: (call: FakeCall) => FakeReply | Promise<FakeReply> =
     const handlers: Array<(event: unknown, ctx: unknown) => Promise<any>> = [];
     // The real extension, as session.ts registers it. The session's registry knows the cheap model.
     const leadModel = { provider: "acme", id: "lead-model", api: "openai-completions", contextWindow: 200_000 };
-    const cheapModel = { provider: "acme", id: "cheap-model", api: "openai-completions", contextWindow: 100_000 };
-    idleLaneExtension(runtime, { resolveModel: (spec) => (spec === CHEAP ? cheapModel as never : undefined) })(
+    // Every catalog model of the test's config is registered in the session.
+    const known = new Set([CHEAP, "acme/gpt-6-luna", "other/gpt-6-luna"]);
+    const registered = (spec: string) => {
+      const slash = spec.indexOf("/");
+      return { provider: spec.slice(0, slash), id: spec.slice(slash + 1), api: "openai-completions", contextWindow: 100_000 };
+    };
+    idleLaneExtension(runtime, { resolveModel: (spec) => (known.has(spec) ? registered(spec) as never : undefined) })(
       { on: (_name: string, handler: (event: unknown, ctx: unknown) => Promise<any>) => handlers.push(handler) } as never,
     );
     const listeners: Array<(event: any) => void> = [];
@@ -140,7 +148,9 @@ describe("POST /v1/lead/compact", () => {
     const { http, summaries, entries, notices, idleRecords, logs } = await boot();
     const asked = await http("/v1/lead/compact", { model: CHEAP, instructions: "保留工单 12 的细节" });
     expect(asked.status, JSON.stringify(asked.body)).toBe(200);
-    expect(asked.body).toEqual({ applied: "now", model: CHEAP, tokensBefore: 150_000, existing: false, reason: null });
+    expect(asked.body).toEqual({
+      applied: "now", model: CHEAP, tokensBefore: 150_000, existing: false, requestApplied: true, candidates: [], reason: null,
+    });
 
     await vi.waitFor(() => expect(summaries).toHaveLength(1), { timeout: 5_000 });
     const { request } = summaries[0]!;
@@ -148,7 +158,7 @@ describe("POST /v1/lead/compact", () => {
     expect(request.auth.apiKey).toBe("key-for-cheap-model");
     expect(request.instructions).toBe("保留工单 12 的细节");
     // A second request while the summary is written joins it.
-    expect((await http("/v1/lead/compact", {})).body).toMatchObject({ applied: "now", existing: true, model: CHEAP });
+    expect((await http("/v1/lead/compact", {})).body).toMatchObject({ applied: "now", existing: true, model: CHEAP, requestApplied: false });
 
     summaries[0]!.finish("CHEAP SUMMARY");
     await vi.waitFor(() => expect(notices()).toHaveLength(1), { timeout: 5_000 });
@@ -181,6 +191,10 @@ describe("POST /v1/lead/compact", () => {
 
     const asked = await http("/v1/lead/compact", {});
     expect(asked.body).toMatchObject({ applied: "after_turn", model: "stub/model", existing: false });
+    // Review item 4: a second request that names a model joins the waiting one. The answer names the model that will write
+    // the summary (Lead's own), and says that this request's model does not apply.
+    expect((await http("/v1/lead/compact", { model: CHEAP })).body)
+      .toMatchObject({ applied: "after_turn", model: "stub/model", existing: true, requestApplied: false });
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(summaries).toHaveLength(0);
 
@@ -194,23 +208,53 @@ describe("POST /v1/lead/compact", () => {
     expect(notices()[0]!.text).toContain("about 150,000 → 9,000 tokens. The summary was written by acme/lead-model.");
   }, 30_000);
 
-  it("refuses an unknown model with the valid choices, and starts nothing", async () => {
+  // Review 2026-11-18 (item 1): the user's real words were 「用 gpt 6 luna」. The first version took words without a slash as
+  // instructions and compacted with Lead's own model. Now the words must name exactly one model of the catalog.
+  it("resolves the user's words to one catalog model, and refuses several or none without starting anything", async () => {
     const { http, summaries } = await boot();
-    const asked = await http("/v1/lead/compact", { model: "acme/gpt-6-luna" });
-    expect(asked.status).toBe(400);
-    expect(JSON.stringify(asked.body)).toContain("acme/cheap-model");
+    const ambiguous = await http("/v1/lead/compact", { model: "gpt 6 luna" });
+    expect(ambiguous.status).toBe(200);
+    expect(ambiguous.body).toMatchObject({
+      applied: "model_ambiguous", model: "gpt 6 luna", existing: false, requestApplied: false,
+      candidates: ["acme/gpt-6-luna", "other/gpt-6-luna"],
+    });
+    const unknown = await http("/v1/lead/compact", { model: "luna" });
+    expect(unknown.body).toMatchObject({ applied: "model_unknown", candidates: ["acme/gpt-6-luna", "other/gpt-6-luna"] });
+    expect((await http("/v1/lead/compact", { model: "acme/gpt-7" })).body).toMatchObject({ applied: "model_unknown" });
     expect((await http("/v1/lead/compact", { model: CHEAP, extra: true })).status).toBe(400);
     await new Promise((resolve) => setTimeout(resolve, 100));
     expect(summaries).toHaveLength(0);
+
+    // Words that name one model: that model writes the summary.
+    const one = await http("/v1/lead/compact", { model: "用 cheap model" });
+    expect(one.body).toMatchObject({ applied: "now", model: CHEAP });
+    await vi.waitFor(() => expect(summaries).toHaveLength(1), { timeout: 5_000 });
+    expect(summaries[0]!.request.model).toMatchObject({ provider: "acme", id: "cheap-model" });
   }, 30_000);
 
   it("shows a failed summary in the conversation and does not hold Lead's model", async () => {
     const { http, summaries, notices, logs } = await boot();
     await http("/v1/lead/compact", { model: CHEAP });
     await vi.waitFor(() => expect(summaries).toHaveLength(1), { timeout: 5_000 });
-    summaries[0]!.fail("401 invalid api key");
+    // Review item 6: the error goes into the conversation without the secret in it.
+    summaries[0]!.fail("401 invalid api key sk-abcdefghijklmnopqrstuvwxyz0123");
     await vi.waitFor(() => expect(notices()).toHaveLength(1), { timeout: 5_000 });
-    expect(notices()[0]!.text).toMatch(/^The compaction of \S+'s context with acme\/cheap-model did not succeed: 401 invalid api key\. The context did not change\.$/u);
+    expect(notices()[0]!.text).toMatch(/^The compaction of \S+'s context with acme\/cheap-model did not succeed: 401 invalid api key \S+\. The context did not change\.$/u);
+    expect(notices()[0]!.text).not.toContain("sk-abcdefghijklmnopqrstuvwxyz0123");
     expect(logs.some((line) => line.includes("model hold"))).toBe(false);
+  }, 30_000);
+
+  // Review item 5: a request that waits when the daemon stops is not lost silently.
+  it("tells the user when the daemon stops before a waiting compaction ran", async () => {
+    const release = deferred();
+    const { http, notices } = await boot(() => ({ say: [release.promise, "做完了。"] }));
+    await http("/v1/chat/send", { id: "t1", message: "做一个长任务" });
+    await vi.waitFor(async () => expect((await http("/v1/lead/scheduler")).body.unit).not.toBeNull(), { timeout: 5_000 });
+    expect((await http("/v1/lead/compact", {})).body).toMatchObject({ applied: "after_turn" });
+    const closing = daemon!.close();
+    release.resolve();
+    await closing;
+    daemon = null;
+    expect(notices()).toEqual([expect.objectContaining({ text: expect.stringMatching(/did not succeed: the background service stopped or restarted/u) })]);
   }, 30_000);
 });

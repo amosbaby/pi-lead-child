@@ -66,7 +66,7 @@ import { InterventionCard } from './InterventionCard';
 import {
   LeadModelComposerTrigger, LeadModelPicker, LeadModelResendLink, leadModelTriggerText, TurnModelChip, useModelAccounts,
 } from './LeadModelPicker';
-import { compactNoticeText } from './compactCommand';
+import { compactErrorNotice, compactNotice } from './compactCommand';
 import { MessageComposer, type MessageComposerHandle } from './MessageComposer';
 import { AssistantTurnView } from './AssistantTurnView';
 import { MessagePartView } from './MessagePartView';
@@ -497,7 +497,10 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           // 输入框上不放模型（模型配置方案 C 的 S4）：输入 /model 打开换模型的浮层，这句话不发给 Lead。
           onModelCommand={() => composerAnchorRef.current?.measure((anchor) => setPicker({ anchor }))}
           // /compact [provider/id] [instructions]: compact Lead's context; this text does not go to Lead.
-          onCompactCommand={(request) => runtime.compactLeadContext(request).then((result) => compactNoticeText(result, locale))}
+          onCompactCommand={(request) => runtime.compactLeadContext(request).then(
+            (result) => compactNotice(result, locale),
+            (error: unknown) => compactErrorNotice(error, locale),
+          )}
           chip={canTurnModel && turnModel ? (
             <TurnModelChip text={leadModelTriggerText(leadModelSpec(turnModel), modelAccounts, locale) ?? turnModel.model} onRemove={() => setTurnModel(null)} />
           ) : null}

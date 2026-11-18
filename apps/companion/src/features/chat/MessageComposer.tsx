@@ -11,6 +11,7 @@ import { useLocale, type Locale } from '@/i18n';
 import { canPickImages, ChatImageError, pickImageFiles, prepareChatImage, type ComposerImage } from '@/data/chatImagePicker';
 import { useCompanionRuntime } from '@/state/CompanionStateProvider';
 
+import type { CompactNotice } from './compactCommand';
 import { composerMessages } from './composer.messages';
 
 type MessageComposerProps = {
@@ -26,9 +27,9 @@ type MessageComposerProps = {
   attachImages?: boolean;
   // 输入 /model 发送时（只有 Lead 的会话给）：不发给 Lead，在输入框上方打开换模型的浮层（模型配置方案 C 的 S4）。
   onModelCommand?: () => void;
-  // /compact [provider/id] [instructions] (only Lead's conversation gives it): compact Lead's context, do not send it to Lead.
-  // Resolves to one line for the user under the input; rejects with the error to show.
-  onCompactCommand?: (request: CompactLeadContextRequest) => Promise<string>;
+  // /compact [model] [-- instructions] (only Lead's conversation gives it): compact Lead's context, do not send it to Lead.
+  // Resolves to one line for the user under the input (compactCommand.ts): a status, or a refusal (tone danger).
+  onCompactCommand?: (request: CompactLeadContextRequest) => Promise<CompactNotice>;
   // 输入区上面的小标签，例如「只这一条」的单轮模型（TurnModelChip）。
   chip?: ReactNode;
   // 工具栏右边、发送按钮前面的模型名（桌面上的 Lead 会话：LeadModelComposerTrigger，写着模型 id 和推理强度，点开换模型）。
@@ -121,8 +122,8 @@ function MessageComposerField({
       workspace.getState().clearComposerDraft(contextKey);
       setCommandNotice({ text: m.compact.sending, tone: 'muted' });
       onCompactCommand(compactRequest).then(
-        (line) => setCommandNotice({ text: line, tone: 'muted' }),
-        (error: unknown) => setCommandNotice({ text: m.compact.failed(error instanceof Error ? error.message : String(error)), tone: 'danger' }),
+        (notice) => setCommandNotice(notice),
+        () => setCommandNotice({ text: m.compact.failed, tone: 'danger' }),
       );
       inputRef.current?.focus();
       return;
