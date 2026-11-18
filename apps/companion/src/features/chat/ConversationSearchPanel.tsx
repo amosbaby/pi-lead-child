@@ -1,4 +1,4 @@
-import { Box, Button, Card, Chip, Column, IconButton, isWeb, Pressable, Row, ScrollArea, SegmentedControl, Text, TextField } from '@pi-lead-child/components';
+import { Box, Button, Card, Chip, Column, elevation, IconButton, isWeb, Pressable, Row, ScrollArea, SegmentedControl, Text, TextField } from '@pi-lead-child/components';
 import { useEffect, useState } from 'react';
 
 import { useLocale } from '@/i18n';
@@ -77,7 +77,7 @@ export function ConversationSearchPanel({ client, leadName, onJump, onClose }: C
     : '';
 
   return (
-    <Card testID="conversation-search">
+    <Card testID="conversation-search" variant="float" p="card" boxShadow={elevation.raised}>
       <Column gap="card-section">
         <Row items="center" gap="inline-item">
           <Box grow={1} minW={0}>

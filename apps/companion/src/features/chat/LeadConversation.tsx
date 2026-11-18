@@ -537,9 +537,9 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           ? <EmptyConversation title={m.empty.title} body={m.empty.body(leadName)} />
           : <EmptyConversation title={m.empty.notConnectedTitle(leadName)} body={m.empty.notConnectedBody(leadName)} />}
       />
-      {/* 搜索面板浮在会话上方，不推动会话内容（会话列表不能跳）。 */}
+      {/* 搜索面板浮在会话上方，不推动会话内容（会话列表不能跳）。上边和左右留 page 边距，靠浮起的阴影（E-2）和消息分开。 */}
       {searchOpen ? (
-        <Box position="absolute" t={8} l={0} r={0} items="center" pointerEvents="box-none">
+        <Box position="absolute" t="page-y" l={0} r={0} items="center" pointerEvents="box-none">
           <Box w="100%" maxW={700} px="page-x" pointerEvents="auto">
             <ConversationSearchPanel client={searchClient} leadName={leadName} onJump={jumpToSearchEntry} onClose={closeSearch} />
           </Box>
