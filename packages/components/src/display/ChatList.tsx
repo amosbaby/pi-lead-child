@@ -290,7 +290,10 @@ function VirtualChatList<T>({
         <ChatBlockScope blockKey={key} keep={keepBlockInPlace}>{renderItem(item, index)}</ChatBlockScope>
       </View>
     );
-    return key === highlightKey ? <Box testID={testID ? `${testID}-highlight` : undefined} bg="accent-soft" rounded="md">{block}</Box> : block;
+    // 始终包一层：高亮开关时子树不换类型，卡片里展开的状态、正在加载的图不会被重挂载丢掉。
+    return key === highlightKey
+      ? <Box testID={testID ? `${testID}-highlight` : undefined} bg="accent-soft" rounded="md">{block}</Box>
+      : <Box rounded="md">{block}</Box>;
   }, [highlightKey, keepBlockInPlace, keyExtractor, renderItem, testID]);
   // 高亮的那一块变了，看得见的块要重画（列表按 extraData 缓存每一块）。
   const listExtra = useMemo(() => ({ extraData, highlightKey }), [extraData, highlightKey]);

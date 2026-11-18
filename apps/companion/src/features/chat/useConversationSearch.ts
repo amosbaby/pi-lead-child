@@ -44,6 +44,8 @@ export function useConversationSearch(client: ConversationSearchClient, debounce
   const [modelUnavailable, setModelUnavailable] = useState(false);
   const [active, setActive] = useState(-1);
   const abort = useRef<AbortController | null>(null);
+  // 列表里现在这些命中是用哪组参数搜出来的。参数变了（输入还在防抖）而列表还是旧的时，不能接着旧偏移往下翻。
+  const loadedKey = useRef<string | null>(null);
   const clientRef = useRef(client);
   clientRef.current = client;
 
@@ -56,6 +58,7 @@ export function useConversationSearch(client: ConversationSearchClient, debounce
 
   const run = useCallback(async (offset: number, append: boolean) => {
     const text = query.trim();
+    const key = JSON.stringify([text, mode, mode === 'exact' && wholeWord]);
     const controller = begin();
     setStatus('loading');
     try {
@@ -63,7 +66,13 @@ export function useConversationSearch(client: ConversationSearchClient, debounce
         { query: text, mode, wholeWord: mode === 'exact' && wholeWord, offset, limit: PAGE_SIZE }, controller.signal,
       );
       if (controller.signal.aborted) return;
-      setEntries((current) => (append ? [...current, ...result.hits] : result.hits));
+      loadedKey.current = key;
+      // 翻页之间来了新消息，下一页会和上一页重一条：按「轮 + 哪一侧」去重。
+      setEntries((current) => {
+        if (!append) return result.hits;
+        const seen = new Set(current.map((entry) => `${entry.turnId}:${entry.role}`));
+        return [...current, ...result.hits.filter((hit) => !seen.has(`${hit.turnId}:${hit.role}`))];
+      });
       setTotal(result.total);
       setCapped(result.totalCapped);
       setStatus('ready');
@@ -94,8 +103,9 @@ export function useConversationSearch(client: ConversationSearchClient, debounce
 
   const loadMore = useCallback(() => {
     if (status === 'loading' || agentMode || entries.length >= total) return;
+    if (loadedKey.current !== JSON.stringify([query.trim(), mode, mode === 'exact' && wholeWord])) return;
     void run(entries.length, true);
-  }, [agentMode, entries.length, run, status, total]);
+  }, [agentMode, entries.length, mode, query, run, status, total, wholeWord]);
 
   // 让 agent 找：模型不能用、超时、出错时，用模糊搜索的结果代替，并告诉用户（modelUnavailable）。
   const askAgent = useCallback(async () => {
@@ -143,6 +153,8 @@ export function useConversationSearch(client: ConversationSearchClient, debounce
     setActive(-1);
   }, []);
   const stopAgent = useCallback(() => {
+    // 还在找的那次不能在回到关键词以后把候选写进列表。
+    abort.current?.abort();
     setAgentMode(false);
     setModelUnavailable(false);
   }, []);

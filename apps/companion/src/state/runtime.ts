@@ -2338,12 +2338,16 @@ export class CompanionStateRuntime {
 
   // 命中的那一轮要先在会话里：往上一页一页取，直到它进来（一页 100 轮，最多 300 页）。取到头还没有、或者取的时候出错，返回 false。
   async revealConversationTurn(turnId: string, signal?: AbortSignal): Promise<boolean> {
+    const sessionId = this.activeSessionId;
     for (let page = 0; page < REVEAL_MAX_PAGES; page += 1) {
       const state = this.control.getState();
       if (state.turnsById[turnId]) return true;
-      if (signal?.aborted || !state.conversationHistory.hasMore) return false;
+      if (signal?.aborted || !state.conversationHistory.hasMore || this.activeSessionId !== sessionId) return false;
+      const oldestBefore = state.conversationHistory.oldest?.id;
       await this.loadOlderConversationTurns(REVEAL_PAGE_TURNS);
-      if (this.control.getState().conversationHistory.error) return false;
+      const after = this.control.getState().conversationHistory;
+      // 出错，或这一页没把游标往前推（没有游标、daemon 不支持）：再取也是空转。
+      if (after.error || after.oldest?.id === oldestBefore) return false;
     }
     return Boolean(this.control.getState().turnsById[turnId]);
   }

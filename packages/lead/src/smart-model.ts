@@ -188,7 +188,8 @@ export function createLeadSmartModel(input: {
           { ...(signal ? { signal } : {}), maxTokens, sessionId: routingSessionId },
         ));
       } catch (error) {
-        input.hold?.failed("decision", errorMessage(error));
+        // 调用方自己取消的（用户换了搜索词、请求超时）不是模型的故障，不能累计到熔断里。
+        if (!signal?.aborted) input.hold?.failed("decision", errorMessage(error));
         throw error;
       }
     }

@@ -333,9 +333,20 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const [highlightKey, setHighlightKey] = useState<string | null>(null);
   const listHandle = useRef<ChatListHandle | null>(null);
   const highlightTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 连按「下一条」时只认最后一次跳转：前面的取更早轮次、补滚都作废。
+  const jumpToken = useRef(0);
+  const jumpAbort = useRef<AbortController | null>(null);
+  const settleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 取到更早的轮次以后，要用最新的行去找命中的那一行：记在 ref 里。
   const latest = useRef({ rows, messagesById, turnsById });
   latest.current = { rows, messagesById, turnsById };
+  const cancelJump = useCallback(() => {
+    jumpToken.current += 1;
+    jumpAbort.current?.abort();
+    jumpAbort.current = null;
+    if (settleTimer.current) clearTimeout(settleTimer.current);
+    settleTimer.current = null;
+  }, []);
   const clearHighlight = useCallback(() => {
     if (highlightTimer.current) clearTimeout(highlightTimer.current);
     highlightTimer.current = null;
@@ -343,9 +354,13 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   }, []);
   const closeSearch = useCallback(() => {
     setSearchOpen(false);
+    cancelJump();
     clearHighlight();
-  }, [clearHighlight]);
-  useEffect(() => () => { if (highlightTimer.current) clearTimeout(highlightTimer.current); }, []);
+  }, [cancelJump, clearHighlight]);
+  useEffect(() => () => {
+    cancelJump();
+    if (highlightTimer.current) clearTimeout(highlightTimer.current);
+  }, [cancelJump]);
   useEffect(() => {
     if (!isWeb) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -362,22 +377,33 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
     agent: (description: string, signal?: AbortSignal) => runtime.findConversationWithAgent(description, signal),
   }), [runtime]);
   const jumpToSearchEntry = useCallback(async (entry: SearchEntry): Promise<boolean> => {
+    cancelJump();
+    const token = jumpToken.current;
+    const controller = new AbortController();
+    jumpAbort.current = controller;
     const loaded = Boolean(latest.current.turnsById[entry.turnId]);
     if (!loaded) {
-      if (!await runtime.revealConversationTurn(entry.turnId)) throw new Error('turn not loaded');
+      if (!await runtime.revealConversationTurn(entry.turnId, controller.signal)) {
+        if (token !== jumpToken.current) return true;
+        throw new Error('turn not loaded');
+      }
       // 新取到的轮次要等界面重画一次，才有对应的行。
       await new Promise((resolve) => setTimeout(resolve, 60));
     }
+    if (token !== jumpToken.current) return true;
     const key = rowKeyForTurn(latest.current.rows, latest.current.messagesById, entry);
     if (!key) return false;
     listHandle.current?.scrollToKey(key);
     // 虚拟列表第一次滚动时下面的块还是估算的高度，隔一会儿再对一次。
-    setTimeout(() => listHandle.current?.scrollToKey(key, { animated: false }), 250);
+    settleTimer.current = setTimeout(() => {
+      settleTimer.current = null;
+      listHandle.current?.scrollToKey(key, { animated: false });
+    }, 250);
     if (highlightTimer.current) clearTimeout(highlightTimer.current);
     setHighlightKey(key);
     highlightTimer.current = setTimeout(() => { highlightTimer.current = null; setHighlightKey(null); }, HIGHLIGHT_MS);
     return true;
-  }, [runtime]);
+  }, [cancelJump, runtime]);
   const searchText = conversationSearchMessages(locale);
 
   // 一块要画的东西都在 rowContext 里：它变了，看得见的块重画（ChatList 的 extraData）。

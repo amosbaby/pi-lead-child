@@ -44,8 +44,12 @@ export function ConversationSearchPanel({ client, leadName, onJump, onClose }: C
   useEffect(() => {
     if (!isWeb) return undefined;
     const onKeyDown = (event: KeyboardEvent) => {
+      // 输入法选字时的回车（和选字用的方向键）是给输入法的，不是「下一条」。
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape') { onClose(); return; }
       if (event.key === 'Enter') {
+        // 焦点在按钮、命中行上时，回车是在按它，不拦。
+        if ((event.target as HTMLElement | null)?.closest?.('button, [role="button"]')) return;
         event.preventDefault();
         if (search.agentMode && entries.length === 0) void search.askAgent();
         else jump(event.shiftKey ? -1 : 1);
