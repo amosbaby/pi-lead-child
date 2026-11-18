@@ -19,6 +19,12 @@ export interface RunIdleCompactOptions {
   log?: (line: string) => void;
 }
 
+/** The length budget and the rules first, then what the person who asked for this compaction wants (when they said). */
+export function withRequestedInstructions(base: string, requested: string | undefined): string {
+  const extra = typeof requested === "string" ? requested.trim() : "";
+  return extra ? `${base}\n这次压缩是有人明确要求的。对摘要的额外要求（在上面的长度预算以内）：${extra}` : base;
+}
+
 /** 写一份摘要。失败时返回 ok=false 和原因（不抛错）。 */
 export async function runIdleCompact(request: IdleCompactRequest, options: RunIdleCompactOptions = {}): Promise<IdleCompactResponse> {
   if (request?.version !== IDLE_COMPACT_REQUEST_VERSION || !request.preparation || !request.model) {
@@ -43,7 +49,7 @@ export async function runIdleCompact(request: IdleCompactRequest, options: RunId
   for (const level of ["normal", "strict"] as const) {
     try {
       const result = await compactInChunks(event, ctx, {
-        instructions: leadCompactionInstructions(level),
+        instructions: withRequestedInstructions(leadCompactionInstructions(level), request.instructions),
         ...(request.prefix ? { prefix: () => request.prefix } : {}),
         ...(typeof request.historyCap === "number" ? { historyCap: request.historyCap } : {}),
         ...(options.log ? { log: options.log } : {}),

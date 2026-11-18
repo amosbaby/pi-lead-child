@@ -12,5 +12,5 @@ export * from "./idle-lane.js";
 export * from "./idle-compaction.js";
 export {
   IdleLaneRuntime, idleLaneExtension, IDLE_APPLY_INSTRUCTIONS, IDLE_PROBE_INSTRUCTIONS,
-  type IdleLaneHost, type IdleLaneRuntimeOptions, type PrecipitationOutcome,
+  type IdleLaneHost, type IdleLaneRuntimeOptions, type ManualCompactReport, type ManualCompactTicket, type PrecipitationOutcome,
 } from "./idle-runtime.js";

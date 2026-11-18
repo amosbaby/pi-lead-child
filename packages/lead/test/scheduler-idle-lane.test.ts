@@ -1,7 +1,8 @@
 // 空闲车道的决策层（lead-scheduler spec D8，P4）：假时钟、表驱动，覆盖每一种决定。
 import { describe, expect, it } from "vitest";
 import {
-  compactionRetryAt, DEFAULT_IDLE_LANE_LIMITS, idleLaneLimitsFromEnv, idleLaneStep, initialIdleLaneState, inlineDecision, nextIdleCheckAt, promoteLine,
+  compactionRetryAt, DEFAULT_IDLE_LANE_LIMITS, idleLaneLimitsFromEnv, idleLaneStep, initialIdleLaneState, inlineDecision, manualCompactionHold,
+  nextIdleCheckAt, promoteLine,
   type IdleLaneEffect, type IdleLaneEvent, type IdleLaneLimits, type IdleLaneState,
 } from "../src/scheduler/index.js";
 
@@ -409,5 +410,135 @@ describe("idle lane: the model hold", () => {
 
     const lifted = run([[12 * 60_000 + 1, { type: "model.hold", held: false }], [12 * 60_000 + 2, tick(0.9)]], LIMITS, held.state);
     expect(lifted.kinds).toEqual(["precipitate.start"]);
+  });
+});
+
+// A compaction someone asked for (2026-11-18: the user typed 「压缩一下上下文，用 gpt 6 luna」 and Lead had no tool for it).
+describe("idle lane: a requested compaction", () => {
+  const ask = (model: string | null = null, starting = false): IdleLaneEvent => ({
+    type: "compact.request", starting, request: { model, overrideModel: model !== null, instructions: model ? "keep ticket 12" : null },
+  });
+  const done = (effects: Array<{ effect: IdleLaneEffect }>) => effects.flatMap(({ effect }) => (effect.type === "manual.done" ? [effect] : []));
+
+  it("starts at once when Lead is idle, without the ratio, the grace or the backoffs", () => {
+    // The context is low, Lead was idle for 1 s only, and the last compaction failed (backoff): it starts all the same.
+    const { kinds, state } = run([
+      [0, { type: "compact.inline_failed", reason: "threshold" }],
+      [1_000, ask("acme/cheap-model")],
+    ]);
+    expect(kinds).toEqual(["compact.start"]);
+    expect(state.compact).toMatchObject({ phase: "preparing", manual: { model: "acme/cheap-model", overrideModel: true, instructions: "keep ticket 12" } });
+    expect(state.manual).toBeNull();
+  });
+
+  it("waits while Lead is busy, and starts at the unit boundary before anything else", () => {
+    const { kinds, state, logs } = run([
+      [0, { type: "busy", unitId: "unit_a", lane: 0 }],
+      [1_000, ask()],
+      [5_000, { type: "idle" }],
+      // A queued input waits (pendingInput): the requested compaction still starts at the boundary.
+      [5_000, tick(0.3, { boundary: true, pendingInput: true })],
+    ]);
+    expect(kinds).toEqual(["compact.start"]);
+    expect(state.compact.manual).toMatchObject({ model: null, overrideModel: false });
+    expect(logs.some((line) => /^\[sched\] idle\.manual\.wait job=compact id=idle_compact_\w+ why=lead_busy unit=unit_a lane=L0$/u.test(line))).toBe(true);
+    expect(logs.some((line) => /^\[sched\] idle\.start job=compact id=idle_compact_\w+ manual=true model=lead why=boundary ratio=0\.30 waitedMs=4000$/u.test(line))).toBe(true);
+  });
+
+  it("waits while a system turn probes the network, and looks again in a second", () => {
+    const { kinds, state } = run([[0, ask(null, true)]]);
+    expect(kinds).toEqual([]);
+    expect(state.manual).not.toBeNull();
+    expect(nextIdleCheckAt(state, LIMITS, 0)).toBe(1_000);
+  });
+
+  it("joins a request that waits or runs instead of starting a second one", () => {
+    const { kinds, state, logs } = run([
+      [0, ask("acme/cheap-model")],
+      [100, ask()],
+      [200, ask("acme/other-model")],
+    ]);
+    expect(kinds).toEqual(["compact.start"]);
+    expect(state.compact.manual?.model).toBe("acme/cheap-model");
+    expect(logs.filter((line) => line.startsWith("[sched] idle.manual.joined"))).toHaveLength(2);
+  });
+
+  it("joins an automatic summary, or drops it when the request names a model", () => {
+    const automatic: Array<[number, IdleLaneEvent]> = [
+      [0, tick(0.9)],
+      [0, { type: "compact.summarizing", tokens: 900, messages: 12 }],
+    ];
+    const joined = run([...automatic, [10, ask()]]);
+    expect(joined.kinds).toEqual(["compact.start"]);
+    expect(joined.state.compact).toMatchObject({ phase: "summarizing", manual: { model: null } });
+    expect(joined.state.compact.manual?.id).toBe(joined.state.compact.id);
+
+    const replaced = run([...automatic, [10, ask("acme/cheap-model")]]);
+    expect(replaced.kinds).toEqual(["compact.start", "compact.cancel", "compact.start"]);
+    expect(replaced.state.compact).toMatchObject({ phase: "preparing", manual: { model: "acme/cheap-model" } });
+  });
+
+  it("is not stopped by Lead's model hold or the unit backoff: the daemon decides the hold rule first", () => {
+    const { kinds } = run([
+      [0, { type: "model.hold", held: true }],
+      [0, { type: "busy", unitId: "unit_a", lane: 0 }],
+      [10, { type: "idle", outcome: "failed" }],
+      [20, ask("acme/cheap-model")],
+    ]);
+    expect(kinds).toEqual(["compact.start"]);
+  });
+
+  it("reports the tokens before and after when the summary is applied", () => {
+    const { effects, state } = run([
+      [0, ask("acme/cheap-model")],
+      [5, { type: "compact.summarizing", tokens: 900, messages: 12 }],
+      [9_000, { type: "compact.ready", ms: 8_995, chars: 2_000, chunks: 1 }],
+      [9_010, { type: "compact.applied", tokensBefore: 180_000, tokensAfter: 12_000 }],
+    ]);
+    expect(done(effects)).toEqual([expect.objectContaining({
+      outcome: "applied", tokensBefore: 180_000, tokensAfter: 12_000, request: expect.objectContaining({ model: "acme/cheap-model" }),
+    })]);
+    expect(state.compact.manual).toBeNull();
+  });
+
+  it("says when there is nothing to compact, and keeps the automatic schedule", () => {
+    const { effects, state } = run([[0, ask()], [3, { type: "compact.skipped", why: "Already compacted" }]]);
+    expect(done(effects)).toEqual([expect.objectContaining({ outcome: "nothing", error: "Already compacted" })]);
+    expect(state.compact).toMatchObject({ phase: "idle", retryAt: null, failures: 0 });
+  });
+
+  it("does not back off Lead's own compactions when a summary with another model fails", () => {
+    const failing = (model: string | null) => run([
+      [0, ask(model)], [5, { type: "compact.summarizing", tokens: 9, messages: 1 }], [9, { type: "compact.failed", error: "403", ms: 4 }],
+    ]);
+    const other = failing("acme/cheap-model");
+    expect(done(other.effects)).toEqual([expect.objectContaining({ outcome: "failed", error: "403" })]);
+    expect(other.state.compact).toMatchObject({ failures: 0, retryAt: null });
+    const own = failing(null);
+    expect(done(own.effects)).toEqual([expect.objectContaining({ outcome: "failed" })]);
+    expect(own.state.compact.failures).toBe(1);
+  });
+
+  it("tells a waiting request that another compaction compacted the context first", () => {
+    const { effects, state } = run([
+      [0, { type: "busy", unitId: "unit_a", lane: 0 }],
+      [1, ask()],
+      [2, { type: "compacted", how: "threshold" }],
+    ]);
+    expect(done(effects)).toEqual([expect.objectContaining({ outcome: "superseded" })]);
+    expect(state.manual).toBeNull();
+  });
+});
+
+describe("manualCompactionHold", () => {
+  it.each([
+    // [another model, held, asked by the user, expected]
+    [true, true, false, "pass"],
+    [true, false, false, "pass"],
+    [false, false, false, "pass"],
+    [false, true, true, "pass"],
+    [false, true, false, "refuse"],
+  ] as const)("another model %s, held %s, asked by the user %s: %s", (overrideModel, held, byUser, expected) => {
+    expect(manualCompactionHold({ overrideModel, held, byUser })).toBe(expected);
   });
 });

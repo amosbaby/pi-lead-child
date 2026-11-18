@@ -41,6 +41,8 @@ export interface IdleCompactRequest {
   // How many tokens of history the summary reads at most: the window of Lead's model (compaction-chunks.ts). model can
   // be a cheaper summary model with a smaller window.
   historyCap?: number;
+  // Extra instructions for this summary from whoever asked for it (compact_lead_context). They come after the length budget.
+  instructions?: string;
 }
 
 export type IdleCompactResponse =

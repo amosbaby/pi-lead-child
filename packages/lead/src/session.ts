@@ -523,7 +523,18 @@ export async function createLeadSession(opts: {
       },
       // 空闲车道（scheduler/idle-runtime.ts，P4）：pi 在单元中间想压缩时推迟到空闲，或者用子进程写好的摘要。
       // 排在分段压缩之前：它取消时 pi 不再问后面的扩展；它接上时分段压缩跳过（skip）。
-      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, { prefix: prefixFor, summaryModel: summaryModelFor, prefixWarmMs: prefixWarmMsFor }) }] : []),
+      ...(opts.idleLane ? [{ name: "plc-idle-lane", hidden: true, factory: idleLaneExtension(opts.idleLane, {
+        prefix: prefixFor, summaryModel: summaryModelFor, prefixWarmMs: prefixWarmMsFor,
+        // A compaction someone asked for with a model of its own (compact_lead_context): the model from this session's registry.
+        resolveModel: (spec) => {
+          try {
+            const { provider, id } = parseModelName(spec);
+            return modelRuntime.getModel(provider, id) ?? undefined;
+          } catch {
+            return undefined;
+          }
+        },
+      }) }] : []),
       // 历史放不进一次摘要请求时分段压缩（compaction-chunks.ts，2026-11-01）。pi 自己触发的压缩也由它来写，
       // 带上删减的标准和「能力不写成规则」（2026-11-02）；daemon 发起、放得进一次请求的压缩照旧交给 pi。
       {

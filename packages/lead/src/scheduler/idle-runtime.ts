@@ -18,6 +18,7 @@ import { schedulerLine } from "./core.js";
 import {
   compactionRetryAt, idleLaneLimitsFromEnv, idleLaneStep, idleLongEnough, initialIdleLaneState, nextIdleCheckAt,
   type IdleLaneEffect, type InlineCompactionReason, type IdleLaneEvent, type IdleLaneLimits, type IdleLaneState, type IdleRecordPayload,
+  type ManualCompactOutcome, type ManualCompactRequest,
 } from "./idle-lane.js";
 import {
   serializablePreparation, summarizeInChild, type IdleCompactRequest, type SummarizeInChildOptions, type SummarizeInChildResult,
@@ -55,7 +56,30 @@ export interface IdleLaneHost {
   // pi 的 session.compact(说明)。
   compact(instructions: string): Promise<unknown>;
   // 子进程写摘要失败了（原文）：daemon 交给模型暂停（model-hold.ts），账号级的失败进入暂停。
+  // Not called for a requested summary with another model than Lead's: that failure says nothing about Lead's model.
   modelFailed?(error: string): void;
+  // A requested compaction ended (compact_lead_context, POST /v1/lead/compact): the daemon shows it in the conversation.
+  manualCompactionDone?(report: ManualCompactReport): void;
+}
+
+/** How a requested compaction ended. model: the model that wrote the summary (provider/id), when one was started. */
+export interface ManualCompactReport {
+  id: string;
+  outcome: ManualCompactOutcome;
+  requested: { model: string | null; instructions: string | null; overrideModel: boolean };
+  model: string | null;
+  tokensBefore: number | null;
+  tokensAfter: number | null;
+  error: string | null;
+}
+
+/** What requestCompaction did: started now, waits for the unit to end, or joined a request or job that was already there. */
+export interface ManualCompactTicket {
+  id: string;
+  applied: "now" | "after_turn";
+  existing: boolean;
+  // The model of the joined job or request (provider/id); null: Lead's own model.
+  model: string | null;
 }
 
 export interface IdleLaneRuntimeOptions {
@@ -124,6 +148,10 @@ export class IdleLaneRuntime {
   } | null = null;
   #sweepHeldLogged = false;
   #stopped = false;
+  // The model of the summary that the child process writes now (provider/id): requested compactions report it.
+  #childModel: { id: string; model: string } | null = null;
+  // How the last requested compactions ended, by id (the daemon reads it right after an idle request: nothing to compact).
+  #manualReports = new Map<string, ManualCompactReport>();
 
   constructor(options: IdleLaneRuntimeOptions) {
     this.#host = options.host;
@@ -178,6 +206,50 @@ export class IdleLaneRuntime {
   modelHold(held: boolean): void {
     this.dispatch({ type: "model.hold", held });
     if (!held) this.check();
+  }
+
+  /**
+   * Someone asked for a compaction (idle-lane.ts, the file header). Lead idle: the probe starts now. Lead busy: it starts at
+   * the next unit boundary. The caller decides the hold rule first (manualCompactionHold). Never throws.
+   */
+  requestCompaction(request: { model: string | null; overrideModel: boolean; instructions: string | null }): ManualCompactTicket {
+    let starting = false;
+    try {
+      starting = this.#host.starting();
+    } catch {
+      starting = true;
+    }
+    const before = this.#state.manual ?? this.#state.compact.manual;
+    const automatic = this.#state.compact.phase !== "idle" ? this.#state.compact.id : null;
+    this.dispatch({
+      type: "compact.request", starting,
+      request: { model: request.model, overrideModel: request.overrideModel, instructions: request.instructions },
+    });
+    const waiting = this.#state.manual;
+    const running = this.#state.compact.manual;
+    const current = before ?? running ?? waiting;
+    if (!current) {
+      // The lane is stopped. Report it as waiting: nothing will run it.
+      return { id: "-", applied: "after_turn", existing: false, model: request.model };
+    }
+    return {
+      id: current.id,
+      applied: waiting && waiting.id === current.id ? "after_turn" : "now",
+      // Joined: a request that was there, or the automatic job that was running.
+      existing: before !== null || (automatic !== null && current.id === automatic),
+      model: current.model,
+    };
+  }
+
+  /** How a requested compaction ended, when it has ended. */
+  manualCompactionReport(id: string): ManualCompactReport | null {
+    return this.#manualReports.get(id) ?? null;
+  }
+
+  /** The requested compaction that the next probe is for (the extension reads the model and the instructions). */
+  manualJob(): Pick<ManualCompactRequest, "id" | "model" | "instructions"> | null {
+    const job = this.#state.compact;
+    return job.manual && job.phase === "preparing" ? { id: job.manual.id, model: job.manual.model, instructions: job.manual.instructions } : null;
   }
 
   /** 压缩失败以后的退避还没到时：下一次可以压缩的时间；没有退避时为 null。 */
@@ -366,16 +438,25 @@ export class IdleLaneRuntime {
    * pi 的一次压缩结束（compaction_end）。ours：是空闲车道取消的（取对话、推迟），daemon 不当成压缩中止来报；
    * applied：接上的是空闲车道写好的摘要。
    */
-  compactionEnded(event: { reason?: unknown; aborted?: unknown; result?: unknown; errorMessage?: unknown }): { ours: boolean; applied: boolean } {
+  compactionEnded(event: { reason?: unknown; aborted?: unknown; result?: unknown; errorMessage?: unknown }): {
+    ours: boolean; applied: boolean;
+    // The applied summary was a requested one (someone asked for it): it is not an automatic model call.
+    manual?: boolean;
+  } {
     const succeeded = Boolean(event.result) && !event.aborted && !event.errorMessage;
     if (this.#supplied) {
       const id = this.#supplied;
       this.#supplied = null;
       this.#claimed = null;
       if (succeeded) {
-        const tokensBefore = (event.result as { tokensBefore?: unknown }).tokensBefore;
-        this.dispatch({ type: "compact.applied", tokensBefore: typeof tokensBefore === "number" ? tokensBefore : null });
-        return { ours: true, applied: true };
+        const result = event.result as { tokensBefore?: unknown; estimatedTokensAfter?: unknown };
+        const manual = this.#state.compact.manual !== null;
+        this.dispatch({
+          type: "compact.applied",
+          tokensBefore: typeof result.tokensBefore === "number" ? result.tokensBefore : null,
+          tokensAfter: typeof result.estimatedTokensAfter === "number" ? result.estimatedTokensAfter : null,
+        });
+        return { ours: true, applied: true, manual };
       }
       this.#host.log(schedulerLine("idle.apply_failed", { job: "compact", id, error: String(event.errorMessage ?? (event.aborted ? "aborted" : "unknown")).slice(0, 200) }));
       this.dispatch({ type: "compact.stale", why: "apply_failed" });
@@ -456,6 +537,23 @@ export class IdleLaneRuntime {
       case "gate.release":
         for (const resolve of this.#gateWaiters.splice(0)) resolve();
         return;
+      case "manual.done": {
+        const report: ManualCompactReport = {
+          id: effect.request.id, outcome: effect.outcome,
+          requested: { model: effect.request.model, instructions: effect.request.instructions, overrideModel: effect.request.overrideModel },
+          model: this.#childModel?.id === effect.request.id ? this.#childModel.model : effect.request.model,
+          tokensBefore: effect.tokensBefore, tokensAfter: effect.tokensAfter, error: effect.error,
+        };
+        this.#manualReports.set(report.id, report);
+        // Keep the last few only.
+        if (this.#manualReports.size > 20) this.#manualReports.delete(this.#manualReports.keys().next().value!);
+        try {
+          this.#host.manualCompactionDone?.(report);
+        } catch (error) {
+          this.#host.log(schedulerLine("idle.manual.report_failed", { id: report.id, error: error instanceof Error ? error.message : String(error) }));
+        }
+        return;
+      }
     }
   }
 
@@ -509,10 +607,12 @@ export class IdleLaneRuntime {
     historyCap: number | null = null,
   ): void {
     const model = ctx.model;
+    const manual = this.#state.compact.id === id ? this.#state.compact.manual : null;
     if (!model) {
-      this.dispatch({ type: "compact.failed", error: "no model", ms: 0 });
+      this.dispatch({ type: "compact.failed", error: manual?.model ? `the model ${manual.model} is not available in Lead's session` : "no model", ms: 0 });
       return;
     }
+    this.#childModel = { id, model: `${model.provider}/${model.id}` };
     const preparation = serializablePreparation(event.preparation as never);
     const baseCompactionId = lastCompactionId(event.branchEntries as readonly BranchEntry[]);
     const auth = ctx.modelRegistry.getApiKeyAndHeaders(model);
@@ -539,6 +639,7 @@ export class IdleLaneRuntime {
           preparation,
           ...(prefix ? { prefix } : {}),
           ...(historyCap !== null ? { historyCap } : {}),
+          ...(manual?.instructions ? { instructions: manual.instructions } : {}),
         };
         result = await this.#summarize(request, {
           id, timeoutMs: this.#timeoutMs, signal: controller.signal,
@@ -555,7 +656,8 @@ export class IdleLaneRuntime {
       const { response, ms } = result;
       if (!response.ok) {
         this.dispatch({ type: "compact.failed", error: response.error, ms });
-        this.#host.modelFailed?.(response.error);
+        // A requested summary with another model: its failure does not put Lead's model on hold (manualCompactionHold).
+        if (!manual?.overrideModel) this.#host.modelFailed?.(response.error);
         return;
       }
       this.#ready = {
@@ -606,6 +708,8 @@ export function idleLaneExtension(
     summaryModel?: (main: NonNullable<ExtensionContext["model"]>) => ExtensionContext["model"];
     // How long a prefix counts as held in the provider's cache (compaction-chunks.ts, PREFIX_WARM_MS).
     prefixWarmMs?: (main: { provider: string; id: string }) => number;
+    // The model for a requested compaction that names one (provider/id). undefined: not available in the session.
+    resolveModel?: (spec: string) => ExtensionContext["model"];
     now?: () => number;
   } = {},
 ): ExtensionFactory {
@@ -613,6 +717,20 @@ export function idleLaneExtension(
     pi.on("session_before_compact", (event, ctx) => {
       const main = ctx.model;
       if (!main) return runtime.beforeCompact(event, ctx, null);
+      // A requested compaction (compact_lead_context): the model it names, or Lead's own model. Lead's model never changes.
+      const manual = event.customInstructions === IDLE_PROBE_INSTRUCTIONS ? runtime.manualJob() : null;
+      if (manual) {
+        if (manual.model && manual.model !== `${main.provider}/${main.id}`) {
+          const model = options.resolveModel?.(manual.model);
+          return runtime.beforeCompact(event, { model, modelRegistry: ctx.modelRegistry }, null, main.contextWindow);
+        }
+        // Lead's own model: on its warm prefix when there is one, never the cheap summary model.
+        const own = chooseSummaryRoute({
+          main, cheap: undefined, prefix: options.prefix?.(main) ?? null, now: (options.now ?? Date.now)(),
+          ...(options.prefixWarmMs ? { warmMs: options.prefixWarmMs(main) } : {}),
+        });
+        return runtime.beforeCompact(event, ctx, own.prefix);
+      }
       const route = chooseSummaryRoute({
         main, cheap: options.summaryModel?.(main), prefix: options.prefix?.(main) ?? null, now: (options.now ?? Date.now)(),
         ...(options.prefixWarmMs ? { warmMs: options.prefixWarmMs(main) } : {}),

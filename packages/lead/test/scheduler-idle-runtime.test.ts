@@ -3,14 +3,15 @@
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai";
-import { createAgentSession, DefaultResourceLoader, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createAgentSession, DefaultResourceLoader, ModelRegistry, SessionManager, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { compactionChunksExtension } from "../src/compaction-chunks.js";
 import {
   DEFAULT_IDLE_LANE_LIMITS, IDLE_APPLY_INSTRUCTIONS, idleLaneExtension, IdleLaneRuntime,
-  type IdleCompactRequest, type IdleLaneHost, type SummarizeInChildOptions, type SummarizeInChildResult,
+  type IdleCompactRequest, type IdleLaneHost, type ManualCompactReport, type SummarizeInChildOptions, type SummarizeInChildResult,
 } from "../src/scheduler/index.js";
+import { vi } from "vitest";
 
 // 窗口 8000，预留 2000：pi 的压缩线是 6000 token。一条 4000 字的消息约 1000 token。
 const WINDOW = 8_000;
@@ -26,6 +27,9 @@ interface Harness {
   // 写摘要的替身：每次调用一个，测试决定什么时候写完。
   pending: Array<{ resolve: (summary: string) => void; fail: (error: string) => void; signal: AbortSignal | undefined }>;
   host: { unit: string | null; ratio: number | null };
+  // Requested compactions that ended (IdleLaneHost.manualCompactionDone).
+  reports: ManualCompactReport[];
+  faux: ReturnType<typeof fauxProvider>;
   close: () => void;
 }
 
@@ -35,7 +39,9 @@ afterEach(() => {
   harness = null;
 });
 
-async function boot(limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}): Promise<Harness> {
+async function boot(
+  limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}, extension: Parameters<typeof idleLaneExtension>[1] = {},
+): Promise<Harness> {
   const dataDir = tempDir("plc-idle-runtime-");
   const agentDir = join(dataDir, "agent");
   mkdirSync(agentDir, { recursive: true });
@@ -44,6 +50,7 @@ async function boot(limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}): Prom
   const requests: IdleCompactRequest[] = [];
   const pending: Harness["pending"] = [];
   const state = { unit: null as string | null, ratio: null as number | null };
+  const reports: ManualCompactReport[] = [];
   let session: Harness["session"] | null = null;
   const host: IdleLaneHost = {
     log: (line) => logs.push(line),
@@ -62,6 +69,7 @@ async function boot(limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}): Prom
     writeInFlight: () => null,
     yieldUnit: () => {},
     compact: (instructions) => session!.compact(instructions),
+    manualCompactionDone: (report) => reports.push(report),
   };
   const summarize = (request: IdleCompactRequest, options: SummarizeInChildOptions) => {
     requests.push(request);
@@ -76,7 +84,11 @@ async function boot(limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}): Prom
   };
   const runtime = new IdleLaneRuntime({ host, limits: { ...DEFAULT_IDLE_LANE_LIMITS, graceMs: 0, ...limits }, summarize });
   const counters = { inline: 0 };
-  const faux = fauxProvider({ provider: "plc-idle-test", api: "plc-idle-test-api", models: [{ id: "faux-small", contextWindow: WINDOW, maxTokens: 500 }] });
+  const faux = fauxProvider({ provider: "plc-idle-test", api: "plc-idle-test-api", models: [
+    { id: "faux-small", contextWindow: WINDOW, maxTokens: 500 },
+    // A cheaper model for a requested compaction (compact_lead_context with model).
+    { id: "faux-cheap", contextWindow: WINDOW, maxTokens: 500 },
+  ] });
   faux.setResponses(Array.from({ length: 40 }, () => fauxAssistantMessage("ok")));
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_200 }, retry: { enabled: false } });
   const loader = new DefaultResourceLoader({
@@ -85,7 +97,7 @@ async function boot(limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}): Prom
     extensionFactories: [
       { name: "provider", factory: (pi) => pi.registerProvider(faux.provider) },
       // 和 session.ts 一样：空闲车道排在分段压缩之前，分段压缩认 skip。
-      { name: "plc-idle-lane", factory: idleLaneExtension(runtime) },
+      { name: "plc-idle-lane", factory: idleLaneExtension(runtime, extension) },
       {
         name: "plc-compaction-chunks",
         factory: compactionChunksExtension({
@@ -111,7 +123,7 @@ async function boot(limits: Partial<typeof DEFAULT_IDLE_LANE_LIMITS> = {}): Prom
     if (event.type === "compaction_end") runtime.compactionEnded(event);
   });
   const result: Harness = {
-    session, runtime, logs, records, requests, pending, host: state,
+    session, runtime, logs, records, requests, pending, host: state, reports, faux,
     get inlineSummaries() { return counters.inline; },
     close: () => { runtime.stop(); session!.dispose(); },
   };
@@ -255,5 +267,68 @@ describe("idle lane on a real pi session", () => {
     expect(compactions(h)).toHaveLength(1);
     expect(h.logs.some((line) => /idle\.discard job=compact .*why=compacted_by_manual/.test(line))).toBe(true);
     expect(h.pending[0]!.signal?.aborted).toBe(true);
+  }, 30_000);
+});
+
+// 2026-11-18: the user asked 「压缩一下上下文，用 gpt 6 luna」. Lead had no compaction tool; it switched its own model twice and said
+// the context was compressed when it was not. A requested compaction writes the summary with the model it names, with that
+// model's credentials, and Lead's model stays as it was.
+describe("a requested compaction on a real pi session", () => {
+  it("writes the summary with the named model and its credentials, applies it, and keeps Lead's model", async () => {
+    harness = await boot({}, {
+      resolveModel: (spec) => (spec === "plc-idle-test/faux-cheap" ? harness!.faux.getModel("faux-cheap") as never : undefined),
+    });
+    const h = harness;
+    // The extension's registry wraps the session's model runtime: each model has its own key here.
+    const auth = vi.spyOn(ModelRegistry.prototype, "getApiKeyAndHeaders").mockImplementation(async (model) => ({
+      ok: true, apiKey: `key-for-${model.id}`,
+    }) as never);
+    for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
+    // The context is low (no automatic compaction would start), and Lead is idle.
+    h.host.ratio = 0.3;
+    const ticket = h.runtime.requestCompaction({ model: "plc-idle-test/faux-cheap", overrideModel: true, instructions: "keep ticket 12" });
+    expect(ticket).toMatchObject({ applied: "now", existing: false, model: "plc-idle-test/faux-cheap" });
+    await until(() => h.pending.length === 1);
+    const request = h.requests[0]!;
+    expect(request.model).toMatchObject({ provider: "plc-idle-test", id: "faux-cheap" });
+    expect(request.auth.apiKey).toBe("key-for-faux-cheap");
+    expect(request.instructions).toBe("keep ticket 12");
+    // No warm prefix of Lead's model for another model; the history cap is the window of Lead's model.
+    expect(request.prefix).toBeUndefined();
+    expect(request.historyCap).toBe(WINDOW);
+    // A second request while it runs joins it.
+    expect(h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null })).toMatchObject({ id: ticket.id, existing: true });
+    h.pending[0]!.resolve("CHEAP SUMMARY");
+    await until(() => h.reports.length === 1);
+    expect(compactions(h).at(-1)?.summary).toBe("CHEAP SUMMARY");
+    expect(h.reports[0]).toMatchObject({
+      id: ticket.id, outcome: "applied", model: "plc-idle-test/faux-cheap", requested: { model: "plc-idle-test/faux-cheap", overrideModel: true },
+    });
+    expect(h.reports[0]!.tokensBefore).toBeGreaterThan(h.reports[0]!.tokensAfter!);
+    // Lead's model did not change.
+    expect(h.session.model?.id).toBe("faux-small");
+    expect(auth).not.toHaveBeenCalledWith(expect.objectContaining({ id: "faux-small" }));
+    auth.mockRestore();
+  }, 30_000);
+
+  it("fails with a clear reason when the named model is not in the session, without a hold on Lead's model", async () => {
+    harness = await boot({}, { resolveModel: () => undefined });
+    const h = harness;
+    for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
+    h.runtime.requestCompaction({ model: "acme/unknown", overrideModel: true, instructions: null });
+    await until(() => h.reports.length === 1);
+    expect(h.reports[0]).toMatchObject({ outcome: "failed", error: "the model acme/unknown is not available in Lead's session" });
+    expect(h.runtime.compactionRetryAt()).toBeNull();
+  }, 30_000);
+
+  it("says nothing to compact right after a compaction", async () => {
+    harness = await boot();
+    const h = harness;
+    for (const tag of ["one", "two", "three"]) await h.session.prompt(big(1_200, tag), { expandPromptTemplates: false });
+    await h.session.compact("manual compaction elsewhere");
+    const ticket = h.runtime.requestCompaction({ model: null, overrideModel: false, instructions: null });
+    await h.runtime.sessionFree();
+    expect(h.runtime.manualCompactionReport(ticket.id)).toMatchObject({ outcome: "nothing" });
+    expect(h.pending).toHaveLength(0);
   }, 30_000);
 });
