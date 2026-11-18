@@ -28,6 +28,7 @@ import { createTurn } from "@pi-lead-child/store";
 import { grantDelegationPolicy } from "@pi-lead-child/store";
 import { createWorkspace } from "@pi-lead-child/store";
 import { recordDeliverySnapshot } from "@pi-lead-child/store";
+import { LEAD_SYSTEM_PROMPT } from "../src/prompt.js";
 
 let db: Db;
 let dir: string;
@@ -1165,6 +1166,52 @@ describe("lead tools", () => {
     })).content[0].text);
     expect(switched.result).toMatchObject({ applied: "now", selected: { model: "vibeproxy/as4/claude-sonnet-5", effort: "high" } });
     expect(switches).toEqual([{ model: "vibeproxy/as4/claude-sonnet-5", effort: "high" }]);
+  });
+
+  // 2026-11-18: the user typed 「压缩一下上下文，用 gpt 6 luna」. Lead had no compaction tool: it wrote a hand-off document,
+  // switched its own model twice, and said the context was compressed when it was not. compact_lead_context is the same
+  // operation as /compact in the message box (lead_context / compact), and it never changes Lead's model.
+  it("compact_lead_context compacts through lead_context / compact and leaves Lead's model alone", async () => {
+    expect(toolNames()).toContain("compact_lead_context");
+    expect(toolParams("compact_lead_context")).toEqual(["model", "instructions", "reason"]);
+    const description = tool("compact_lead_context").description as string;
+    // The description covers the user's own words, and says what not to do instead.
+    for (const phrase of ["压缩一下上下文", "compact", "list_lead_models", "你的模型不变", "不要写交接文档"]) expect(description).toContain(phrase);
+    expect(LEAD_SYSTEM_PROMPT).toContain("compact_lead_context");
+
+    const compactions: Array<{ request: unknown; byUser: boolean }> = [];
+    const switches: unknown[] = [];
+    const leadContext = {
+      state: () => ({ model: "vibeproxy/claude-sonnet-5", tokens: 180_000 }),
+      compact: async (request: { model?: string }, options: { byUser: boolean }) => {
+        compactions.push({ request, byUser: options.byUser });
+        return { applied: "now" as const, model: request.model ?? "vibeproxy/claude-sonnet-5", tokensBefore: 180_000, existing: false, reason: null };
+      },
+    };
+    const leadModels = {
+      state: () => ({ current: { model: "vibeproxy/claude-sonnet-5", effort: null }, selected: { model: "vibeproxy/claude-sonnet-5", effort: null } }),
+      catalog: async () => ({ ...leadModels.state(), models: [] }),
+      switch: async (choice: unknown) => { switches.push(choice); return { previous: leadModels.state().selected, selected: choice, applied: "now" }; },
+    };
+    let turnId: string | null = null;
+    deps = { ...deps, uiActionServices: { leadContext, leadModels } as never, currentTurnId: () => turnId };
+
+    await expect(tool("compact_lead_context").execute("compact", {})).rejects.toThrow(/reason/);
+    // Lead's own turn (no user turn): it can compact; it is not the user's request.
+    const own = JSON.parse((await tool("compact_lead_context").execute("compact", { reason: "上下文快满了" })).content[0].text);
+    expect(own).toMatchObject({ authority: "lead", result: { applied: "now", model: "vibeproxy/claude-sonnet-5" } });
+    expect(own.result.next).toContain("不要再写交接文档");
+    expect(compactions.at(-1)).toEqual({ request: {}, byUser: false });
+
+    // In the user's own turn: the model goes without its effort suffix, the instructions go with it, and the user asked.
+    const { binding } = createLoopbackBinding(db, { name: "Mac 网页" });
+    turnId = createTurn(db, { originBindingId: binding.id, originKind: "paired:companion", userText: "压缩一下上下文，用 gpt 6 luna", state: "streaming" }).id;
+    await tool("compact_lead_context").execute("compact", {
+      model: "vibeproxy/gpt-6-luna(high)", instructions: "保留工单 12 的细节", reason: "用户说压缩一下上下文，用 gpt 6 luna",
+    });
+    expect(compactions.at(-1)).toEqual({ request: { model: "vibeproxy/gpt-6-luna", instructions: "保留工单 12 的细节" }, byUser: true });
+    // It never switches Lead's model.
+    expect(switches).toEqual([]);
   });
 
   it("switch_lead_model writes a configured model and schedules restart after the turn", async () => {

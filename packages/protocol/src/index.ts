@@ -1329,6 +1329,7 @@ export * from "./ticket-actions.ts";
 export * from "./chat-images.ts";
 export * from "./ticket-attachments.ts";
 export * from "./lead-models.ts";
+export * from "./lead-context.ts";
 export * from "./model-settings.ts";
 export * from "./model-subscriptions.ts";
 export * from "./model-groups.ts";

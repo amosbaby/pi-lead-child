@@ -39,6 +39,7 @@ import {
   AutoCallBudget, autoCallBudgetLimits, autoCallUsageLine, cacheRetentionOf, ModelHold, modelBreakerLimitsFromEnv, PREFIX_WARM_LONG_MS,
   PREFIX_WARM_MS, uncachedTokens, wakePaceDecision, type ModelHoldPort,
 } from "@pi-lead-child/lead";
+import { manualCompactionHold, modelHoldError, type IdleLaneRuntimeOptions, type ManualCompactReport } from "@pi-lead-child/lead";
 import { userMessagePlacement } from "./user-placement.js";
 import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
@@ -87,7 +88,7 @@ import {
 import { createTicketReplyActionsJudge, type TicketReplyActionsJudge } from "./ticket-reply-actions.js";
 import {
   acceptRunningChildren, CHANNEL_TASK_CALLBACK, conversationWorkspaceChecksSettled, deliverySnapshotsSettled, detachRunningChildren, effectiveRunPurpose,
-  killIdleChildren, liveChildren, runWorkspaceFactsReady, setGitFactsLog, UiActionError, warmRunWorkspaceFacts, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadModelService, type UiActionServices,
+  killIdleChildren, liveChildren, runWorkspaceFactsReady, setGitFactsLog, UiActionError, warmRunWorkspaceFacts, type DecisionModelCredentials, type FollowUpEntry, type InstallFetch, type LeadContextService, type LeadModelService, type UiActionServices,
 } from "@pi-lead-child/engine";
 import { attachJsonlReader, listenOwnerOnly } from "@pi-lead-child/runtime";
 import { appendBody, getBusyPlacement, getItem, getWakePace, readLeadCallGuard, transition, writeLeadCallGuard } from "@pi-lead-child/store";
@@ -542,6 +543,8 @@ export interface DaemonOpts {
   // 测试注入：绕过真实 LLM 的 session 工厂 / fake-pi child
   // 启动时问各 CLI 要模型目录。缺省：没有注入 sessionFactory（真实 daemon）时问，测试不问。
   modelDiscovery?: boolean;
+  // Tests replace the child process that writes the idle lane's summaries (lead's idle-compaction.ts).
+  idleCompactSummarize?: IdleLaneRuntimeOptions["summarize"];
   sessionFactory?: (args: {
     dataDir: string; dbPath: string; db: Db;
     onChildDone?: LeadDeps["onChildDone"]; onChildEvent?: LeadDeps["onChildEvent"];
@@ -809,6 +812,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const idleLane = new IdleLaneRuntime({
     limits: idleLaneLimitsFromEnv(process.env, { precipitateRatio: PRECIPITATE_RATIO }),
     compactionTimeoutMs: Number(process.env.PLC_LEAD_COMPACTION_TIMEOUT_MS) > 0 ? Number(process.env.PLC_LEAD_COMPACTION_TIMEOUT_MS) : 10 * 60_000,
+    ...(opts.idleCompactSummarize ? { summarize: opts.idleCompactSummarize } : {}),
     host: {
       log,
       record: (payload) => { recordSchedulerEvent(db, "idle_job", payload); },
@@ -837,6 +841,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       },
       // 子进程写摘要失败：账号级的失败进入模型暂停（modelHold 在下面建，到用的时候已经有了）。
       modelFailed: (error) => { modelHold.failed("compaction", error); },
+      // A requested compaction ended (/compact, compact_lead_context): one line in the conversation.
+      manualCompactionDone: (report) => noteManualCompaction(report),
     },
   });
   // 回收区的删除（engine 的 workspace.ts）开始以前等 Lead 空闲（core 的 waitForHostIdle）。
@@ -1611,6 +1617,23 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (lastErrorBroadcast?.text === text && now - lastErrorBroadcast.at < 60_000) return;
     lastErrorBroadcast = { text, at: now };
     broadcast({ type: "notice", text });
+  }
+
+  // A requested compaction of Lead's context ended (2026-11-18): the user sees it in the conversation as a system notice. It
+  // says the tokens before and after and the model that wrote the summary, or why it did not compact.
+  function noteManualCompaction(report: ManualCompactReport): void {
+    try {
+      const m = serverMessages(getLocale(db)).compaction;
+      const name = leadDisplayName(db);
+      const model = report.model ?? leadSessionModelSpec();
+      const text = report.outcome === "applied" ? m.applied(name, report.tokensBefore, report.tokensAfter, model)
+        : report.outcome === "nothing" ? m.nothing(name)
+        : report.outcome === "superseded" ? m.superseded(name)
+        : m.failed(name, model, (report.error ?? "unknown").slice(0, 300));
+      publishSystemNotice(SYSTEM_TURN_ORIGINS.contextNotice, text, { id: `turn_context_${report.id}` });
+    } catch (error: any) {
+      log(`requested compaction: telling the user failed: ${error?.message ?? String(error)}`);
+    }
   }
 
   // daemon 自己发出的一条系统通知（不经过 lead），例如 blocker 提示和兜底投递的通知。
@@ -3220,6 +3243,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   const inputDeliveryEvents = reportsInputDelivery === true;
   // Lead 正在用的模型（spec D9 的模型切换会换掉它）。hello 和状态里报这个。
   let leadModelName = modelName;
+  // The model of Lead's session now (provider/id, no effort suffix), with the subscription account when there is one.
+  const leadSessionModelSpec = (): string => parseLeadModelSpec(leadCurrentModel?.() ?? leadModelName).model;
   // 模型切换（model-failover.ts）：会话能在运行中换模型、也配了模型时才有。
   // 额度用尽、在重置以前跳过的模型存在 kv 里（2026-10-19）：daemon 重启以后不再去撞一次额度。
   // 额度按周重置的规则读 config.json 的 lead.quotaResets，没有时用 DEFAULT_LEAD_QUOTA_RESETS（笔记 #46）。
@@ -3362,6 +3387,51 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     },
   };
   uiActionServices.leadModels = leadModelService;
+
+  // Compact Lead's context on request (2026-11-18): the page (POST /v1/lead/compact, /compact in the message box) and Lead
+  // (compact_lead_context, perform_action) call lead_context / compact, which calls this. The summary is written by the idle
+  // lane in a child process: now when Lead is idle, after the current unit when it is busy. Lead's model does not change.
+  const leadContextService: LeadContextService = {
+    state: () => ({ model: leadSessionModelSpec(), tokens: currentContextUsage()?.tokens ?? null }),
+    async compact(request, { byUser }) {
+      if (typeof session.compact !== "function") throw new UiActionError("unavailable", "the Lead session cannot compact");
+      const leadSpec = leadSessionModelSpec();
+      // A model without an effort suffix: the summary call has no effort setting. A suffix is ignored.
+      const requested = request.model?.trim() ? parseLeadModelSpec(request.model).model : null;
+      if (requested) {
+        try {
+          await assertConfiguredLeadModel(requested, loadLeadModelConfig(opts.dataDir));
+        } catch (error) {
+          throw new UiActionError("invalid_input", error instanceof Error ? error.message : String(error));
+        }
+      }
+      const overrideModel = requested !== null && subscriptionSlotSpec(requested) !== subscriptionSlotSpec(leadSpec);
+      const model = overrideModel ? requested! : leadSpec;
+      const tokensBefore = currentContextUsage()?.tokens ?? null;
+      // The hold rule (lead's manualCompactionHold): another model, or the user's own request, passes the hold of Lead's model.
+      if (manualCompactionHold({ overrideModel, held: modelHold.held, byUser }) === "refuse") {
+        log(`requested compaction refused: Lead's model is on hold (${modelHold.state?.kind ?? "-"})`);
+        return { applied: "held", model, tokensBefore, existing: false, reason: modelHoldError(modelHold.state) };
+      }
+      const ticket = idleLane.requestCompaction({
+        model: overrideModel ? requested : null, overrideModel, instructions: request.instructions?.trim() || null,
+      });
+      log(`requested compaction ${ticket.id}: ${ticket.applied}${ticket.existing ? " (joined)" : ""}, model ${model}, by ${byUser ? "the user" : "Lead"}`);
+      if (ticket.applied === "now" && !ticket.existing) {
+        // Lead is idle: the probe takes a few milliseconds. It tells at once when there is nothing to compact.
+        await idleLane.sessionFree();
+        const report = idleLane.manualCompactionReport(ticket.id);
+        if (report?.outcome === "nothing") {
+          return { applied: "nothing_to_compact", model, tokensBefore, existing: false, reason: report.error };
+        }
+      }
+      return {
+        applied: ticket.applied, model: ticket.existing && ticket.model ? ticket.model : model, tokensBefore, existing: ticket.existing,
+        reason: null,
+      };
+    },
+  };
+  uiActionServices.leadContext = leadContextService;
 
   // 设置 → 模型的订阅（模型配置方案 C 的 S2，subscriptions.ts）：GitHub Copilot 和 Codex 的账号、登录、换号方式。
   // 凭据和 pi-multi-pass 的配置在 pi 的 agentDir（D2）。模型目录列出有账号登录了的订阅的模型（setLeadSubscriptionSource）。
@@ -3788,7 +3858,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (idle.ours && !idle.applied) return;
       // 压缩也是系统发起的模型调用（2026-11-16：一次压缩发了 394 万 token）：成功的按它的用量记进自动调用的预算，
       // 失败的记一次调用。被中止的不算。超了就暂停，和上面一样。
-      if (outcome.kind !== "aborted") {
+      // A requested compaction is not an automatic call: someone asked for it (lead_context / compact).
+      if (outcome.kind !== "aborted" && !idle.manual) {
         const over = autoBudget.record(uncachedTokens(event.result?.usage));
         if (over) modelHold.pause(over.until, over.detail);
       }

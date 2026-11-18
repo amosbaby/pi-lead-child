@@ -35,6 +35,7 @@ import { SignalSourceInputSchema, SignalSourceUpdateSchema } from "./signal-sour
 import { AgendaEntryPatchSchema, AgendaFeedInputSchema, AgendaFeedUpdateSchema, AgendaSnapshotSchema } from "./agenda-feeds.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { SetWakePaceRequestSchema } from "./wake-pace.ts";
+import { CompactLeadContextRequestSchema } from "./lead-context.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
 import { TimerRequestDecisionSchema } from "./timer-origins.ts";
@@ -73,6 +74,8 @@ export const ActionPermissionSchema = Type.Union([
 //   channel_policy  一个来源的「自动代你处理」：开关、授权表和信心模型的参数（设置 → 消息通道，2026-10-23）。编号是来源，例如 slack。
 //   channel_handbook  交接说明（设置 → 消息通道 → 自动代你处理，方案 B，2026-10-30，channel-handbook.ts）。编号只有 handbook。
 //   lead_model  Lead 自己用的模型和推理强度（会话输入框右下角，2026-10-26，lead-models.ts）。编号只有 lead。
+//   lead_context  Lead's context: compact it now, optionally with another model (/compact in the message box, 2026-11-18,
+//     lead-context.ts). The id is always "lead".
 //   reminder   一条提醒（会话里的提醒卡、响铃卡、横幅、收件箱，P03、P04）。编号是提醒的编号（工单编号）。
 //   workspace  一张工单的工作区（工单详情的工作区一栏，P04）。编号是工作区的编号。
 //   milestone  工单的一个日期节点（日程、左栏，P04）。编号是节点的编号。
@@ -109,7 +112,7 @@ export const ActionPermissionSchema = Type.Union([
 //   agenda_feed  One feed: update, pause, resume, delete, sync a snapshot (Lead only). The id is the feed name.
 //   agenda_entry  One external entry: mute it or change its lead time. The id is the entry id.
 export const UI_ACTION_TARGET_TYPES = [
-  "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model",
+  "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model", "lead_context",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
@@ -242,6 +245,10 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   lead_model: {
     // 换 Lead 的模型和推理强度。写进 config.json 的 lead.models（排第一），Lead 空闲时马上换，正在回答时这一轮结束后换。
     switch: LeadModelChoiceSchema,
+  },
+  lead_context: {
+    // Compact Lead's context now (Lead idle) or after the current unit (Lead busy). model: the summary model; Lead's model stays.
+    compact: CompactLeadContextRequestSchema,
   },
   reminder: {
     // 知道了：到点的提醒确认掉（fired → acked）。acked 是终态。

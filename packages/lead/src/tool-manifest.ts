@@ -41,7 +41,7 @@ const INSTANT_WRITES = [
   "create_task", "create_reminder", "create_project", "set_display_title", "set_milestone", "update_milestone",
   "update_agenda_note", "update_project_summary", "link_project_repository", "merge_projects", "link_tickets",
   "authorize_retry", "register_run_outcome", "request_runtime_maintenance", "clear_lead_model_quota", "switch_lead_model",
-  "save_note", "update_note", "invalidate_memory", "create_cron_trigger", "create_once_trigger", "set_trigger_enabled",
+  "compact_lead_context", "save_note", "update_note", "invalidate_memory", "create_cron_trigger", "create_once_trigger", "set_trigger_enabled",
   "add_comment", "record_decision", "create_continuation", "ack_reminder", "update_item", "reschedule_reminder", "defer_item",
   "confirm_item", "render_ui", "follow_up", "cancel_follow_up", "record_disposition", "watch", "wait_for_user_action",
   "cancel_wait", "record_handback", "mark_channel_card_handled", "propose_standing_order_change", "update_lead_profile",

@@ -27,6 +27,9 @@ export const SYSTEM_TURN_ORIGINS = {
   ownerAction: "system:owner-action",
   // 安全报警（security-alerts.ts）：daemon 发现有人绕过 API 改了账本里的设置、或者 child 想写账本，直接写的会话卡。
   securityAlert: "system:security-alert",
+  // A requested compaction of Lead's context ended (compact_lead_context, /compact, 2026-11-18): the daemon writes one line
+  // with the tokens before and after and the model that wrote the summary.
+  contextNotice: "system:context-notice",
   // 提醒到点（工单 07）：Lead 空着时，daemon 为一条到点的提醒单独开一轮。这一轮说的话挂在提醒卡下面（lead.turn_responding）。
   reminder: "system:reminder",
 } as const;
@@ -36,17 +39,18 @@ export type SystemTurnOrigin = typeof SYSTEM_TURN_ORIGINS[keyof typeof SYSTEM_TU
 // Lead 自己发起的回合只写「Lead」，和用户发起的回合一样：发生了什么由消息内容说明（2026-10-15 用户决定，
 // 方案 A）。daemon 自己写的通知不是 Lead 在说话，标成系统通知。
 // 系统通知的标签按界面语言（system-turns.messages.ts）。
-const NOTICE_LABELS: Record<string, "blockerNotice" | "fallbackNotice" | "ownerAction" | "securityAlert"> = {
+const NOTICE_LABELS: Record<string, "blockerNotice" | "fallbackNotice" | "ownerAction" | "securityAlert" | "contextNotice"> = {
   [SYSTEM_TURN_ORIGINS.blockerNotice]: "blockerNotice",
   [SYSTEM_TURN_ORIGINS.fallbackNotice]: "fallbackNotice",
   [SYSTEM_TURN_ORIGINS.ownerAction]: "ownerAction",
   [SYSTEM_TURN_ORIGINS.securityAlert]: "securityAlert",
+  [SYSTEM_TURN_ORIGINS.contextNotice]: "contextNotice",
 };
 
 // daemon 自己写的通知：不是 Lead 的回合，也不是任何人的回答。
 export const DAEMON_NOTICE_ORIGINS: readonly SystemTurnOrigin[] = [
   SYSTEM_TURN_ORIGINS.blockerNotice, SYSTEM_TURN_ORIGINS.fallbackNotice, SYSTEM_TURN_ORIGINS.ownerAction,
-  SYSTEM_TURN_ORIGINS.securityAlert,
+  SYSTEM_TURN_ORIGINS.securityAlert, SYSTEM_TURN_ORIGINS.contextNotice,
 ];
 
 export function isDaemonNoticeOrigin(originKind: string | null | undefined): boolean {

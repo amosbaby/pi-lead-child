@@ -42,7 +42,7 @@ export const LEAD_CODEMODE_TOOL_GROUPS: ReadonlyArray<{ label: string; tools: re
     label: "设置和系统",
     tools: [
       "update_lead_profile", "set_lead_avatar", "update_design_preferences", "switch_lead_model", "clear_lead_model_quota",
-      "propose_standing_order_change", "get_standing_order", "list_standing_orders", "get_triage_shadow_report",
+      "compact_lead_context", "propose_standing_order_change", "get_standing_order", "list_standing_orders", "get_triage_shadow_report",
       "read_lead_turns", "request_runtime_maintenance", "suggest_route",
       // 沙箱里跑不了 ps（2026-10-29）：daemon 在沙箱外读进程表。少用。
       "list_processes",

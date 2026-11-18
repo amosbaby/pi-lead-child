@@ -87,7 +87,7 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "create_task", "create_reminder", "create_project", "set_display_title", "set_milestone", "update_milestone",
   "update_agenda_note", "update_project_summary", "link_project_repository", "merge_projects", "link_tickets",
   "authorize_retry", "register_run_outcome", "request_runtime_maintenance",
-  "clear_lead_model_quota", "switch_lead_model", "spawn_child", "ticket_action", "recover_ticket_run", "run_on_host",
+  "clear_lead_model_quota", "switch_lead_model", "compact_lead_context", "spawn_child", "ticket_action", "recover_ticket_run", "run_on_host",
   "continue_ticket_agent", "steer_child", "save_note", "update_note", "invalidate_memory", "create_cron_trigger",
   "create_once_trigger", "set_trigger_enabled", "add_comment", "record_decision", "preflight_delegation",
   "create_continuation", "complete_delivery", "ack_reminder", "update_item", "reschedule_reminder", "defer_item",
