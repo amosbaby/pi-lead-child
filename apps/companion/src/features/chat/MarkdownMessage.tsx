@@ -6,7 +6,8 @@ import { createContext, useContext, useMemo } from 'react';
 
 import { MarkdownInlineText } from './MarkdownInlineText';
 import { ObjectLinksAllowed } from './ObjectLink';
-import { parseMarkdownMessage, type MarkdownBlock, type MarkdownInline } from './markdownModel';
+import { markdownBlockText, parseMarkdownMessage, type MarkdownBlock, type MarkdownInline } from './markdownModel';
+import { QuotableBlock } from './QuotableBlock';
 
 // 把 Lead 的 Markdown 回复渲染成组件库的文字和块。解析见 markdownModel.ts。主会话和工单对话都用它。
 // 宽度跟着所在的内容列（会话里是 ConversationColumn，2026-10-16）：正文和卡片一样宽，不再单独限在 prose。
@@ -59,16 +60,20 @@ function MarkdownBlocks({ blocks, nested = false, top = false, depth = 0, tone =
 }) {
   return (
     <Column w="100%" gap={nested ? 'list-row' : 'reply-block'}>
-      {blocks.map((block, index) => (
-        <MarkdownBlockView
-          key={`${block.kind}-${index}`}
-          block={block}
-          first={index === 0}
-          lead={top && index === 0 && isLeadSentence(block)}
-          depth={depth}
-          tone={tone}
-        />
-      ))}
+      {blocks.map((block, index) => {
+        const view = (
+          <MarkdownBlockView
+            key={`${block.kind}-${index}`}
+            block={block}
+            first={index === 0}
+            lead={top && index === 0 && isLeadSentence(block)}
+            depth={depth}
+            tone={tone}
+          />
+        );
+        // 最外层的每一段：手机上可以右滑、长按引用它（QuotableBlock，设计规范 P17.10）。没开手势时原样画。
+        return top ? <QuotableBlock key={`${block.kind}-${index}`} text={markdownBlockText(block)}>{view}</QuotableBlock> : view;
+      })}
     </Column>
   );
 }

@@ -216,3 +216,23 @@ function blockTokens(tokens: Token[]): MarkdownBlock[] {
 export function parseMarkdownMessage(markdown: string, options: { breaks?: boolean } = {}): MarkdownBlock[] {
   return blockTokens(marked.lexer(markdown, { gfm: true, breaks: options.breaks === true }));
 }
+
+// 一块的纯文字（手机上整段引用时用，设计规范 P17.10）：去掉格式，列表一项一行，表格一格一个空格。
+export function markdownBlockText(block: MarkdownBlock): string {
+  const inlines = (items: MarkdownInline[]) => items.map((inline) => inline.text).join('');
+  switch (block.kind) {
+    case 'heading':
+    case 'paragraph':
+      return inlines(block.inlines);
+    case 'list':
+      return block.items.map((item) => item.blocks.map(markdownBlockText).join('\n')).join('\n');
+    case 'quote':
+      return block.blocks.map(markdownBlockText).join('\n');
+    case 'code':
+      return block.text;
+    case 'table':
+      return [block.header, ...block.rows].map((row) => row.map(inlines).join(' ')).join('\n');
+    case 'rule':
+      return '';
+  }
+}

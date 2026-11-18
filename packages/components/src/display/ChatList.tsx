@@ -40,6 +40,11 @@ export type ChatListProps<T> = {
   onStartReached?: () => void;
   /** 还没量过的块按这个高度估算。 */
   estimatedItemSize?: number;
+  /**
+   * 列表把「滚到某一块」的函数放在这里（引用回复的跳回原文，设计规范 P17.7、Q-9）。传块的 key，
+   * 把它滚到可视区上部三分之一处；这一块不在 data 里时返回 false（调用方先加载更早的再试）。
+   */
+  jumpRef?: { current: ((key: string) => boolean) | null };
 };
 
 /** 可视区以外上下各多画这么多像素：快速滚动时不露白，展开的浮层跟着卡片滚出一小段也还在（P2.6）。 */
@@ -117,7 +122,7 @@ function useGapSeparator(gap: ColumnProps['gap'], testID: string | undefined) {
 
 function VirtualChatList<T>({
   data, keyExtractor, renderItem, extraData, testID, followKey, bottomAligned = true, newContentLabel: newContentLabelProp,
-  gap = 'conversation-block', header, footer, empty, onStartReached, estimatedItemSize = ESTIMATED_ITEM_SIZE,
+  gap = 'conversation-block', header, footer, empty, onStartReached, estimatedItemSize = ESTIMATED_ITEM_SIZE, jumpRef,
 }: ChatListProps<T>) {
   const m = useMessages(displayMessages);
   const newContentLabel = newContentLabelProp ?? m.newMessages;
@@ -234,6 +239,20 @@ function VirtualChatList<T>({
     return () => node.removeEventListener('pointerdown', onPress, { capture: true });
   }, []);
 
+  // 滚到某一块（jumpRef）：停下贴底跟随，免得新内容又把列表拉回底部。
+  useEffect(() => {
+    if (!jumpRef) return undefined;
+    jumpRef.current = (key: string) => {
+      const index = data.findIndex((item) => keyExtractor(item) === key);
+      const list = listRef.current;
+      if (index < 0 || !list) return false;
+      list.cancelScroll();
+      void list.scrollToIndex({ index, animated: true, viewPosition: 0.33 });
+      return true;
+    };
+    return () => { jumpRef.current = null; };
+  }, [data, jumpRef, keyExtractor]);
+
   const backToBottom = useCallback(() => {
     setNewBelow(false);
     void listRef.current?.scrollToEnd({ animated: true });
@@ -281,10 +300,25 @@ function VirtualChatList<T>({
 
 // 不虚拟化：每一块都画在普通的滚动区里（测试的 DOM 环境里量不出行高，虚拟化以后一块也不画）。跟随底部、「新消息 ↓」都没有。
 function ChatListAll<T>({
-  data, keyExtractor, renderItem, testID, bottomAligned = true, gap = 'conversation-block', header, footer, empty,
+  data, keyExtractor, renderItem, testID, bottomAligned = true, gap = 'conversation-block', header, footer, empty, jumpRef,
 }: ChatListProps<T>) {
   const Separator = useGapSeparator(gap, testID);
   const scrollRef = useRef<ScrollAreaHandle | null>(null);
+  // 滚到某一块（jumpRef）：每一块都画着，web 上直接让那一块滚进可视区。
+  useEffect(() => {
+    if (!jumpRef) return undefined;
+    jumpRef.current = (key: string) => {
+      if (!data.some((item) => keyExtractor(item) === key)) return false;
+      if (Platform.OS === 'web' && typeof document !== 'undefined') {
+        const block = document.querySelector(`[data-chat-key="${CSS.escape(key)}"]`);
+        if (block && typeof (block as HTMLElement).scrollIntoView === 'function') {
+          (block as HTMLElement).scrollIntoView({ block: 'start', behavior: 'smooth' });
+        }
+      }
+      return true;
+    };
+    return () => { jumpRef.current = null; };
+  }, [data, jumpRef, keyExtractor]);
   // 第一次有了内容时落到最底下。
   const placed = useRef(false);
   const onContentSizeChange = useCallback((_width: number, height: number) => {

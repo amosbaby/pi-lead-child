@@ -3,6 +3,10 @@ import { defineMessages } from '@/i18n';
 
 export const composerMessages = defineMessages({
   en: {
+    quoteNotePlaceholder: 'Say something about it, or leave it empty',
+    quoteAdd: 'Add',
+    quoteSave: 'Save',
+    quoteRemove: 'Remove',
     placement: { steer: 'Steer', followUp: 'Queue' },
     imageFailed: 'Some images could not be added.',
     send: 'Send',
@@ -40,6 +44,10 @@ export const composerMessages = defineMessages({
     },
   },
   zh: {
+    quoteNotePlaceholder: '对这段说点什么，也可以不写',
+    quoteAdd: '加上',
+    quoteSave: '保存',
+    quoteRemove: '删掉',
     placement: { steer: '插话', followUp: '排队' },
     imageFailed: '有图片没能加上',
     send: '发送',

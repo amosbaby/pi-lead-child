@@ -6,7 +6,7 @@ import {
   Text,
 } from '@pi-lead-child/components';
 import {
-  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
+  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, CHAT_QUOTES_CAPABILITY, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
   ownerActionRefOfTurn, SYSTEM_TURN_ORIGINS, ticketNeedsUser,
   ticketNeedsUserLabel, ticketTurn, type ChatPlacement, type KernelTicketWorkItemV2,
   type ChannelCardDto,
@@ -14,7 +14,7 @@ import {
   type TicketSummary,
   validateUiSurface,
 } from '@pi-lead-child/protocol';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useRouter } from 'expo-router';
 import { ticketsNeedingUser } from '@pi-lead-child/protocol';
 
@@ -56,7 +56,12 @@ import {
 } from '../../state/hooks';
 import type { ConversationCardEntity, LeadTurnEntity, MessageEntity, MessagePart } from '../../state/types';
 import { QuoteBlock } from './QuoteViews';
-import { useQuoteJump } from './quoteNavigation';
+import { QuoteJumpContext, useQuoteJump, type QuotePartForJump } from './quoteNavigation';
+import { quoteDrafts } from './quoteDrafts';
+import { flashQuote } from './quoteFlash';
+import { QuoteSource } from './QuoteSource';
+import { SelectionReplyLayer } from './SelectionReplyLayer';
+import { QuoteGesturesContext } from './quoteSources';
 import { RESOURCE_KEYS } from '../../state/types';
 
 import { CheckpointCard } from './CheckpointCard';
@@ -293,14 +298,49 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
   // 不看连接：消息先进本机发件箱，断线时显示「连接恢复后发送」，连上以后按顺序发出（2026-10-16）。
-  const send = (message: string, images: ChatImageInput[]) => {
+  // 引用回复（设计规范 P17）：daemon 收引用时（chat.quotes.v1）才能引用。
+  const canQuote = useControlPlaneStore((state) => state.capabilities.includes(CHAT_QUOTES_CAPABILITY));
+  const send = (message: string, images: ChatImageInput[], quotes?: ChatQuoteInput[]) => {
     const mode = canPlace && leadBusy ? (canSteerQueued ? (placesByPreference ? undefined : 'followUp') : placement) : undefined;
     const once = canTurnModel ? turnModel : null;
     setTurnModel(null);
-    void (once
+    const sent = quotes?.length
+      ? runtime.sendChat(message, undefined, mode, images.length ? images : undefined, once ?? undefined, quotes)
+      : once
       ? runtime.sendChat(message, undefined, mode, images.length ? images : undefined, once)
-      : images.length ? runtime.sendChat(message, undefined, mode, images) : runtime.sendChat(message, undefined, mode)).catch(() => {});
+      : images.length ? runtime.sendChat(message, undefined, mode, images) : runtime.sendChat(message, undefined, mode);
+    void sent.catch(() => {});
   };
+  // 引用浮层里按 ⌘Enter 或发送钮：托盘里的和这一段一起马上发出，正文是空的（说明就是你要说的话，P17.5）。
+  const sendQuotesNow = () => {
+    const quotes = quoteDrafts.getState().take();
+    if (quotes.length) send('', [], quotes);
+  };
+  // 跳回引用的原文（P17.7、P17.8、Q-9）：先在画出来的页面里找；不在时让列表滚到那一块；还没加载的先往上加载。
+  // 手机上右滑、长按一段开始引用以后：聚焦输入框、弹出键盘（P17.10）。
+  const quoteGestures = useMemo(() => ({ onBegin: () => composerRef.current?.focus() }), []);
+  const jumpRef = useRef<((key: string) => boolean) | null>(null);
+  const loadOlderRef = useRef<(() => Promise<unknown> | undefined) | null>(null);
+  const rowsRef = useRef(rows);
+  rowsRef.current = rows;
+  const jumpToQuote = useCallback((quote: QuotePartForJump) => {
+    if (flashQuote(quote.source, quote.text, quote.anchor)) return;
+    const rowKey = () => rowsRef.current.find((row) => (quote.source.kind === 'turn'
+      ? row.kind === 'message' && row.messageId.endsWith(`:${quote.source.turnId}:${quote.source.role}`)
+      : row.kind === 'channel-cards' && row.cardIds.includes(quote.source.cardId)))?.key ?? null;
+    let attempts = 0;
+    const tryJump = () => {
+      const key = rowKey();
+      if (key && jumpRef.current?.(key)) {
+        // 列表滚过去、那一块画出来以后再闪。
+        setTimeout(() => flashQuote(quote.source, quote.text, quote.anchor), 400);
+        return;
+      }
+      if (attempts++ >= 5) return;
+      void Promise.resolve(loadOlderRef.current?.()).then(() => setTimeout(tryJump, 200));
+    };
+    tryJump();
+  }, []);
   const loadOlderConversationCards = async () => {
     if (!connected || historyRequest.loading) return;
     setHistoryRequest({ loading: true, error: null });
@@ -324,6 +364,13 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
     if (!connected) return;
     if (turnHistory.hasMore && (retry || !turnHistory.error)) void runtime.loadOlderConversationTurns();
     if (conversationCardPage?.hasMore && (retry || !historyRequest.error)) void loadOlderConversationCards();
+  };
+  // 跳回引用的原文时往上加载一页（jumpToQuote）：等它加载完再找。
+  loadOlderRef.current = () => {
+    if (!connected) return undefined;
+    if (turnHistory.hasMore) return runtime.loadOlderConversationTurns();
+    if (conversationCardPage?.hasMore) return loadOlderConversationCards();
+    return undefined;
   };
 
   // 一块要画的东西都在 rowContext 里：它变了，看得见的块重画（ChatList 的 extraData）。
@@ -387,6 +434,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
 
   // 会话按外观偏好里会话区域的密度（缺省标准）。
   return (
+    <QuoteJumpContext.Provider value={canQuote ? jumpToQuote : null}>
+    <QuoteGesturesContext.Provider value={canQuote && compact ? quoteGestures : null}>
     <Density zone="conversation"><KeyboardArea testID="lead-conversation" bg={compact ? 'page' : 'surface'}>
       {/* 手机上没有顶栏，是两颗悬浮圆钮（主题 11.20 H-2，2026-11-14 方案 F）。 */}
       {compact ? (
@@ -463,6 +512,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         followKey={lastUserMessageId}
         bottomAligned={false}
         onStartReached={loadOlder}
+        jumpRef={jumpRef}
         header={listHeader}
         // spacing-exempt: 会话流上下的留白，手机 18、桌面 24（和以前的 py 一样）
         footer={<Box pb={compact ? 18 : 24} />}
@@ -495,6 +545,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           placeholder={connected ? m.composer.placeholder(leadName) : m.composer.offline}
           onSend={send}
           attachImages={canSendImages}
+          quotes={canQuote}
           // 输入框上不放模型（模型配置方案 C 的 S4）：输入 /model 打开换模型的浮层，这句话不发给 Lead。
           onModelCommand={() => composerAnchorRef.current?.measure((anchor) => setPicker({ anchor }))}
           chip={canTurnModel && turnModel ? (
@@ -537,7 +588,11 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           onOpenWaiting={openWaiting}
         />
       ) : null}
+      {/* 桌面上的选字回复（设计规范 P17、主题 Q-1–Q-3）：画在页面最上层，不占会话列表的位置。手机上从右滑和长按开始。 */}
+      <SelectionReplyLayer enabled={canQuote && !compact} onSendNow={sendQuotesNow} />
     </KeyboardArea></Density>
+    </QuoteGesturesContext.Provider>
+    </QuoteJumpContext.Provider>
   );
 }
 
@@ -775,12 +830,15 @@ function ConversationMessage({
     const text = turnUserPart?.kind === 'text' ? turnUserPart.text : '';
     const quotes = turnUserQuotes.length ? turnUserQuotes : undefined;
     if (!turnUserImages.length) {
-      if (text.trim() || quotes) void runtime.sendChat(text, undefined, undefined, undefined, turnModel, quotes).catch(() => {});
+      if (quotes) void runtime.sendChat(text, undefined, undefined, undefined, turnModel, quotes).catch(() => {});
+      else if (text.trim()) void (turnModel ? runtime.sendChat(text, undefined, undefined, undefined, turnModel) : runtime.sendChat(text)).catch(() => {});
       return;
     }
     void Promise.all(turnUserImages.map((part): Promise<ChatImageInput> | ChatImageInput =>
       part.data !== undefined ? { mimeType: part.mimeType, data: part.data } : runtime.loadChatImage(part.imageId ?? '')))
-      .then((images) => runtime.sendChat(text, undefined, undefined, images, turnModel, quotes))
+      .then((images) => (quotes
+        ? runtime.sendChat(text, undefined, undefined, images, turnModel, quotes)
+        : runtime.sendChat(text, undefined, undefined, images, turnModel)))
       .catch(() => {});
   };
   // 一个字也没说的助手消息不画内容区，失败了就只显示错误。和工单对话（TicketThread）同一条规则。
@@ -810,6 +868,7 @@ function ConversationMessage({
       ) : null}
       {userImages.length ? <UserMessageImages images={userImages} /> : null}
       {bubble && userBubble ? (
+        <QuoteSourceFor turnId={message.turnId} role="user" text={rawText}>
         <MessageBubble testID="user-bubble">
           {userQuotes.length ? (
             <Column gap="card-row" testID="user-message-quotes">
@@ -827,6 +886,7 @@ function ConversationMessage({
             />
           ))}
         </MessageBubble>
+        </QuoteSourceFor>
       ) : null}
       {deliveryCopy ? (
         <Text testID="outbox-status" size="meta" tone={message.delivery === 'pending' ? 'warning-dark' : 'secondary'} align="right">
@@ -839,6 +899,7 @@ function ConversationMessage({
       {bubble && !user ? (
         // Lead 的回复不加气泡，直接排在白底上，Lead 主动发起的也一样（方案 A）。只有 daemon 自己写的系统通知铺一层浅底色。
         // 消息头、正文、依据、附件之间是 reply-block，和正文的段落间距一样（2026-10-21，原来是 10）。
+        <QuoteSourceFor turnId={systemNotice ? null : message.turnId} role="assistant" text={rawText}>
         <Column gap="reply-block" {...(systemNotice ? { px: 14, py: 12, rounded: 'xl', bg: 'accent-wash' } as const : {})}>
           <AssistantTurnView
             compact={compact}
@@ -852,6 +913,7 @@ function ConversationMessage({
             taskVariant="inline"
           />
         </Column>
+        </QuoteSourceFor>
       ) : null}
       {/* 回答写到一半被你的插话打断（2026-11-10，设计规范 P10.2）：写出的字照原样留着，后面接一个琥珀虚线胶囊写原因。
           你自己打断的，没有「重发」：Lead 在插话那一轮里接着做。 */}
@@ -896,6 +958,14 @@ type ImagePart = Extract<MessagePart, { kind: 'image' }>;
 
 function isImagePart(part: MessagePart): part is ImagePart {
   return part.kind === 'image';
+}
+
+// 能引用的一段（设计规范 P17.1）：有轮次的 Lead 回答和你的消息。daemon 自己写的系统通知、没有轮次的本地消息不能引用。
+function QuoteSourceFor({ turnId, role, text, children }: {
+  turnId: string | null | undefined; role: 'assistant' | 'user'; text: string; children: ReactNode;
+}) {
+  if (!turnId || !text.trim()) return <>{children}</>;
+  return <QuoteSource source={{ kind: 'turn', turnId, role }} texts={[text]}>{children}</QuoteSource>;
 }
 
 type QuotePart = Extract<MessagePart, { kind: 'quote' }>;

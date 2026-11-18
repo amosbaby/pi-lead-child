@@ -128,7 +128,8 @@ describe('chat prototype density', () => {
     expect(composer).toContain('useCompanionRuntime');
     expect(composer).toContain("useState(() => workspace.getState().composerDraftByContext[contextKey] ?? '')");
     expect(composer).toContain('onBlur={() => workspace.getState().setComposerDraft(contextKey, text)}');
-    expect(composer).toContain('onSend(text.trim(), images.map(');
+    expect(composer).toContain('const sentImages = images.map(');
+    expect(composer).toContain('onSend(text.trim(), sentImages');
   });
 
   // 会话栏是白底：进展通知铺一层浅底，但不加边框和阴影，比待处理的介入卡片轻一档。

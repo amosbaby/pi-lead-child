@@ -1,8 +1,8 @@
 import {
-  Box, ChatInput, Column, elevation, IconButton, ImageThumbnail, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
+  Box, Button, ChatInput, Column, elevation, IconButton, ImageThumbnail, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
 } from '@pi-lead-child/components';
 import {
-  CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, type ChatImageInput, type ChatPlacement,
+  CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, type ChatImageInput, type ChatPlacement, type ChatQuoteInput,
 } from '@pi-lead-child/protocol';
 import { useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
@@ -11,12 +11,14 @@ import { canPickImages, ChatImageError, pickImageFiles, prepareChatImage, type C
 import { useCompanionRuntime } from '@/state/CompanionStateProvider';
 
 import { composerMessages } from './composer.messages';
+import { QuotingSlot, QuoteTray } from './QuoteTray';
+import { quoteDrafts, useQuoteDrafts } from './quoteDrafts';
 
 type MessageComposerProps = {
   contextKey: string;
   placeholder: string;
-  // images：随消息发的图片（只有给了 attachImages 的输入框才会有）。
-  onSend: (message: string, images: ChatImageInput[]) => void;
+  // images：随消息发的图片（只有给了 attachImages 的输入框才会有）。quotes：引用的几段话（只有给了 quotes 的输入框才会有）。
+  onSend: (message: string, images: ChatImageInput[], quotes?: ChatQuoteInput[]) => void;
   compact?: boolean;
   // 工单对话坞里的输入框：一行，只有文字和发送按钮。
   minimal?: boolean;
@@ -42,9 +44,13 @@ type MessageComposerProps = {
   onPlus?: () => void;
   // 页面拿来从加号面板里选图片（选好的图片加进这张输入框）。
   ref?: Ref<MessageComposerHandle>;
+  // 能不能带引用（设计规范 P17）：Lead 的会话，daemon 也收引用（CHAT_QUOTES_CAPABILITY）。给了时卡片上半截有引用托盘；
+  // 手机（float）上正在引用的一段在输入区上面，这时输入的字是对这一段的说明（Q-5）。
+  quotes?: boolean;
 };
 
-export type MessageComposerHandle = { pickImages: () => void; canAttach: boolean };
+// focus：手机上开始引用一段以后，聚焦输入框、弹出键盘（设计规范 P17.10）。
+export type MessageComposerHandle = { pickImages: () => void; canAttach: boolean; focus: () => void };
 
 export type ComposerTray = { row: ReactNode; drawer: ReactNode; open: boolean };
 
@@ -84,7 +90,7 @@ export function MessageComposer(props: MessageComposerProps) {
 // web 上 Enter 发送、Shift+Enter 换行；可以粘贴剪贴板里的图片。草稿按 contextKey 存在工作区里，失去焦点时保存（图片不存）。
 function MessageComposerField({
   contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, chip, modelControl, tray,
-  float = false, onPlus, ref,
+  float = false, onPlus, ref, quotes = false,
 }: MessageComposerProps) {
   const locale = useLocale();
   const m = composerMessages(locale);
@@ -96,7 +102,11 @@ function MessageComposerField({
   // 正在处理（读取、缩小）的图片张数：处理完之前不能发送。
   const [preparing, setPreparing] = useState(0);
   const canAttach = attachImages && canPickImages && !minimal;
-  const ready = !disabled && preparing === 0 && (text.trim().length > 0 || images.length > 0);
+  const quoteCount = useQuoteDrafts((state) => (quotes ? state.drafts.length + (state.pending ? 1 : 0) : 0));
+  const pendingQuote = useQuoteDrafts((state) => (quotes ? state.pending : null));
+  // 手机上正在引用：输入框写的是对这一段的说明，存在引用里（Q-5）；平常的草稿留着，加上或取消以后回来。
+  const noteMode = float && pendingQuote !== null;
+  const ready = !disabled && preparing === 0 && (text.trim().length > 0 || images.length > 0 || quoteCount > 0);
   const inputRef = useRef<ChatInputHandle>(null);
 
   const send = () => {
@@ -108,7 +118,10 @@ function MessageComposerField({
       onModelCommand();
       return;
     }
-    onSend(text.trim(), images.map(({ mimeType, data }) => ({ mimeType, data })));
+    const taken = quotes ? quoteDrafts.getState().take() : [];
+    const sentImages = images.map(({ mimeType, data }) => ({ mimeType, data }));
+    if (taken.length) onSend(text.trim(), sentImages, taken);
+    else onSend(text.trim(), sentImages);
     setText('');
     setAttachments(EMPTY_ATTACHMENTS);
     workspace.getState().clearComposerDraft(contextKey);
@@ -128,7 +141,7 @@ function MessageComposerField({
   };
 
   const pickImages = () => void pickImageFiles().then(addFiles);
-  useImperativeHandle(ref, () => ({ pickImages, canAttach }));
+  useImperativeHandle(ref, () => ({ pickImages, canAttach, focus: () => inputRef.current?.focus() }));
 
   const removeImage = (key: string) => {
     setAttachments((current) => ({ images: current.images.filter((image) => image.key !== key), notice: null }));
@@ -137,9 +150,9 @@ function MessageComposerField({
   const input = (
     <ChatInput
       ref={inputRef}
-      value={text}
-      onChangeText={setText}
-      placeholder={placeholder}
+      value={noteMode ? pendingQuote.note : text}
+      onChangeText={noteMode ? (note: string) => quoteDrafts.getState().setPendingNote(note) : setText}
+      placeholder={noteMode ? m.quoteNotePlaceholder : placeholder}
       disabled={disabled}
       onSubmit={send}
       {...(canAttach ? { onPasteFiles: (files: Blob[]) => void addFiles(files) } : {})}
@@ -190,8 +203,10 @@ function MessageComposerField({
             ))}
           </Row>
         ) : null}
+        {quotes ? <QuoteTray compact /> : null}
         {notice ? <Text testID="composer-notice" size="note" tone="danger" px="inline-item">{notice}</Text> : null}
         {chip ? <Box px="inline-item" pt="inline-item">{chip}</Box> : null}
+        {noteMode ? <QuotingSlot onFocusInput={() => inputRef.current?.focus()} /> : null}
         <Box px="inline-item" py="inline-item">{input}</Box>
         <Row items="center" gap="inline-item">
           {onPlus ? (
@@ -210,7 +225,21 @@ function MessageComposerField({
           ) : null}
           {preparing > 0 ? <Text testID="composer-preparing" size="note" tone="muted">{m.preparingImages}</Text> : null}
           <Spacer />
-          <IconButton
+          {noteMode ? (
+            // Q-6：正在引用时多一颗「加上」：收进托盘，接着引用别处（P17.5）。改托盘里的一条时是「删掉」和「保存」。
+            pendingQuote.editingId ? (
+              <>
+                <Button testID="quote-remove" label={m.quoteRemove} variant="soft" tone="neutral" size="lg" shape="pill"
+                  onPress={() => quoteDrafts.getState().remove(pendingQuote.editingId!)} />
+                <Button testID="quote-save" label={m.quoteSave} icon="check" tone="accent" size="lg" shape="pill"
+                  onPress={() => quoteDrafts.getState().commit()} />
+              </>
+            ) : (
+              <Button testID="quote-add" label={m.quoteAdd} icon="plus" variant="soft" tone="neutral" size="lg" shape="pill"
+                onPress={() => quoteDrafts.getState().commit()} />
+            )
+          ) : null}
+          {noteMode && pendingQuote.editingId ? null : <IconButton
             testID="send-message"
             icon="arrow-up"
             label={m.send}
@@ -220,7 +249,7 @@ function MessageComposerField({
             rounded="full"
             iconColor={ready ? 'surface' : 'text-secondary'}
             onPress={send}
-          />
+          />}
         </Row>
       </Column>
     );
@@ -300,6 +329,7 @@ function MessageComposerField({
       overflow={tray ? 'hidden' : undefined}
     >
       {tray ? tray.row : null}
+      {quotes ? <QuoteTray /> : null}
       {body}
     </Column>
   );

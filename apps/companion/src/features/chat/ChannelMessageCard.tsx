@@ -20,6 +20,7 @@ import {
   type ChannelLookupView, type ChannelReplyTrackView,
 } from './channelCard';
 import { channelCardMessages } from './channelCard.messages';
+import { QuoteSource } from './QuoteSource';
 import { MarkdownMessage } from './MarkdownMessage';
 import { slackPlainText, slackToMarkdown } from './slackMarkdown';
 import { useOpenTicket } from './useOpenTicket';
@@ -612,7 +613,9 @@ function LatestMessage({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
 function MessageStack({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
   const recent = card.recent?.length ? card.recent.slice(-3) : [{ at: card.updatedAt, text: card.excerpt }];
   const earlier = Math.max(0, card.messageCount - recent.length);
+  // 对方的话可以引用（设计规范 P17.1）：交给 Lead 时照旧是外部内容（P17.9）。
   return (
+    <QuoteSource source={{ kind: 'card', cardId: card.id }} texts={recent.map((message) => message.text)}>
     <Bubble wide testID={`channel-card-${card.id}-messages`}>
       {earlier > 0 ? <Text size="meta" tone="secondary">{m.earlier(earlier)}</Text> : null}
       {recent.map((message, index) => (
@@ -622,6 +625,7 @@ function MessageStack({ card, m }: { card: ChannelCardDto; m: CardMessages }) {
         </Row>
       ))}
     </Bubble>
+    </QuoteSource>
   );
 }
 
