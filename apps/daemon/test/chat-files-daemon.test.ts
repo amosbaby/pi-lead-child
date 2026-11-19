@@ -2,12 +2,14 @@
 // 一起存下，再写进这一轮的文件夹（数据目录的 chat-files/<轮次>/）；交给 Lead 的消息列出每个文件的名字、类型、大小和路径，
 // 不放内容；会话快照列出文件，按 id 取得到。重启后再答时，清单照样重建，文件夹里缺的文件再写一份。
 import { existsSync, readFileSync, rmSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WebSocket from "ws";
 import {
   createPairing, createTurn, insertChatFiles, listTurnChatFiles, openDb, redeemPairing, waitTurnForRetry, type Db,
 } from "@pi-lead-child/store";
+import { tildeHome } from "@pi-lead-child/core";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { startDaemon } from "../src/server.js";
 import { chatTurnFilesDir, writeChatTurnFiles } from "../src/chat-files.js";
@@ -71,6 +73,10 @@ async function start(factory: unknown) {
 const turnState = (id: string) => db.prepare("SELECT state, user_text, assistant_text FROM channel_turns WHERE id = ?").get(id) as
   { state: string; user_text: string; assistant_text: string };
 
+
+// 发给模型的路径把用户目录写成 ~（home-paths.ts）。CI 的临时目录在用户目录下面，本机的不在。
+const shown = (path: string): string => tildeHome(path, homedir());
+
 describe("files the user sends to Lead", () => {
   it("are written to the turn's folder and listed in Lead's message without their contents", async () => {
     const lead = fakePiLead(() => ({ say: "看过日志了。" }));
@@ -94,8 +100,8 @@ describe("files the user sends to Lead", () => {
 
     const prompt = lead.prompts[0]!;
     expect(prompt).toContain('<user_files count="2">');
-    expect(prompt).toContain(`1. app.log · text/plain · ${LOG_BYTES.length} B · ${join(folder, "app.log")}`);
-    expect(prompt).toContain(`2. counts.csv · text/csv · ${CSV_BYTES.length} B · ${join(folder, "counts.csv")}`);
+    expect(prompt).toContain(`1. app.log · text/plain · ${LOG_BYTES.length} B · ${shown(join(folder, "app.log"))}`);
+    expect(prompt).toContain(`2. counts.csv · text/csv · ${CSV_BYTES.length} B · ${shown(join(folder, "counts.csv"))}`);
     expect(prompt).toMatch(/<user_message[^>]* files="2">\n这两个文件里有什么问题\n<\/user_message>/u);
     // 内容不进上下文。
     expect(prompt).not.toContain("disk full");
@@ -152,7 +158,7 @@ describe("files the user sends to Lead", () => {
     await vi.waitFor(() => expect(turnState(waiting.id)).toMatchObject({ state: "completed", assistant_text: "收到。" }));
     const prompt = lead.prompts.find((candidate) => candidate.includes("重启前没答上的"))!;
     const path = join(chatTurnFilesDir(dir, waiting.id), "app.log");
-    expect(prompt).toContain(`1. app.log · text/plain · ${LOG_BYTES.length} B · ${path}`);
+    expect(prompt).toContain(`1. app.log · text/plain · ${LOG_BYTES.length} B · ${shown(path)}`);
     expect(readFileSync(path)).toEqual(LOG_BYTES);
   });
 });
