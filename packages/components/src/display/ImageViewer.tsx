@@ -362,6 +362,19 @@ function ZoomablePage({ item, width, height, active, dragY, failedLabel, onZoomC
     }
   };
 
+  // 小图不放大（放大发糊）：按比例放进屏幕，最大到原图的大小。还不知道尺寸时先占满。
+  const [natural, setNatural] = useState<{ uri: string; width: number; height: number } | null>(null);
+  useEffect(() => {
+    const uri = item.uri;
+    if (!uri) return undefined;
+    let live = true;
+    Image.getSize(uri, (w, h) => { if (live && w > 0 && h > 0) setNatural({ uri, width: w, height: h }); }, () => {});
+    return () => { live = false; };
+  }, [item.uri]);
+  const known = natural && natural.uri === item.uri ? natural : null;
+  const fit = known ? Math.min(width / known.width, height / known.height, 1) : 1;
+  const box = known ? { width: Math.round(known.width * fit), height: Math.round(known.height * fit) } : { width, height };
+
   const imageStyle = useAnimatedStyle(() => ({
     transform: [{ translateX: x.value }, { translateY: y.value }, { scale: scale.value }],
   }));
@@ -371,7 +384,7 @@ function ZoomablePage({ item, width, height, active, dragY, failedLabel, onZoomC
       <Pressable aria-label={item.label} feedback="none" cursor="zoom-in" onPress={onTap} style={StyleSheet.absoluteFill}>
         <Animated.View style={[StyleSheet.absoluteFill, styles.center, imageStyle]}>
           {item.uri ? (
-            <Image source={{ uri: item.uri }} resizeMode="contain" accessibilityIgnoresInvertColors style={{ width, height }} />
+            <Image source={{ uri: item.uri }} resizeMode="contain" accessibilityIgnoresInvertColors style={box} />
           ) : item.failed ? (
             <Icon name="error-outline" size={24} color="ink-muted" accessibilityLabel={failedLabel} />
           ) : null}
