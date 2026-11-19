@@ -69,6 +69,8 @@ export interface SituationInput {
   idleTickets?: string | null;
   // 你在等的用户操作（lead_waits，2026-10-19）：每条一行。
   waits?: string[];
+  // shadow 处理完的事（用户 2026-11-19，shadow/）：每件一行。行数由 daemon 限制，不按预算截断。
+  shadow?: string[];
 }
 
 /** 当前局面里最多列几条道。 */
@@ -151,6 +153,8 @@ function compose(input: SituationInput, draft: Draft): string {
     ...current,
     ...section("排队中（你答完这一轮后，系统会把它们单独交给你，现在不用处理）", queued),
     ...section("上一轮以后的变化", changes, "没有。"),
+    ...section(`shadow 处理了 ${(input.shadow ?? []).length} 件（上一轮以后。它是你在一个不带对话历史的小会话里处理的，`
+      + "每件一句：什么事、怎么处理的、为什么。用户问起时照这里回答；要细节用 query_events 查）", input.shadow ?? []),
     ...section("关于你自己（上一轮以后）", input.self ?? []),
     ...section("对话通道（外部来源的对话，每条道一行。消息已经按常设指令投递给用户，要你处理的会单独交给你（消息事件）；你不用逐条回复，要看细节用 query_events 查）",
       laneLines(input.lanes ?? [])),

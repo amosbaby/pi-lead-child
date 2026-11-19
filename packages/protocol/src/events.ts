@@ -7,6 +7,7 @@
 //
 // payload 的 schema 只钉住核心字段，允许多出来的字段：双写的写入点和 schema 在同一个仓库里，
 // 但校验失败会让原来的写入一起回滚，所以这里宁可宽一点（additionalProperties 不设 false）。
+import { LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND } from "./lead-shadow.ts";
 import { Type, type Static, type TSchema } from "typebox";
 import { Value } from "typebox/value";
 import { TICKET_REPLY_ACTIONS_KIND, TicketReplyActionIdSchema } from "./ticket-chat.ts";
@@ -309,6 +310,32 @@ export const INTERNAL_EVENT_KINDS: readonly EventKindDefinition[] = [
       turnId: Nullable(Type.String()),
     }),
     description: "Lead 把一件事交给用户自己去做：碰到底线、要用户本人在场，或者系统缺工具、缺权限（能力缺口）。",
+  },
+  {
+    // shadow 处理完的一件事（用户 2026-11-19，lead-shadow.ts）：record 级，Lead 下一轮的当前局面里每件一句。
+    kind: LEAD_SHADOW_HANDLED_KIND,
+    sources: ["lead"],
+    payload: Type.Object({
+      // 事件块里写的编号，和它们代表的事件序号。
+      ids: Type.Array(Id),
+      seqs: Type.Array(Id),
+      line: Type.String({ minLength: 1 }),
+      batch: Type.String(),
+      model: Type.String(),
+    }),
+    description: "shadow 处理完了一件后台事件，没有叫醒主会话：什么事、怎么处理的、为什么。",
+  },
+  {
+    // shadow 的一次会话（lead-shadow.ts）：record 级，不进 Lead 的上下文。比对和报告用：这一批、结论、用量、做了什么。
+    kind: LEAD_SHADOW_RUN_KIND,
+    sources: ["lead"],
+    payload: Type.Object({
+      batch: Type.String(),
+      mode: Type.Union([Type.Literal("on"), Type.Literal("trial")]),
+      model: Type.String(),
+      seqs: Type.Array(Id),
+    }),
+    description: "shadow 处理了一批后台事件（开着或者试运行）：做完了哪些、交回主会话哪些、用了多少 token。",
   },
   {
     kind: "ticket_agent.turn_completed",

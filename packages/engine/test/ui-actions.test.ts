@@ -10,7 +10,7 @@ import {
 } from "@pi-lead-child/protocol";
 import {
   STANDING_ORDER_PROPOSAL_TOOL, UserTurnScopeError, createApproval, createCliBinding, createItem, createLoopbackBinding, createTurn,
-  getApproval, getBinding, getDecisionRequest, getItem, insertDecisionRequest, openChannelCard, openDb, recordChannelLaneMessage,
+  getApproval, getBinding, getDecisionRequest, getItem, getLeadShadow, insertDecisionRequest, openChannelCard, openDb, recordChannelLaneMessage,
   type Db,
 } from "@pi-lead-child/store";
 import {
@@ -242,6 +242,34 @@ describe("runUiAction", () => {
       target: { type: "lead_model", id: "lead" }, action: "switch", input: choice, caller: { kind: "user" }, services: {},
     }).then(() => null, (caught: unknown) => caught as UiActionError);
     expect(missing?.message).toContain("还没有启动");
+  });
+
+  it("refuses a shadow model that is not in Lead's model catalog, and keeps the old setting", async () => {
+    const option = (model: string) => {
+      const [provider, ...rest] = model.split("/");
+      return { model, provider: provider!, id: rest.join("/"), prefix: null, source: null, name: null };
+    };
+    const services = {
+      leadModels: {
+        state: () => ({ current: { model: "magpie/codex/gpt-sol", effort: null }, selected: { model: "magpie/codex/gpt-sol", effort: null } }),
+        catalog: async () => ({
+          current: { model: "magpie/codex/gpt-sol", effort: null }, selected: { model: "magpie/codex/gpt-sol", effort: null },
+          models: [option("magpie/codex/gpt-sol"), option("magpie/codex/gpt-terra")],
+        }) as never,
+        switch: async () => { throw new Error("not used"); },
+      },
+    };
+    const set = (model: string | null) => runUiAction(db, {
+      target: { type: "lead_shadow", id: "lead" }, action: "set", input: { model }, caller: { kind: "user" }, services,
+    });
+    // 少了 provider 前缀：以前会存下来，shadow 再悄悄用主会话的模型。
+    const wrong = await set("codex/gpt-terra").then(() => null, (caught: unknown) => caught as UiActionError);
+    expect(wrong?.code).toBe("invalid_input");
+    expect(wrong?.message).toContain("magpie/codex/gpt-terra");
+    expect(getLeadShadow(db).model).toBeNull();
+
+    expect((await set("magpie/codex/gpt-terra")).result).toMatchObject({ changed: true, shadow: { model: "magpie/codex/gpt-terra" } });
+    expect((await set(null)).result).toMatchObject({ changed: true, shadow: { model: null } });
   });
 
   it("checks the target, the action, the input and Lead's reason before doing anything", async () => {

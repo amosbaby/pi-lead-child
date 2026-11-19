@@ -54,6 +54,8 @@ export async function createIsolatedLookupSession(input: {
   extensionFactories?: Array<{ name: string; factory: ExtensionFactory }>;
   // 工具不听中止、过了宽限还在跑时（tool-abort-guard.ts），它的结果从这里交回。不给时只写日志。
   backgroundJobs?: LeadBackgroundJobs;
+  // 第一条 prompt 之前放进会话的消息（pi 的 AgentMessage）。shadow 用它放固定的开头（shadow/session.ts）。
+  seedMessages?: unknown[];
 }): Promise<LookupSession> {
   const cwd = join(input.workDir, "cwd");
   const agentDir = join(input.workDir, "agent");
@@ -73,13 +75,16 @@ export async function createIsolatedLookupSession(input: {
   });
   await loader.reload();
   const names = input.tools.map((tool) => tool.name);
+  // 会话的消息按会话记录重建（pi 的 buildSessionProjection），所以固定的开头写进记录，不直接改 agent 的消息。
+  const sessionManager = SessionManager.inMemory(cwd);
+  for (const message of input.seedMessages ?? []) sessionManager.appendMessage(message as Parameters<typeof sessionManager.appendMessage>[0]);
   const { session } = await createAgentSession({
     cwd, agentDir,
     model: input.model,
     ...(input.modelRuntime ? { modelRuntime: input.modelRuntime } : {}),
     thinkingLevel: input.thinkingLevel ?? "low",
     resourceLoader: loader,
-    sessionManager: SessionManager.inMemory(cwd),
+    sessionManager,
     settingsManager,
     noTools: "all",
     tools: names,

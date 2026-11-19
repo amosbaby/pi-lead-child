@@ -16,11 +16,13 @@ import {
   SettingsManager,
   type ExtensionFactory,
   type Skill,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createLeadToolset, GRANT_GATED_LEAD_TOOLS, type LeadDeps } from "./tools.js";
 import { LEAD_CODEMODE_INLINE_BUDGET, LEAD_CODEMODE_TOOLS } from "./tool-exposure.js";
 import { CONNECTION_QUIET_TOOLS } from "./connection-tools.js";
 import { renderLeadSystemPrompt } from "./prompt.js";
+import { SHADOW_LEAD_TOOL_NAMES, renderShadowSystemPrompt } from "./shadow/shadow.js";
 import { IDENTITY_SECTION, renderLeadIdentity } from "./identity.js";
 import { designPreferencesFields } from "@pi-lead-child/protocol";
 import { APPEARANCE_SECTION, renderAppearance } from "./appearance.js";
@@ -289,6 +291,8 @@ export async function createLeadSession(opts: {
   refreshModelAuth: (providers: readonly string[]) => Promise<void>;
   // 删掉的订阅账号：从会话的 ModelRuntime 里注销（扩展重新加载不会注销以前注册的 provider）。
   forgetProvider: (provider: string) => void;
+  // shadow（shadow/）：和主会话同一份工具定义和依赖，只换这一批自己的回合来历。系统提示词每批现取。
+  shadow: LeadShadowParts;
 }> {
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
@@ -755,5 +759,47 @@ export async function createLeadSession(opts: {
     forgetProvider: (provider) => {
       if (modelRuntime.getRegisteredProviderIds().includes(provider)) modelRuntime.unregisterProvider(provider);
     },
+    shadow: leadShadowParts(toolDeps),
+  };
+}
+
+/** shadow 要的两样东西（shadow/shadow.ts）：这一批的工具、现在的系统提示词。 */
+export interface LeadShadowParts {
+  /**
+   * Lead 的工具（同一份定义，同一组依赖），换成这一批的回合来历：没有用户的一轮（currentTurnId 为 null），
+   * 回合来历由 daemon 按这一批的事件和读过的工具记。只留 shadow 的那些（wrapShadowTools 再筛一次并套上规则）。
+   */
+  tools(turn: { turnOrigin: NonNullable<LeadDeps["turnOrigin"]>; turnUserActions?: LeadDeps["turnUserActions"] }): ToolDefinition<any>[];
+  /** Lead 的系统提示词（常设指令、核心记忆现取）加身份和代回复风格（renderShadowSystemPrompt）。 */
+  systemPrompt(): string;
+  /** 这个连接的这个工具是不是只读（shadow 的 call_connection_tool 只放行只读的）。没接连接时一律不是。 */
+  connectionReadOnly(connection: string, tool: string): boolean;
+}
+
+export function leadShadowParts(toolDeps: LeadDeps): LeadShadowParts {
+  const wanted = new Set(SHADOW_LEAD_TOOL_NAMES);
+  return {
+    tools: (turn) => {
+      const { handoff: _handoff, turnEvidence: _evidence, ...shared } = toolDeps;
+      return createLeadToolset({
+        ...shared,
+        currentTurnId: () => null,
+        cancelBudgetTurnId: () => null,
+        turnOrigin: turn.turnOrigin,
+        ...(turn.turnUserActions ? { turnUserActions: turn.turnUserActions } : {}),
+      }).filter((tool) => wanted.has(tool.name));
+    },
+    systemPrompt: () => {
+      const db = toolDeps.db;
+      const read = <T>(what: () => T, fallback: T): T => {
+        try { return what(); } catch { return fallback; }
+      };
+      return renderShadowSystemPrompt({
+        lead: renderLeadSystemPrompt(read(() => renderCoreMemory(db), null), read(() => renderStandingOrdersForLead(db), null)),
+        identity: read(() => renderLeadIdentity(leadProfileFields(getLeadProfile(db))), null),
+        replyStyle: read(() => renderReplyStyle(getReplyStyle(db).text), null),
+      });
+    },
+    connectionReadOnly: (connection, tool) => toolDeps.connections?.isReadOnlyTool(connection, tool) ?? false,
   };
 }

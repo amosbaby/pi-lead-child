@@ -1,3 +1,4 @@
+import type { LeadShadowParts } from "./session.js";
 import type { AgentSession } from "@earendil-works/pi-coding-agent";
 import type { SmartModel, SmartTextComplete } from "@pi-lead-child/engine";
 
@@ -53,4 +54,6 @@ export interface LeadEngineFactoryResult {
   refreshModelAuth?: (providers: readonly string[]) => Promise<void>;
   // 删掉的订阅账号从会话的 ModelRuntime 里注销。
   forgetProvider?: (provider: string) => void;
+  // shadow（shadow/）：和主会话同一份工具定义和系统提示词。没有时 daemon 不开 shadow（测试的假会话）。
+  shadow?: LeadShadowParts;
 }

@@ -15,6 +15,7 @@ export * from "./model-hold.js";
 export * from "./auto-call-budget.js";
 export * from "./subscriptions.js";
 export * from "./wake-pace.js";
+export * from "./shadow/index.js";
 export * from "./model-switch.js";
 export * from "./precipitate.js";
 export * from "./compaction-settings.js";

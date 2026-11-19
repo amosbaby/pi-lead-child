@@ -86,6 +86,7 @@ export * from "./signal-sources.js";
 export * from "./agenda-feeds.js";
 export * from "./busy-placement.js";
 export * from "./wake-pace.js";
+export * from "./lead-shadow.js";
 export * from "./lead-call-guards.js";
 export * from "./channel-connections.js";
 export * from "./channel-catch-up.js";
