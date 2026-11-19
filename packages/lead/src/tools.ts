@@ -865,7 +865,7 @@ export function routeTicketMessageToAgentRun(
   deps: LeadDeps,
   args: {
     itemId: number; message: string; actor?: "user" | "lead"; source?: string;
-    // Lead 重发一条工单对话时可以换 runtime、模型和 effort（recover_ticket_run）。null 表示不指定，由 CLI 决定。
+    // Lead 重发一条工单对话时可以换 runtime、模型和 effort（recover_ticket_run）。null 和不给一样：先取配置的默认值，没配置才由 CLI 决定。
     runtime?: RuntimeId; model?: string | null; effort?: string | null;
   },
 ): TicketAgentRunRoute {
@@ -896,13 +896,14 @@ export function routeTicketMessageToAgentRun(
     : null;
   // 工单对话接着来源 Run 的 session 时，沿用它的模型和 effort（run-choice.ts）；不拿执行者的模型给 reviewer。
   const reviewer = reviewerProfileFor(deps.db, item.id, role, { profile: (candidate) => childRuntimeProfile(deps, candidate) });
-  const model = args.model !== undefined
-    ? args.model ?? undefined
+  // null 和没给一样：恢复路径换 runtime 时清掉了旧模型（runtime-recovery.ts），这时也要走 runModelFor，取配置的默认模型并记日志（工单 #373）。
+  const model = args.model != null
+    ? args.model
     : runModelFor({
       role, runtime: runtimeId, item, resumedFrom: resumeRun ?? undefined, reviewer, choice: runProfileChoice(deps.db, item.id, role), logDefault: true,
     });
-  const effort = args.effort !== undefined
-    ? args.effort ?? undefined
+  const effort = args.effort != null
+    ? args.effort
     : runEffortFor(deps.db, { itemId: item.id, role, purpose, runtime: runtimeId, model, resumedFrom: resumeRun ?? undefined, reviewer, logDefault: true });
   const runtime = deps.childPi ? undefined : (deps.runtimeRegistry ?? createDefaultRuntimeRegistry()).get(runtimeId);
   // 健康账本（工单 03）：工单对话也不在不可用的 profile 上创建 Run。直接告诉发消息的人原因，
