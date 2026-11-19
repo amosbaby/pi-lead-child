@@ -54,15 +54,32 @@ function containerFor(key: string): Element | null {
   return document.querySelector(`[data-quote-key="${CSS.escape(key)}"]`);
 }
 
+// 选区只有一头在来源里、另一头在来源外面（不在别的来源里）时，收到来源的边上。
+// 三击选中一整段时，浏览器把终点放在下一个块的开头：这一段是回答的最后一段时，终点就在回答外面。
+function clampToSource(range: Range): { container: Element; range: Range } | null {
+  const start = containerOf(range.startContainer);
+  const end = containerOf(range.endContainer);
+  if (start && start === end) return { container: start, range };
+  if (start && end) return null;
+  const container = start ?? end;
+  if (!container) return null;
+  const clamped = range.cloneRange();
+  if (start) clamped.setEnd(container, container.childNodes.length);
+  else clamped.setStart(container, 0);
+  return { container, range: clamped };
+}
+
 // 读当前的选区：在同一个来源里、字在原文里，才算能引用。
 function readSelection(): Picked | null {
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null;
-  const range = selection.getRangeAt(0);
-  const container = containerOf(range.startContainer);
-  if (!container || container !== containerOf(range.endContainer)) return null;
+  const clamped = clampToSource(selection.getRangeAt(0));
+  if (!clamped) return null;
+  const { container, range } = clamped;
   const key = container.getAttribute('data-quote-key') ?? '';
-  const text = selection.toString().trim().slice(0, QUOTE_TEXT_LIMIT);
+  // 选区的字带着段落之间的换行，先用它；收过边以后对不上（多出来源外面的字），用收过边的那一段。
+  const whole = selection.toString().trim().slice(0, QUOTE_TEXT_LIMIT);
+  const text = whole && canQuote(key, whole) ? whole : range.toString().trim().slice(0, QUOTE_TEXT_LIMIT);
   if (!text || !canQuote(key, text)) return null;
   const rect = range.getBoundingClientRect();
   if (!rect.width && !rect.height) return null;

@@ -349,7 +349,8 @@ function MessageComposerField({
       bg="surface"
       boxShadow={compact ? '0 4px 14px rgba(16,24,40,0.06)' : '0 6px 20px rgba(16,24,40,0.08)'}
       opacity={disabled ? 0.62 : 1}
-      overflow={tray ? 'hidden' : undefined}
+      // 状态栏和引用托盘的底色是方角：裁到卡片的圆角里，不盖住上面两个角的边框。
+      overflow={tray || quotes ? 'hidden' : undefined}
     >
       {tray ? tray.row : null}
       {quotes ? <QuoteTray /> : null}

@@ -130,6 +130,63 @@ describe('replying to selected text on the desktop', () => {
     ]);
   });
 
+  // 三击（macOS 上双击后再点一下也一样）选中一整段：浏览器把选区的终点放在这一段后面那个块的开头。
+  // 这一段是回答的最后一段时，终点落在回答外面，这时也要出「回复」，引用的是回答里的那一段。
+  it('offers Reply when a triple click selects the last paragraph and the selection ends after the answer', async () => {
+    const { sendChat } = setup();
+    const container = document.querySelector('[data-quote-key="turn:turn-a:assistant"]')!;
+    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+    let first: Text | null = null;
+    for (let node = walker.nextNode() as Text | null; node; node = walker.nextNode() as Text | null) {
+      if (node.data.includes('压缩完成')) { first = node; break; }
+    }
+    const after = [...document.body.querySelectorAll('*')].find((element) =>
+      !container.contains(element) && Boolean(container.compareDocumentPosition(element) & Node.DOCUMENT_POSITION_FOLLOWING))!;
+    const range = document.createRange();
+    range.setStart(first!, first!.data.indexOf('压缩完成'));
+    range.setEnd(after, 0);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    await act(async () => {
+      fireEvent.mouseUp(document);
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    fireEvent.click(await screen.findByTestId('quote-reply-button'));
+    const note = await screen.findByTestId('quote-note');
+    fireEvent.keyDown(note, { key: 'Enter', code: 'Enter', metaKey: true });
+    expect(sendChat).toHaveBeenCalledWith('', undefined, undefined, undefined, undefined, [
+      { source: leadSource, text: ANSWER, anchor: 'n:0' },
+    ]);
+  });
+
+  it('offers no Reply when a selection runs from one message into another', async () => {
+    setup({ turns: [turn(), turn({ id: 'turn-b', userText: '再说一遍', assistantText: '好的，再说一遍。' })] });
+    const from = document.querySelector('[data-quote-key="turn:turn-a:assistant"]')!;
+    const to = document.querySelector('[data-quote-key="turn:turn-b:assistant"]')!;
+    const [early, late] = from.compareDocumentPosition(to) & Node.DOCUMENT_POSITION_FOLLOWING ? [from, to] : [to, from];
+    const range = document.createRange();
+    range.setStart(early, 0);
+    range.setEnd(late, late.childNodes.length);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    await act(async () => {
+      fireEvent.mouseUp(document);
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(screen.queryByTestId('quote-reply-button')).toBeNull();
+  });
+
+  it('keeps the rounded top corners of the composer when the tray shows', async () => {
+    setup();
+    act(() => {
+      quoteDrafts.getState().begin({ source: leadSource, text: '提前压缩' });
+      quoteDrafts.getState().commit();
+    });
+    await screen.findByTestId('quote-tray');
+    // 托盘的底色是方角：卡片要裁掉它，不然盖住卡片上面两个圆角的边框。
+    expect(getComputedStyle(screen.getByTestId('composer')).overflow).toBe('hidden');
+  });
+
   it('offers no Reply for text that is not in the answer, or when the daemon does not take quotes', async () => {
     setup({ capabilities: [] });
     selectInAnswer('提前压缩');
