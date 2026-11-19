@@ -207,7 +207,7 @@ type Availability = { label: string; available: boolean; reason: string | null; 
 function useAvailability(target: UiActionButtonTarget, action: string): Availability & { reload: () => void } {
   const runtime = useCompanionRuntime();
   const m = useMessages(genuiMessages).controls;
-  const ticketActions = useTicketActions(target.type === 'ticket' ? target.id : 0);
+  const ticketActions = useTicketActions(target.type === 'ticket' ? target.id : null);
   const [views, setViews] = useState<UiActionView[] | null>(null);
   const [epoch, setEpoch] = useState(0);
   const key = `${target.type}:${target.id}`;

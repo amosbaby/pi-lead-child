@@ -28,6 +28,11 @@ export type TileProps = {
   was?: string;
   /** 大值用强调色：这是一个选了、还没提交的新值。 */
   highlight?: boolean;
+  /**
+   * 小标题条的高度（贴边时用）：和旁边正文的第一行（例如事件标题）一样高，字都上下居中，
+   * 小标题和标题落在同一条水平线上（2026-11-19 用户：展开的提醒卡）。不给时按字的高度。
+   */
+  bandHeight?: number;
   /** 小标题前一个勾：这件事已经完成（视觉稿：已确认的提醒，浅绿色带上一个勾）。 */
   done?: boolean;
   /** 大值上一道斜线、整块变灰：这件事取消了（视觉稿：已取消的提醒）。 */
@@ -65,7 +70,7 @@ const ATTACHED_RADIUS = 11;
 
 export function Tile({
   eyebrow, value, caption, tone = 'neutral', size = 'md', emphasis = 'normal', attached = false, above, was, highlight = false,
-  done = false, crossed = false, testID,
+  done = false, crossed = false, bandHeight, testID,
 }: TileProps) {
   const text = typeof value === 'number' ? formatNumber(value) : value;
   // 强调等级只改颜色和字重，不改尺寸（v3 第 3 节）。
@@ -86,7 +91,13 @@ export function Tile({
     >
       {eyebrow ? (
         // spacing-exempt: 图块小标题条的上下留白（组件规格）
-        <Box testID={testID ? `${testID}-eyebrow` : undefined} bg={band} py={2} px="text-stack" items="center">
+        <Box
+          testID={testID ? `${testID}-eyebrow` : undefined}
+          bg={band}
+          px="text-stack"
+          items="center"
+          {...(bandHeight !== undefined ? { h: bandHeight, justify: 'center' as const } : { py: 2 })} // spacing-exempt: 图块小标题条的上下留白（组件规格）
+        >
           <Row items="center" gap="text-stack">
             {done ? <Icon name="check" size={10} color={dataToneFillText(tone)} weight="bold" /> : null}
             <Text size="label" weight="semibold" tone={crossed ? 'muted' : bandText} numberOfLines={1}>{eyebrow}</Text>

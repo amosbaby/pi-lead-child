@@ -466,10 +466,11 @@ export function useTicketDelivery(ticketId: number) {
 }
 
 // 这张工单现在能做的操作（工单 03）。还没读到、旧服务端时是空数组：按钮都不画。
-export function useTicketActions(ticketId: number) {
-  const key = RESOURCE_KEYS.actions(ticketId);
-  useObservedResource(key);
-  const actions = useControlPlaneStore((state) => state.ticketActionsByTicket[ticketId] ?? EMPTY_ACTIONS);
+// ticketId 为 null 时不读（按钮的对象不是工单，例如提醒）：以前传 0，会去取不存在的 /v1/tickets/0/actions（404）。
+export function useTicketActions(ticketId: number | null) {
+  const key = RESOURCE_KEYS.actions(ticketId ?? 0);
+  useObservedResource(key, ticketId !== null);
+  const actions = useControlPlaneStore((state) => (ticketId === null ? EMPTY_ACTIONS : state.ticketActionsByTicket[ticketId] ?? EMPTY_ACTIONS));
   const resource = useControlPlaneStore((state) => state.resourceState[key]);
   return { actions, resource };
 }
@@ -554,7 +555,7 @@ export function useAttemptLogsByAttempt(attemptIds: readonly number[]) {
   return { logsByAttemptId, resourcesByAttemptId };
 }
 
-function useObservedResource(key: ResourceKey): void {
+function useObservedResource(key: ResourceKey, enabled = true): void {
   const runtime = useCompanionRuntime();
-  useEffect(() => runtime.observeResource(key), [key, runtime]);
+  useEffect(() => (enabled ? runtime.observeResource(key) : undefined), [enabled, key, runtime]);
 }

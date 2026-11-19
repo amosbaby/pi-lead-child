@@ -15,6 +15,10 @@ import { useOpenAgenda } from './useOpenAgenda';
 
 const pad = (value: number) => String(value).padStart(2, '0');
 
+// 展开的提醒卡（2026-11-19 用户）：日历页顶上的色带和右边事件标题那一行一样高，字都上下居中，
+// 色带上的「Reminder」/月份和事件标题落在同一条水平线上。组件规格：标题一行的高度加上下各 10。
+const HEAD_HEIGHT = 44;
+
 // 星期的简写：中文「周一」，英文「Mon」。
 function weekdayWord(date: Date, locale: Locale): string {
   return new Intl.DateTimeFormat(intlLocale(locale), { weekday: 'short' }).format(date);
@@ -132,9 +136,9 @@ export function ReminderCard({ view }: { view: ReminderCardView }) {
         targets={{ [actions[0]!.id]: id, [actions[1]!.id]: id }}
         summary={summaryRow}
         panel={(
-          <MediaRow attach bleed notches={false} testID={`reminder-card-${id}-open`} lead={<ReminderPage at={at} tone={tone} stage={stage} reminderId={id} expanded />}>
+          <MediaRow attach bleed flushTop notches={false} testID={`reminder-card-${id}-open`} lead={<ReminderPage at={at} tone={tone} stage={stage} reminderId={id} expanded />}>
             <Column gap="card-section">
-              <ReminderLines reminderId={id} title={title} at={at} stage={stage} level={level} changedAt={changedAt} />
+              <ReminderLines reminderId={id} title={title} at={at} stage={stage} level={level} changedAt={changedAt} headHeight={HEAD_HEIGHT} />
               {view.event ? <Text size="secondary" tone="muted" numberOfLines={1}>{view.event}</Text> : null}
               <FieldView
                 id={`reminder-${id}-pick`}
@@ -172,9 +176,9 @@ export function ReminderPreview({ reminderId, title, remindAt, stage, changedAt,
   const changed = changedAt ? new Date(changedAt) : null;
   const tone: DataTone = stage === 'acked' ? 'success' : stage === 'cancelled' ? 'neutral' : 'info';
   return (
-    <MediaRow attach bleed notches={false} testID={`reminder-preview-${reminderId}`} lead={<ReminderPage at={at} tone={tone} stage={stage} expanded />}>
+    <MediaRow attach bleed flushTop notches={false} testID={`reminder-preview-${reminderId}`} lead={<ReminderPage at={at} tone={tone} stage={stage} expanded />}>
       <Column gap="card-section" items="flex-start">
-        <ReminderLines reminderId={reminderId} title={title} at={at} stage={stage} level={null} changedAt={changed} />
+        <ReminderLines reminderId={reminderId} title={title} at={at} stage={stage} level={null} changedAt={changed} headHeight={HEAD_HEIGHT} />
         <Button testID={`reminder-preview-${reminderId}-agenda`} label={m.openInAgenda} variant="link" size="sm" onPress={onOpenAgenda} />
       </Column>
     </MediaRow>
@@ -216,6 +220,7 @@ function ReminderPage({ at, tone, stage, expanded = false, reminderId }: {
       done={stage === 'acked'}
       crossed={stage === 'cancelled'}
       highlight={pending !== null}
+      {...(expanded ? { bandHeight: HEAD_HEIGHT } : {})}
       {...(expanded && shown ? { above: weekday(shown), caption: `${pad(shown.getHours())}:${pad(shown.getMinutes())}` } : {})}
       {...(pending && at ? { was: m.was(weekday(at), at.getDate()) } : {})}
     />
@@ -223,9 +228,10 @@ function ReminderPage({ at, tone, stage, expanded = false, reminderId }: {
 }
 
 // 标题和下面一行。下面一行按状态写：等待中写时刻和剩余时间，重要写会打断你，已确认、已取消写什么时候。
-function ReminderLines({ reminderId, title, at, stage, level, changedAt, note = null }: {
+// headHeight：展开时标题自己占一行这么高、上下居中，和日历页的色带对齐（HEAD_HEIGHT）。
+function ReminderLines({ reminderId, title, at, stage, level, changedAt, note = null, headHeight }: {
   reminderId: number; title: string; at: Date | null; stage: TicketStatus | null; level: ReminderLevel | null; changedAt: Date | null;
-  note?: string | null;
+  note?: string | null; headHeight?: number;
 }) {
   const pendingIso = usePendingValue(reminderId, 'remindAt');
   const pending = pendingIso ? new Date(pendingIso) : null;
@@ -262,8 +268,7 @@ function ReminderLines({ reminderId, title, at, stage, level, changedAt, note = 
       </Row>
     );
   }
-  return (
-    <Column gap="text-stack" minW={0}>
+  const titleText = (
       <Text
         size="card-title"
         weight="bold"
@@ -274,6 +279,10 @@ function ReminderLines({ reminderId, title, at, stage, level, changedAt, note = 
       >
         {title}
       </Text>
+  );
+  return (
+    <Column gap="text-stack" minW={0}>
+      {headHeight !== undefined ? <Box testID={`reminder-${reminderId}-head`} h={headHeight} justify="center">{titleText}</Box> : titleText}
       {line}
       {note ? <Text testID="reminder-card-note" size="note" tone="secondary" numberOfLines={1}>{note}</Text> : null}
     </Column>

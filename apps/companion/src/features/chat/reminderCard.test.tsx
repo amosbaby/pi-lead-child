@@ -100,6 +100,31 @@ describe('a reminder Lead created in the conversation', () => {
     expect(runtime.workspace.getState().threadOpen).toBe(false);
   });
 
+  // 2026-11-19 用户：展开以后，日历页顶上的色带和右边事件标题那一行一样高、字都上下居中，「Reminder」/月份和标题在同一条水平线上。
+  it('lines the band of the opened calendar page up with the event title', async () => {
+    render(async () => detail(reminder()));
+    await screen.findByText('3 days 1 hour left');
+    fireEvent.click(screen.getByTestId('surface-disclosure-reminder-83-summary'));
+    await screen.findByRole('radio', { name: 'In 1 hour' });
+    const band = screen.getByTestId('reminder-page-open-eyebrow');
+    const head = screen.getByTestId('reminder-83-head');
+    expect(getComputedStyle(band).height).toBe('44px');
+    expect(getComputedStyle(head).height).toBe(getComputedStyle(band).height);
+    expect(getComputedStyle(head).justifyContent).toBe('center');
+    // 正文上面不留内边距：标题那一行从卡片顶上开始，和色带同一个起点。
+    expect(getComputedStyle(screen.getByTestId('reminder-card-83-open-content')).paddingTop).toBe('0px');
+  });
+
+  // 2026-11-19：改时间的按钮的对象是提醒，不是工单。以前它也去读「工单 0」的操作清单（GET /v1/tickets/0/actions，404）。
+  it('does not read the action list of a ticket 0 for the reschedule button', async () => {
+    const runtime = render(async () => detail(reminder()));
+    const observe = vi.spyOn(runtime, 'observeResource');
+    await screen.findByText('3 days 1 hour left');
+    fireEvent.click(screen.getByTestId('surface-disclosure-reminder-83-summary'));
+    await screen.findByRole('radio', { name: 'In 1 hour' });
+    expect(observe.mock.calls.map(([key]) => key)).not.toContain('actions:0');
+  });
+
   it('says an important reminder interrupts, in amber', async () => {
     render(async () => ({ ...detail(reminder()), reminder: { level: 'interrupt', earlyMs: null, repeat: null, ticketId: null, check: null } } as TicketDetail));
     expect(await screen.findByText('Important. It interrupts you when it is due.')).toBeTruthy();

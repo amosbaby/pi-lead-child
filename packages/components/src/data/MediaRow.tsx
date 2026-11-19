@@ -20,18 +20,23 @@ export type MediaRowProps = {
    * （2026-10-27：选了一个时间以后，日历页的月份被顶出浮层 6 px）。
    */
   notches?: boolean;
+  /**
+   * bleed 时正文上面不留内边距：正文的第一行自己撑高、上下居中，和前导顶上的小标题条对齐（Tile 的 bandHeight，
+   * 2026-11-19 用户：展开的提醒卡里「Reminder」和事件标题在同一条水平线上）。
+   */
+  flushTop?: boolean;
   testID?: string;
 };
 
 // 前导 + 正文（媒体对象，genui v3 积木 2，2026-10-27）。正文的起点只由前导的宽度决定，不由正文决定。
 // 清爽主题：attach 时中间是一条 1.5px 的 border-strong 虚线（R-6，打孔线），用短线段画。
-export function MediaRow({ lead, children, attach = false, align = 'start', bleed = false, notches = true, testID }: MediaRowProps) {
+export function MediaRow({ lead, children, attach = false, align = 'start', bleed = false, notches = true, flushTop = false, testID }: MediaRowProps) {
   if (bleed) {
     return (
       <Row testID={testID} items="stretch">
         <Box shrink={0}>{lead}</Box>
         {attach ? <Perforation testID={testID} notches={notches} /> : null}
-        <Column flex={1} minW={0} justify={align === 'center' ? 'center' : 'flex-start'} p="card">{children}</Column>
+        <Column testID={testID ? `${testID}-content` : undefined} flex={1} minW={0} justify={align === 'center' ? 'center' : 'flex-start'} p="card" {...(flushTop ? { pt: 0 } : {})}>{children}</Column>
       </Row>
     );
   }
