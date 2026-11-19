@@ -10,7 +10,7 @@
 // 正文里不可能出现任何标签，用户的话冒充不了系统事件，系统事件里转述的内容也冒充不了用户。
 // 系统提示词里有一段说明这两种块（prompt.ts）。
 import {
-  CHANNEL_INTENT_LABELS, CHANNEL_RULE_CHANGE_FLAG, CHAT_IMAGE_ID_PATTERN, channelRuleChangeNotice, isChannelIntent, isChannelRuleChangeKind,
+  CHANNEL_INTENT_LABELS, CHANNEL_RULE_CHANGE_FLAG, CHAT_IMAGE_ID_PATTERN, formatChatFileSize, channelRuleChangeNotice, isChannelIntent, isChannelRuleChangeKind,
   HANDBOOK_ABILITY_LABELS, HANDBOOK_MODE_LABELS, HANDBOOK_MODE_PHRASES, isHandbookMode, isSenderTrust, messageEventConversationKey, redactAndCap,
   SENDER_TRUST_LABELS, type HandbookAbility, type HandbookMode,
 } from "@pi-lead-child/protocol";
@@ -64,29 +64,50 @@ function quoteBlock(quote: LeadUserQuote, n: number): string {
   return `<quoted_text${attributes({ n, author: quote.author, turn: quote.turnId })}>\n${body(quote.text)}\n</quoted_text>`;
 }
 
+// 用户随这条消息发的一个文件（App 的输入框，protocol 的 chat-files.ts）。daemon 把它写进这一轮的文件夹（只读），
+// path 是那里的路径，用户目录写成 ~（home-paths.ts：发给模型的文字不带真的 home 路径）。文件内容不进上下文。
+export interface LeadUserFile {
+  name: string;
+  mimeType: string;
+  size: number;
+  path: string;
+}
+
+// 文件清单：每行一个，名字、类型、大小、路径。名字是用户给的（网关清理过，没有换行），和用户的话一样原样转来。
+function filesBlock(files: readonly LeadUserFile[]): string {
+  const lines = files.map((file, index) =>
+    `${index + 1}. ${file.name} · ${file.mimeType} · ${formatChatFileSize(file.size)} · ${file.path}`);
+  return `<user_files${attributes({ count: files.length })}>\n${body(lines.join("\n"))}\n</user_files>`;
+}
+
 // images：用户随这条消息发了几张图片（App 的输入框，protocol 的 chat-images.ts）。图片作为同一条消息里的图片块跟在这段文字后面；
 // 只发了图片时正文是空的。imageIds：这些图片的编号，按顺序（2026-10-28：Lead 用编号指一张图，例如 set_lead_avatar 换形象）。
 // 编号只有 CHAT_IMAGE_ID_PATTERN 里的字符，不按 120 个字截断：8 张图的编号也要完整。
 // quotes：这条消息引用的几段话，按加入的顺序。引用块排在 <user_message> 前面，<user_message> 带 quotes=N，
 // 正文先按编号写用户对每段的说明（没写说明的不列），再是用户这条消息本身的话。
+// files：用户随这条消息发的文件，按发送时的顺序。<user_files> 块排在引用块和 <user_message> 前面，<user_message> 带 files=N。
 export function leadUserMessage(
   source: {
     via: string; channel: string; sender?: string; thread?: string; images?: number; imageIds?: readonly string[];
-    quotes?: readonly LeadUserQuote[];
+    quotes?: readonly LeadUserQuote[]; files?: readonly LeadUserFile[];
   },
   text: string,
 ): string {
   const ids = (source.imageIds ?? []).filter((id) => CHAT_IMAGE_ID_PATTERN.test(id));
   const images = source.images || ids.length;
   const quotes = source.quotes ?? [];
+  const files = source.files ?? [];
   const head = attributes({ from: "user", via: source.via, channel: source.channel, sender: source.sender, thread: source.thread })
     + (ids.length ? ` image_ids="${ids.join(" ")}"` : "")
-    + attributes({ images: images ? images : undefined, quotes: quotes.length ? quotes.length : undefined });
+    + attributes({
+      images: images ? images : undefined, quotes: quotes.length ? quotes.length : undefined, files: files.length ? files.length : undefined,
+    });
   const notes = quotes
     .map((quote, index) => (quote.note?.trim() ? `对引用 ${index + 1}：${quote.note.trim()}` : null))
     .filter((line): line is string => line !== null);
   const message = `<user_message${head}>\n${body([...notes, text].filter((part) => part.trim()).join("\n\n"))}\n</user_message>`;
-  return quotes.length ? [...quotes.map((quote, index) => quoteBlock(quote, index + 1)), message].join("\n") : message;
+  const blocks = [...(files.length ? [filesBlock(files)] : []), ...quotes.map((quote, index) => quoteBlock(quote, index + 1))];
+  return blocks.length ? [...blocks, message].join("\n") : message;
 }
 
 // ── 系统交给 Lead 的一条 inbox 行（工单 03，spec D8）──────────────────────────────────────────

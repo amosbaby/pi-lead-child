@@ -10,6 +10,8 @@
 //   · 只有 Lead 的会话收图片。工单对话交给工单的 agent，它们的运行时还不收图片，带图片的工单消息被拒收。
 import { Type, type Static } from "typebox";
 
+import { CHAT_FILES_MAX_TOTAL_BASE64_LENGTH } from "./chat-files.ts";
+
 export const CHAT_IMAGES_CAPABILITY = "chat.images.v1";
 // GET /v1/conversation/turns?include=images：每一轮带上用户发的图片。
 export const CHAT_IMAGES_INCLUDE = "images";
@@ -27,8 +29,9 @@ export const CHAT_IMAGE_MAX_COUNT = 8;
 export const CHAT_IMAGE_MAX_BASE64_LENGTH = 5 * 1024 * 1024;
 // 一条消息所有图片的 base64 加起来最长多少个字符。客户端先缩小再发，平常一张只有几百 KB。
 export const CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH = 20 * 1024 * 1024;
-// 带图片的 chat.send 最大多少字节（WebSocket 的一帧和 HTTP 兜底的请求体）：图片加上 1 MB 给文字和命令的其余部分。
-export const CHAT_SEND_MAX_BYTES = CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH + 1024 * 1024;
+// 带图片和文件的 chat.send 最大多少字节（WebSocket 的一帧和 HTTP 兜底的请求体）：满额的图片加上满额的文件（chat-files.ts），
+// 再加 1 MB 给文字、引用和命令的其余部分。
+export const CHAT_SEND_MAX_BYTES = CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH + CHAT_FILES_MAX_TOTAL_BASE64_LENGTH + 1024 * 1024;
 // 客户端把图片的长边缩到多少像素以内。更大的图片模型服务也会先缩小（Anthropic 建议长边不超过 1568）。
 export const CHAT_IMAGE_MAX_EDGE = 1568;
 

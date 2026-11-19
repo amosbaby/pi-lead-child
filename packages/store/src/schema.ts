@@ -1637,6 +1637,22 @@ CREATE TABLE IF NOT EXISTS chat_images (
   created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS chat_images_turn ON chat_images(turn_id, position);
+-- 用户发给 Lead 的文件（chat.send 的 files，protocol 的 chat-files.ts），按轮次存，position 是发送时的顺序。
+-- name 是网关清理过的名字；disk_name 是写进这一轮文件夹（数据目录的 chat-files/）时用的名字，同一轮里去过重、限过长。
+-- 库里的 data 是原件：会话快照（include=files）列出文件，客户端按 id 取；文件夹里的副本不见了时 daemon 从这里再写一份。
+-- 由 SCHEMA 建，新库老库一样，不占迁移号（和 chat_images 一样）。turn_id 不设外键，理由同 chat_images。
+CREATE TABLE IF NOT EXISTS chat_files (
+  id          TEXT PRIMARY KEY,
+  turn_id     TEXT NOT NULL,
+  position    INTEGER NOT NULL,
+  name        TEXT NOT NULL,
+  disk_name   TEXT NOT NULL,
+  mime_type   TEXT NOT NULL,
+  byte_size   INTEGER NOT NULL,
+  data        BLOB NOT NULL,
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_files_turn ON chat_files(turn_id, position);
 -- 用户消息带的引用（chat.send 的 quotes，protocol 的 chat-quotes.ts；设计规范 P17），按轮次存，position 是加入的顺序。
 -- 来源是一轮（source_turn_id + source_role）或一张外来消息卡（source_card_id）；author 由 daemon 按来源写。
 -- external 是外来消息卡引用的来源说明（JSON：source、sender、conversation），交给 Lead 时写进外部内容的标签；别的来源是 NULL。

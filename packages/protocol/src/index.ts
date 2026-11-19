@@ -16,6 +16,7 @@ import { TurnPlacementSchema } from "./lead-follow-ups.ts";
 import { LEAD_ACTIVITY_OPT_IN, LEAD_ACTIVITY_RESOURCE } from "./lead-activity.ts";
 import { ReminderSettingsSchema } from "./reminders.ts";
 import { UI_ACTION_INPUT_SCHEMAS } from "./ui-actions.ts";
+import { ChatFileRefSchema, ChatFilesInputSchema } from "./chat-files.ts";
 import { ChatImageRefSchema, ChatImagesInputSchema } from "./chat-images.ts";
 import { ChatQuoteRefSchema, ChatQuotesInputSchema } from "./chat-quotes.ts";
 import { LeadModelChoiceSchema } from "./lead-models.ts";
@@ -1048,6 +1049,8 @@ export const ConversationTurnSchema = StrictObject({
   images: Type.Optional(Type.Array(ChatImageRefSchema)),
   // 用户的这条消息带的引用，按加入的顺序（include=quotes 才有，带了引用的轮次才有；chat-quotes.ts）。
   quotes: Type.Optional(Type.Array(ChatQuoteRefSchema)),
+  // 用户的这条消息带的文件，按发送时的顺序（include=files 才有，带了文件的轮次才有；chat-files.ts）。
+  files: Type.Optional(Type.Array(ChatFileRefSchema)),
   // Lead 开始回答这一轮的时刻（include=answer_started 才有，有记录的轮次才有；2026-11-09）。
   // 排队、插话的消息发出以后要等别的轮次答完才开始回答：会话按它放 Lead 的回答和用户的这句话，回答的用时也从它算。
   answerStartedAt: Type.Optional(Type.String()),
@@ -1242,7 +1245,8 @@ export type ChatSendMode = "started" | "steered" | "queued";
 export const ChatSendCommandSchema = StrictObject({
   type: Type.Literal("chat.send"),
   ...CommandBase,
-  // 用户写的话。只带图片或引用的消息可以没有文字（chat-images.ts、chat-quotes.ts）；文字、图片、引用都没有时 daemon 拒收。
+  // 用户写的话。只带图片、文件或引用的消息可以没有文字（chat-images.ts、chat-files.ts、chat-quotes.ts）；
+  // 文字、图片、文件、引用都没有时 daemon 拒收。
   message: Type.String(),
   // answerer：工单 08 第一版里你选的回答者（ticket-chat.ts）。2026-10-19 起 daemon 不再宣布这个能力，也忽略这个字段：
   // 工单对话一律交给工单的 agent。schema 继续接受它，旧客户端带了也不报错。
@@ -1256,6 +1260,8 @@ export const ChatSendCommandSchema = StrictObject({
   images: Type.Optional(ChatImagesInputSchema),
   // 引用回复（chat-quotes.ts）。客户端只在 hello.v2 的 capabilities 里有 CHAT_QUOTES_CAPABILITY 时带它。
   quotes: Type.Optional(ChatQuotesInputSchema),
+  // 发给 Lead 的文件（chat-files.ts）。客户端只在 hello.v2 的 capabilities 里有 CHAT_FILES_CAPABILITY 时带它。
+  files: Type.Optional(ChatFilesInputSchema),
   // 「只这一条」（lead-models.ts 的 CHAT_TURN_MODEL_CAPABILITY）：只用这个模型和推理强度答这一条，答完回到主用。
   // 只在 Lead 的会话里；客户端只在 daemon 宣布了 CHAT_TURN_MODEL_CAPABILITY 时带它。
   turnModel: Type.Optional(LeadModelChoiceSchema),
@@ -1331,6 +1337,7 @@ export * from "./delivery.ts";
 export * from "./delivery-snapshots.ts";
 export * from "./execution-plan.ts";
 export * from "./ticket-actions.ts";
+export * from "./chat-files.ts";
 export * from "./chat-images.ts";
 export * from "./chat-quotes.ts";
 export * from "./ticket-attachments.ts";

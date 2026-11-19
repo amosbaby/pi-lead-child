@@ -394,7 +394,8 @@ type TurnProjection = {
 };
 
 function projectTurn(previous: ConversationProjection, sessionId: string, item: ConversationTurn): TurnProjection {
-  const hasUserText = item.userText.trim().length > 0 || (item.images?.length ?? 0) > 0 || (item.quotes?.length ?? 0) > 0;
+  const hasUserText = item.userText.trim().length > 0 || (item.images?.length ?? 0) > 0 || (item.quotes?.length ?? 0) > 0
+    || (item.files?.length ?? 0) > 0;
   const userMessageId = `${sessionId}:${item.id}:user`;
   const assistantMessageId = `${sessionId}:${item.id}:assistant`;
   const userTextPartId = `${userMessageId}:text`;
@@ -483,6 +484,20 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     kind: 'quote', id: `${userMessageId}:quote:${index}`, source: quote.source, text: quote.text, author: quote.author,
     ...(quote.note ? { note: quote.note } : {}), ...(quote.anchor ? { anchor: quote.anchor } : {}),
   }));
+  // 用户发的文件（include=files）。本机刚发出去的还留着数据，留下它，不用再向 daemon 取。
+  // 快照没带 files（旧 daemon，或者退回了少要几项的请求）时，留着已有的文件。
+  const previousFileParts = (previous.partIdsByMessage[userMessageId] ?? []).flatMap((partId) => {
+    const part = previous.messagePartsById[partId];
+    return part?.kind === 'file' ? [part] : [];
+  });
+  const userFileParts: MessagePart[] = item.files === undefined ? previousFileParts : item.files.map((file, index) => {
+    const id = `${userMessageId}:file:${index}`;
+    const prior = previous.messagePartsById[id];
+    const data = prior?.kind === 'file' && (prior.fileId === undefined || prior.fileId === file.id) ? prior.data : undefined;
+    return {
+      kind: 'file', id, name: file.name, mimeType: file.mimeType, size: file.size, fileId: file.id, ...(data === undefined ? {} : { data }),
+    };
+  });
   const assistantTextPart: MessagePart = {
     kind: 'text',
     id: assistantTextPartId,
@@ -513,6 +528,7 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     reuseValue(previous.messagePartsById[userTextPartId], userTextPart),
     ...userImageParts.map((part) => reuseValue(previous.messagePartsById[part.id], part)),
     ...userQuoteParts.map((part) => reuseValue(previous.messagePartsById[part.id], part)),
+    ...userFileParts.map((part) => reuseValue(previous.messagePartsById[part.id], part)),
     reuseValue(previous.messagePartsById[assistantTextPartId], assistantTextPart),
     ...liveAssistantPartIds.map((partId) => previous.messagePartsById[partId]!),
   ];
@@ -532,7 +548,10 @@ function projectTurn(previous: ConversationProjection, sessionId: string, item: 
     parts,
     userPartIds: reuseArray(
       previous.partIdsByMessage[userMessageId] ?? [],
-      [userTextPartId, ...userImageParts.map((part) => part.id), ...userQuoteParts.map((part) => part.id)],
+      [
+        userTextPartId, ...userImageParts.map((part) => part.id), ...userQuoteParts.map((part) => part.id),
+        ...userFileParts.map((part) => part.id),
+      ],
     ),
     // 快照里的工具调用按开始的先后排在文字后面；快照还没见到的实时 part（快照取得早于这些事件）接在后面。
     assistantPartIds: reuseArray(

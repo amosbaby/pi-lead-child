@@ -96,7 +96,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
       'tool_calls,surfaces,placement', 'tool_calls,surfaces', 'tool_calls',
     ]);
   });
@@ -117,7 +117,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions',
       'tool_calls,surfaces,placement', 'tool_calls,surfaces',
     ]);
   });
@@ -143,7 +143,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns(77)).resolves.toEqual([turn]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions', 'tool_calls,surfaces,placement',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images', 'tool_calls,surfaces,placement,reply_actions', 'tool_calls,surfaces,placement',
     ]);
   });
 
@@ -164,7 +164,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started', 'tool_calls,surfaces,placement,reply_actions,images',
     ]);
   });
 
@@ -184,7 +184,7 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted', 'tool_calls,surfaces,placement,reply_actions,images,answer_started',
     ]);
   });
 
@@ -205,8 +205,30 @@ describe('conversation turns with surfaces', () => {
     const client = new ControlPlaneClient({ fetch: fetcher, credentials });
     await expect(client.getConversationTurns()).resolves.toEqual([]);
     expect(asked).toEqual([
-      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files', 'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes',
       'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted',
+    ]);
+  });
+
+  // 2026-11-19：用户发的文件（include=files，protocol 的 chat-files.ts）。只认识 quotes 的 daemon 回 400：
+  // 退回不要它，引用照样带着。
+  it('asks for files, and keeps quotes from a daemon that does not know them', async () => {
+    const credentials = createJsonCredentialStore(new MemoryKeyValueStorage());
+    await credentials.save({ baseUrl: 'http://daemon.test', accessToken: 'secret', binding, lastSeq: 0 });
+    const asked: string[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      asked.push(url.searchParams.get('include') ?? '');
+      if (url.searchParams.get('include')?.includes('files')) {
+        return response({ error: { code: 'invalid_request', message: 'invalid include' } }, 400);
+      }
+      return response({ items: [] });
+    });
+    const client = new ControlPlaneClient({ fetch: fetcher, credentials });
+    await expect(client.getConversationTurns()).resolves.toEqual([]);
+    expect(asked).toEqual([
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files',
+      'tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes',
     ]);
   });
 
@@ -238,7 +260,7 @@ describe('conversation turns with surfaces', () => {
     await expect(client.getOlderConversationTurns(turnAt('t2', 2), { limit: 30 })).resolves.toEqual({ items: [turnAt('t1', 1)], hasMore: true });
     expect(asked[1]!.searchParams.get('before')).toBe('t2');
     expect(asked[1]!.searchParams.get('limit')).toBe('30');
-    expect(asked[1]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes');
+    expect(asked[1]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files');
   });
 
   // 旧 daemon 不认识 before，回最近的几轮、没有 hasMore：只留比游标更早的，当作没有更早的了。
@@ -252,7 +274,7 @@ describe('conversation turns with surfaces', () => {
     const newer = await turnsClient(() => response({ items: [turnAt('t3', 3)] }));
     await expect(newer.client.getConversationTurnsById(['t3', 't3'])).resolves.toEqual([turnAt('t3', 3)]);
     expect(newer.asked[0]!.searchParams.get('turn_id')).toBe('t3');
-    expect(newer.asked[0]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes');
+    expect(newer.asked[0]!.searchParams.get('include')).toBe('tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files');
 
     const older = await turnsClient(() => response({ items: [turnAt('t1', 1), turnAt('t2', 2), turnAt('t3', 3)] }));
     await expect(older.client.getConversationTurnsById(['t3', 't1'])).resolves.toEqual([turnAt('t1', 1), turnAt('t3', 3)]);
@@ -1563,6 +1585,53 @@ describe('a link that may be dead', () => {
     current.client.disconnect();
   });
 
+  // 发给 Lead 的文件（protocol 的 chat-files.ts）：旧 daemon 不认识 files，只发文字会丢掉文件，所以整条拒收。
+  // 个数、单个大小、名字有问题的也不发，原因写明是哪个文件。
+  it('sends files only to a daemon that accepts them, and refuses the message otherwise', async () => {
+    const files = [{ name: 'app.log', mimeType: 'text/plain', data: 'aGVsbG8=' }];
+    const old = await connectedClient(['chat.client-message-id.v1', 'chat.images.v1']);
+    await expect(old.client.sendChatCommand({ id: 'cmd-1', message: '看日志', files }))
+      .rejects.toMatchObject({ code: 'invalid_request', message: 'the daemon does not accept files yet' });
+    expect(old.sockets[0]!.sent.some((frame) => JSON.parse(frame).type === 'chat.send')).toBe(false);
+    old.client.disconnect();
+
+    const current = await connectedClient(['chat.client-message-id.v1', 'chat.files.v1']);
+    void current.client.sendChatCommand({ id: 'cmd-2', message: '', files }).catch(() => {});
+    expect(JSON.parse(current.sockets[0]!.sent.at(-1)!)).toMatchObject({ id: 'cmd-2', message: '', files });
+    void current.client.sendChatCommand({ id: 'cmd-3', message: '只有字', files: [] }).catch(() => {});
+    expect(JSON.parse(current.sockets[0]!.sent.at(-1)!)).not.toHaveProperty('files');
+    const tooMany = Array.from({ length: 6 }, () => files[0]!);
+    await expect(current.client.sendChatCommand({ id: 'cmd-4', message: 'x', files: tooMany }))
+      .rejects.toMatchObject({ code: 'invalid_request', message: 'at most 5 files per message' });
+    await expect(current.client.sendChatCommand({ id: 'cmd-5', message: 'x', files: [{ name: '..', data: '' }] }))
+      .rejects.toMatchObject({ code: 'invalid_request' });
+    expect(JSON.parse(current.sockets[0]!.sent.at(-1)!).id).toBe('cmd-3');
+    current.client.disconnect();
+  });
+
+  it('keeps the files on the HTTP fallback, and reads one file by id', async () => {
+    const files = [{ name: 'counts.csv', mimeType: 'text/csv', data: 'YSwx' }];
+    const bodies: unknown[] = [];
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).endsWith('/v1/chat/send')) {
+        bodies.push(JSON.parse(String(init?.body)));
+        return response({ mode: 'started', turnId: 'turn-http' });
+      }
+      if (String(input).endsWith('/v1/chat/files/file_1')) {
+        return response({ id: 'file_1', name: 'counts.csv', mimeType: 'text/csv', size: 3, data: 'YSwx' });
+      }
+      return response({ ws_ticket: 'wst', expires_at: '2026-10-16T10:00:00.000Z' }, 201);
+    });
+    const { client, sockets } = await connectedClient(['chat.files.v1'], { fetch: fetcher as unknown as typeof fetch });
+    sockets[0]!.disconnect();
+    await expect(client.sendChatCommand({ id: 'cmd-1', message: '看表', clientMessageId: 'msg_1', files }))
+      .resolves.toEqual({ turnId: 'turn-http' });
+    expect(bodies).toEqual([{ id: 'cmd-1', message: '看表', clientMessageId: 'msg_1', files }]);
+    await expect(client.getChatFile('file_1'))
+      .resolves.toEqual({ id: 'file_1', name: 'counts.csv', mimeType: 'text/csv', size: 3, data: 'YSwx' });
+    client.disconnect();
+  });
+
   // 2026-10-19：工单对话一律交给工单的 agent。即使 daemon 还宣布 chat.ticket-answerer.v1（工单 08 第一版），
   // 客户端也只带工单号，不带回答者。
   it('sends only the ticket id as the chat context', async () => {
@@ -1627,7 +1696,7 @@ describe('a link that may be dead', () => {
     const client = new ControlPlaneClient({ fetch: fetcher as unknown as typeof fetch, credentials });
     await client.getConversationTurns();
     await expect(client.getChatImage('img_1')).resolves.toEqual({ id: 'img_1', mimeType: 'image/png', data: 'iVBORw0KGgo=' });
-    expect(asked).toEqual(['tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes']);
+    expect(asked).toEqual(['tool_calls,surfaces,placement,reply_actions,images,answer_started,interrupted,quotes,files']);
   });
 
   it('keeps the client message id on the HTTP fallback', async () => {

@@ -1,4 +1,7 @@
-import { foldToolCall, isSystemTurnOrigin, surfaceShadowedByFinal, surfacesReplacedBy, type ChatImageInput, type ChatQuoteInput } from '@pi-lead-child/protocol';
+import {
+  chatFileBase64Size, foldToolCall, isSystemTurnOrigin, normalizeChatFileMimeType, sanitizeChatFileName, surfaceShadowedByFinal, surfacesReplacedBy,
+  type ChatFileInput, type ChatImageInput, type ChatQuoteInput,
+} from '@pi-lead-child/protocol';
 
 import type { ControlPlaneMutation } from './eventReducer';
 import type { ControlPlaneStore } from './store';
@@ -235,6 +238,15 @@ function removeAssistantParts(store: ControlPlaneStore, turnId: string | null, p
   });
 }
 
+// 本机刚发的一个文件：名字按 daemon 的规则清理（去掉目录部分），类型规整，大小按 base64 算。和快照里的一样显示。
+function optimisticFilePart(id: string, file: ChatFileInput): MessagePart {
+  const sanitized = sanitizeChatFileName(file.name);
+  return {
+    kind: 'file', id, name: sanitized.ok ? sanitized.name : file.name, mimeType: normalizeChatFileMimeType(file.mimeType),
+    size: chatFileBase64Size(file.data), data: file.data,
+  };
+}
+
 export function createOptimisticUserMessage(
   store: ControlPlaneStore,
 	  input: {
@@ -248,6 +260,8 @@ export function createOptimisticUserMessage(
 	    images?: readonly ChatImageInput[];
 	    // 引用的几段话：画在气泡里正文的上面（设计规范 P17.7）。
 	    quotes?: readonly ChatQuoteInput[];
+	    // 随消息发的文件：名字、类型、大小和本机的数据（daemon 存下以后快照补上 fileId）。
+	    files?: readonly ChatFileInput[];
 	  },
 ): string {
   const state = store.getState();
@@ -261,6 +275,7 @@ export function createOptimisticUserMessage(
 	      kind: 'quote', id: `${messageId}:quote:${index}`, source: quote.source, text: quote.text,
 	      ...(quote.note ? { note: quote.note } : {}), ...(quote.anchor ? { anchor: quote.anchor } : {}),
 	    })),
+	    ...(input.files ?? []).map((file, index): MessagePart => optimisticFilePart(`${messageId}:file:${index}`, file)),
 	  ];
 	  const entity: MessageEntity = {
 	    id: messageId,
@@ -342,6 +357,8 @@ export function resolveOptimisticUserMessage(
       .map((part, index): MessagePart => ({ ...part, id: `${targetId}:image:${index}` })),
     ...optimisticParts.flatMap((part) => (part?.kind === 'quote' ? [part] : []))
       .map((part, index): MessagePart => ({ ...part, id: `${targetId}:quote:${index}` })),
+    ...optimisticParts.flatMap((part) => (part?.kind === 'file' ? [part] : []))
+      .map((part, index): MessagePart => ({ ...part, id: `${targetId}:file:${index}` })),
   ];
   const messagesById = { ...state.messagesById };
   const messagePartsById = { ...state.messagePartsById };

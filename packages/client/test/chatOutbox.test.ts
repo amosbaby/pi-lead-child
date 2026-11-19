@@ -81,6 +81,20 @@ describe('ChatOutbox', () => {
     expect(reloaded.sends[0]).toMatchObject({ quotes });
   });
 
+  // 发给 Lead 的文件（protocol 的 chat-files.ts）：和文字存在一起，重新加载以后照样发。
+  it('keeps files across a reload', async () => {
+    const storage = new MemoryStorage();
+    const files = [{ name: 'app.log', mimeType: 'text/plain', data: 'aGVsbG8=' }];
+    const first = harness({ storage, connected: false });
+    await first.outbox.load();
+    await first.outbox.enqueue('', undefined, undefined, undefined, undefined, undefined, files);
+    expect(storage.saved[0]).toMatchObject({ message: '', files });
+    const reloaded = harness({ storage });
+    await reloaded.outbox.load();
+    await vi.waitFor(() => expect(reloaded.sends).toHaveLength(1));
+    expect(reloaded.sends[0]).toMatchObject({ message: '', files });
+  });
+
   // 工单 04：Lead 正忙时选了排队的消息，重发、重新加载以后照样按排队发；旧版本存下的条目没有它，照旧按插话发。
   it('keeps the placement the user chose across a reload, and reads entries saved without one', async () => {
     const storage = new MemoryStorage();
@@ -335,6 +349,11 @@ describe('createJsonOutboxStorage', () => {
     const badModel = { ...entry, clientMessageId: 'msg_6', turnModel: { model: 'vibeproxy/claude-opus-5-5' } };
     values.set('pi-lead-child.chat-outbox.v1', JSON.stringify([withModel, badModel]));
     expect(await storage.load()).toEqual([withModel]);
+    // 带文件的条目：文件的形状不对时整条读不懂。
+    const withFiles = { ...entry, clientMessageId: 'msg_7', files: [{ name: 'app.log', data: 'aGVsbG8=' }] };
+    const badFiles = { ...entry, clientMessageId: 'msg_8', files: [{ name: 'app.log' }] };
+    values.set('pi-lead-child.chat-outbox.v1', JSON.stringify([withFiles, badFiles]));
+    expect(await storage.load()).toEqual([withFiles]);
     values.set('pi-lead-child.chat-outbox.v1', '{not json');
     expect(await storage.load()).toEqual([]);
     await storage.save([]);

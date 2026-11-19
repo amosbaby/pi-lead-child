@@ -15,8 +15,8 @@
 import { Value } from 'typebox/value';
 
 import {
-  ChatImagesInputSchema, ChatQuotesInputSchema, LeadModelChoiceSchema,
-  type ChatImageInput, type ChatPlacement, type ChatQuoteInput, type LeadModelChoice,
+  ChatFilesInputSchema, ChatImagesInputSchema, ChatQuotesInputSchema, LeadModelChoiceSchema,
+  type ChatFileInput, type ChatImageInput, type ChatPlacement, type ChatQuoteInput, type LeadModelChoice,
 } from '@pi-lead-child/protocol';
 
 import { ControlPlaneClientError } from './controlPlaneClient.ts';
@@ -44,6 +44,8 @@ export interface OutboxEntry {
   turnModel?: LeadModelChoice;
   // 引用回复（protocol 的 chat-quotes.ts）。和文字存在一起，重新加载以后照样带。
   quotes?: ChatQuoteInput[];
+  // 发给 Lead 的文件（base64，protocol 的 chat-files.ts）。和图片一样存在一起；存储写不下时只在内存里。
+  files?: ChatFileInput[];
 }
 
 export interface OutboxStorage {
@@ -69,7 +71,8 @@ function isOutboxEntry(value: unknown): value is OutboxEntry {
     && (entry.mode === undefined || entry.mode === 'steer' || entry.mode === 'followUp')
     && (entry.images === undefined || Value.Check(ChatImagesInputSchema, entry.images))
     && (entry.turnModel === undefined || Value.Check(LeadModelChoiceSchema, entry.turnModel))
-    && (entry.quotes === undefined || Value.Check(ChatQuotesInputSchema, entry.quotes));
+    && (entry.quotes === undefined || Value.Check(ChatQuotesInputSchema, entry.quotes))
+    && (entry.files === undefined || Value.Check(ChatFilesInputSchema, entry.files));
   // 工单 08 第一版存下的条目可能还带着 answerer（工单对话里选的回答者）。照样读回来、照样发，只是不再带它：
   // 2026-10-19 起工单对话一律交给工单的 agent。不能因为多一个旧字段丢掉用户的消息。
 }
@@ -201,10 +204,10 @@ export class ChatOutbox {
 
   // 写进发件箱（先存好），然后在连着时发出去。mode：Lead 忙时插话还是排队（工单 04），缺省插话。
   // images：发给 Lead 的图片。存储写不下（例如 localStorage 满了）时，这条照样在内存里发出去，只是重新加载以后就没有了。
-  // turnModel：「只这一条」的单轮模型。quotes：引用回复，按加入的顺序。
+  // turnModel：「只这一条」的单轮模型。quotes：引用回复，按加入的顺序。files：发给 Lead 的文件，按选的顺序。
   async enqueue(
     message: string, ticketId?: number, mode?: ChatPlacement, images?: readonly ChatImageInput[], turnModel?: LeadModelChoice,
-    quotes?: readonly ChatQuoteInput[],
+    quotes?: readonly ChatQuoteInput[], files?: readonly ChatFileInput[],
   ): Promise<OutboxEntry> {
     const entry: OutboxEntry = {
       clientMessageId: this.createId(),
@@ -219,6 +222,7 @@ export class ChatOutbox {
       ...(images?.length ? { images: images.map((image) => ({ ...image })) } : {}),
       ...(turnModel ? { turnModel: { model: turnModel.model, effort: turnModel.effort } } : {}),
       ...(quotes?.length ? { quotes: quotes.map((quote) => ({ ...quote, source: { ...quote.source } })) } : {}),
+      ...(files?.length ? { files: files.map((file) => ({ ...file })) } : {}),
     };
     this.list.push(entry);
     await this.persist();
