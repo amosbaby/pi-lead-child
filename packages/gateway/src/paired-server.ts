@@ -28,6 +28,7 @@ import {
   CHAT_PLACEMENT_CAPABILITY,
   CHAT_FOLLOW_UP_ACTIONS_CAPABILITY,
   CHAT_PLACEMENT_PREFERENCE_CAPABILITY,
+  LEAD_SHADOW_SETTINGS_CAPABILITY,
   CHAT_TURN_MODEL_CAPABILITY,
   leadModelSpec,
   type LeadModelChoice,
@@ -147,7 +148,7 @@ import { handleRuleChangeRoute } from "./rule-change-routes.js";
 import { handleTimerRoute } from "./timer-routes.js";
 import type { LeadCapability, LeadGrant, LeadGrantChannel } from "@pi-lead-child/store";
 import {
-  findClientMessageTurn, getBusyPlacement, getChatImage, getItem, listSurfaceActions, listWidgets, loadSetupStatus, recordClientMessageTurn, recordSurfaceAction, type ChatImageData,
+  findClientMessageTurn, getBusyPlacement, getChatImage, getItem, getLeadShadow, listSurfaceActions, listWidgets, loadSetupStatus, recordClientMessageTurn, recordSurfaceAction, type ChatImageData,
 } from "@pi-lead-child/store";
 import { getChatFile, type ChatFileData } from "@pi-lead-child/store";
 import { TicketAttachmentError } from "@pi-lead-child/store";
@@ -1633,6 +1634,14 @@ export async function startPairedServer(
       if (req.method === "GET" && url.pathname === "/v1/lead/busy-placement") {
         requireAuth(req, "tickets:view");
         json(req, res, 200, { busyPlacement: getBusyPlacement(bridge.db) });
+        return;
+      }
+
+      // shadow 的设置（设置 → Shadow，protocol 的 lead-shadow.ts，2026-11-19）。只读 kv。
+      // 改走通用的操作入口（POST /v1/actions/lead_shadow/lead/set）。
+      if (req.method === "GET" && url.pathname === "/v1/lead/shadow") {
+        requireAuth(req, "tickets:view");
+        json(req, res, 200, { shadow: getLeadShadow(bridge.db) });
         return;
       }
 
@@ -3560,6 +3569,8 @@ export async function startPairedServer(
           "kernel.conversation-cards.v1",
           CHAT_CLIENT_MESSAGE_ID_CAPABILITY,
           CHAT_PLACEMENT_CAPABILITY,
+          // 设置页读 shadow 的设置（GET /v1/lead/shadow）。
+          LEAD_SHADOW_SETTINGS_CAPABILITY,
           // 排着的追问能插进这一轮、能取消（daemon 交来了这个服务时）。
           ...(bridge.uiActionServices?.followUps ? [CHAT_FOLLOW_UP_ACTIONS_CAPABILITY] : []),
           // 没带 mode 的消息按「Lead 忙时你发的消息」的设置放（daemon 说它这样做时）。

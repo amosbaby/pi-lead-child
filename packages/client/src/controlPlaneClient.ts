@@ -87,6 +87,7 @@ import {
   LeadAvatarResponseSchema,
   HostBypassResponseSchema,
   BusyPlacementResponseSchema,
+  LeadShadowResponseSchema,
   SlackEmojiPreviewSchema,
   DesignPreferencesResponseSchema,
   RuntimeSettingsResponseSchema,
@@ -103,6 +104,7 @@ import {
   type LeadAvatarDto,
   type HostBypassDto,
   type BusyPlacementDto,
+  type LeadShadowDto,
   type LeadAvatarImage,
   type LeadAvatarSlackEmojiRequest,
   type LeadAvatarSlot,
@@ -2096,6 +2098,12 @@ export class ControlPlaneClient {
   // 改走 performUiAction('busy_placement', 'lead', 'set', { input: { placement } })。
   async getBusyPlacement(signal?: AbortSignal): Promise<BusyPlacementDto> {
     return (await this.request<{ busyPlacement: BusyPlacementDto }>('/v1/lead/busy-placement', BusyPlacementResponseSchema, { signal })).busyPlacement;
+  }
+
+  // shadow 的设置（设置 → Shadow，契约在 protocol 的 lead-shadow.ts，2026-11-19）。读要 tickets:view；
+  // 改走 performUiAction('lead_shadow', 'lead', 'set', { input })，只写要改的字段。
+  async getLeadShadow(signal?: AbortSignal): Promise<LeadShadowDto> {
+    return (await this.request<{ shadow: LeadShadowDto }>('/v1/lead/shadow', LeadShadowResponseSchema, { signal })).shadow;
   }
 
   // 界面的外观偏好（设置页「外观」）。

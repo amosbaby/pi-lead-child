@@ -60,6 +60,18 @@ export type LeadShadowDto = Static<typeof LeadShadowDtoSchema>;
 
 export const DEFAULT_LEAD_SHADOW: LeadShadowDto = { mode: "off", model: null, shares: { channel: 100, ticket: 0, other: 0 }, gatherSeconds: 20 };
 
+// The settings page reads the setting with GET /v1/lead/shadow (tickets:view). When the setting changes, the gateway
+// sends snapshot.required with the payload {resource: LEAD_SHADOW_RESOURCE}, and the client reads it again.
+
+/**
+ * The gateway reports it in the hello.v2 capabilities: it serves GET /v1/lead/shadow. An older daemon does not report it,
+ * and the settings page then does not show the shadow.
+ */
+export const LEAD_SHADOW_SETTINGS_CAPABILITY = "lead.shadow-settings.v1";
+
+export const LeadShadowResponseSchema = StrictObject({ shadow: LeadShadowDtoSchema });
+export type LeadShadowResponse = Static<typeof LeadShadowResponseSchema>;
+
 /**
  * Which side of the split an object falls on: a number 0–99 from the object key (FNV-1a). The object goes to the shadow
  * when its bucket is below the source's share. The same key always gives the same bucket, so a conversation or a ticket

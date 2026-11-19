@@ -250,6 +250,14 @@ export function useBusyPlacement() {
   return { busyPlacement, resource };
 }
 
+// shadow 的设置（GET /v1/lead/shadow，2026-11-19）。设置 → Shadow 在屏幕上时才取；snapshot.required（resource 是 lead-shadow）时重取。
+export function useLeadShadow() {
+  useObservedResource(RESOURCE_KEYS.leadShadow);
+  const leadShadow = useControlPlaneStore((state) => state.leadShadow);
+  const resource = useControlPlaneStore((state) => state.resourceState[RESOURCE_KEYS.leadShadow]);
+  return { leadShadow, resource };
+}
+
 // Lead 的名字、人格和互动风格（GET /v1/lead/profile）。连上就取（runtime 的 core 资源里有它）；
 // snapshot.required（resource 是 lead-profile）时重取。设置页「身份与风格」读它。
 export function useLeadProfile() {

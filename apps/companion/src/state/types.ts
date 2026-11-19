@@ -11,6 +11,7 @@ import type {
   LeadAvatarDto,
   HostBypassDto,
   BusyPlacementDto,
+  LeadShadowDto,
   LeadProfileDto,
   DesignPreferencesDto,
   RuntimeSettingsDto,
@@ -76,6 +77,7 @@ export type ResourceKey =
   | 'lead-avatar'
   | 'host-bypass'
   | 'busy-placement'
+  | 'lead-shadow'
   | 'design-preferences'
   | 'channel-settings'
   | 'conversation:current'
@@ -120,6 +122,8 @@ export const RESOURCE_KEYS = {
   hostBypass: 'host-bypass' as const,
   // Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement，2026-11-09）。设置 → Lead → 身份与风格在屏幕上时才取。
   busyPlacement: 'busy-placement' as const,
+  // shadow 的设置（GET /v1/lead/shadow，2026-11-19）。设置 → Shadow 在屏幕上时才取。
+  leadShadow: 'lead-shadow' as const,
   designPreferences: 'design-preferences' as const,
   channelSettings: 'channel-settings' as const,
   workItems: 'work-items' as const,
@@ -369,6 +373,8 @@ export interface ControlPlaneData {
   hostBypass: HostBypassDto | null;
   /** Lead 忙时你发的消息怎么放（GET /v1/lead/busy-placement）：排队或插话。设置页在屏幕上时才取；没取到时为 null。 */
   busyPlacement: BusyPlacementDto | null;
+  /** shadow 的设置（GET /v1/lead/shadow）：模式、比例、模型、合批等待。设置页在屏幕上时才取；没取到时为 null。 */
+  leadShadow: LeadShadowDto | null;
   /** 界面的外观偏好（GET /v1/design/preferences）。连上以后就取；没取到时用缺省值画。 */
   designPreferences: DesignPreferencesDto | null;
   /** 外部消息通道的凭据和状态（GET /v1/channels/settings）：每个来源一行，没有密钥的值。没取到时为 null。 */

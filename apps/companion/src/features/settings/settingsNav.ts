@@ -10,7 +10,7 @@ type Messages = ReturnType<typeof settingsMessages>;
 
 export type SettingsSectionId =
   | 'profile' | 'appearance' | 'connections' | 'channels' | 'device' | 'devices' | 'model' | 'memory' | 'standing-orders' | 'runtimes'
-  | 'host-bypass';
+  | 'host-bypass' | 'shadow';
 
 // 名字在 settings.messages.ts（settingsMessages 的 items、groups），按界面语言取。
 export type SettingsItem = {
@@ -38,6 +38,8 @@ export const SETTINGS_GROUPS: readonly SettingsGroup[] = [
       { id: 'standing-orders', href: '/settings/standing-orders', icon: 'shield-check' },
       // 用户本人发话时免沙箱（工单 #246）：只有你本人能在这里打开，一直开着，直到你或 Lead 关掉。
       { id: 'host-bypass', href: '/settings/host-bypass', icon: 'shield' },
+      // Lead 的分身 shadow（2026-11-19）：开关、交给它的比例、模型和合批等待。Lead 也能改。
+      { id: 'shadow', href: '/settings/shadow', icon: 'copy' },
     ],
   },
   {
@@ -77,7 +79,7 @@ export function settingsSectionForPath(pathname: string, { desktop }: { desktop:
   const section = segments[1];
   if (section === undefined) return desktop ? 'profile' : null;
   if (section === 'profile' || section === 'appearance' || section === 'connections' || section === 'channels' || section === 'device' || section === 'devices' || section === 'model' || section === 'memory'
-    || section === 'standing-orders' || section === 'runtimes' || section === 'host-bypass') return section;
+    || section === 'standing-orders' || section === 'runtimes' || section === 'host-bypass' || section === 'shadow') return section;
   return null;
 }
 

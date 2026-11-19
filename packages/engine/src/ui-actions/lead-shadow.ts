@@ -5,13 +5,13 @@
 //     refused with a confirm card. The user said both the user and Lead can set the shadow's model.
 // The daemon reads the setting each time it is about to hand background events out (apps/daemon, wakeForEvents).
 import {
-  LEAD_SHADOW_MAX_GATHER_SECONDS, normalizeLeadShadow, type LeadShadowDto, type SetLeadShadowRequest,
+  LEAD_SHADOW_MAX_GATHER_SECONDS, LEAD_SHADOW_RESOURCE, normalizeLeadShadow, type LeadShadowDto, type SetLeadShadowRequest,
 } from "@pi-lead-child/protocol";
-import { getLeadShadow, writeLeadShadow } from "@pi-lead-child/store";
+import { getLeadShadow, publishGatewayEvent, writeLeadShadow } from "@pi-lead-child/store";
 import { AVAILABLE } from "../ticket-actions/types.js";
 import { UiActionError, type UiActionDefinition, type UiActionEnv, type UiActionTargetKind } from "./types.js";
 
-export const LEAD_SHADOW_WHERE = "会话里直接告诉 Lead（设置页还没有这一项）";
+export const LEAD_SHADOW_WHERE = "设置 → Shadow，或者会话里直接告诉 Lead";
 
 export interface LeadShadowChange {
   changed: boolean;
@@ -83,6 +83,8 @@ export const LEAD_SHADOW_ACTIONS = {
       const next = normalizeLeadShadow({ ...before, ...input, shares: { ...before.shares, ...input.shares } });
       if (JSON.stringify(next) === JSON.stringify(before)) return { changed: false, before, shadow: before };
       writeLeadShadow(run.db, next);
+      // The settings page reads it again (GET /v1/lead/shadow).
+      publishGatewayEvent(run.db, { type: "snapshot.required", requiredScope: "tickets:view", payload: { resource: LEAD_SHADOW_RESOURCE } });
       return { changed: true, before, shadow: getLeadShadow(run.db) };
     },
     forLead: (_run, result) => {

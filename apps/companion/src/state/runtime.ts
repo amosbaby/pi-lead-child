@@ -59,6 +59,8 @@ import type {
   LeadProfileRequest,
   HostBypassDto,
   BusyPlacement,
+  LeadShadowDto,
+  SetLeadShadowRequest,
   LeadAvatarDto,
   LeadAvatarSlackEmojiRequest,
   LeadAvatarSlot,
@@ -100,7 +102,7 @@ import type {
   UiActionView,
   TicketSummary,
 } from '@pi-lead-child/protocol';
-import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
+import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, LEAD_SHADOW_SETTINGS_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
 import { Value } from 'typebox/value';
 
 import {
@@ -219,7 +221,7 @@ export type CompanionTransport = Pick<
   | 'getRuntimeSettings' | 'updateRuntimeSettings'
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
-  | 'getBusyPlacement'
+  | 'getBusyPlacement' | 'getLeadShadow'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences'
   | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection'
@@ -1564,6 +1566,18 @@ export class CompanionStateRuntime {
     else await this.ensureResource(RESOURCE_KEYS.busyPlacement, true);
   }
 
+  // shadow 的设置（设置 → Shadow，2026-11-19）：操作层的 lead_shadow.set，和 Lead 的 perform_action 同一个函数，actor 是你本人。
+  // 只写要改的字段。做完马上换成操作回的值（回答里没有时重取）；网关之后的 snapshot.required（resource 是 lead-shadow）也会触发重取。
+  // 失败时抛出，原因是 daemon 写的那句话（例如模型目录里没有这个模型）。
+  async setLeadShadow(input: SetLeadShadowRequest): Promise<void> {
+    const { client } = this.dependencies;
+    if (typeof client.performUiAction !== 'function') throw new Error(this.messages().noAction);
+    const outcome = await client.performUiAction('lead_shadow', 'lead', 'set', { input });
+    const saved = (outcome.result as { shadow?: LeadShadowDto } | null)?.shadow;
+    if (saved && typeof saved === 'object' && 'mode' in saved) this.control.setState({ leadShadow: saved });
+    else await this.ensureResource(RESOURCE_KEYS.leadShadow, true);
+  }
+
   // 设置页的「形象」：上传、去掉一种状态的图，改 Slack 署名的 emoji。改完马上换成 daemon 回的值，再取新图。
   async uploadLeadAvatarSlot(slot: LeadAvatarSlot, request: LeadAvatarUploadRequest): Promise<LeadAvatarDto> {
     return this.applyLeadAvatar(await this.memoryClient('uploadLeadAvatarSlot')(slot, request));
@@ -2542,6 +2556,10 @@ export class CompanionStateRuntime {
         const value = await this.memoryClient('getBusyPlacement')(signal);
         if (!canCommit()) return;
         this.control.setState({ busyPlacement: value });
+      } else if (key === RESOURCE_KEYS.leadShadow) {
+        const value = await this.memoryClient('getLeadShadow')(signal);
+        if (!canCommit()) return;
+        this.control.setState({ leadShadow: value });
       } else if (key === RESOURCE_KEYS.leadAvatar) {
         const value = await this.memoryClient('getLeadAvatar')(signal);
         if (!canCommit()) return;
@@ -2766,6 +2784,10 @@ export class CompanionStateRuntime {
     if (key === RESOURCE_KEYS.busyPlacement) {
       return this.scopes.has('tickets:view') && this.capabilities.has(CHAT_PLACEMENT_PREFERENCE_CAPABILITY)
         && typeof this.dependencies.client.getBusyPlacement === 'function';
+    }
+    if (key === RESOURCE_KEYS.leadShadow) {
+      return this.scopes.has('tickets:view') && this.capabilities.has(LEAD_SHADOW_SETTINGS_CAPABILITY)
+        && typeof this.dependencies.client.getLeadShadow === 'function';
     }
     if (key === RESOURCE_KEYS.leadAvatar) {
       return this.scopes.has('tickets:view') && this.capabilities.has(LEAD_AVATAR_CAPABILITY)
@@ -3017,7 +3039,7 @@ type MemoryClientMethod =
   | 'getRuntimeSettings' | 'updateRuntimeSettings'
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
-  | 'getBusyPlacement'
+  | 'getBusyPlacement' | 'getLeadShadow'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences';
 
