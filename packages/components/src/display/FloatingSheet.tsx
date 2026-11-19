@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Modal, PanResponder, Platform, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
+import { Dimensions, Keyboard, Modal, PanResponder, Platform, ScrollView, StatusBar, StyleSheet, View } from 'react-native';
 import Animated, {
   Easing,
   runOnJS,
@@ -40,6 +40,27 @@ export type FloatingSheetProps = {
 };
 
 export type SheetCover = { left: number; right: number; bottom: number };
+
+// 量出面板要盖住的那一块（例如输入框）在屏幕上的位置。measure 给窗口坐标（PopoverAnchorHandle 的 measure）。
+// 键盘开着时那一块被顶上去了：先收起键盘，等它收下去再量。
+export function measureSheetCover(
+  measure: ((done: (frame: { x: number; y: number; width: number; height: number }) => void) => void) | null | undefined,
+  done: (cover: SheetCover | null) => void,
+) {
+  const run = () => {
+    if (!measure) { done(null); return; }
+    measure(({ x, y, width, height }) => {
+      const screen = Dimensions.get('window');
+      done({ left: x, right: Math.max(0, screen.width - x - width), bottom: Math.max(0, screen.height - y - height) });
+    });
+  };
+  if (Platform.OS !== 'web' && Keyboard.isVisible()) {
+    const subscription = Keyboard.addListener('keyboardDidHide', () => { subscription.remove(); run(); });
+    Keyboard.dismiss();
+  } else {
+    run();
+  }
+}
 
 // 手机上的悬浮底部面板（主题 H-7，P13.2 到 P13.2c，2026-11-14 用户定）。加号、换模型和会话里点开的卡片都用它。
 // 不贴边：左右离屏幕 12、离底 20（加安全区），四角圆角 28，白底，面板阴影；顶上一条 36×4 的小横杠。

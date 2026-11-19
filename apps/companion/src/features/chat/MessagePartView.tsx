@@ -73,6 +73,9 @@ export function MessagePartView({
   // 你引用的几段话由气泡自己画在正文上面（LeadConversation 的 QuoteBlock），不在这里画。
   if (part.kind === 'quote') return null;
 
+  // 你发的文件画在气泡上面（LeadConversation 的 UserMessageFiles），不在气泡里。
+  if (part.kind === 'file') return null;
+
   return (
     <InfoRow
       icon="agent"

@@ -15,6 +15,7 @@ export const composerMessages = defineMessages({
     // 全屏看大图下面的按钮。
     removeThisImage: 'Remove this image',
     addImage: 'Add image',
+    addFile: 'Add files',
     plus: 'Add images, or change the model',
     preparingImages: 'Processing images…',
     tooManyImages: (max: number) => `A message can have at most ${max} images. The extra images were not added.`,
@@ -76,6 +77,7 @@ export const composerMessages = defineMessages({
     removeImage: (n) => `移除图片 ${n}`,
     removeThisImage: '删掉这张',
     addImage: '添加图片',
+    addFile: '添加文件',
     plus: '添加图片，或者换模型',
     preparingImages: '正在处理图片…',
     tooManyImages: (max) => `一条消息最多带 ${max} 张图片，多出来的没有加上`,

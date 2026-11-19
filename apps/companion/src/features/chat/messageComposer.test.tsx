@@ -2,11 +2,13 @@
 // 会话的输入框（2026-10-25，参考 Kimi）：一张卡片，上面是待发的图片，中间是多行文字，下面是「+」、模型名和发送按钮。
 // Enter 发送，Shift+Enter 换行，输入法组字时的 Enter 不发送；点「+」选图片，或者粘贴剪贴板里的图片；
 // 每张图片是一个 64×64 的小图，可以删掉单张；文字和图片一起发给 Lead。daemon 不收图片时没有「+」。
-import { CHAT_IMAGES_CAPABILITY, type ConversationTurn, type LeadStatus, type Overview } from '@pi-lead-child/protocol';
+import { CHAT_FILES_CAPABILITY, CHAT_IMAGES_CAPABILITY, type ConversationTurn, type LeadStatus, type Overview } from '@pi-lead-child/protocol';
 import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { pickImageFiles, prepareChatImage } from '@/data/chatImagePicker';
+import { pickChatFiles } from '@/data/chatFilePicker';
+import { presentChatFile } from '@/data/chatFileOpen';
 import { composerImage } from '@/data/chatImagePicker.types';
 
 import { renderUI } from '../../../test/render';
@@ -30,6 +32,12 @@ vi.mock('@/data/chatImagePicker', async () => {
     }),
   };
 });
+// 文件选择换成替身（浏览器的文件框在测试里打不开）；读文件照旧用 FileReader。
+vi.mock('@/data/chatFilePicker', async () => {
+  const actual = await vi.importActual<typeof import('@/data/chatFilePicker')>('@/data/chatFilePicker');
+  return { ...actual, pickChatFiles: vi.fn(async () => []) };
+});
+vi.mock('@/data/chatFileOpen', () => ({ presentChatFile: vi.fn(async () => {}) }));
 vi.hoisted(() => {
   window.requestAnimationFrame = () => 0;
   window.cancelAnimationFrame = () => {};
@@ -87,6 +95,8 @@ const thumbnails = () => screen.queryAllByTestId(/^composer-image-\d+$/);
 beforeEach(() => {
   vi.mocked(pickImageFiles).mockReset().mockResolvedValue([]);
   vi.mocked(prepareChatImage).mockClear();
+  vi.mocked(pickChatFiles).mockReset().mockResolvedValue([]);
+  vi.mocked(presentChatFile).mockClear();
 });
 
 describe('the message composer', () => {
@@ -205,6 +215,62 @@ describe('the message composer', () => {
     const camera = await screen.findByTestId('lead-plus-camera');
     await act(async () => { fireEvent.click(camera); });
     await waitFor(() => expect(screen.getByTestId('composer-notice').textContent).toBe('Lead-Child cannot use the camera. Allow it in Settings.'));
+  });
+
+  // 2026-11-19：daemon 收文件时，「+」什么文件都能选。图片照旧按图片发，别的是一张文件卡（主题 A-2），和文字一起发给 Lead。
+  it('adds files from the + button as file cards, keeps pictures as images, and sends both', async () => {
+    const { sendChat } = setup({ capabilities: [CHAT_IMAGES_CAPABILITY, CHAT_FILES_CAPABILITY] });
+    const log = new File(['line 212: password is empty'], 'release.log', { type: 'text/plain' });
+    vi.mocked(pickChatFiles).mockResolvedValue([
+      { name: 'release.log', mimeType: 'text/plain', size: log.size, blob: log },
+      { name: 'shot.png', mimeType: 'image/png', size: 4, blob: png('shot.png') },
+    ]);
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-attach')); });
+    await waitFor(() => expect(screen.getByTestId('composer-file-0').textContent).toContain('release.log'));
+    expect(screen.getByTestId('composer-file-0').textContent).toContain('27 B · Text');
+    await waitFor(() => expect(thumbnails()).toHaveLength(1));
+    type('看日志');
+    enter();
+    expect(sendChat).toHaveBeenCalledWith('看日志', undefined, undefined, [{ mimeType: 'image/png', data: btoa('shot.png') }], undefined, undefined, [
+      { name: 'release.log', mimeType: 'text/plain', data: btoa('line 212: password is empty') },
+    ]);
+    expect(screen.queryByTestId('composer-file-0')).toBeNull();
+  });
+
+  it('refuses a file over 10 MB and says why', async () => {
+    setup({ capabilities: [CHAT_IMAGES_CAPABILITY, CHAT_FILES_CAPABILITY] });
+    vi.mocked(pickChatFiles).mockResolvedValue([{ name: 'dump.bin', mimeType: 'application/octet-stream', size: 11 * 1024 * 1024 }]);
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-attach')); });
+    await waitFor(() => expect(screen.getByTestId('composer-notice').textContent).toBe('dump.bin is larger than 10 MB.'));
+    expect(screen.queryByTestId('composer-file-0')).toBeNull();
+  });
+
+  it('offers Files in the phone plus sheet only when the daemon takes files', async () => {
+    setup({ compact: true, capabilities: [CHAT_IMAGES_CAPABILITY, CHAT_FILES_CAPABILITY] });
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-plus')); });
+    const files = await screen.findByTestId('lead-plus-files');
+    await act(async () => { fireEvent.click(files); });
+    expect(pickChatFiles).toHaveBeenCalled();
+  });
+
+  it('shows the files you sent as cards that open the file', async () => {
+    const getChatFile = vi.fn(async () => ({ id: 'file_1', name: 'release.log', mimeType: 'text/plain', size: 27, data: btoa('x') }));
+    const runtime = createCompanionStateRuntime({
+      client: { getChatFile } as unknown as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    runtime.control.setState({ phase: 'ready', connectionState: 'connected', overview: overview(), capabilities: [CHAT_FILES_CAPABILITY] });
+    runtime.control.getState().replaceConversation(SESSION, [{
+      id: 'turn-f', originBindingId: 1, originKind: 'paired:companion', ticketId: null, state: 'completed',
+      userText: '看日志', assistantText: '好。', error: null, createdAt: '2026-11-19T03:00:00.000Z', updatedAt: '2026-11-19T03:00:05.000Z',
+      files: [{ id: 'file_1', name: 'release.log', mimeType: 'text/plain', size: 27 }],
+    }]);
+    renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation /></CompanionRuntimeProvider>);
+    const card = screen.getByTestId('user-message-file-0');
+    expect(card.textContent).toContain('release.log');
+    await act(async () => { fireEvent.click(screen.getByTestId('user-message-file-0-open')); });
+    await waitFor(() => expect(presentChatFile).toHaveBeenCalledWith(expect.objectContaining({ name: 'release.log', data: btoa('x') })));
   });
 
   it('keeps at most 8 images and says why one could not be added', async () => {

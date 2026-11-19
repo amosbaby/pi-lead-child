@@ -6,7 +6,7 @@ import {
   Text,
 } from '@pi-lead-child/components';
 import {
-  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, CHAT_QUOTES_CAPABILITY, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
+  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, CHAT_QUOTES_CAPABILITY, CHAT_FILES_CAPABILITY, type ChatFile, type ChatFileInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
   ownerActionRefOfTurn, SYSTEM_TURN_ORIGINS, ticketNeedsUser,
   ticketNeedsUserLabel, ticketTurn, type ChatPlacement, type KernelTicketWorkItemV2,
   type ChannelCardDto,
@@ -18,7 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { useRouter } from 'expo-router';
 import { ticketsNeedingUser } from '@pi-lead-child/protocol';
 
-import { useLocale, type Locale } from '@/i18n';
+import { useLocale, useMessages, type Locale } from '@/i18n';
 
 import { conversationMessages } from './conversation.messages';
 import { placementCopyFor, steeredNoticeFor } from './steeredNotice';
@@ -31,8 +31,8 @@ import { HomeTopBar } from '../home/HomeTopBar';
 import { LeadPlusSheet, type PlusTile } from '../home/LeadPlusSheet';
 import { homeMessages } from '../home/home.messages';
 import { canPickImages, canTakePhoto } from '@/data/chatImagePicker';
-import { Dimensions, Keyboard, Platform } from 'react-native';
-import type { SheetCover } from '@pi-lead-child/components';
+import { canPickFiles } from '@/data/chatFilePicker';
+import { measureSheetCover, type SheetCover } from '@pi-lead-child/components';
 import { useLeadAvatarSource } from '../../components/useLeadAvatarSource';
 import { WebUpdateNotice } from '../../components/WebUpdateNotice';
 import { ticketContextLabel, ticketSummaryToTicket } from '../workspace/model';
@@ -58,6 +58,9 @@ import {
 } from '../../state/hooks';
 import type { ConversationCardEntity, LeadTurnEntity, MessageEntity, MessagePart } from '../../state/types';
 import { QuoteBlock } from './QuoteViews';
+import { FileChip } from './FileChip';
+import { fileMessages } from './file.messages';
+import { presentChatFile } from '@/data/chatFileOpen';
 import { QuoteJumpContext, useQuoteJump, type QuotePartForJump } from './quoteNavigation';
 import { quoteDrafts } from './quoteDrafts';
 import { flashQuote } from './quoteFlash';
@@ -289,6 +292,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const queueTray = useComposerQueueTray({ leadName, actions: canSteerQueued });
   // daemon 收图片时，输入框才有「+」和粘贴图片（protocol 的 chat-images.ts）。
   const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
+  // daemon 收文件时（chat.files.v1）：加号面板有「文件」，桌面上的「+」什么文件都能选（图片照旧按图片发）。
+  const canSendFiles = useControlPlaneStore((state) => state.capabilities.includes(CHAT_FILES_CAPABILITY));
   // Lead 现在用的模型：桌面上写在输入框工具栏右边、发送按钮前面（2026-11-16 用户），点开换模型（LeadModelPicker）；手机上在加号面板里。
   // 只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
   const leadModel = useControlPlaneStore((state) => state.overview?.model);
@@ -299,23 +304,12 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const canTurnModel = useControlPlaneStore((state) => state.capabilities.includes(CHAT_TURN_MODEL_CAPABILITY));
   const [turnModel, setTurnModel] = useState<LeadModelChoice | null>(null);
   const composerAnchorRef = useRef<PopoverAnchorHandle>(null);
+  // 加号面板盖住输入框：先收起键盘，再量输入框在屏幕上的位置（measureSheetCover）。
   const openPlus = useCallback(() => {
-    const open = () => {
-      const anchor = composerAnchorRef.current;
-      if (!anchor) { setPlusOpen(true); return; }
-      anchor.measure(({ x, y, width, height }) => {
-        const screen = Dimensions.get('window');
-        setPlusCover({ left: x, right: Math.max(0, screen.width - x - width), bottom: Math.max(0, screen.height - y - height) });
-        setPlusOpen(true);
-      });
-    };
-    // 键盘开着时输入框被顶上去了：等键盘收下去再量。
-    if (Platform.OS !== 'web' && Keyboard.isVisible()) {
-      const subscription = Keyboard.addListener('keyboardDidHide', () => { subscription.remove(); open(); });
-      Keyboard.dismiss();
-    } else {
-      open();
-    }
+    measureSheetCover(composerAnchorRef.current?.measure, (cover) => {
+      setPlusCover(cover);
+      setPlusOpen(true);
+    });
   }, []);
   // 加号面板上面一排（主题 H-7）：daemon 收图片、这台设备能选图片时有「拍照」（能拍照时）和「图片」。
   const plusTiles = useMemo(() => {
@@ -324,19 +318,22 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       if (canTakePhoto) tiles.push({ id: 'camera', icon: 'camera', label: homeText.camera, onPress: () => composerRef.current?.pickImages('camera') });
       tiles.push({ id: 'photos', icon: 'image', label: homeText.photos, onPress: () => composerRef.current?.pickImages('library') });
     }
+    if (canSendFiles && canPickFiles) tiles.push({ id: 'files', icon: 'file', label: homeText.files, onPress: () => composerRef.current?.pickFiles() });
     return tiles;
-  }, [canSendImages, homeText]);
+  }, [canSendFiles, canSendImages, homeText]);
   // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
   // 不看连接：消息先进本机发件箱，断线时显示「连接恢复后发送」，连上以后按顺序发出（2026-10-16）。
   // 引用回复（设计规范 P17）：daemon 收引用时（chat.quotes.v1）才能引用。
   const canQuote = useControlPlaneStore((state) => state.capabilities.includes(CHAT_QUOTES_CAPABILITY));
-  const send = (message: string, images: ChatImageInput[], quotes?: ChatQuoteInput[]) => {
+  const send = (message: string, images: ChatImageInput[], quotes?: ChatQuoteInput[], files?: ChatFileInput[]) => {
     const mode = canPlace && leadBusy ? (canSteerQueued ? (placesByPreference ? undefined : 'followUp') : placement) : undefined;
     const once = canTurnModel ? turnModel : null;
     setTurnModel(null);
-    const sent = quotes?.length
+    const sent = files?.length
+      ? runtime.sendChat(message, undefined, mode, images.length ? images : undefined, once ?? undefined, quotes?.length ? quotes : undefined, files)
+      : quotes?.length
       ? runtime.sendChat(message, undefined, mode, images.length ? images : undefined, once ?? undefined, quotes)
       : once
       ? runtime.sendChat(message, undefined, mode, images.length ? images : undefined, once)
@@ -577,6 +574,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           placeholder={connected ? m.composer.placeholder(leadName) : m.composer.offline}
           onSend={send}
           attachImages={canSendImages}
+          attachFiles={canSendFiles}
           quotes={canQuote}
           // 输入框上不放模型（模型配置方案 C 的 S4）：输入 /model 打开换模型的浮层，这句话不发给 Lead。
           onModelCommand={() => composerAnchorRef.current?.measure((anchor) => setPicker({ anchor }))}
@@ -755,6 +753,7 @@ function ConversationMessage({
   // 这一轮你发的图片：「重发」时连图片一起发。
   const turnUserParts = useMessageParts(turn ? turn.userMessageId : '');
   const turnUserImages = turnUserParts.filter(isImagePart);
+  const turnUserFiles = turnUserParts.filter(isFilePart);
   // 重发时引用一起带上（设计规范 P17）：原文、说明、来源都和第一次一样，daemon 再核对一次。
   const turnUserQuotes: ChatQuoteInput[] = turnUserParts.filter(isQuotePart).map((part) => ({
     source: part.source, text: part.text, ...(part.note ? { note: part.note } : {}), ...(part.anchor ? { anchor: part.anchor } : {}),
@@ -862,11 +861,24 @@ function ConversationMessage({
     else if (action === 'remove') runtime.dismissLocalMessage(message.id);
     else if (action === 'resend') resend();
   };
-  // 重发这一轮：文字和图片一起。只有文字时马上发；本机没有的图片先向 daemon 取。
+  // 重发这一轮：文字、图片和文件一起。只有文字时马上发；本机没有的图片和文件先向 daemon 取。
   // turnModel：「换个模型重发」里点了「只这一条」时，重发的这一次用的模型。
   const resend = (turnModel?: LeadModelChoice) => {
     const text = turnUserPart?.kind === 'text' ? turnUserPart.text : '';
     const quotes = turnUserQuotes.length ? turnUserQuotes : undefined;
+    if (turnUserFiles.length) {
+      void Promise.all([
+        Promise.all(turnUserImages.map((part): Promise<ChatImageInput> | ChatImageInput =>
+          part.data !== undefined ? { mimeType: part.mimeType, data: part.data } : runtime.loadChatImage(part.imageId ?? ''))),
+        Promise.all(turnUserFiles.map((part): Promise<ChatFileInput> | ChatFileInput =>
+          part.data !== undefined
+            ? { name: part.name, mimeType: part.mimeType, data: part.data }
+            : runtime.loadChatFile(part.fileId ?? '').then((file) => ({ name: file.name, mimeType: file.mimeType, data: file.data })))),
+      ])
+        .then(([images, files]) => runtime.sendChat(text, undefined, undefined, images.length ? images : undefined, turnModel, quotes, files))
+        .catch(() => {});
+      return;
+    }
     if (!turnUserImages.length) {
       if (quotes) void runtime.sendChat(text, undefined, undefined, undefined, turnModel, quotes).catch(() => {});
       else if (text.trim()) void (turnModel ? runtime.sendChat(text, undefined, undefined, undefined, turnModel) : runtime.sendChat(text)).catch(() => {});
@@ -884,9 +896,11 @@ function ConversationMessage({
   const bubble = user || hasContent || message.state === 'streaming';
   // 你发的图片排在气泡上面。只发了图片的消息没有气泡。
   const userImages = user ? parts.filter(isImagePart) : [];
+  // 你发的文件：图片下面一张张文件卡（主题 A-4），点开用系统预览或分享。
+  const userFiles = user ? parts.filter(isFilePart) : [];
   // 你引用的几段话画在气泡里、正文上面（设计规范 P17.7）。只带了引用的消息也有气泡。
   const userQuotes = user ? parts.filter(isQuotePart) : [];
-  const userBubble = user && (rawText.trim().length > 0 || userQuotes.length > 0 || userImages.length === 0);
+  const userBubble = user && (rawText.trim().length > 0 || userQuotes.length > 0 || (userImages.length === 0 && userFiles.length === 0));
 
   return (
     <Column
@@ -905,6 +919,7 @@ function ConversationMessage({
         ) : <Text size="meta" weight="semibold" tone="secondary" align={user ? 'right' : 'left'}>{`${sender} · ${stateCopy}`}</Text>
       ) : null}
       {userImages.length ? <UserMessageImages images={userImages} /> : null}
+      {userFiles.length ? <UserMessageFiles files={userFiles} /> : null}
       {bubble && userBubble ? (
         <QuoteSourceFor turnId={message.turnId} role="user" text={rawText}>
         <MessageBubble testID="user-bubble">
@@ -996,6 +1011,42 @@ type ImagePart = Extract<MessagePart, { kind: 'image' }>;
 
 function isImagePart(part: MessagePart): part is ImagePart {
   return part.kind === 'image';
+}
+
+type FilePart = Extract<MessagePart, { kind: 'file' }>;
+function isFilePart(part: MessagePart): part is FilePart {
+  return part.kind === 'file';
+}
+
+// 你随消息发的文件（主题 A-4）：右对齐，一张一行。点开：本机还有数据的直接打开，daemon 存的先按 id 取（runtime 缓存）。
+// web 上下载，手机上交给系统的分享面板。打不开时在下面写一句。
+function UserMessageFiles({ files }: { files: readonly FilePart[] }) {
+  const runtime = useCompanionRuntime();
+  const m = useMessages(fileMessages);
+  const [failed, setFailed] = useState<string | null>(null);
+  const open = (file: FilePart) => {
+    setFailed(null);
+    const loaded: Promise<ChatFile> = file.data !== undefined
+      ? Promise.resolve({ id: file.fileId ?? file.id, name: file.name, mimeType: file.mimeType, size: file.size, data: file.data })
+      : runtime.loadChatFile(file.fileId ?? '');
+    loaded.then(presentChatFile).catch(() => setFailed(m.openFailed(file.name)));
+  };
+  return (
+    <Column testID="user-message-files" self="flex-end" items="flex-end" gap="thumbnails">
+      {files.map((file, index) => (
+        <FileChip
+          key={file.id}
+          testID={`user-message-file-${index}`}
+          variant="sent"
+          name={file.name}
+          mimeType={file.mimeType}
+          size={file.size}
+          onPress={() => open(file)}
+        />
+      ))}
+      {failed ? <Text size="note" tone="danger">{failed}</Text> : null}
+    </Column>
+  );
 }
 
 // 能引用的一段（设计规范 P17.1）：有轮次的 Lead 回答和你的消息。daemon 自己写的系统通知、没有轮次的本地消息不能引用。

@@ -2,19 +2,22 @@ import {
   Box, Button, ChatInput, Column, elevation, IconButton, ImageThumbnail, ImageViewer, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
 } from '@pi-lead-child/components';
 import {
-  CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, parseCompactCommand, type ChatImageInput, type ChatPlacement,
-  type ChatQuoteInput, type CompactLeadContextRequest,
+  CHAT_FILE_MAX_BYTES, CHAT_FILE_MAX_COUNT, CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, formatChatFileSize, parseCompactCommand,
+  type ChatFileInput, type ChatImageInput, type ChatPlacement, type ChatQuoteInput, type CompactLeadContextRequest,
 } from '@pi-lead-child/protocol';
 import { useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
-import { useLocale, type Locale } from '@/i18n';
+import { useLocale, useMessages, type Locale } from '@/i18n';
 import {
   canPickImages, canTakePhoto, ChatImageError, pickImageFiles, prepareChatImage, type ChatImageSource, type ComposerImage, type PickedImage,
 } from '@/data/chatImagePicker';
+import { canPickFiles, ChatFileError, composerFileKey, isPickedImage, pickChatFiles, pickedFileAsImage, readChatFile, type ComposerFile, type PickedFile } from '@/data/chatFilePicker';
 import { useCompanionRuntime } from '@/state/CompanionStateProvider';
 
 import type { CompactNotice } from './compactCommand';
 import { composerMessages } from './composer.messages';
+import { FileChip } from './FileChip';
+import { fileMessages } from './file.messages';
 import { QuotingSlot, QuoteTray } from './QuoteTray';
 import { quoteDrafts, useQuoteDrafts } from './quoteDrafts';
 
@@ -22,13 +25,15 @@ type MessageComposerProps = {
   contextKey: string;
   placeholder: string;
   // images：随消息发的图片（只有给了 attachImages 的输入框才会有）。quotes：引用的几段话（只有给了 quotes 的输入框才会有）。
-  onSend: (message: string, images: ChatImageInput[], quotes?: ChatQuoteInput[]) => void;
+  onSend: (message: string, images: ChatImageInput[], quotes?: ChatQuoteInput[], files?: ChatFileInput[]) => void;
   compact?: boolean;
   // 工单对话坞里的输入框：一行，只有文字和发送按钮。
   minimal?: boolean;
   disabled?: boolean;
   // 能不能带图片：Lead 的会话，daemon 也收图片（CHAT_IMAGES_CAPABILITY）。这个平台还不能选图片时（canPickImages）也没有「+」。
   attachImages?: boolean;
+  // 能不能带文件：Lead 的会话，daemon 也收文件（CHAT_FILES_CAPABILITY）。
+  attachFiles?: boolean;
   // 输入 /model 发送时（只有 Lead 的会话给）：不发给 Lead，在输入框上方打开换模型的浮层（模型配置方案 C 的 S4）。
   onModelCommand?: () => void;
   // /compact [model] [-- instructions] (only Lead's conversation gives it): compact Lead's context, do not send it to Lead.
@@ -59,7 +64,10 @@ type MessageComposerProps = {
 // focus：手机上开始引用一段以后，聚焦输入框、弹出键盘（设计规范 P17.10）。
 export type MessageComposerHandle = {
   pickImages: (source?: ChatImageSource) => void;
+  // 打开系统的文件选择（加号面板的「文件」）。
+  pickFiles: () => void;
   canAttach: boolean;
+  canAttachFiles: boolean;
   // 这台设备能拍照（手机上的加号面板有「拍照」）。
   canTakePhoto: boolean;
   focus: () => void;
@@ -102,7 +110,7 @@ export function MessageComposer(props: MessageComposerProps) {
 // 中间是文字（缺省一行高，内容多了自动长高），下面一行工具栏：左边「+」选图片，右边模型名和圆形的发送按钮。
 // web 上 Enter 发送、Shift+Enter 换行；可以粘贴剪贴板里的图片。草稿按 contextKey 存在工作区里，失去焦点时保存（图片不存）。
 function MessageComposerField({
-  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, onModelCommand, onCompactCommand,
+  contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, attachFiles = false, onModelCommand, onCompactCommand,
   chip, modelControl, tray,
   float = false, onPlus, ref, quotes = false,
 }: MessageComposerProps) {
@@ -113,6 +121,9 @@ function MessageComposerField({
   // 待发的图片，和图片加不进来的原因（不是图片、太多、太大；下一次加图片、删图片或发送时清掉）。放在一起，用一次更新改。
   const [attachments, setAttachments] = useState<{ images: ComposerImage[]; notice: string | null }>(EMPTY_ATTACHMENTS);
   const { images, notice } = attachments;
+  // 待发的文件（主题 A-2）：和图片排在同一行。
+  const [files, setFiles] = useState<ComposerFile[]>([]);
+  const fileText = useMessages(fileMessages);
   // 正在处理（读取、缩小）的图片张数：处理完之前不能发送。
   const [preparing, setPreparing] = useState(0);
   // What the last /compact did: a status line, or the error (tone danger). Cleared by the next send.
@@ -122,19 +133,20 @@ function MessageComposerField({
   const pendingQuote = useQuoteDrafts((state) => (quotes ? state.pending : null));
   // 手机上正在引用：输入框写的是对这一段的说明，存在引用里（Q-5）；平常的草稿留着，加上或取消以后回来。
   const noteMode = float && pendingQuote !== null;
-  const ready = !disabled && preparing === 0 && (text.trim().length > 0 || images.length > 0 || quoteCount > 0);
+  const ready = !disabled && preparing === 0 && (text.trim().length > 0 || images.length > 0 || files.length > 0 || quoteCount > 0);
+  const canAttachFiles = attachFiles && canPickFiles && !minimal;
   const inputRef = useRef<ChatInputHandle>(null);
 
   const send = () => {
     if (!ready) return;
     // /model 是界面自己的命令：打开换模型的浮层，这句话不发给 Lead（daemon 的 /fairyeye、/stop 才交给 daemon）。
-    if (onModelCommand && isModelCommand(text) && images.length === 0) {
+    if (onModelCommand && isModelCommand(text) && images.length === 0 && files.length === 0) {
       setText('');
       workspace.getState().clearComposerDraft(contextKey);
       onModelCommand();
       return;
     }
-    const compactRequest = onCompactCommand && images.length === 0 ? parseCompactCommand(text) : null;
+    const compactRequest = onCompactCommand && images.length === 0 && files.length === 0 ? parseCompactCommand(text) : null;
     if (onCompactCommand && compactRequest) {
       setText('');
       workspace.getState().clearComposerDraft(contextKey);
@@ -149,10 +161,13 @@ function MessageComposerField({
     setCommandNotice(null);
     const taken = quotes ? quoteDrafts.getState().take() : [];
     const sentImages = images.map(({ mimeType, data }) => ({ mimeType, data }));
-    if (taken.length) onSend(text.trim(), sentImages, taken);
+    const sentFiles = files.map(({ name, mimeType, data }) => ({ name, mimeType, data }));
+    if (sentFiles.length) onSend(text.trim(), sentImages, taken, sentFiles);
+    else if (taken.length) onSend(text.trim(), sentImages, taken);
     else onSend(text.trim(), sentImages);
     setText('');
     setAttachments(EMPTY_ATTACHMENTS);
+    setFiles([]);
     workspace.getState().clearComposerDraft(contextKey);
     // 发完以后焦点回到输入框，好接着打字（2026-11-02）。点发送按钮时焦点在按钮上，按钮随后变灰，焦点会掉到页面上。
     inputRef.current?.focus();
@@ -175,7 +190,74 @@ function MessageComposerField({
       setAttachments((current) => ({ ...current, notice: error instanceof ChatImageError ? error.message : m.imageFailed }));
     });
   };
-  useImperativeHandle(ref, () => ({ pickImages, canAttach, canTakePhoto: canAttach && canTakePhoto, focus: () => inputRef.current?.focus() }));
+  // 选来的文件：图片按图片处理（缩小、显示小图）；别的读成 base64，最多 CHAT_FILE_MAX_COUNT 个，每个不超过 CHAT_FILE_MAX_BYTES。
+  const addPickedFiles = async (picked: readonly PickedFile[]) => {
+    const asImages = canAttach ? picked.filter(isPickedImage) : [];
+    const others = picked.filter((file) => !asImages.includes(file));
+    if (asImages.length) {
+      const converted = await Promise.allSettled(asImages.map((file) => pickedFileAsImage(file)));
+      void addFiles(converted.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : [])));
+    }
+    if (!others.length) return;
+    let problem: string | null = null;
+    const room = Math.max(0, CHAT_FILE_MAX_COUNT - files.length);
+    if (others.length > room) problem = fileText.tooMany(CHAT_FILE_MAX_COUNT);
+    const accepted = others.slice(0, room).filter((file) => {
+      if (file.size <= CHAT_FILE_MAX_BYTES) return true;
+      problem = fileText.tooLarge(file.name, formatChatFileSize(CHAT_FILE_MAX_BYTES));
+      return false;
+    });
+    setPreparing((count) => count + accepted.length);
+    const read = await Promise.allSettled(accepted.map(async (file): Promise<ComposerFile> => ({
+      key: composerFileKey(), name: file.name, mimeType: file.mimeType, size: file.size, data: await readChatFile(file),
+    })));
+    setPreparing((count) => count - accepted.length);
+    read.forEach((result, index) => {
+      if (result.status === 'rejected') problem = fileText.unreadable(accepted[index]?.name ?? '');
+    });
+    const added = read.flatMap((result) => (result.status === 'fulfilled' ? [result.value] : []));
+    setFiles((current) => [...current, ...added].slice(0, CHAT_FILE_MAX_COUNT));
+    setAttachments((current) => ({ ...current, notice: problem }));
+  };
+  const pickFiles = () => {
+    pickChatFiles().then(addPickedFiles, (error: unknown) => {
+      setAttachments((current) => ({ ...current, notice: error instanceof ChatFileError ? error.message : m.imageFailed }));
+    });
+  };
+  const removeFile = (key: string) => {
+    setFiles((current) => current.filter((file) => file.key !== key));
+    setAttachments((current) => ({ ...current, notice: null }));
+  };
+  useImperativeHandle(ref, () => ({
+    pickImages, pickFiles, canAttach, canAttachFiles, canTakePhoto: canAttach && canTakePhoto, focus: () => inputRef.current?.focus(),
+  }));
+  // 待发的图片和文件，排在输入框上面同一行（主题 A-1、A-2）。
+  const attachmentTiles = (
+    <>
+      {images.map((image, index) => (
+        <ImageThumbnail
+          key={image.key}
+          testID={`composer-image-${index}`}
+          uri={image.uri}
+          label={m.image(index + 1)}
+          removeLabel={m.removeImage(index + 1)}
+          onPress={() => setViewing(index)}
+          onRemove={() => removeImage(image.key)}
+        />
+      ))}
+      {files.map((file, index) => (
+        <FileChip
+          key={file.key}
+          testID={`composer-file-${index}`}
+          variant="waiting"
+          name={file.name}
+          mimeType={file.mimeType}
+          size={file.size}
+          onRemove={() => removeFile(file.key)}
+        />
+      ))}
+    </>
+  );
   // 点一张待发的小图：全屏看大图（通用的 ImageViewer），下面一颗「删掉这张」。
   const [viewing, setViewing] = useState<number | null>(null);
   const viewer = (
@@ -235,20 +317,8 @@ function MessageComposerField({
         gap="composer-row"
         opacity={disabled ? 0.62 : 1}
       >
-        {images.length ? (
-          <Row testID="composer-images" flexWrap="wrap" gap="thumbnails" px="inline-item">
-            {images.map((image, index) => (
-              <ImageThumbnail
-                key={image.key}
-                testID={`composer-image-${index}`}
-                uri={image.uri}
-                label={m.image(index + 1)}
-                removeLabel={m.removeImage(index + 1)}
-                onPress={() => setViewing(index)}
-                onRemove={() => removeImage(image.key)}
-              />
-            ))}
-          </Row>
+        {images.length || files.length ? (
+          <Row testID="composer-images" flexWrap="wrap" gap="thumbnails" px="inline-item">{attachmentTiles}</Row>
         ) : null}
         {quotes ? <QuoteTray compact /> : null}
         {notice ? <Text testID="composer-notice" size="note" tone="danger" px="inline-item">{notice}</Text> : null}
@@ -327,36 +397,25 @@ function MessageComposerField({
 
   const body = (
     <Column gap="composer-row" px="composer-x" py="composer-y">
-      {images.length ? (
-        <Row testID="composer-images" flexWrap="wrap" gap="thumbnails">
-          {images.map((image, index) => (
-            <ImageThumbnail
-              key={image.key}
-              testID={`composer-image-${index}`}
-              uri={image.uri}
-              label={m.image(index + 1)}
-              removeLabel={m.removeImage(index + 1)}
-              onPress={() => setViewing(index)}
-              onRemove={() => removeImage(image.key)}
-            />
-          ))}
-        </Row>
+      {images.length || files.length ? (
+        <Row testID="composer-images" flexWrap="wrap" gap="thumbnails">{attachmentTiles}</Row>
       ) : null}
       {notice ? <Text testID="composer-notice" size="note" tone="danger">{notice}</Text> : null}
       {commandNotice ? <Text testID="composer-command-notice" size="note" tone={commandNotice.tone}>{commandNotice.text}</Text> : null}
       {chip ?? null}
       {input}
       <Row items="center" gap="inline-item">
-        {canAttach ? (
+        {canAttach || canAttachFiles ? (
+          // 桌面上的「+」：daemon 收文件时什么文件都能选（图片照旧按图片发），不收时只选图片。
           <IconButton
             testID="composer-attach"
             icon="plus"
-            label={m.addImage}
+            label={canAttachFiles ? m.addFile : m.addImage}
             variant="ghost"
             size="md"
             iconColor="text-secondary"
             disabled={disabled}
-            onPress={() => pickImages()}
+            onPress={() => (canAttachFiles ? pickFiles() : pickImages())}
           />
         ) : null}
         {preparing > 0 ? <Text testID="composer-preparing" size="note" tone="muted">{m.preparingImages}</Text> : null}

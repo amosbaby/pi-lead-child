@@ -1,7 +1,7 @@
 import type { PickedImage } from './chatImagePicker.types';
 import { ChatFileError, type PickedFile } from './chatFilePicker.types';
 
-export { ChatFileError, formatFileSize, isPickedImage, type ComposerFile, type PickedFile } from './chatFilePicker.types';
+export { ChatFileError, composerFileKey, isPickedImage, type ComposerFile, type PickedFile } from './chatFilePicker.types';
 
 export const canPickFiles = true;
 

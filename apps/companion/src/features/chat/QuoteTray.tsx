@@ -2,11 +2,10 @@
 //   · QuoteTray：输入框卡片的上半截，收起来的引用一条一行：回复图标、原文、说明、×。没有标题行和编号（P17.6）。
 //     最多露 3 条，其余写「还有 N 条」。悬停（桌面）时这一行和原文的标记一起加深；点这一行回到编辑（P17.4）并跳回原文。
 //   · QuotingSlot（手机）：正在写说明的那一段。点它在输入框里原地展开成整段，拖两端改范围（只读的 TextInput，
-//     onSelectionChange 给选区，不要原生模块）。
+//     组件库的 RangeSelectText，不要原生模块）。
 import { useState } from 'react';
-import { Platform, TextInput } from 'react-native';
 
-import { Box, Column, Icon, IconButton, Pressable, Row, Text, palette, textLeading, textSizes } from '@pi-lead-child/components';
+import { Box, Column, Icon, IconButton, Pressable, RangeSelectText, Row, Text } from '@pi-lead-child/components';
 
 import { useMessages } from '@/i18n';
 
@@ -41,10 +40,8 @@ export function QuoteTray({ compact = false }: { compact?: boolean }) {
             rounded="md"
             px="pill-x"
             bg={active ? 'accent-soft' : undefined}
-            {...(Platform.OS === 'web' ? {
-              onHoverIn: () => quoteDrafts.getState().setActive(draft.id),
-              onHoverOut: () => quoteDrafts.getState().setActive(null),
-            } : {})}
+            // 悬停（桌面）：这一行和原文的标记一起加深。手机上没有悬停，这两个不会被调用。
+            {...{ onHoverIn: () => quoteDrafts.getState().setActive(draft.id), onHoverOut: () => quoteDrafts.getState().setActive(null) }}
           >
             <Pressable
               flex={1}
@@ -107,20 +104,12 @@ export function QuotingSlot({ onFocusInput }: { onFocusInput: () => void }) {
         </Pressable>
         {expanded ? (
           <Box bg="surface-subtle" rounded="lg" px="inset-x" py="inset-y">
-            <TextInput
+            <RangeSelectText
               testID="quoting-range"
-              value={context}
-              multiline
-              // 只读：只用来选范围。键盘不弹，改字不生效。
-              showSoftInputOnFocus={false}
-              onChangeText={() => {}}
-              selection={{ start, end: start + pending.text.length }}
-              onSelectionChange={(event) => {
-                const { start: from, end: to } = event.nativeEvent.selection;
-                if (to > from) quoteDrafts.getState().setPendingText(context.slice(from, to));
-              }}
-              style={{ fontSize: textSizes['message-body'], lineHeight: textLeading['message-body'], color: palette.text, padding: 0 }}
-              selectionColor={palette.accent}
+              text={context}
+              start={start}
+              end={start + pending.text.length}
+              onSelect={(from, to) => quoteDrafts.getState().setPendingText(context.slice(from, to))}
             />
           </Box>
         ) : (

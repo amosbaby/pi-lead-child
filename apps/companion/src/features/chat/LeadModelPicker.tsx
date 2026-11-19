@@ -711,7 +711,7 @@ export function LeadModelComposerTrigger({ current, accounts, onOpen }: {
         onPress={() => ref.current?.measure(onOpen)}
         // spacing-exempt: 按钮的规格，左右 8、上下 6，高 28（文字行高 16），和改版以前一样
         px={8}
-        py={6}
+        py={6} // spacing-exempt: 按钮的规格，上下 6（见上一行）
         rounded="sm"
         bg={{ default: 'transparent', hover: 'surface-muted' }}
       >
