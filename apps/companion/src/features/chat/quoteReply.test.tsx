@@ -225,6 +225,37 @@ describe('quotes in your bubble', () => {
 });
 
 describe('quoting on the phone composer', () => {
+  // 2026-11-19 用户截图：手机的悬浮输入框有内边距，托盘在内边距里面是直角的，看起来很尖。
+  // 托盘的四角是 20（输入框 28 减去内边距 8，同心圆角），也不要下面那条分隔线。
+  it('rounds the tray inside the floating composer', async () => {
+    const runtime = createCompanionStateRuntime({
+      client: {} as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    renderUI(
+      <CompanionRuntimeProvider runtime={runtime}>
+        <MessageComposer contextKey="lead" placeholder="Message" onSend={vi.fn()} float quotes />
+      </CompanionRuntimeProvider>,
+    );
+    act(() => {
+      quoteDrafts.getState().begin({ source: leadSource, text: ANSWER, context: ANSWER });
+      quoteDrafts.getState().commit();
+    });
+    const tray = getComputedStyle(await screen.findByTestId('quote-tray'));
+    expect(tray.borderTopLeftRadius).toBe('20px');
+    expect(tray.borderBottomRightRadius).toBe('20px');
+    expect(tray.borderBottomWidth === '' || tray.borderBottomWidth === '0px').toBe(true);
+    // 左右边距照视觉稿：回复图标离托盘左边 12（托盘 6 + 一行 6），× 贴着一行的右边（托盘 6，一行 0）。
+    // 以前托盘 12、一行左右各 6，两头都多了一截（2026-11-19 用户截图）。
+    expect(tray.paddingLeft).toBe('6px');
+    expect(tray.paddingRight).toBe('6px');
+    const row = getComputedStyle(screen.getByTestId(`quote-tray-row-${quoteDrafts.getState().drafts[0]!.id}`));
+    expect(row.paddingLeft).toBe('6px');
+    expect(row.paddingRight === '' || row.paddingRight === '0px').toBe(true);
+  });
+
+
   it('types the note of the quote in hand, and Add puts it in the tray', async () => {
     const runtime = createCompanionStateRuntime({
       client: {} as CompanionRuntimeDependencies['client'],

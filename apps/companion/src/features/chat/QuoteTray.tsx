@@ -28,7 +28,17 @@ export function QuoteTray({ compact = false }: { compact?: boolean }) {
   const visible = showAll ? rows : rows.slice(0, VISIBLE_ROWS);
   const hidden = rows.length - visible.length;
   return (
-    <Column testID="quote-tray" bg="surface-subtle" borderBottomWidth={1} borderColor="border-soft" px="inset-x" py="pill-y">
+    <Column
+      testID="quote-tray"
+      bg="surface-subtle"
+      py="pill-y"
+      // 桌面：输入框卡片的上半截，卡片把它裁进圆角，下面一条分隔线（Q-4）。
+      // 手机：托盘在悬浮输入框的内边距里面，自己带圆角 20（输入框 28 减去内边距 8，同心），没有分隔线（2026-11-19 用户：直角太尖）；
+      // 左右只留 6，回复图标离托盘左边 12、× 贴着右边，和视觉稿一样（以前托盘 12 加一行 6，两头都宽了）。
+      {...(compact
+        ? { rounded: '5xl' as const, pl: 'pill-x' as const, pr: 'pill-x' as const }
+        : { borderBottomWidth: 1, borderColor: 'border-soft' as const, pl: 'inset-x' as const, pr: 'inset-x' as const })}
+    >
       {visible.map((draft) => {
         const active = draft.id === activeId || draft.id === editingId;
         return (
@@ -38,7 +48,8 @@ export function QuoteTray({ compact = false }: { compact?: boolean }) {
             items="center"
             gap="icon-label"
             rounded="md"
-            px="pill-x"
+            pl="pill-x"
+            {...(compact ? {} : { pr: 'pill-x' as const })}
             bg={active ? 'accent-soft' : undefined}
             // 悬停（桌面）：这一行和原文的标记一起加深。手机上没有悬停，这两个不会被调用。
             {...{ onHoverIn: () => quoteDrafts.getState().setActive(draft.id), onHoverOut: () => quoteDrafts.getState().setActive(null) }}
