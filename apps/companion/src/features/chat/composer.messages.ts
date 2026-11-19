@@ -12,6 +12,8 @@ export const composerMessages = defineMessages({
     send: 'Send',
     image: (n: number) => `Image ${n}`,
     removeImage: (n: number) => `Remove image ${n}`,
+    // 全屏看大图下面的按钮。
+    removeThisImage: 'Remove this image',
     addImage: 'Add image',
     plus: 'Add images, or change the model',
     preparingImages: 'Processing images…',
@@ -72,6 +74,7 @@ export const composerMessages = defineMessages({
     send: '发送',
     image: (n) => `图片 ${n}`,
     removeImage: (n) => `移除图片 ${n}`,
+    removeThisImage: '删掉这张',
     addImage: '添加图片',
     plus: '添加图片，或者换模型',
     preparingImages: '正在处理图片…',

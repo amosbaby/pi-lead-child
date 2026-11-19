@@ -1,5 +1,5 @@
 import {
-  Box, Button, ChatInput, Column, elevation, IconButton, ImageThumbnail, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
+  Box, Button, ChatInput, Column, elevation, IconButton, ImageThumbnail, ImageViewer, Row, SegmentedControl, Spacer, Text, type ChatInputHandle,
 } from '@pi-lead-child/components';
 import {
   CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, parseCompactCommand, type ChatImageInput, type ChatPlacement,
@@ -8,7 +8,9 @@ import {
 import { useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
 import { useLocale, type Locale } from '@/i18n';
-import { canPickImages, ChatImageError, pickImageFiles, prepareChatImage, type ComposerImage } from '@/data/chatImagePicker';
+import {
+  canPickImages, canTakePhoto, ChatImageError, pickImageFiles, prepareChatImage, type ChatImageSource, type ComposerImage, type PickedImage,
+} from '@/data/chatImagePicker';
 import { useCompanionRuntime } from '@/state/CompanionStateProvider';
 
 import type { CompactNotice } from './compactCommand';
@@ -55,7 +57,13 @@ type MessageComposerProps = {
 };
 
 // focus：手机上开始引用一段以后，聚焦输入框、弹出键盘（设计规范 P17.10）。
-export type MessageComposerHandle = { pickImages: () => void; canAttach: boolean; focus: () => void };
+export type MessageComposerHandle = {
+  pickImages: (source?: ChatImageSource) => void;
+  canAttach: boolean;
+  // 这台设备能拍照（手机上的加号面板有「拍照」）。
+  canTakePhoto: boolean;
+  focus: () => void;
+};
 
 export type ComposerTray = { row: ReactNode; drawer: ReactNode; open: boolean };
 
@@ -150,7 +158,7 @@ function MessageComposerField({
     inputRef.current?.focus();
   };
 
-  const addFiles = async (files: Blob[]) => {
+  const addFiles = async (files: readonly PickedImage[]) => {
     if (!canAttach || !files.length) return;
     setPreparing((count) => count + files.length);
     const results = await Promise.allSettled(files.map((file) => prepareChatImage(file, locale)));
@@ -161,8 +169,25 @@ function MessageComposerField({
     setAttachments((current) => appendImages(current.images, prepared, failed, m.tooManyImages(CHAT_IMAGE_MAX_COUNT)));
   };
 
-  const pickImages = () => void pickImageFiles().then(addFiles);
-  useImperativeHandle(ref, () => ({ pickImages, canAttach, focus: () => inputRef.current?.focus() }));
+  // 打开系统的选图（或相机）。没有权限、打不开时，原因写在输入框里。
+  const pickImages = (source: ChatImageSource = 'library') => {
+    pickImageFiles(source, locale).then(addFiles, (error: unknown) => {
+      setAttachments((current) => ({ ...current, notice: error instanceof ChatImageError ? error.message : m.imageFailed }));
+    });
+  };
+  useImperativeHandle(ref, () => ({ pickImages, canAttach, canTakePhoto: canAttach && canTakePhoto, focus: () => inputRef.current?.focus() }));
+  // 点一张待发的小图：全屏看大图（通用的 ImageViewer），下面一颗「删掉这张」。
+  const [viewing, setViewing] = useState<number | null>(null);
+  const viewer = (
+    <ImageViewer
+      testID="composer-image-viewer"
+      open={viewing !== null}
+      items={images.map((image, index) => ({ key: image.key, uri: image.uri, label: m.image(index + 1) }))}
+      initialIndex={viewing ?? 0}
+      onClose={() => setViewing(null)}
+      actions={[{ id: 'remove', label: m.removeThisImage, icon: 'trash', onPress: (index) => { const image = images[index]; if (image) removeImage(image.key); } }]}
+    />
+  );
 
   const removeImage = (key: string) => {
     setAttachments((current) => ({ images: current.images.filter((image) => image.key !== key), notice: null }));
@@ -219,6 +244,7 @@ function MessageComposerField({
                 uri={image.uri}
                 label={m.image(index + 1)}
                 removeLabel={m.removeImage(index + 1)}
+                onPress={() => setViewing(index)}
                 onRemove={() => removeImage(image.key)}
               />
             ))}
@@ -273,6 +299,7 @@ function MessageComposerField({
             onPress={send}
           />}
         </Row>
+        {viewer}
       </Column>
     );
   }
@@ -309,6 +336,7 @@ function MessageComposerField({
               uri={image.uri}
               label={m.image(index + 1)}
               removeLabel={m.removeImage(index + 1)}
+              onPress={() => setViewing(index)}
               onRemove={() => removeImage(image.key)}
             />
           ))}
@@ -328,7 +356,7 @@ function MessageComposerField({
             size="md"
             iconColor="text-secondary"
             disabled={disabled}
-            onPress={() => void pickImageFiles().then(addFiles)}
+            onPress={() => pickImages()}
           />
         ) : null}
         {preparing > 0 ? <Text testID="composer-preparing" size="note" tone="muted">{m.preparingImages}</Text> : null}
@@ -363,6 +391,7 @@ function MessageComposerField({
     <Box position="relative">
       {tray ? tray.drawer : null}
       {card}
+      {viewer}
     </Box>
   );
 }

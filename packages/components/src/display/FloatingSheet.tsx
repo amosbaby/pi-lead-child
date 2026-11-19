@@ -31,8 +31,15 @@ export type FloatingSheetProps = {
   tall?: boolean;
   /** 内容区的内边距：content 是卡片的 12/20/16；menu 是加号面板这类菜单的 0/12/12，内容自己排。 */
   inset?: 'content' | 'menu';
+  /**
+   * 盖住页面上的一块（窗口坐标，离左边、右边、底边的距离）：加号面板盖住输入框（2026-11-19 用户定）。
+   * 给出时面板的左右和底边对齐这一块，不用缺省的离边 12、离底 20。圆角两者一样，都是 28。
+   */
+  cover?: SheetCover | null;
   testID?: string;
 };
+
+export type SheetCover = { left: number; right: number; bottom: number };
 
 // 手机上的悬浮底部面板（主题 H-7，P13.2 到 P13.2c，2026-11-14 用户定）。加号、换模型和会话里点开的卡片都用它。
 // 不贴边：左右离屏幕 12、离底 20（加安全区），四角圆角 28，白底，面板阴影；顶上一条 36×4 的小横杠。
@@ -61,7 +68,7 @@ export function FloatingSheet(props: FloatingSheetProps) {
   return <FloatingSheetBody {...props} onExited={() => setMounted(false)} />;
 }
 
-function FloatingSheetBody({ onExited, open, onClose, label, children, footer, tall: tallProp = false, inset = 'content', testID }: FloatingSheetProps & { onExited: () => void }) {
+function FloatingSheetBody({ onExited, open, onClose, label, children, footer, tall: tallProp = false, inset = 'content', cover = null, testID }: FloatingSheetProps & { onExited: () => void }) {
   const m = useMessages(displayMessages);
   const insets = useSafeAreaInsets();
   const { height: screenHeight } = useBreakpoint();
@@ -107,7 +114,7 @@ function FloatingSheetBody({ onExited, open, onClose, label, children, footer, t
     ? { opacity: progress.value, transform: [{ translateY: keyboard.value }] }
     : { opacity: progress.value, transform: [{ translateY: (1 - progress.value) * RISE + drag.value + keyboard.value }] }));
 
-  const bottom = BOTTOM + insets.bottom;
+  const bottom = cover ? cover.bottom : BOTTOM + insets.bottom;
   const statusTop = Math.max(insets.top, Platform.OS === 'android' ? StatusBar.currentHeight ?? 0 : 0);
   const top = Math.max(TALL_TOP, statusTop + EDGE);
   const sizing = tall ? { top } : { maxHeight: Math.round(screenHeight * MEDIUM_SHARE) };
@@ -125,7 +132,7 @@ function FloatingSheetBody({ onExited, open, onClose, label, children, footer, t
           aria-label={label}
           accessibilityViewIsModal
           onLayout={(event) => { panelHeight.current = event.nativeEvent.layout.height; }}
-          style={[styles.panel, { bottom, backgroundColor: palette.surface, boxShadow: elevation.raised }, sizing, panelStyle]}
+          style={[styles.panel, cover ? { left: cover.left, right: cover.right } : null, { bottom, backgroundColor: palette.surface, boxShadow: elevation.raised }, sizing, panelStyle]}
         >
           <View {...pan.panHandlers} style={styles.grabber} testID={testID ? `${testID}-grabber` : undefined}>
             <View style={[styles.handle, { backgroundColor: palette['border-strong'] }]} />

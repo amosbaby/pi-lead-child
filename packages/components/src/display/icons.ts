@@ -27,6 +27,10 @@ export const icons = {
   'qr-scan': { ios: 'qrcode.viewfinder', android: 'qr_code_scanner' },
   copy: { ios: 'doc.on.doc', android: 'content_copy' },
   document: { ios: 'doc.text', android: 'description' },
+  // 加号面板的「图片」「文件」，大图里的「删掉这张」（2026-11-19）。
+  image: { ios: 'photo', android: 'image' },
+  file: { ios: 'doc', android: 'draft' },
+  trash: { ios: 'trash', android: 'delete' },
   // 数据来源（会话里回复下面的「依据」标签）。
   database: { ios: 'cylinder', android: 'database' },
   exclamation: { ios: 'exclamationmark', android: 'priority_high' },

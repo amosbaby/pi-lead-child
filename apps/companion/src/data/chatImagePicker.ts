@@ -1,18 +1,18 @@
 import { DEFAULT_LOCALE, type Locale } from '@/i18n';
 
-import { ChatImageError, type ComposerImage } from './chatImagePicker.types';
+import { ChatImageError, type ChatImageSource, type ComposerImage, type PickedImage } from './chatImagePicker.types';
 import { imagePickerMessages } from './imagePicker.messages';
 
-export { ChatImageError, type ComposerImage } from './chatImagePicker.types';
+export { ChatImageError, type ChatImageSource, type ComposerImage, type PickedImage } from './chatImagePicker.types';
 
-// 兜底实现：Metro 在 web 上选 .web.ts。原生应用还没有选图片的模块（要加 expo-image-picker），
-// canPickImages 为 false，输入框不显示「+」。
+// 兜底实现：Metro 在 web 上选 .web.ts，在手机上选 .native.ts。别的地方（测试以外）不会用到它。
 export const canPickImages = false;
+export const canTakePhoto = false;
 
-export async function pickImageFiles(): Promise<Blob[]> {
+export async function pickImageFiles(_source: ChatImageSource = 'library', _locale: Locale = DEFAULT_LOCALE): Promise<PickedImage[]> {
   return [];
 }
 
-export async function prepareChatImage(_file: Blob, locale: Locale = DEFAULT_LOCALE): Promise<ComposerImage> {
+export async function prepareChatImage(_file: PickedImage, locale: Locale = DEFAULT_LOCALE): Promise<ComposerImage> {
   throw new ChatImageError(imagePickerMessages(locale).chatUnsupported);
 }

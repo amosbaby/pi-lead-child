@@ -11,6 +11,8 @@ export const imagePickerMessages = defineMessages({
     notImage: 'You can send only images.',
     cannotOpen: 'Cannot open this image.',
     tooLarge: 'This image is too large.',
+    cameraDenied: 'Lead-Child cannot use the camera. Allow it in Settings.',
+    photosDenied: 'Lead-Child cannot open your photos. Allow it in Settings.',
   },
   zh: {
     avatarUnsupported: '这个平台还不能上传图片',
@@ -21,5 +23,7 @@ export const imagePickerMessages = defineMessages({
     notImage: '只能发图片',
     cannotOpen: '这张图片打不开',
     tooLarge: '这张图片太大了',
+    cameraDenied: 'Lead-Child 不能用相机，请在系统设置里允许',
+    photosDenied: 'Lead-Child 不能打开照片，请在系统设置里允许',
   },
 });

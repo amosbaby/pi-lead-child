@@ -1,6 +1,6 @@
 import { Density, PopoverAnchorView, type PopoverAnchor, type PopoverAnchorHandle } from '@pi-lead-child/components';
 import {
-  AbsenceTail, Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
+  AbsenceTail, Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, ImageViewer, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
   Pressable, Row,
   Spacer,
   Text,
@@ -28,9 +28,11 @@ import { splitMaintenanceNotice } from './maintenanceNotice';
 import { LeadIdentity } from '../../components/LeadIdentity';
 import { HomeDrawer } from '../home/HomeDrawer';
 import { HomeTopBar } from '../home/HomeTopBar';
-import { LeadPlusSheet } from '../home/LeadPlusSheet';
+import { LeadPlusSheet, type PlusTile } from '../home/LeadPlusSheet';
 import { homeMessages } from '../home/home.messages';
-import { canPickImages } from '@/data/chatImagePicker';
+import { canPickImages, canTakePhoto } from '@/data/chatImagePicker';
+import { Dimensions, Keyboard, Platform } from 'react-native';
+import type { SheetCover } from '@pi-lead-child/components';
 import { useLeadAvatarSource } from '../../components/useLeadAvatarSource';
 import { WebUpdateNotice } from '../../components/WebUpdateNotice';
 import { ticketContextLabel, ticketSummaryToTicket } from '../workspace/model';
@@ -124,6 +126,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
   const [plusOpen, setPlusOpen] = useState(false);
+  // 加号面板盖住输入框（2026-11-19 用户定）：打开前先收起键盘，量输入框在屏幕上的位置。
+  const [plusCover, setPlusCover] = useState<SheetCover | null>(null);
   const homeText = homeMessages(locale);
   const composerRef = useRef<MessageComposerHandle>(null);
   const waiting = useMemo(() => ticketsNeedingUser(tickets), [tickets]);
@@ -295,6 +299,33 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   const canTurnModel = useControlPlaneStore((state) => state.capabilities.includes(CHAT_TURN_MODEL_CAPABILITY));
   const [turnModel, setTurnModel] = useState<LeadModelChoice | null>(null);
   const composerAnchorRef = useRef<PopoverAnchorHandle>(null);
+  const openPlus = useCallback(() => {
+    const open = () => {
+      const anchor = composerAnchorRef.current;
+      if (!anchor) { setPlusOpen(true); return; }
+      anchor.measure(({ x, y, width, height }) => {
+        const screen = Dimensions.get('window');
+        setPlusCover({ left: x, right: Math.max(0, screen.width - x - width), bottom: Math.max(0, screen.height - y - height) });
+        setPlusOpen(true);
+      });
+    };
+    // 键盘开着时输入框被顶上去了：等键盘收下去再量。
+    if (Platform.OS !== 'web' && Keyboard.isVisible()) {
+      const subscription = Keyboard.addListener('keyboardDidHide', () => { subscription.remove(); open(); });
+      Keyboard.dismiss();
+    } else {
+      open();
+    }
+  }, []);
+  // 加号面板上面一排（主题 H-7）：daemon 收图片、这台设备能选图片时有「拍照」（能拍照时）和「图片」。
+  const plusTiles = useMemo(() => {
+    const tiles: PlusTile[] = [];
+    if (canSendImages && canPickImages) {
+      if (canTakePhoto) tiles.push({ id: 'camera', icon: 'camera', label: homeText.camera, onPress: () => composerRef.current?.pickImages('camera') });
+      tiles.push({ id: 'photos', icon: 'image', label: homeText.photos, onPress: () => composerRef.current?.pickImages('library') });
+    }
+    return tiles;
+  }, [canSendImages, homeText]);
   // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
@@ -558,7 +589,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
             <TurnModelChip text={leadModelTriggerText(leadModelSpec(turnModel), modelAccounts, locale) ?? turnModel.model} onRemove={() => setTurnModel(null)} />
           ) : null}
           {...(compact
-            ? { float: true, onPlus: () => setPlusOpen(true), ref: composerRef }
+            ? { float: true, onPlus: openPlus, ref: composerRef }
             : { modelControl: <LeadModelComposerTrigger current={leadModel} accounts={modelAccounts} onOpen={(anchor) => setPicker({ anchor })} /> })}
           // 新 daemon：排着的事在输入卡片上半截的状态栏里（主题 11.13）。
           // 旧 daemon（没有 Steer 和取消）：照旧在发送前选「插话/排队」，排着的外部消息在那一行的右边（工单 10）。
@@ -573,8 +604,9 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         <LeadPlusSheet
           open={plusOpen}
           onClose={() => setPlusOpen(false)}
-          // 只放现在能用的：daemon 收图片、这台设备能选图片时才有「图片」。拍照和文件还没有（主题 H-7）。
-          tiles={canSendImages && canPickImages ? [{ id: 'photos', icon: 'camera', label: homeText.photos, onPress: () => composerRef.current?.pickImages() }] : []}
+          // 拍照、图片、文件（主题 H-7），只放这台设备和 daemon 现在能用的。
+          tiles={plusTiles}
+          cover={plusCover}
           // 手机上换模型从这里进（主题 H-7、11.18，用户 2026-11-16）：加号面板收起，换模型的底部面板升起。
           modelText={leadModelTriggerText(leadModel, modelAccounts, locale)}
           onOpenModel={() => setPicker({ anchor: null })}
@@ -979,40 +1011,59 @@ function isQuotePart(part: MessagePart): part is QuotePart {
   return part.kind === 'quote';
 }
 
-// 你随消息发的图片：气泡上面右对齐的一排小图（和输入框里待发的图片一样大）。
+// 你随消息发的图片：气泡上面右对齐的一排小图（和输入框里待发的图片一样大）。点一张全屏看大图（通用的 ImageViewer），
+// 左右滑看这条消息的别的图。
 function UserMessageImages({ images }: { images: readonly ImagePart[] }) {
+  const m = conversationMessages(useLocale());
+  const shown = useChatImageUris(images);
+  const [viewing, setViewing] = useState<number | null>(null);
   return (
     <Row testID="user-message-images" self="flex-end" justify="flex-end" flexWrap="wrap" gap="thumbnails">
-      {images.map((image, index) => <UserMessageImage key={image.id} image={image} index={index} />)}
+      {images.map((image, index) => (
+        <ImageThumbnail
+          key={image.id}
+          testID={`user-message-image-${index}`}
+          uri={shown[index]?.uri ?? null}
+          failed={shown[index]?.failed ?? false}
+          label={m.yourImage(index + 1)}
+          onPress={() => setViewing(index)}
+        />
+      ))}
+      <ImageViewer
+        testID="user-message-image-viewer"
+        open={viewing !== null}
+        items={images.map((image, index) => ({
+          key: image.id, uri: shown[index]?.uri ?? null, failed: shown[index]?.failed ?? false, label: m.yourImage(index + 1),
+        }))}
+        initialIndex={viewing ?? 0}
+        onClose={() => setViewing(null)}
+      />
     </Row>
   );
 }
 
-function UserMessageImage({ image, index }: { image: ImagePart; index: number }) {
+// 每张图的地址：本机还留着数据的直接用；daemon 存的按 id 取一次（runtime 缓存）。取到以前是 null（浅灰的占位块），取不到时 failed。
+function useChatImageUris(images: readonly ImagePart[]): readonly { uri: string | null; failed: boolean }[] {
   const runtime = useCompanionRuntime();
-  const local = image.data !== undefined ? `data:${image.mimeType};base64,${image.data}` : null;
-  // daemon 存的图片：按 id 取一次（runtime 缓存）。取到以前是浅灰的占位块，取不到时显示提示图标。
-  const [loaded, setLoaded] = useState<{ imageId: string; uri: string | null } | null>(null);
-  const imageId = local ? null : image.imageId ?? null;
+  const [loaded, setLoaded] = useState<Readonly<Record<string, string | null>>>({});
+  const wanted = images.flatMap((image) => (image.data === undefined && image.imageId ? [image.imageId] : []));
+  const wantedKey = wanted.join(',');
   useEffect(() => {
-    if (!imageId) return;
+    if (!wantedKey) return undefined;
     let live = true;
-    runtime.loadChatImage(imageId).then(
-      (loadedImage) => { if (live) setLoaded({ imageId, uri: `data:${loadedImage.mimeType};base64,${loadedImage.data}` }); },
-      () => { if (live) setLoaded({ imageId, uri: null }); },
-    );
+    for (const imageId of wantedKey.split(',')) {
+      runtime.loadChatImage(imageId).then(
+        (image) => { if (live) setLoaded((old) => ({ ...old, [imageId]: `data:${image.mimeType};base64,${image.data}` })); },
+        () => { if (live) setLoaded((old) => ({ ...old, [imageId]: null })); },
+      );
+    }
     return () => { live = false; };
-  }, [imageId, runtime]);
-  const remote = loaded && loaded.imageId === imageId ? loaded : null;
-  const m = conversationMessages(useLocale());
-  return (
-    <ImageThumbnail
-      testID={`user-message-image-${index}`}
-      uri={local ?? remote?.uri ?? null}
-      failed={remote !== null && remote.uri === null}
-      label={m.yourImage(index + 1)}
-    />
-  );
+  }, [wantedKey, runtime]);
+  return images.map((image) => {
+    if (image.data !== undefined) return { uri: `data:${image.mimeType};base64,${image.data}`, failed: false };
+    const remote = image.imageId ? loaded[image.imageId] : undefined;
+    return { uri: remote ?? null, failed: remote === null };
+  });
 }
 
 // Lead 的最后回复。切换模型的系统提示（【系统】…）单独居中显示。

@@ -61,6 +61,15 @@
         }
       ],
       "expo-sharing",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Choose photos to send to Lead.",
+          "cameraPermission": "Scan the pairing QR code of the Lead-Child daemon on your computer, or take a photo to send to Lead.",
+          "microphonePermission": false
+        }
+      ],
+      "expo-document-picker",
       "./plugins/withLanCleartext"
     ],
     "experiments": {

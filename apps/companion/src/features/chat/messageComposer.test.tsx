@@ -15,13 +15,14 @@ import { createCompanionStateRuntime, type CompanionRuntimeDependencies } from '
 import { LeadConversation } from './LeadConversation';
 
 vi.mock('expo-crypto', () => ({ getRandomBytesAsync: vi.fn(), digest: vi.fn(), CryptoDigestAlgorithm: {} }));
-vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }) }));
+vi.mock('expo-router', () => ({ useRouter: () => ({ push: vi.fn() }), useFocusEffect: () => {} }));
 // 浏览器里的选图和缩小（canvas、createImageBitmap）happy-dom 没有：换成按文件名给出一张图的替身。
 vi.mock('@/data/chatImagePicker', async () => {
   const types = await vi.importActual<typeof import('@/data/chatImagePicker.types')>('@/data/chatImagePicker.types');
   return {
     ChatImageError: types.ChatImageError,
     canPickImages: true,
+    canTakePhoto: true,
     pickImageFiles: vi.fn(async () => []),
     prepareChatImage: vi.fn(async (file: File) => {
       if (file.name.startsWith('broken')) throw new types.ChatImageError('这张图片打不开');
@@ -47,7 +48,7 @@ function overview(): Overview {
   };
 }
 
-function setup(options: { capabilities?: string[]; turns?: ConversationTurn[]; getChatImage?: unknown } = {}) {
+function setup(options: { capabilities?: string[]; turns?: ConversationTurn[]; getChatImage?: unknown; compact?: boolean } = {}) {
   const runtime = createCompanionStateRuntime({
     client: (options.getChatImage ? { getChatImage: options.getChatImage } : {}) as CompanionRuntimeDependencies['client'],
     credentials: {} as CompanionRuntimeDependencies['credentials'],
@@ -59,7 +60,7 @@ function setup(options: { capabilities?: string[]; turns?: ConversationTurn[]; g
   });
   runtime.control.getState().replaceConversation(SESSION, options.turns ?? []);
   const sendChat = vi.spyOn(runtime, 'sendChat').mockResolvedValue({ clientMessageId: 'msg_1' });
-  renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation /></CompanionRuntimeProvider>);
+  renderUI(<CompanionRuntimeProvider runtime={runtime}><LeadConversation compact={options.compact ?? false} /></CompanionRuntimeProvider>);
   return { runtime, sendChat };
 }
 
@@ -153,6 +154,22 @@ describe('the message composer', () => {
     expect(thumbnails()).toHaveLength(0);
   });
 
+  // 2026-11-19：点一张待发的小图全屏看大图（通用的 ImageViewer），左右滑看别的，「删掉这张」去掉它；删光了自己关上。
+  it('opens a waiting image full screen, and removes it from there', async () => {
+    setup();
+    await paste([png('a.png'), png('b.png')]);
+    await waitFor(() => expect(thumbnails()).toHaveLength(2));
+    fireEvent.click(screen.getByTestId('composer-image-1-open'));
+    const viewer = await screen.findByTestId('composer-image-viewer');
+    expect(viewer.getAttribute('aria-label')).toBe('Image 2 of 2, Image 2');
+    fireEvent.click(screen.getByTestId('composer-image-viewer-action-remove'));
+    expect(thumbnails()).toHaveLength(1);
+    expect(screen.getByTestId('composer-image-viewer').getAttribute('aria-label')).toBe('Image 1 of 1, Image 1');
+    fireEvent.click(screen.getByTestId('composer-image-viewer-action-remove'));
+    expect(thumbnails()).toHaveLength(0);
+    await waitFor(() => expect(screen.queryByTestId('composer-image-viewer')).toBeNull());
+  });
+
   it('pastes text as text even when the clipboard also has an image', async () => {
     setup();
     await paste([png('cells.png')], 'A1\tB1');
@@ -167,6 +184,27 @@ describe('the message composer', () => {
     await waitFor(() => expect(thumbnails()).toHaveLength(1));
     fireEvent.click(screen.getByTestId('send-message'));
     expect(sendChat).toHaveBeenCalledWith('', undefined, undefined, [{ mimeType: 'image/png', data: btoa('photo.png') }]);
+  });
+
+  // 手机上的加号面板（主题 H-7，2026-11-19）：「拍照」打开相机，「图片」打开系统相册；选好的图进输入框。
+  it('offers Camera and Photos in the phone plus sheet, and adds the photo it takes', async () => {
+    setup({ compact: true });
+    vi.mocked(pickImageFiles).mockResolvedValue([png('shot.png')]);
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-plus')); });
+    expect(await screen.findByTestId('lead-plus-photos')).toBeTruthy();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-plus-camera')); });
+    expect(pickImageFiles).toHaveBeenCalledWith('camera', 'en');
+    await waitFor(() => expect(thumbnails()).toHaveLength(1));
+  });
+
+  it('says why the camera could not open', async () => {
+    setup({ compact: true });
+    const types = await vi.importActual<typeof import('@/data/chatImagePicker.types')>('@/data/chatImagePicker.types');
+    vi.mocked(pickImageFiles).mockRejectedValue(new types.ChatImageError('Lead-Child cannot use the camera. Allow it in Settings.'));
+    await act(async () => { fireEvent.click(screen.getByTestId('composer-plus')); });
+    const camera = await screen.findByTestId('lead-plus-camera');
+    await act(async () => { fireEvent.click(camera); });
+    await waitFor(() => expect(screen.getByTestId('composer-notice').textContent).toBe('Lead-Child cannot use the camera. Allow it in Settings.'));
   });
 
   it('keeps at most 8 images and says why one could not be added', async () => {

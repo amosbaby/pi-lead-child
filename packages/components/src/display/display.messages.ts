@@ -32,6 +32,10 @@ export const displayMessages = defineMessages({
     groupExpand: (label: string, count: string) => `Expand ${label}, ${count}`,
     removeImage: 'Remove image',
     imageFailed: 'The image did not load',
+    // 全屏看大图（ImageViewer）：「Image 2 of 3, screenshot.png」。
+    imageOf: (index: number, total: number, label: string) => `Image ${index} of ${total}, ${label}`,
+    previousImage: 'Previous image',
+    nextImage: 'Next image',
     collapseRecord: 'Collapse the record',
     systemMessage: 'System message',
     // detailsLabel 是一个名词，放在句子里：英文写小写，例如「original text」。
@@ -65,6 +69,9 @@ export const displayMessages = defineMessages({
     groupExpand: (label, count) => `展开${label}，${count}`,
     removeImage: '移除图片',
     imageFailed: '图片加载失败',
+    imageOf: (index, total, label) => `第 ${index} 张，共 ${total} 张，${label}`,
+    previousImage: '上一张',
+    nextImage: '下一张',
     collapseRecord: '收起记录',
     systemMessage: '系统信息',
     detailsLabel: '原文',

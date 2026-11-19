@@ -2,16 +2,18 @@ import { CHAT_IMAGE_MAX_BASE64_LENGTH, type ChatImageMimeType } from '@pi-lead-c
 
 import { DEFAULT_LOCALE, type Locale } from '@/i18n';
 
-import { ChatImageError, composerImage, planChatImage, type ComposerImage } from './chatImagePicker.types';
+import { ChatImageError, composerImage, planChatImage, type ChatImageSource, type ComposerImage, type PickedImage } from './chatImagePicker.types';
 import { imagePickerMessages } from './imagePicker.messages';
 
-export { ChatImageError, type ComposerImage } from './chatImagePicker.types';
+export { ChatImageError, type ChatImageSource, type ComposerImage, type PickedImage } from './chatImagePicker.types';
 
 export const canPickImages = true;
+// 浏览器里不开相机：手机浏览器的文件框自己会给「拍照」这一项。
+export const canTakePhoto = false;
 
 // 打开浏览器的文件选择：只列图片，可以多选。浏览器要求在用户的点按里调用。
 // 用户取消时有的浏览器不通知（没有 cancel 事件），Promise 就不结束：没有人在等它做别的事。
-export function pickImageFiles(): Promise<Blob[]> {
+export function pickImageFiles(_source: ChatImageSource = 'library', _locale: Locale = DEFAULT_LOCALE): Promise<Blob[]> {
   return new Promise((resolve) => {
     const input = document.createElement('input');
     input.type = 'file';
@@ -34,8 +36,10 @@ let sequence = 0;
 
 // 把一张选中或粘贴的图片变成可以发的样子：格式模型收、长边不超过 1568、不太大的原样发；
 // 别的缩小以后重新编码（WebP，浏览器不会编 WebP 时用 JPEG）。
-export async function prepareChatImage(file: Blob, locale: Locale = DEFAULT_LOCALE): Promise<ComposerImage> {
+export async function prepareChatImage(picked: PickedImage, locale: Locale = DEFAULT_LOCALE): Promise<ComposerImage> {
   const m = imagePickerMessages(locale);
+  if (!(picked instanceof Blob)) throw new ChatImageError(m.cannotOpen);
+  const file = picked;
   if (!file.type.startsWith('image/') || file.type === 'image/svg+xml') throw new ChatImageError(m.notImage);
   const bitmap = await createImageBitmap(file).catch(() => null);
   if (!bitmap) throw new ChatImageError(m.cannotOpen);

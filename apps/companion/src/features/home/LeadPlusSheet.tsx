@@ -1,4 +1,4 @@
-import { FloatingSheet, Icon, Pressable, Row, Spacer, Text, type IconName } from '@pi-lead-child/components';
+import { FloatingSheet, Icon, Pressable, Row, Spacer, Text, type IconName, type SheetCover } from '@pi-lead-child/components';
 
 import { useMessages } from '@/i18n';
 
@@ -10,17 +10,19 @@ export type PlusTile = { id: string; icon: IconName; label: string; onPress: () 
 // 上面一排方块（拍照、图片、文件，只放这台设备和 daemon 现在能用的），下面一行「模型」和正在用的模型。
 // 点「模型」：加号面板收起，换模型的面板升起（11.18，模型配置方案 C；用户 2026-11-16「就在消息输入框的加号按钮里面的浮层」）。
 // modelText 是 leadModelTriggerText 的结果（模型 · 推理强度 · 接入）；还不知道在用哪个模型时为 null。
-export function LeadPlusSheet({ open, onClose, tiles, modelText, onOpenModel }: {
+// cover：输入框在屏幕上的位置。给出时面板正好盖住输入框（左右、底边、圆角都一样，2026-11-19 用户定）。
+export function LeadPlusSheet({ open, onClose, tiles, modelText, onOpenModel, cover = null }: {
   open: boolean;
   onClose: () => void;
   tiles: readonly PlusTile[];
   modelText: string | null;
   onOpenModel: () => void;
+  cover?: SheetCover | null;
 }) {
   const m = useMessages(homeMessages);
   const shown = modelText ?? m.modelUnknown;
   return (
-    <FloatingSheet testID="lead-plus" inset="menu" open={open} onClose={onClose} label={m.plusTitle}>
+    <FloatingSheet testID="lead-plus" inset="menu" open={open} onClose={onClose} label={m.plusTitle} cover={cover}>
       {tiles.length ? (
         <Row gap="card-row">
           {tiles.map((tile) => (

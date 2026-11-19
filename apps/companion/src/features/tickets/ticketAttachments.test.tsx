@@ -80,9 +80,10 @@ describe('ticket attachments in the ticket detail', () => {
     await act(async () => { fireEvent.click(within(strip).getByTestId('ticket-attachment-0-open')); });
     const viewer = await screen.findByTestId('ticket-attachment-viewer');
     expect(within(viewer).getByText('screenshot.png')).toBeTruthy();
-    expect(within(viewer).getByText('From Slack · #returns · Ethan')).toBeTruthy();
+    expect(within(viewer).getByText(/From Slack · #returns · Ethan/)).toBeTruthy();
     expect(within(viewer).getByText(/Other people wrote this\./)).toBeTruthy();
-    await waitFor(() => expect(within(viewer).getByTestId('ticket-attachment-viewer-image').querySelector('img')).toBeTruthy());
+    // 全屏看大图（通用的 ImageViewer）。
+    await waitFor(() => expect(within(viewer).getByTestId('ticket-attachment-viewer-page-0').querySelector('img')).toBeTruthy());
 
     await act(async () => { fireEvent.click(screen.getByTestId('ticket-attachment-viewer-close')); });
     await waitFor(() => expect(screen.queryByTestId('ticket-attachment-viewer')).toBeNull());

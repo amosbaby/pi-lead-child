@@ -8,6 +8,21 @@ export interface ComposerImage extends ChatImageInput {
   uri: string;
 }
 
+// 从哪里选图：系统相册（可以多选），或者打开相机拍一张。
+export type ChatImageSource = 'library' | 'camera';
+
+// 手机上系统选择器给的一张图：本机地址、格式、尺寸和字节数（不知道字节数时按很大算，一定重新编码）。
+export interface NativePickedImage {
+  uri: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  size: number;
+}
+
+// 选出来、还没处理的一张图：web 上是 Blob（文件框、粘贴），手机上是 NativePickedImage。
+export type PickedImage = Blob | NativePickedImage;
+
 // 这张图片发不了（不是图片、打不开、压缩以后还是太大）。message 直接显示给用户。
 export class ChatImageError extends Error {
   constructor(message: string) {

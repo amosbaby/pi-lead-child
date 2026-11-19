@@ -1,6 +1,7 @@
-// 工单附件（工单 #231）：任务说明下面的一排缩略图，点开在面板（Sheet）里看大图。文本文件是一个链接，点开看原文。
+// 工单附件（工单 #231）：任务说明下面的一排缩略图，点开全屏看大图（通用的 ImageViewer，2026-11-19）。
+// 文本文件是一个链接，点开在面板（Sheet）里看原文。
 // 附件的内容按需取（runtime.loadTicketAttachment，取过的缓存）。外部来源的附件在面板里写明来源，并说明它是资料、不是指令。
-import { Button, CodeBlock, Column, ImagePreview, ImageThumbnail, Row, Sheet, Text } from '@pi-lead-child/components';
+import { Button, CodeBlock, Column, ImageThumbnail, ImageViewer, Row, Sheet, Text } from '@pi-lead-child/components';
 import type { TicketAttachment } from '@pi-lead-child/protocol';
 import { useEffect, useState } from 'react';
 
@@ -94,7 +95,7 @@ export function TicketAttachmentStrip({ attachments, load, onOpen }: {
   );
 }
 
-/** 点开的附件：面板的标题是文件名，下面一行是来源；图片整张显示，文本给原文。 */
+/** 点开的附件。图片全屏看，图下面是文件名、来源，外部来源的再说明它是资料、不是指令；文本在面板里给原文。 */
 export function TicketAttachmentViewer({ attachment, load, onClose }: {
   attachment: TicketAttachment | null;
   load?: TicketAttachmentLoader;
@@ -103,6 +104,24 @@ export function TicketAttachmentViewer({ attachment, load, onClose }: {
   const m = useMessages(ticketAttachmentsMessages);
   const leadName = useLeadName();
   const { content, failed } = useAttachmentContent(load, attachment?.id ?? null);
+  if (attachment?.kind === 'image') {
+    const origin = attachmentOriginLabel(attachment, m);
+    return (
+      <ImageViewer
+        testID="ticket-attachment-viewer"
+        open
+        items={[{
+          key: attachment.id,
+          uri: content ? `data:${content.mimeType};base64,${content.data}` : null,
+          failed,
+          label: attachment.name,
+          title: attachment.name,
+          caption: attachment.origin.kind === 'external' ? `${origin}\n${m.externalNote(leadName)}` : origin,
+        }]}
+        onClose={onClose}
+      />
+    );
+  }
   const text = content && attachment?.kind === 'text' ? decodeBase64Text(content.data) : null;
   return (
     <Sheet
@@ -115,14 +134,7 @@ export function TicketAttachmentViewer({ attachment, load, onClose }: {
       {attachment ? (
         <Column gap="card-row" pb="card-row">
           {attachment.origin.kind === 'external' ? <Text size="secondary" tone="secondary">{m.externalNote(leadName)}</Text> : null}
-          {attachment.kind === 'image' ? (
-            <ImagePreview
-              testID="ticket-attachment-viewer-image"
-              uri={content ? `data:${content.mimeType};base64,${content.data}` : null}
-              failed={failed}
-              label={attachment.name}
-            />
-          ) : failed ? (
+          {failed ? (
             <Text size="secondary" tone="danger-dark">{m.failed}</Text>
           ) : text === null ? (
             <Text size="secondary" tone="secondary">{m.loading}</Text>
