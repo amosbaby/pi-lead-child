@@ -33,6 +33,9 @@ import {
   type LeadModelChoice,
   FollowUpActionRequestSchema,
   CHAT_IMAGE_ID_PATTERN,
+  CHAT_FILE_ID_PATTERN,
+  CHAT_FILES_CAPABILITY,
+  CHAT_FILES_INCLUDE,
   TICKET_ATTACHMENT_ID_PATTERN,
   CHAT_IMAGES_CAPABILITY,
   CHAT_IMAGES_INCLUDE,
@@ -146,8 +149,10 @@ import type { LeadCapability, LeadGrant, LeadGrantChannel } from "@pi-lead-child
 import {
   findClientMessageTurn, getBusyPlacement, getChatImage, getItem, listSurfaceActions, listWidgets, loadSetupStatus, recordClientMessageTurn, recordSurfaceAction, type ChatImageData,
 } from "@pi-lead-child/store";
+import { getChatFile, type ChatFileData } from "@pi-lead-child/store";
 import { TicketAttachmentError } from "@pi-lead-child/store";
 import { decodeChatImages } from "./chat-images.js";
+import { decodeChatFiles } from "./chat-files.js";
 import { setProjectStatus } from "@pi-lead-child/store";
 import { createMilestone, type ItemMilestone } from "@pi-lead-child/store";
 import { MILESTONE_KIND_LABELS } from "@pi-lead-child/protocol";
@@ -264,7 +269,11 @@ export interface PairedBridge {
     turnModel?: string;
     // 引用（protocol 的 chat-quotes.ts），网关已经校验形状。只有 Lead 的会话收；daemon 核对原文在不在来源里。
     quotes?: ChatQuoteInput[];
+    // 用户发的文件（protocol 的 chat-files.ts），网关已经校验、清理名字并解码。只有 Lead 的会话收文件。
+    files?: ChatFileData[];
   }) => { mode: ChatSendMode; turnId: string };
+  // chatV2 收文件（protocol 的 CHAT_FILES_CAPABILITY）。为 true 时网关在 hello.v2 里宣布这个能力，客户端据此才带 files。
+  chatFiles?: boolean;
   // chatV2 收引用（protocol 的 CHAT_QUOTES_CAPABILITY）。为 true 时网关在 hello.v2 里宣布这个能力，客户端据此才带 quotes。
   chatQuotes?: boolean;
   // chatV2 收「只这一条」的单轮模型（protocol 的 CHAT_TURN_MODEL_CAPABILITY）。为 true 时网关在 hello.v2 里宣布这个能力，
@@ -1198,6 +1207,7 @@ export async function startPairedServer(
     input: {
       id: string; message: string; context?: { ticketId?: number };
       clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[];
+      files?: unknown;
     },
     binding: Binding,
   ): { mode: ChatSendMode; turnId: string; duplicate?: true } {
@@ -1220,6 +1230,17 @@ export async function startPairedServer(
       if (!decoded.ok) throw new PairedCommandError("invalid_request", decoded.error);
       images = decoded.images;
     }
+    // 文件（protocol 的 chat-files.ts）：和图片一样只有 Lead 的会话收，daemon 也要说它收。
+    let files: ChatFileData[] | undefined;
+    if (input.files !== undefined) {
+      if (input.context?.ticketId !== undefined) {
+        throw new PairedCommandError("invalid_request", "files are only accepted in the Lead conversation");
+      }
+      if (!bridge.chatV2 || !bridge.chatFiles) throw new PairedCommandError("invalid_request", "this daemon does not accept files");
+      const decoded = decodeChatFiles(input.files);
+      if (!decoded.ok) throw new PairedCommandError("invalid_request", decoded.error);
+      files = decoded.files;
+    }
     // 引用（protocol 的 chat-quotes.ts）：只有 Lead 的会话收，daemon 也要说它收。
     if (input.quotes !== undefined) {
       if (input.context?.ticketId !== undefined) {
@@ -1227,8 +1248,10 @@ export async function startPairedServer(
       }
       if (!bridge.chatV2 || !bridge.chatQuotes) throw new PairedCommandError("invalid_request", "this daemon does not accept quotes");
     }
-    // 只带图片或引用的消息可以没有文字；文字、图片、引用都没有时拒收。
-    if (!input.message.trim() && !images && !input.quotes?.length) throw new PairedCommandError("invalid_request", "message is required");
+    // 只带图片、文件或引用的消息可以没有文字；文字、图片、文件、引用都没有时拒收。
+    if (!input.message.trim() && !images && !files && !input.quotes?.length) {
+      throw new PairedCommandError("invalid_request", "message is required");
+    }
     // 「只这一条」：只有 Lead 的会话收，daemon 也要说它收（CHAT_TURN_MODEL_CAPABILITY）。
     if (input.turnModel !== undefined) {
       if (input.context?.ticketId !== undefined) {
@@ -1236,8 +1259,8 @@ export async function startPairedServer(
       }
       if (!bridge.chatV2 || !bridge.chatTurnModel) throw new PairedCommandError("invalid_request", "this daemon does not accept turnModel");
     }
-    const { images: _raw, ...command } = input;
-    const result = startChatTurn({ ...command, ...(images ? { images } : {}) }, binding);
+    const { images: _raw, files: _rawFiles, ...command } = input;
+    const result = startChatTurn({ ...command, ...(images ? { images } : {}), ...(files ? { files } : {}) }, binding);
     if (clientMessageId !== undefined) {
       recordClientMessageTurn(bridge.db, { bindingId: binding.id, clientMessageId, turnId: result.turnId, mode: result.mode });
     }
@@ -1247,7 +1270,7 @@ export async function startPairedServer(
   function startChatTurn(
     input: {
       id: string; message: string; context?: { ticketId?: number }; mode?: ChatPlacement; images?: ChatImageData[];
-      turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[];
+      turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[]; files?: ChatFileData[];
     },
     binding: Binding,
   ): { mode: ChatSendMode; turnId: string } {
@@ -1272,6 +1295,7 @@ export async function startPairedServer(
           ...(input.images ? { images: input.images } : {}),
           ...(input.turnModel ? { turnModel: leadModelSpec(input.turnModel) } : {}),
           ...(input.quotes?.length ? { quotes: input.quotes } : {}),
+          ...(input.files?.length ? { files: input.files } : {}),
         })
       : {
           mode: bridge.chat(input.message, { label: `paired:${binding.kind}:${binding.display_name}` }),
@@ -1284,12 +1308,16 @@ export async function startPairedServer(
   ): {
     id: string; message: string; context?: { ticketId?: number };
     clientMessageId?: string; mode?: ChatPlacement; images?: unknown; turnModel?: LeadModelChoice; quotes?: ChatQuoteInput[];
+      files?: unknown;
   } {
     if (typeof body.id !== "string" || !body.id.trim()) {
       throw new HttpError(400, "invalid_request", "id is required");
     }
-    // 只带图片或引用的消息可以没有文字（executeChatCommand 再查一次文字、图片、引用是不是都没有）。
-    if (typeof body.message !== "string" || (!body.message.trim() && body.images === undefined && body.quotes === undefined)) {
+    // 只带图片、文件或引用的消息可以没有文字（executeChatCommand 再查一次文字、图片、文件、引用是不是都没有）。
+    if (
+      typeof body.message !== "string"
+      || (!body.message.trim() && body.images === undefined && body.files === undefined && body.quotes === undefined)
+    ) {
       throw new HttpError(400, "invalid_request", "message is required");
     }
     if (body.clientMessageId !== undefined && !Value.Check(ClientMessageIdSchema, body.clientMessageId)) {
@@ -1311,6 +1339,7 @@ export async function startPairedServer(
       ...(body.images === undefined ? {} : { images: body.images }),
       ...(body.turnModel === undefined ? {} : { turnModel: body.turnModel as LeadModelChoice }),
       ...(body.quotes === undefined ? {} : { quotes: body.quotes as ChatQuoteInput[] }),
+      ...(body.files === undefined ? {} : { files: body.files }),
     };
     const context = body.context;
     if (context === undefined || context === null) return parsed;
@@ -1515,7 +1544,7 @@ export async function startPairedServer(
 
       if (req.method === "POST" && url.pathname === "/v1/chat/send") {
         const { binding } = requireAuth(req, "chat");
-        // 带图片的消息有几 MB（protocol 的 CHAT_SEND_MAX_BYTES）。
+        // 带图片和文件的消息有几十 MB（protocol 的 CHAT_SEND_MAX_BYTES）。
         const body = parseChatSendBody(parseJson(await readBody(req, Math.max(maxBodyBytes, CHAT_SEND_MAX_BYTES))));
         try {
           json(req, res, 200, executeChatCommand(body, binding));
@@ -1686,6 +1715,17 @@ export async function startPairedServer(
         const image = CHAT_IMAGE_ID_PATTERN.test(id) ? getChatImage(bridge.db, id) : null;
         if (!image) throw new HttpError(404, "not_found", "image not found");
         json(req, res, 200, { id: image.id, mimeType: image.mimeType, data: image.data.toString("base64") });
+        return;
+      }
+
+      // 用户发给 Lead 的一个文件（protocol 的 chat-files.ts）。会话快照（include=files）里列出 id。权限和图片一样。
+      const chatFileMatch = url.pathname.match(/^\/v1\/chat\/files\/([^/]+)$/);
+      if (req.method === "GET" && chatFileMatch) {
+        requireAuth(req, "chat");
+        const id = chatFileMatch[1]!;
+        const file = CHAT_FILE_ID_PATTERN.test(id) ? getChatFile(bridge.db, id) : null;
+        if (!file) throw new HttpError(404, "not_found", "file not found");
+        json(req, res, 200, { id: file.id, name: file.name, mimeType: file.mimeType, size: file.data.length, data: file.data.toString("base64") });
         return;
       }
 
@@ -2708,12 +2748,12 @@ export async function startPairedServer(
         // ?include=reply_actions：工单 agent 的轮次带上回复在问你要不要做的动作（2026-10-19，protocol 的 ticket-chat.ts）。
         // 不认识的取值拒掉，免得拼错了静默拿不到。
         const include = url.searchParams.getAll("include").flatMap((value) => value.split(",")).filter(Boolean);
-        // ?include=images：用户的轮次带上发的图片（protocol 的 chat-images.ts）。
+        // ?include=images：用户的轮次带上发的图片（protocol 的 chat-images.ts）。?include=files：发的文件（chat-files.ts）。
         // ?include=answer_started：用户的轮次带上 Lead 开始回答的时刻（2026-11-09，会话按它排 Lead 的回答）。
         // ?include=interrupted：回答写到一半被插话打断的轮次带上 interrupted（2026-11-10）。
         const known = new Set([
           "tool_calls", "surfaces", "placement", TICKET_REPLY_ACTIONS_INCLUDE, CHAT_IMAGES_INCLUDE, CONVERSATION_ANSWER_STARTED_INCLUDE,
-          CONVERSATION_INTERRUPTED_INCLUDE, CHAT_QUOTES_INCLUDE,
+          CONVERSATION_INTERRUPTED_INCLUDE, CHAT_QUOTES_INCLUDE, CHAT_FILES_INCLUDE,
         ]);
         if (include.some((value) => !known.has(value))) {
           throw new HttpError(400, "invalid_request", "invalid include");
@@ -2727,6 +2767,7 @@ export async function startPairedServer(
           ...(include.includes(TICKET_REPLY_ACTIONS_INCLUDE) ? { replyActions: true } : {}),
           ...(include.includes(CHAT_IMAGES_INCLUDE) ? { images: true } : {}),
           ...(include.includes(CHAT_QUOTES_INCLUDE) ? { quotes: true } : {}),
+          ...(include.includes(CHAT_FILES_INCLUDE) ? { files: true } : {}),
           ...(include.includes(CONVERSATION_ANSWER_STARTED_INCLUDE) ? { answerStarted: true } : {}),
           ...(include.includes(CONVERSATION_INTERRUPTED_INCLUDE) ? { interrupted: true } : {}),
         };
@@ -3221,7 +3262,7 @@ export async function startPairedServer(
     }
   });
 
-  // 带图片的 chat.send 有几 MB（protocol 的 CHAT_SEND_MAX_BYTES）。连上 WebSocket 要先配对，发命令的都是配对过的客户端。
+  // 带图片和文件的 chat.send 有几十 MB（protocol 的 CHAT_SEND_MAX_BYTES）。连上 WebSocket 要先配对，发命令的都是配对过的客户端。
   const wss = new WebSocketServer({ noServer: true, maxPayload: Math.max(maxBodyBytes, CHAT_SEND_MAX_BYTES) });
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -3528,6 +3569,8 @@ export async function startPairedServer(
           ...(bridge.chatV2 && bridge.chatQuotes ? [CHAT_QUOTES_CAPABILITY] : []),
           // Lead 的会话收图片（只有 chatV2 的桥接收）。
           ...(bridge.chatV2 ? [CHAT_IMAGES_CAPABILITY] : []),
+          // Lead 的会话收文件（daemon 说它收时）。
+          ...(bridge.chatV2 && bridge.chatFiles ? [CHAT_FILES_CAPABILITY] : []),
           // Lead 的形象（/v1/lead/avatar 的路由，protocol 的 lead-avatar.ts）。这个网关总有这些路由。
           LEAD_AVATAR_CAPABILITY,
           // 不再宣布 chat.ticket-answerer.v1（2026-10-19）：新客户端据此不带 context.answerer。

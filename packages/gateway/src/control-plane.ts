@@ -68,7 +68,7 @@ import { itemHasRun } from "@pi-lead-child/engine";
 import type { Db } from "@pi-lead-child/store";
 import { activeRun, getRun, latestSessionRun, listRuns, runTokenUsage } from "@pi-lead-child/store";
 import { listActivitiesAfter } from "@pi-lead-child/store";
-import { listChatImageRefs, listChatQuoteRefs, ticketReplyActionsByTurn } from "@pi-lead-child/store";
+import { listChatFileRefs, listChatImageRefs, listChatQuoteRefs, ticketReplyActionsByTurn } from "@pi-lead-child/store";
 import { listTicketAttachments, readTicketAttachment, TicketAttachmentError } from "@pi-lead-child/store";
 import type { TicketAttachment, TicketAttachmentContent } from "@pi-lead-child/protocol";
 import {
@@ -1596,6 +1596,8 @@ type ConversationTurnQuery = {
   images?: boolean;
   // 用户的轮次带上引用（protocol 的 chat-quotes.ts）。
   quotes?: boolean;
+  // 用户的轮次带上发的文件（protocol 的 chat-files.ts）。
+  files?: boolean;
   // 用户的轮次带上开始回答的时刻（protocol 的 CONVERSATION_ANSWER_STARTED_INCLUDE，2026-11-09）。
   answerStarted?: boolean;
   // 回答写到一半被插话打断的轮次带上 interrupted（protocol 的 CONVERSATION_INTERRUPTED_INCLUDE，2026-11-10）。
@@ -1606,6 +1608,7 @@ type ConversationTurnQuery = {
 function conversationTurnsOf(db: Db, turns: ChannelTurnRow[], opts?: ConversationTurnQuery): ConversationTurn[] {
   const imageRefs = opts?.images ? listChatImageRefs(db, turns.map((turn) => turn.id)) : null;
   const quoteRefs = opts?.quotes ? listChatQuoteRefs(db, turns.map((turn) => turn.id)) : null;
+  const fileRefs = opts?.files ? listChatFileRefs(db, turns.map((turn) => turn.id)) : null;
   // 判断过的工单 agent 轮次才有；没有判断过的（还在判断、SmartModel 不可用、Lead 的轮次）不带这个字段。
   const replyActions = opts?.replyActions
     ? ticketReplyActionsByTurn(db, turns.filter((turn) => turn.origin_kind.endsWith(":ticket-agent")).map((turn) => turn.id))
@@ -1664,6 +1667,7 @@ function conversationTurnsOf(db: Db, turns: ChannelTurnRow[], opts?: Conversatio
     ...(replyActions?.has(turn.id) ? { replyActions: replyActions.get(turn.id)! } : {}),
     ...(imageRefs?.has(turn.id) ? { images: imageRefs.get(turn.id)! } : {}),
     ...(quoteRefs?.has(turn.id) ? { quotes: quoteRefs.get(turn.id)! } : {}),
+    ...(fileRefs?.has(turn.id) ? { files: fileRefs.get(turn.id)! } : {}),
     ...(answerStarts?.has(turn.id) ? { answerStartedAt: answerStarts.get(turn.id)! } : {}),
     ...interruptedOf(turn),
   }));

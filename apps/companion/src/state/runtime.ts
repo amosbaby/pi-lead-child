@@ -1,4 +1,6 @@
 import type {
+  ChatFile,
+  ChatFileInput,
   ChatImageInput,
   ChatQuoteInput,
   TicketAttachment,
@@ -231,7 +233,7 @@ export type CompanionTransport = Pick<
   | 'getOwnerAction' | 'disownOwnerAction'
   | 'getTicketReviewer' | 'getTicketDeliveries' | 'getTicketUsage'
   | 'listTicketActions' | 'runTicketAction' | 'getTicketAcceptanceCriteria' | 'getTicketExecutionPlan'
-  | 'getChatImage' | 'getTicketAttachments' | 'getTicketAttachment'
+  | 'getChatImage' | 'getChatFile' | 'getTicketAttachments' | 'getTicketAttachment'
   | 'getLeadModels' | 'switchLeadModel' | 'compactLeadContext'
 >>;
 
@@ -322,6 +324,8 @@ export class CompanionStateRuntime {
   private shownOutboxIds = new Set<string>();
   // 向 daemon 取过的图片（用户发给 Lead 的，按 id）：同一张图只取一次。取失败的拿掉，下次再取。
   private chatImages = new Map<string, Promise<ChatImageInput>>();
+  // 向 daemon 取过的文件（用户发给 Lead 的，按 id）：同一个文件只取一次。取失败的拿掉，下次再取。
+  private chatFiles = new Map<string, Promise<ChatFile>>();
   // 工单附件的内容，按「工单:附件」缓存（附件挂上以后不变）。
   private ticketAttachmentContents = new Map<string, Promise<{ mimeType: string; data: string }>>();
   private leadAvatarImagesLoading = new Set<string>();
@@ -466,12 +470,13 @@ export class CompanionStateRuntime {
   // images：发给 Lead 的图片（只有 Lead 的会话收，protocol 的 chat-images.ts）。
   // turnModel：「只这一条」的单轮模型（protocol 的 CHAT_TURN_MODEL_CAPABILITY）。只在 daemon 宣布了这个能力时由界面给。
   // quotes：引用回复（protocol 的 CHAT_QUOTES_CAPABILITY），按加入的顺序。只在 daemon 宣布了这个能力时由界面给。
+  // files：发给 Lead 的文件（protocol 的 CHAT_FILES_CAPABILITY），按选的顺序。只在 daemon 宣布了这个能力时由界面给。
   async sendChat(
     message: string, ticketId?: number, mode?: ChatPlacement, images?: readonly ChatImageInput[], turnModel?: LeadModelChoice,
-    quotes?: readonly ChatQuoteInput[],
+    quotes?: readonly ChatQuoteInput[], files?: readonly ChatFileInput[],
   ): Promise<{ clientMessageId: string }> {
     await this.loadOutbox();
-    const entry = await this.outbox.enqueue(message, ticketId, mode, images, turnModel, quotes);
+    const entry = await this.outbox.enqueue(message, ticketId, mode, images, turnModel, quotes, files);
     return { clientMessageId: entry.clientMessageId };
   }
 
@@ -515,6 +520,23 @@ export class CompanionStateRuntime {
       },
     );
     this.chatImages.set(imageId, loading);
+    return loading;
+  }
+
+  // 用户发给 Lead 的一个文件（会话快照里的 id）：名字、类型、大小和 base64 的内容。
+  loadChatFile(fileId: string): Promise<ChatFile> {
+    const cached = this.chatFiles.get(fileId);
+    if (cached) return cached;
+    const getChatFile = this.dependencies.client.getChatFile;
+    if (!getChatFile) return Promise.reject(new Error('chat files are unavailable'));
+    const loading = getChatFile.call(this.dependencies.client, fileId).then(
+      (file) => ({ id: file.id, name: file.name, mimeType: file.mimeType, size: file.size, data: file.data }),
+      (error: unknown) => {
+        this.chatFiles.delete(fileId);
+        throw error;
+      },
+    );
+    this.chatFiles.set(fileId, loading);
     return loading;
   }
 
@@ -574,6 +596,7 @@ export class CompanionStateRuntime {
         ...(entry.images?.length ? { images: entry.images } : {}),
         ...(entry.turnModel ? { turnModel: entry.turnModel } : {}),
         ...(entry.quotes?.length ? { quotes: entry.quotes } : {}),
+        ...(entry.files?.length ? { files: entry.files } : {}),
       }),
       isConnected: () => this.control.getState().connectionState === 'connected',
       now: () => this.dependencies.now?.() ?? new Date(),
@@ -616,6 +639,7 @@ export class CompanionStateRuntime {
           createdAt: entry.createdAt,
           ...(entry.images?.length ? { images: entry.images } : {}),
           ...(entry.quotes?.length ? { quotes: entry.quotes } : {}),
+          ...(entry.files?.length ? { files: entry.files } : {}),
         });
       }
       setOutboxMessageState(this.control, messageId, { state: entry.state, error: entry.error });

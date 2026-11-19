@@ -952,6 +952,37 @@ describe('CompanionStateRuntime', () => {
     expect(client.disconnect).toHaveBeenCalledTimes(1);
   });
 
+  // 2026-11-19：发给 Lead 的文件（protocol 的 chat-files.ts）。sendChat 的最后一个参数是文件：进发件箱、画在本机的消息上、
+  // 随命令发出去。
+  it('sends files with a chat message and shows them on the local message', async () => {
+    const sendChatCommand = vi.fn((_command: { id: string; files?: unknown }) => new Promise<{ turnId: string }>(() => {}));
+    const client = transport({ sendChatCommand });
+    const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: scheduler() });
+    await runtime.start();
+    const files = [{ name: 'app.log', mimeType: 'text/plain', data: 'aGVsbG8=' }];
+
+    const { clientMessageId } = await runtime.sendChat('看日志', undefined, undefined, undefined, undefined, undefined, files);
+    await vi.waitFor(() => expect(sendChatCommand).toHaveBeenCalled());
+    expect(sendChatCommand.mock.calls[0]![0]).toMatchObject({ id: clientMessageId, files });
+    const state = runtime.control.getState();
+    const messageId = Object.keys(state.messagesById).find((id) => state.messagesById[id]?.clientCommandId === clientMessageId)!;
+    expect((state.partIdsByMessage[messageId] ?? []).map((id) => state.messagePartsById[id]).filter((part) => part?.kind === 'file'))
+      .toEqual([{ kind: 'file', id: `${messageId}:file:0`, name: 'app.log', mimeType: 'text/plain', size: 5, data: 'aGVsbG8=' }]);
+  });
+
+  it('loads a chat file by id once, and again after a failure', async () => {
+    const file = { id: 'file_a', name: 'app.log', mimeType: 'text/plain', size: 5, data: 'aGVsbG8=' };
+    const getChatFile = vi.fn()
+      .mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValue(file);
+    const runtime = createCompanionStateRuntime({ client: transport({ getChatFile }), credentials: credentialStore(), scheduler: scheduler() });
+
+    await expect(runtime.loadChatFile('file_a')).rejects.toThrow('offline');
+    await expect(runtime.loadChatFile('file_a')).resolves.toEqual(file);
+    await expect(runtime.loadChatFile('file_a')).resolves.toEqual(file);
+    expect(getChatFile).toHaveBeenCalledTimes(2);
+  });
+
   it('does not let an old chat command repopulate state after forget', async () => {
     let resolveCommand!: (value: { turnId: string }) => void;
     const command = new Promise<{ turnId: string }>((resolve) => { resolveCommand = resolve; });

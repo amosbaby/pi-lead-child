@@ -97,9 +97,11 @@ import { activeRun, getRun, updateRun } from "@pi-lead-child/store";
 import { repairNonBudgetRetryExhaustion } from "@pi-lead-child/store";
 import { addActivity } from "@pi-lead-child/store";
 import { insertChatImages, listChatImageRefs, listTurnChatImages } from "@pi-lead-child/store";
+import { insertChatFiles, listChatFileRefs, listTurnChatFiles } from "@pi-lead-child/store";
+import { removeChatTurnFiles, writeChatTurnFiles } from "./chat-files.js";
 import { channelCardQuoteSource, insertChatQuotes, listChatQuoteRefs, listTurnChatQuotes, type StoredChatQuote } from "@pi-lead-child/store";
 import { chatQuoteAppearsIn, type ChatQuoteInput } from "@pi-lead-child/protocol";
-import { QUOTED_EXTERNAL_TEXT, type LeadUserQuote } from "@pi-lead-child/lead";
+import { QUOTED_EXTERNAL_TEXT, type LeadUserFile, type LeadUserQuote } from "@pi-lead-child/lead";
 import {
   addInbox, appendEvent, escalateLeadBacklog, expireLeadWaits, flushCommittedEvents, listInbox, listLeadBacklog,
   purgeLeadWaits, recordDueLeadFollowUps, recordUserRequestExpired, subscribeCommittedEvents,
@@ -1201,7 +1203,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 工单的 agent，不再新建这种轮次；库里留下的、重启后还要答的旧轮次照旧带上下文。turnId 是这一轮自己，最近的消息里不列它。
   // imageIds：用户随这条消息发的图片的编号，信封里写着（Lead 用编号指一张图，例如 set_lead_avatar）。
   // 图片本身在 leadTurnImages 里按轮次取，交给 pi 时带上。
-  // quoteTurnId：这一轮的编号，用来取这条消息带的引用（chat_quotes，leadUserQuotes）。
+  // quoteTurnId：这一轮的编号，用来取这条消息带的引用（chat_quotes，leadUserQuotes）和文件（chat_files，leadUserFiles）。
   function userTurnPrompt(args: {
     via: string; channel: string; itemId: number | null; message: string; turnId?: string; imageIds?: readonly string[];
     quoteTurnId?: string;
@@ -1209,16 +1211,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const item = args.itemId === null ? undefined : getItem(db, args.itemId);
     const itemContext = item ? leadSystemEvent("context", ticketChatContext(item, args.turnId ?? null)) : "";
     const quotes = leadUserQuotes(args.quoteTurnId ?? args.turnId ?? null);
+    const files = leadUserFiles(args.quoteTurnId ?? args.turnId ?? null);
     const source = {
       via: args.via, channel: args.channel, ...(args.imageIds?.length ? { imageIds: args.imageIds } : {}), ...(quotes.length ? { quotes } : {}),
+      ...(files.length ? { files } : {}),
     };
     return [itemContext, leadUserMessage(source, args.message)].filter(Boolean).join("\n");
   }
 
-  // 写进摘要的用户的话。只发了图片的消息没有文字，写「[图片]」；只带了引用的写「[引用]」。
+  // 写进摘要的用户的话。只发了图片的消息没有文字，写「[图片]」；只发了文件的写「[文件]」；只带了引用的写「[引用]」。
   function userTurnText(turn: { id: string; user_text: string }): string {
     if (turn.user_text.trim()) return turn.user_text;
     if (listChatImageRefs(db, [turn.id]).has(turn.id)) return "[图片]";
+    if (listChatFileRefs(db, [turn.id]).has(turn.id)) return "[文件]";
     return listChatQuoteRefs(db, [turn.id]).has(turn.id) ? "[引用]" : turn.user_text;
   }
 
@@ -1231,6 +1236,20 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       ...(quote.source.kind === "turn" ? { turnId: quote.source.turnId } : {}),
       ...(quote.external ? { external: quote.external } : {}),
     }));
+  }
+
+  // 一轮带的文件，交给 Lead 的清单（envelope.ts 的 leadUserMessage）。文件按轮次存在库里；给 Lead 读的副本在
+  // 数据目录的 chat-files/<轮次>/（chat-files.ts）。重启、重试后再答时也从这里取，副本不见了时再写一份。
+  function leadUserFiles(turnId: string | null): LeadUserFile[] {
+    if (!turnId) return [];
+    const files = listTurnChatFiles(db, turnId);
+    if (!files.length) return [];
+    try {
+      return writeChatTurnFiles(opts.dataDir, turnId, files);
+    } catch (error) {
+      log(`[chat-files] could not write the files of turn ${turnId}: ${error instanceof Error ? error.message : String(error)}`);
+      return [];
+    }
   }
 
   // 这一轮引用了外来消息卡里对方的话（P17.9，turn-origin.ts 的 QUOTED_EXTERNAL_TEXT）。
@@ -6552,10 +6571,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   ): { mode: ChatSendMode; turnId: string } {
     // /fairyeye on|off（Lead 的形象，用户 2026-10-28）：只认 Lead 的会话里、不带图片、整条消息只有这条命令。
     // daemon 自己答，不交给 Lead、不调模型，Lead 忙着、正在停机时也马上答。这是打开矢量 FairyEye 的唯一入口。
-    const fairyEye = command.itemId === undefined && !command.images?.length ? parseFairyEyeCommand(command.message) : null;
+    const attached = Boolean(command.images?.length || command.files?.length);
+    const fairyEye = command.itemId === undefined && !attached ? parseFairyEyeCommand(command.message) : null;
     if (fairyEye) return answerFairyEyeCommand(command, fairyEye === "on");
     // /stop：只认 Lead 的会话里、不带图片、整条消息只有这条命令。工单对话里的话照常交给工单的 agent。
-    if (command.itemId === undefined && !command.images?.length && isStopCommand(command.message)) return answerStopCommand(command);
+    if (command.itemId === undefined && !attached && isStopCommand(command.message)) return answerStopCommand(command);
     const item = command.itemId === undefined ? undefined : getItem(db, command.itemId);
     if (command.itemId !== undefined && !item) {
       throw new PairedCommandError("not_found", `item #${command.itemId} not found`);
@@ -6566,7 +6586,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       throw new PairedCommandError("invalid_request", "quotes are only accepted in the Lead conversation");
     }
     const quotes = command.quotes?.length ? resolveChatQuotes(command.quotes) : [];
+    // 文件（chat-files.ts）：只在 Lead 的会话里。
+    if (command.files?.length && command.itemId !== undefined) {
+      throw new PairedCommandError("invalid_request", "files are only accepted in the Lead conversation");
+    }
+    const files = command.files ?? [];
     // 图片和这一轮一起存（同一个事务）：交给 Lead 时按轮次取（leadTurnImages）。
+    // 文件也在同一个事务里存，并写进这一轮的文件夹：写不进去时整条拒收，库里和文件夹里都不留。
     const images = command.images ?? [];
     let imageIds: string[] = [];
     const turn = db.transaction(() => {
@@ -6580,6 +6606,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       });
       if (images.length) imageIds = insertChatImages(db, created.id, images).map((image) => image.id);
       if (quotes.length) insertChatQuotes(db, created.id, quotes);
+      if (files.length) {
+        const stored = insertChatFiles(db, created.id, files).map((ref, index) => ({
+          id: ref.id, turnId: created.id, name: ref.name, diskName: ref.diskName, mimeType: ref.mimeType, data: files[index]!.data,
+        }));
+        try {
+          writeChatTurnFiles(opts.dataDir, created.id, stored);
+        } catch (error) {
+          removeChatTurnFiles(opts.dataDir, created.id);
+          log(`[chat-files] could not write the files of a new message: ${error instanceof Error ? error.message : String(error)}`);
+          throw new Error("could not save the attached files");
+        }
+      }
       return created;
     })();
     const prompt = [
@@ -6771,6 +6809,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // 「只这一条」的单轮模型（acceptChatMessage、runTurnNow）：网关据此宣布 CHAT_TURN_MODEL_CAPABILITY。
         chatTurnModel: true,
         chatQuotes: true,
+        // Lead 的会话收文件（acceptChatMessage 写进这一轮的文件夹）：网关据此宣布 CHAT_FILES_CAPABILITY。
+        chatFiles: true,
         ticketMessageV2: handleTicketMessage,
         addClient: (send) => { senders.add(send); return () => senders.delete(send); },
         recheckRuntimes: (runtime) => healthRecovery.recheck({ runtime }),

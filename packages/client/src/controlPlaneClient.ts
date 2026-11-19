@@ -185,6 +185,12 @@ import {
   PROTOCOL_VERSION,
   CHAT_CLIENT_MESSAGE_ID_CAPABILITY,
   CHAT_IMAGES_CAPABILITY,
+  CHAT_FILES_CAPABILITY,
+  CHAT_FILES_INCLUDE,
+  ChatFileSchema,
+  chatFileInputProblem,
+  type ChatFile,
+  type ChatFileInput,
   CHAT_TURN_MODEL_CAPABILITY,
   CHAT_QUOTES_CAPABILITY,
   CHAT_QUOTES_INCLUDE,
@@ -445,6 +451,8 @@ export interface SendChatCommandInput {
   turnModel?: LeadModelChoice;
   // 引用回复（protocol 的 chat-quotes.ts）。daemon 没有宣布 CHAT_QUOTES_CAPABILITY 时不发，报拒收（界面也不给引用）。
   quotes?: ChatQuoteInput[];
+  // 发给 Lead 的文件（protocol 的 chat-files.ts）。daemon 没有宣布 CHAT_FILES_CAPABILITY 时不发，报拒收（界面也不给选文件）。
+  files?: ChatFileInput[];
 }
 
 export interface SendChatCommandResult {
@@ -1291,9 +1299,11 @@ export class ControlPlaneClient {
     // 用户发的图片（include=images）总是先要：页面打开时快照在 hello.v2 之前就取了，那时还不知道 daemon 的能力。
     // 开始回答的时刻（include=answer_started，2026-11-09）也先要：旧 daemon 回 400，退回不带它的一档。
     // 被插话打断的轮次（include=interrupted，2026-11-10）同样：旧 daemon 回 400，退回不带它的一档。
-    // 用户消息带的引用（include=quotes，2026-11-18）同样。
+    // 用户消息带的引用（include=quotes，2026-11-18）同样。用户发的文件（include=files，2026-11-19）同样。
+    const quotesTier = `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE},${CONVERSATION_INTERRUPTED_INCLUDE},${CHAT_QUOTES_INCLUDE}`;
     const includes = [
-      `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE},${CONVERSATION_INTERRUPTED_INCLUDE},${CHAT_QUOTES_INCLUDE}`,
+      `${quotesTier},${CHAT_FILES_INCLUDE}`,
+      quotesTier,
       `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE},${CONVERSATION_INTERRUPTED_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE},${CONVERSATION_ANSWER_STARTED_INCLUDE}`,
       `${full},${CHAT_IMAGES_INCLUDE}`, full, 'tool_calls,surfaces,placement', 'tool_calls,surfaces',
@@ -1377,6 +1387,11 @@ export class ControlPlaneClient {
   // 用户发给 Lead 的一张图片（会话快照的 images 里的 id，protocol 的 chat-images.ts）。
   async getChatImage(imageId: string, signal?: AbortSignal): Promise<ChatImage> {
     return this.request<ChatImage>(`/v1/chat/images/${encodeURIComponent(imageId)}`, ChatImageSchema, { signal });
+  }
+
+  // 用户发给 Lead 的一个文件（会话快照的 files 里的 id，protocol 的 chat-files.ts）。data 是 base64。
+  async getChatFile(fileId: string, signal?: AbortSignal): Promise<ChatFile> {
+    return this.request<ChatFile>(`/v1/chat/files/${encodeURIComponent(fileId)}`, ChatFileSchema, { signal });
   }
 
   // 用户控制面动作（kernel spec §6.4/§8）。路由按动作命名而不是 PATCH stage——服务端
@@ -2388,6 +2403,14 @@ export class ControlPlaneClient {
     if (quotes && !this.capabilities.has(CHAT_QUOTES_CAPABILITY)) {
       throw new ControlPlaneClientError('the daemon does not accept quotes yet', 'invalid_request');
     }
+    // 文件同理：只发文字会丢掉用户的文件。
+    const files = input.files?.length ? input.files : undefined;
+    if (files && !this.capabilities.has(CHAT_FILES_CAPABILITY)) {
+      throw new ControlPlaneClientError('the daemon does not accept files yet', 'invalid_request');
+    }
+    // 个数、单个大小、名字和网关按同一套规则查（protocol 的 chatFileInputProblem）：超了不发，原因写明是哪个文件。
+    const fileProblem = files ? chatFileInputProblem(files) : null;
+    if (fileProblem) throw new ControlPlaneClientError(fileProblem, 'invalid_request');
     const command: WsCommand = {
       type: 'chat.send',
       id: input.id,
@@ -2401,6 +2424,7 @@ export class ControlPlaneClient {
       ...(input.mode !== undefined && this.capabilities.has(CHAT_PLACEMENT_CAPABILITY) ? { mode: input.mode } : {}),
       ...(images ? { images } : {}),
       ...(quotes ? { quotes } : {}),
+      ...(files ? { files } : {}),
       ...(input.turnModel !== undefined && input.ticketId === undefined && this.capabilities.has(CHAT_TURN_MODEL_CAPABILITY)
         ? { turnModel: { model: input.turnModel.model, effort: input.turnModel.effort } }
         : {}),
@@ -2454,6 +2478,7 @@ export class ControlPlaneClient {
           ...(command.images === undefined ? {} : { images: command.images }),
           ...(command.turnModel === undefined ? {} : { turnModel: command.turnModel }),
           ...(command.quotes === undefined ? {} : { quotes: command.quotes }),
+          ...(command.files === undefined ? {} : { files: command.files }),
         }),
         signal: controller.signal,
       }) as Record<string, unknown>;
