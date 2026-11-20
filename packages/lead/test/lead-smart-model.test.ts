@@ -1,4 +1,5 @@
-// Lead 的 SmartModel：LLM 兜底用哪个模型（Haiku 优先），以及 suggest_route 工具走完整的账本路径：
+// Lead 的 SmartModel：LLM 兜底用哪个模型（后台模型：按价格算的便宜模型，没有价格时按名字里的型号；background-model.ts），
+// 坏掉的后台模型不让 Lead 停下（2026-11-20），以及 suggest_route 工具走完整的账本路径：
 // 健康账本里不可用的 runtime 不进候选，建议写进决策日志，日志里没有 brief 原文。
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -27,8 +28,11 @@ import {
   createLeadSmartModel,
   isValidSmartModelSpec,
   newestModelSpec,
+  registeredLeadCatalog,
   selectSmartModelSpec,
 } from "../src/smart-model.js";
+import { BrokenBackgroundModels, createLeadCatalogSource } from "../src/background-model.js";
+import { leadModelCatalog, type LeadCatalogModel } from "../src/model-config.js";
 import { childRuntimeProfile, createLeadTools, type LeadDeps } from "../src/tools.js";
 
 const CONFIG = normalizeLeadModelConfig({
@@ -39,37 +43,63 @@ const CONFIG = normalizeLeadModelConfig({
   models: ["acme/gpt-5.5"],
 }, {});
 
+// A catalog without prices: the family words in the id decide (background-model.ts cheapModels).
+function unpriced(specs: readonly string[]): LeadCatalogModel[] {
+  return specs.map((spec) => {
+    const slash = spec.indexOf("/");
+    return {
+      provider: spec.slice(0, slash), id: spec.slice(slash + 1), group: null, source: null, name: null, input: ["text"],
+      efforts: [], defaultEffort: null, contextWindow: null, maxTokens: null, created: null, price: null,
+    };
+  });
+}
+
 describe("selectSmartModelSpec", () => {
-  const configuredSpecs = configuredLeadModelSpecs(CONFIG);
+  const catalog = unpriced(configuredLeadModelSpecs(CONFIG));
 
   it("prefers a valid PLC_SMART_MODEL", () => {
-    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "acme/gpt-5.4-mini" }, configuredSpecs, leadSpec: "acme/gpt-5.5" }))
+    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "acme/gpt-5.4-mini" }, catalog, leadSpec: "acme/gpt-5.5" }))
       .toEqual({ spec: "acme/gpt-5.4-mini", source: "env", note: null });
   });
 
-  it("ignores a malformed PLC_SMART_MODEL with a note and takes the first configured haiku", () => {
-    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "haiku" }, configuredSpecs, leadSpec: "acme/gpt-5.5" }))
-      .toEqual({ spec: "vibeproxy/claude-haiku-5-5", source: "config", note: expect.stringContaining("provider/model") });
+  it("ignores a malformed PLC_SMART_MODEL with a note and takes the cheap model", () => {
+    expect(selectSmartModelSpec({ env: { PLC_SMART_MODEL: "haiku" }, catalog, leadSpec: "acme/gpt-5.5" }))
+      .toEqual({ spec: "vibeproxy/claude-haiku-5-5", source: "cheap", note: expect.stringContaining("provider/model") });
   });
 
-  it("falls back to the Lead's own model without a haiku", () => {
-    expect(selectSmartModelSpec({ env: {}, configuredSpecs: ["acme/gpt-5.5"], leadSpec: "acme/gpt-5.5" }))
-      .toEqual({ spec: "acme/gpt-5.5", source: "lead", note: null });
+  it("falls back to the Lead's own model without a cheap one", () => {
+    expect(selectSmartModelSpec({ env: {}, catalog: unpriced(["acme/gpt-5.5"]), leadSpec: "acme/gpt-5.5" }))
+      .toEqual({ spec: "acme/gpt-5.5", source: "main", note: null });
   });
 
   // 实测 vibeproxy discover 出来的顺序里，claude-haiku-4-5-20251001 排在 claude-haiku-5-5 前面，以前选到了旧的。
-  it("picks the newest haiku, not the first one the provider lists", () => {
-    const discovered = [
+  it("picks the newest haiku, not the first one the provider lists, when the catalog has no prices", () => {
+    const discovered = unpriced([
       "vibeproxy/claude-3-5-haiku-20241022", "vibeproxy/claude-haiku-4-5-20251001", "vibeproxy/claude-haiku-5-5",
       "vibeproxy/claude-haiku-5-5-20260901",
-    ];
-    expect(selectSmartModelSpec({ env: {}, configuredSpecs: discovered, leadSpec: "x/y" }).spec).toBe("vibeproxy/claude-haiku-5-5");
+    ]);
+    expect(selectSmartModelSpec({ env: {}, catalog: discovered, leadSpec: "x/y" }).spec).toBe("vibeproxy/claude-haiku-5-5");
     expect(newestModelSpec([])).toBeNull();
   });
 
-  it("matches haiku in the model id, not in the provider name", () => {
-    expect(selectSmartModelSpec({ env: {}, configuredSpecs: ["haiku-proxy/gpt-5.5", "p/Claude-Haiku-4"], leadSpec: "x/y" }).spec)
+  it("matches the family word in the model id, not in the provider name", () => {
+    expect(selectSmartModelSpec({ env: {}, catalog: unpriced(["haiku-proxy/gpt-5.5", "p/Claude-Haiku-4"]), leadSpec: "x/y" }).spec)
       .toBe("p/Claude-Haiku-4");
+  });
+
+  it("follows the stored background model, and skips a broken PLC_SMART_MODEL", () => {
+    expect(selectSmartModelSpec({ env: {}, catalog, leadSpec: "acme/gpt-5.5", setting: "vibeproxy/claude-sonnet-5" }))
+      .toMatchObject({ spec: "vibeproxy/claude-sonnet-5", source: "setting" });
+    expect(selectSmartModelSpec({
+      env: { PLC_SMART_MODEL: "acme/gpt-5.4-mini" }, catalog, leadSpec: "acme/gpt-5.5", isBroken: (spec) => spec === "acme/gpt-5.4-mini",
+    })).toMatchObject({ spec: "vibeproxy/claude-haiku-5-5", source: "cheap" });
+  });
+
+  it("builds a catalog from the registered models; zero costs are no price", () => {
+    const runtime = { getModels: (provider: string) => (provider === "acme" ? [{ id: "gpt-5.5", cost: { input: 0, output: 0 } }] : []) };
+    expect(registeredLeadCatalog(CONFIG, runtime as never).map((model) => [`${model.provider}/${model.id}`, model.price])).toEqual([
+      ["acme/gpt-5.5", null], ["vibeproxy/claude-sonnet-5", null], ["vibeproxy/claude-haiku-5-5", null],
+    ]);
   });
 
   it("validates the provider/model format", () => {
@@ -239,6 +269,26 @@ describe("createLeadSmartModel under the model hold", () => {
     expect(calls).toHaveLength(2);
   });
 
+  // 2026-11-20：暂停期间每次拒绝都记成一次失败的 decision_model.called，用量统计里的失败次数是假的。拒了的调用没有发出去，不记。
+  it("records no call when the hold refuses it, so usage counts only calls that went out", async () => {
+    const store = openDb(join(tempDir("plc-lead-smart-"), "plc.db"));
+    const { runtime, calls } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], { stopReason: "error", errorMessage: DISABLED });
+    const hold = new ModelHold({ log: () => {} });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime, config: CONFIG, leadSpec: "acme/gpt-5.5", dataDir: tempDir("plc-lead-smart-"), env: {}, hold,
+      onCall: (call) => recordDecisionModelCall(store, call),
+    });
+    await expect(built.complete!("整理这个线程", { purpose: "channel_memory" })).rejects.toThrow(/disabled in this account/);
+    expect(hold.held).toBe(true);
+    // 暂停期间的拒绝：补全和判断都不记。
+    await expect(built.complete!("再整理一次", { purpose: "channel_memory" })).rejects.toThrow(MODEL_HOLD_ERROR);
+    await expect(built.smartModel!.decide("state", YES_NO, { purpose: "channel_urgency" })).rejects.toThrow(MODEL_HOLD_ERROR);
+    expect(calls).toHaveLength(1);
+    const usage = summarizeSystemUsage(store, { component: "decision_model" }).components[0]!;
+    expect(usage.byPurpose).toEqual([{ name: "channel_memory", calls: 1, failures: 1 }]);
+    store.close();
+  });
+
   it("does not enter the hold on a failure that is not about the account", async () => {
     const { runtime, calls } = fakeRuntime(["vibeproxy/claude-haiku-5-5"], { stopReason: "error", errorMessage: "429 rate limited" });
     const hold = new ModelHold({ log: () => {} });
@@ -249,6 +299,103 @@ describe("createLeadSmartModel under the model hold", () => {
     await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/429/);
     expect(hold.held).toBe(false);
     expect(calls).toHaveLength(2);
+  });
+});
+
+// The live incident (2026-11-17..20): Lead moved to a gateway with luna, terra and sol and no haiku. The decision LLM
+// used Lead's own model (sol, the most expensive), and the gateway's old haiku (404 "magpie knows no model") kept the
+// model hold on for most of a day. Regressions for .scratch/background-models/spec.md.
+describe("the background model on a gateway without haiku", () => {
+  const MAGPIE = normalizeLeadModelConfig({
+    providers: { magpie: { baseUrl: "http://127.0.0.1:3/v1", discover: true } },
+    models: ["magpie/codex/gpt-6.2-sol"],
+  }, {});
+  const pricing = (prompt: string, completion: string) => ({ prompt, completion, input_cache_read: "0.00000001" });
+  // magpie's GET /v1/models: OpenRouter-shaped prices in USD per token (2026-11-20).
+  const magpieModels = (extra: Array<Record<string, unknown>> = []) => (async (url: string | URL) => {
+    if (String(url).includes("client_version")) return new Response("{}", { status: 404 });
+    return new Response(JSON.stringify({
+      data: [
+        { id: "codex/gpt-6.2-sol", created: 1_793_000_000, pricing: pricing("0.000002", "0.00001") },
+        { id: "codex/gpt-6.1-terra", created: 1_792_000_000, pricing: pricing("0.000001", "0.000005") },
+        { id: "codex/gpt-6-luna", created: 1_791_000_000, pricing: pricing("0.0000001", "0.0000005") },
+        ...extra,
+      ],
+    }), { status: 200 });
+  }) as typeof fetch;
+  const catalogOf = (fetchImpl: typeof fetch) => createLeadCatalogSource(() => leadModelCatalog(MAGPIE, {}, fetchImpl).then((result) => result.models));
+  const registered = (specs: string[]) => ({
+    getModels: (provider: string) => specs.filter((spec) => spec.startsWith(`${provider}/`)).map((spec) => ({ provider, id: spec.slice(provider.length + 1) })),
+    getModel: (provider: string, id: string) => (specs.includes(`${provider}/${id}`) ? { provider, id } : undefined),
+  });
+
+  it("calls the cheap model by price (luna), not Lead's own model", async () => {
+    const calls: string[] = [];
+    const runtime = {
+      ...registered(["magpie/codex/gpt-6.2-sol", "magpie/codex/gpt-6.1-terra", "magpie/codex/gpt-6-luna"]),
+      completeSimple: async (model: { provider: string; id: string }) => {
+        calls.push(`${model.provider}/${model.id}`);
+        return { stopReason: "stop", content: [{ type: "text", text: '{"ok": {"yes": true}}' }] };
+      },
+    };
+    const built = createLeadSmartModel({
+      modelRuntime: runtime as never, config: MAGPIE, leadSpec: "magpie/codex/gpt-6.2-sol", dataDir: tempDir("plc-lead-smart-"), env: {},
+      catalog: catalogOf(magpieModels()),
+    });
+    await built.smartModel!.decide("state", YES_NO);
+    expect(await built.complete!("整理这个线程", { purpose: "channel_memory" })).toContain("yes");
+    expect(calls).toEqual(["magpie/codex/gpt-6-luna", "magpie/codex/gpt-6-luna"]);
+  });
+
+  it("does not open the model hold on a 404 of the background model, and moves the call to the next cheap model", async () => {
+    const NOT_SERVED = '404 {"error":"magpie knows no model group/auto-claude-haiku-5-5"}';
+    const calls: string[] = [];
+    const runtime = {
+      ...registered(["magpie/codex/gpt-6.2-sol", "magpie/codex/gpt-6-luna", "magpie/group/auto-claude-haiku-5-5"]),
+      completeSimple: async (model: { provider: string; id: string }) => {
+        const spec = `${model.provider}/${model.id}`;
+        calls.push(spec);
+        return spec.endsWith("haiku-5-5")
+          ? { stopReason: "error", errorMessage: NOT_SERVED, content: [] }
+          : { stopReason: "stop", content: [{ type: "text", text: '{"ok": {"yes": true}}' }] };
+      },
+    };
+    const hold = new ModelHold({ log: () => {} });
+    const failures: unknown[][] = [];
+    const successes: string[] = [];
+    const built = createLeadSmartModel({
+      modelRuntime: runtime as never, config: MAGPIE, leadSpec: "magpie/codex/gpt-6.2-sol", dataDir: tempDir("plc-lead-smart-"), env: {},
+      // The gateway still lists its old haiku (newer and cheap), but no longer serves it.
+      catalog: catalogOf(magpieModels([{ id: "group/auto-claude-haiku-5-5", created: 1_793_500_000, pricing: pricing("0.0000001", "0.0000005") }])),
+      hold, broken: new BrokenBackgroundModels(),
+      onBackgroundFailure: (...args) => failures.push(args),
+      onBackgroundSuccess: (model) => successes.push(model),
+    });
+    for (let i = 0; i < 4; i += 1) await built.smartModel!.decide("state", YES_NO);
+    expect(hold.held).toBe(false);
+    expect(hold.state).toBeNull();
+    // The first call fails over once; the broken haiku is skipped after that.
+    expect(calls).toEqual([
+      "magpie/group/auto-claude-haiku-5-5", "magpie/codex/gpt-6-luna", "magpie/codex/gpt-6-luna", "magpie/codex/gpt-6-luna", "magpie/codex/gpt-6-luna",
+    ]);
+    expect(failures).toEqual([["magpie/group/auto-claude-haiku-5-5", "config", NOT_SERVED, "magpie/codex/gpt-6-luna"]]);
+    expect(successes).toEqual(Array(4).fill("magpie/codex/gpt-6-luna"));
+    expect(built.currentSpec()).toBe("magpie/codex/gpt-6-luna");
+  });
+
+  it("still enters the hold on an account-level failure of the background model", async () => {
+    const DISABLED = "403 This service has been disabled in this account for violation of Terms of Service.";
+    const runtime = {
+      ...registered(["magpie/codex/gpt-6.2-sol", "magpie/codex/gpt-6-luna"]),
+      completeSimple: async () => ({ stopReason: "error", errorMessage: DISABLED, content: [] }),
+    };
+    const hold = new ModelHold({ log: () => {} });
+    const built = createLeadSmartModel({
+      modelRuntime: runtime as never, config: MAGPIE, leadSpec: "magpie/codex/gpt-6.2-sol", dataDir: tempDir("plc-lead-smart-"), env: {},
+      catalog: catalogOf(magpieModels()), hold,
+    });
+    await expect(built.smartModel!.decide("state", YES_NO)).rejects.toThrow(/disabled in this account/);
+    expect(hold.state).toMatchObject({ kind: "account", source: "decision" });
   });
 });
 

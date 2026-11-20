@@ -2,6 +2,7 @@ import { Button } from '@pi-lead-child/components';
 import { useCallback, useState } from 'react';
 
 import { AddModelPanel } from '@/features/settings/AddModelPanel';
+import { BackgroundSection } from '@/features/settings/BackgroundSection';
 import { modelDescription } from '@/features/settings/memoryModel';
 import { modelMessages } from '@/features/settings/model.messages';
 import { ModelSection } from '@/features/settings/ModelSection';
@@ -11,6 +12,7 @@ import { useLocale, useMessages } from '@/i18n';
 import { useLeadName, useModelSettings } from '@/state/hooks';
 
 // 设置 → 模型。页面头上是「添加模型」（方案 C，2026-11-16）：桌面上从右边的抽屉打开，手机上是悬浮底部面板。
+// 「现在的分工」下面是「后台工作」卡（2026-11-20，主题 11.25）。
 export default function ModelRoute() {
   const m = useMessages(settingsMessages);
   const leadName = useLeadName();
@@ -27,7 +29,7 @@ export default function ModelRoute() {
           disabled={!modelSettings} onPress={() => setAdding(true)} />
       )}
     >
-      <ModelSection />
+      <ModelSection background={<BackgroundSection />} />
       <AddModelPanel open={adding} onClose={close} />
     </SettingsPage>
   );

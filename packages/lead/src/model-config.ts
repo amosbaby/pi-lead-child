@@ -40,6 +40,8 @@ export interface LeadProviderModelConfig {
   contextWindow?: number;
   maxTokens?: number;
   input?: Array<"text" | "image">;
+  // Price in USD per 1M tokens (manual override of the catalog's price; background-model.ts reads it).
+  cost?: { input: number; output: number; cacheRead?: number | null };
 }
 
 export interface LeadProviderConfig {
@@ -148,6 +150,10 @@ export function leadSubscriptionModels(base: string): LeadCatalogModel[] {
     input: model.input.filter((kind): kind is "text" | "image" => kind === "text" || kind === "image"),
     efforts: [], defaultEffort: null,
     contextWindow: positiveInteger(model.contextWindow), maxTokens: positiveInteger(model.maxTokens), created: null,
+    price: (() => {
+      const price = configuredPrice(model.cost);
+      return price && (price.input > 0 || price.output > 0) ? { ...price, cacheRead: price.cacheRead || null } : knownModelPrice(model.id);
+    })(),
   }));
 }
 
@@ -220,6 +226,80 @@ export interface LeadCatalogModel {
   maxTokens: number | null;
   // 目录给的发布时间（ISO）：OpenAI 兼容目录的 created（秒），Anthropic 目录的 created_at。目录没说时为 null。
   created: string | null;
+  // Price in USD per 1M tokens (modelPrice): config.json's models[].cost, else the catalog's pricing, else pi's
+  // built-in first-party price for the same id. null when no source knows it. background-model.ts reads it.
+  price: LeadModelPrice | null;
+}
+
+/** A model's price in USD per 1M tokens. cacheRead is null when not known. */
+export interface LeadModelPrice {
+  input: number;
+  output: number;
+  cacheRead: number | null;
+}
+
+// One price field: a number or a decimal string, finite and not negative. Anything else is unknown.
+function priceNumber(value: unknown): number | null {
+  const number = typeof value === "number" ? value
+    : typeof value === "string" && /^\s*\d+(?:\.\d+)?(?:e-?\d+)?\s*$/i.test(value) ? Number(value) : Number.NaN;
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+// Per-token prices are tiny decimals: round the per-1M value so 0.0000001 * 1e6 reads 0.1, not 0.09999999999999999.
+const perMillion = (perToken: number): number => Math.round(perToken * 1e6 * 1e6) / 1e6;
+
+/**
+ * The price in a catalog entry's pricing (OpenRouter shape, as magpie reports it): USD per token, usually as strings
+ * ({ prompt: "0.0000001", completion: "0.0000005", input_cache_read: "0.00000001" }). Returns USD per 1M tokens, or
+ * null when the prompt or the completion price is missing or not a number.
+ */
+export function catalogPricing(item: unknown): LeadModelPrice | null {
+  const pricing = isRecord(item) ? item.pricing : undefined;
+  if (!isRecord(pricing)) return null;
+  const input = priceNumber(pricing.prompt);
+  const output = priceNumber(pricing.completion);
+  if (input === null || output === null) return null;
+  const cacheRead = priceNumber(pricing.input_cache_read);
+  return { input: perMillion(input), output: perMillion(output), cacheRead: cacheRead === null ? null : perMillion(cacheRead) };
+}
+
+/** config.json's models[].cost (USD per 1M tokens). null when it is missing or not numbers. */
+export function configuredPrice(cost: unknown): LeadModelPrice | null {
+  if (!isRecord(cost)) return null;
+  const input = priceNumber(cost.input);
+  const output = priceNumber(cost.output);
+  if (input === null || output === null) return null;
+  return { input, output, cacheRead: priceNumber(cost.cacheRead) };
+}
+
+let knownPrices: Map<string, LeadModelPrice> | null = null;
+
+/**
+ * pi's built-in price of a first-party model with the same name (the last part of the id, without the effort suffix),
+ * in USD per 1M tokens. A price of 0 for both input and output is not a price (pi writes 0 when it does not know one).
+ */
+export function knownModelPrice(id: string): LeadModelPrice | null {
+  const name = modelName(splitLeadModelEffort(id).base);
+  try {
+    if (!knownPrices) {
+      const prices = new Map<string, LeadModelPrice>();
+      const available = new Set<string>(getBuiltinProviders());
+      for (const provider of FIRST_PARTY_CATALOGS) {
+        if (!available.has(provider)) continue;
+        for (const model of getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0])) {
+          const key = model.id.toLowerCase();
+          const price = configuredPrice(model.cost);
+          if (!prices.has(key) && price && (price.input > 0 || price.output > 0)) {
+            prices.set(key, { ...price, cacheRead: price.cacheRead || null });
+          }
+        }
+      }
+      knownPrices = prices;
+    }
+    return knownPrices.get(name) ?? null;
+  } catch {
+    return null;
+  }
 }
 
 // Lead 的上下文最多按 500K 算（2026-10-26 用户：「500K压缩」）。模型按目录里的真实窗口注册，比 500K 大的按 500K 注册：
@@ -370,6 +450,7 @@ interface PlainCatalogFields {
   name: string | null;
   contextWindow: number | null;
   maxTokens: number | null;
+  price: LeadModelPrice | null;
 }
 
 function plainCatalogFields(item: Record<string, unknown>): PlainCatalogFields {
@@ -379,6 +460,7 @@ function plainCatalogFields(item: Record<string, unknown>): PlainCatalogFields {
     name: typeof item.display_name === "string" && item.display_name.trim() ? item.display_name : null,
     contextWindow: positiveInteger(item.context_window),
     maxTokens: positiveInteger(item.max_output_tokens) ?? positiveInteger(item.max_tokens),
+    price: catalogPricing(item),
   };
 }
 
@@ -399,7 +481,7 @@ async function providerCatalog(
   const configuredInput = new Map(configured.flatMap((model) => (model.input ? [[model.id, model.input] as const] : [])));
   const entry = (id: string, extra: Partial<LeadCatalogModel> = {}): LeadCatalogModel => ({
     provider: name, id, group: null, source: null, name: null,
-    input: ["text"], efforts: [], defaultEffort: null, contextWindow: null, maxTokens: null, created: null, ...extra,
+    input: ["text"], efforts: [], defaultEffort: null, contextWindow: null, maxTokens: null, created: null, price: null, ...extra,
   });
   const byId = new Map<string, LeadCatalogModel>();
   for (const model of configured) {
@@ -475,6 +557,7 @@ async function providerCatalog(
           contextWindow: positiveInteger(detail?.context_window) ?? flat?.contextWindow ?? null,
           maxTokens: positiveInteger(detail?.max_tokens) ?? flat?.maxTokens ?? null,
           created: created.get(id) ?? null,
+          price: catalogPricing(detail) ?? flat?.price ?? null,
         }));
       }
       note = `${name}: discovered ${owners.size} model(s) from ${provider.baseUrl}${details.size ? ` (${details.size} with details)` : ""}`;
@@ -491,11 +574,18 @@ async function providerCatalog(
   };
   // The window the settings page shows: config.json's, the catalog's, or the known one; null when none knows it.
   const configuredWindow = new Map(configured.flatMap((model) => (model.contextWindow ? [[model.id, model.contextWindow] as const] : [])));
+  // The price: config.json's cost (manual override), the catalog's pricing, or pi's built-in first-party price.
+  const configuredCost = new Map(configured.flatMap((model) => {
+    const price = configuredPrice(model.cost);
+    return price ? [[model.id, price] as const] : [];
+  }));
   const models = [...byId.values()].map((model) => ({
     ...model,
     group: info.accountPrefix ? modelGroup(model.id) : null,
     contextWindow: configuredWindow.get(model.id) ?? configuredWindow.get(splitLeadModelEffort(model.id).base)
       ?? model.contextWindow ?? knownContextWindow(model.id),
+    price: configuredCost.get(model.id) ?? configuredCost.get(splitLeadModelEffort(model.id).base)
+      ?? model.price ?? knownModelPrice(model.id),
   }));
   return { models, note, info };
 }

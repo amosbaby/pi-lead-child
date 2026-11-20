@@ -67,6 +67,7 @@ export * from "./pipeline/terminal-handoff.js";
 export * from "./pipeline/transient-retry.js";
 export * from "./pipeline/watchdog.js";
 export * from "./runtime-catalog.js";
+export * from "./background-health.js";
 export * from "./model-catalog.js";
 export {
   SOL_PI_ENTRY_ENV, SOL_PI_FEATURES, solPiSettings, type SolPiFeature, type SolPiRole, type SolPiSettings,

@@ -21,7 +21,8 @@ import {
 //   上面「现在的分工」：大脑和直觉各一个主用、最多 3 个备用，点格子从下拉里选；直觉都用不了时问大脑的哪个模型。
 //   下面「模型库」（ModelLibrary.tsx）：按服务商分组的大脑模型，和直觉的每一条；接入服务商、添加直觉都在那里。
 // 每个改动都是操作层的 model_settings 操作（runtime.modelSettingsAction），和 Lead 的 perform_action 同一个函数。
-export function ModelSection() {
+// background：「现在的分工」下面的一块，页面放「后台工作」卡（BackgroundSection.tsx，2026-11-20）。
+export function ModelSection({ background }: { background?: ReactNode } = {}) {
   const locale = useLocale();
   const m = modelMessages(locale);
   const { modelSettings, resource } = useModelSettings();
@@ -48,6 +49,7 @@ export function ModelSection() {
     <Column testID="model-section" gap="page-section">
       <ModelPendingSwitch />
       <Assignment dto={modelSettings} />
+      {background ?? null}
       {/* 接入列表里「订阅」一组（方案 C 的 S3）：daemon 给了 subscriptions 字段时才有。 */}
       <ModelLibrary dto={modelSettings} subscriptions={hasSubscriptionField(modelSettings) ? <SubscriptionRows dto={modelSettings} /> : undefined} />
     </Column>

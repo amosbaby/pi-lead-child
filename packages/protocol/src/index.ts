@@ -1333,6 +1333,7 @@ export * from "./agenda-feeds.ts";
 export * from "./busy-placement.ts";
 export * from "./wake-pace.ts";
 export * from "./lead-shadow.ts";
+export * from "./background-model.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";
 export * from "./delivery-snapshots.ts";

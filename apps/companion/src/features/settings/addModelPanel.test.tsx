@@ -87,7 +87,9 @@ function addRuntime(before: ModelSettingsDto, after: ModelSettingsDto = before) 
   return { runtime, perform };
 }
 
-const inputOf = (perform: ReturnType<typeof vi.fn>, call = 0) => (perform.mock.calls[call]![3] as { input: unknown }).input;
+// 页面上的「后台工作」卡打开时读一次 background_model：只看模型设置的调用。
+const modelCalls = (perform: ReturnType<typeof vi.fn>) => perform.mock.calls.filter((call) => call[0] !== 'background_model');
+const inputOf = (perform: ReturnType<typeof vi.fn>, call = 0) => (modelCalls(perform)[call]![3] as { input: unknown }).input;
 const form = (extra: Partial<AddModelForm>): AddModelForm => ({ kind: 'custom', name: '', baseUrl: '', apiKey: '', api: 'openai-completions', ...extra });
 
 beforeEach(() => {
@@ -189,7 +191,7 @@ describe('the add model panel', () => {
     expect((screen.getByTestId('model-add-key') as HTMLInputElement).type).toBe('password');
     fireEvent.click(screen.getByTestId('model-add-save'));
     expect(screen.getByTestId('model-add-status').textContent).toBe('Enter the address.');
-    expect(perform).not.toHaveBeenCalled();
+    expect(modelCalls(perform)).toEqual([]);
     fireEvent.change(screen.getByTestId('model-add-url'), { target: { value: 'https://gateway.example.com/v1' } });
     fireEvent.change(screen.getByTestId('model-add-key'), { target: { value: 'mk-secret' } });
     await act(async () => { fireEvent.click(screen.getByTestId('model-add-save')); });

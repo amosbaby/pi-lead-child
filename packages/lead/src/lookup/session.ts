@@ -14,8 +14,8 @@ import {
   createAgentSession, DefaultResourceLoader, ModelRuntime, SessionManager, SettingsManager,
   type ExtensionFactory, type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { loadLeadModelConfig, registerLeadProviders, resolveLeadModel, selectedLeadModelSpec } from "../model-config.js";
-import { configuredLeadModelSpecs, selectSmartModelSpec } from "../smart-model.js";
+import { leadModelCatalog, loadLeadModelConfig, registerLeadProviders, resolveLeadModel, selectedLeadModelSpec } from "../model-config.js";
+import { registeredLeadCatalog, selectSmartModelSpec } from "../smart-model.js";
 import type { LeadBackgroundJobs } from "../background-jobs.js";
 import { installToolAbortGuard } from "../tool-abort-guard.js";
 
@@ -118,7 +118,7 @@ export const LOOKUP_MAX_OUTPUT_TOKENS = 32_000;
 
 /**
  * daemon 用的会话工厂：ModelRuntime 建一次，代查之间复用（工单 04：每次新建要跑一次模型发现）。登记 Lead 的 provider
- * （config.json），模型按 SmartModel 的选法：PLC_SMART_MODEL，否则配置里最新的 haiku，否则 Lead 自己的模型。
+ * （config.json），模型按 SmartModel 的选法：PLC_SMART_MODEL，否则按价格自动选的便宜模型（background-model.ts），否则 Lead 自己的模型。
  * 模型的配置（config.json 的 lead 段和相关的环境变量）变了时重建。同时到的几次代查共用一次建立。
  */
 export function createLookupSessionFactory(input: {
@@ -138,9 +138,11 @@ export function createLookupSessionFactory(input: {
     });
     const notes = await registerLeadProviders(modelRuntime, config, env, fetch, { maxOutputTokens: LOOKUP_MAX_OUTPUT_TOKENS });
     for (const note of notes) input.log?.(`[lookup] ${note}`);
+    // The priced catalog decides what is cheap; without it, the model family in the registered ids.
+    const catalog = await leadModelCatalog(config, env).then((result) => result.models, () => []);
     const choice = selectSmartModelSpec({
       env,
-      configuredSpecs: configuredLeadModelSpecs(config, (provider) => modelRuntime.getModels(provider).map((model) => model.id)),
+      catalog: catalog.length ? catalog : registeredLeadCatalog(config, modelRuntime),
       leadSpec: selectedLeadModelSpec(config, env),
     });
     if (choice.note) input.log?.(`[lookup] ${choice.note}`);

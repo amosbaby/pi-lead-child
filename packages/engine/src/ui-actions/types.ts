@@ -5,7 +5,7 @@
 import type { RuntimeDisabledBy, RuntimeId, RuntimeSwitchBy } from "@pi-lead-child/core";
 import type {
   ActionPermission, ChannelCardAction, ConnectionDto, LocalMcpLaunch, StartConnectionResponse, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
-  CompactLeadContextRequest, CompactLeadContextResult, FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
+  BackgroundJobState, BackgroundModelState, CompactLeadContextRequest, CompactLeadContextResult, FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
   SchedulerSnapshot, SetFastChainRequest, SignalSourceDto, TimerOrigin, UiActionTargetType, UserActionRequest,
@@ -67,6 +67,9 @@ export interface UiActionServices {
   leadModels?: LeadModelService;
   // Lead's context: compact it on request (daemon's server.ts, 2026-11-18). Only after Lead's session is built.
   leadContext?: LeadContextService;
+  // The model that background work uses (lead's background-model.ts, daemon's server.ts, 2026-11-20): the cheap models
+  // now and the resolved choice. Without it, Lead cannot choose a background or shadow model (nothing to check against).
+  backgroundModels?: BackgroundModelService;
   // Lead 忙时排着的外部消息（daemon 的 lead-input.ts，工单 10）。Lead 的会话建好以后才有。
   leadQueue?: LeadQueueService;
   // Lead 忙时用户排着的追问（daemon 的 server.ts，用户 2026-10-28）。Lead 的会话建好以后才有。
@@ -303,6 +306,19 @@ export interface LeadModelService {
   // Lead 的会话此刻挂着的模型（provider/id），带订阅的账号（protocol 的 LeadModelCatalog.inSession）。不知道时为 null。
   // 没有它的服务（测试的替身）：GET /v1/lead/models?live=1 不给这个字段。
   inSession?(): string | null;
+}
+
+// The model that background work uses (protocol's background-model.ts). The daemon builds it from Lead's priced catalog.
+export interface BackgroundModelService {
+  // The setting, the model in use, the cheap models and the skipped ones. Reads the catalog (30 s cache).
+  state(): Promise<BackgroundModelState>;
+  // The last state without waiting, for list_actions. null before the first read.
+  snapshot(): BackgroundModelState | null;
+  // The setting changed (background_model.set): users of the model that read it once (Hindsight) pick it up.
+  changed?(): void;
+  // The health of each background job (engine's background-health.ts): background model, channel memory, Hindsight.
+  // Not given: background_model.read returns no jobs.
+  jobs?(): BackgroundJobState[];
 }
 
 export interface LeadContextService {

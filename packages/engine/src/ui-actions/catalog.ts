@@ -34,6 +34,7 @@ import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { WAKE_PACE_ACTIONS, WAKE_PACE_TARGET } from "./wake-pace.js";
 import { LEAD_SHADOW_ACTIONS, LEAD_SHADOW_TARGET } from "./lead-shadow.js";
+import { BACKGROUND_MODEL_ACTIONS, BACKGROUND_MODEL_TARGET } from "./background-model.js";
 import { LEAD_CONTEXT_ACTIONS, LEAD_CONTEXT_TARGET } from "./lead-context.js";
 import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
@@ -1263,6 +1264,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   busy_placement: BUSY_PLACEMENT_TARGET,
   wake_pace: WAKE_PACE_TARGET,
   lead_shadow: LEAD_SHADOW_TARGET,
+  background_model: BACKGROUND_MODEL_TARGET,
   signal_sources: SIGNAL_SOURCES_TARGET,
   signal_source: SIGNAL_SOURCE_TARGET,
   agenda_feeds: AGENDA_FEEDS_TARGET,
@@ -1323,6 +1325,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   wake_pace: WAKE_PACE_ACTIONS,
   // The background shadow (user 2026-11-19): mode, model, sources, gather window. Changes rules; Lead can set it. lead-shadow.ts.
   lead_shadow: LEAD_SHADOW_ACTIONS,
+  // The model that background work uses (user 2026-11-20): set (Lead: cheap models only) and read. background-model.ts.
+  background_model: BACKGROUND_MODEL_ACTIONS,
   // 信号源（用户 2026-11-12）：通过对话把一个连接接进事件体系。建、试跑、改、暂停、恢复、马上跑、删。定义在 signal-sources.ts。
   signal_sources: SIGNAL_SOURCES_ACTIONS,
   signal_source: SIGNAL_SOURCE_ACTIONS,

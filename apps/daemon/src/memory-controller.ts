@@ -990,6 +990,15 @@ export class MemoryController implements MemoryService {
     });
   }
 
+  // The background model changed (background_model.set, lead's background-model.ts): Hindsight's automatic summary slot
+  // follows it. Hindsight restarts only when the resolved model differs (reconcile compares the LLM targets).
+  backgroundModelChanged(): Promise<void> {
+    return this.serial(async () => {
+      this.options.publish("memory");
+      await this.reconcile("settings");
+    });
+  }
+
   getDecisionModel(): DecisionModelDto {
     const decision = this.decision();
     const key = this.decisionKey(decision.host);

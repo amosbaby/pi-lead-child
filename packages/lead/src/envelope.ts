@@ -9,8 +9,9 @@
 // 正文里的每一个「<」都写成 &lt;（发布评审 f796c1c：只换这两种标签挡不住空格、看不见的字符和长得像的字母）：
 // 正文里不可能出现任何标签，用户的话冒充不了系统事件，系统事件里转述的内容也冒充不了用户。
 // 系统提示词里有一段说明这两种块（prompt.ts）。
+import { backgroundFailingLines } from "./background-health-text.js";
 import {
-  CHANNEL_INTENT_LABELS, CHANNEL_RULE_CHANGE_FLAG, CHAT_IMAGE_ID_PATTERN, formatChatFileSize, channelRuleChangeNotice, isChannelIntent, isChannelRuleChangeKind,
+  BACKGROUND_FAILING_KIND, CHANNEL_INTENT_LABELS, CHANNEL_RULE_CHANGE_FLAG, CHAT_IMAGE_ID_PATTERN, formatChatFileSize, channelRuleChangeNotice, isChannelIntent, isChannelRuleChangeKind,
   HANDBOOK_ABILITY_LABELS, HANDBOOK_MODE_LABELS, HANDBOOK_MODE_PHRASES, isHandbookMode, isSenderTrust, messageEventConversationKey, redactAndCap,
   SENDER_TRUST_LABELS, type HandbookAbility, type HandbookMode,
 } from "@pi-lead-child/protocol";
@@ -253,6 +254,11 @@ function eventSummary(payload: Record<string, unknown>): string | null {
 
 export function leadEventBlock(event: LeadEventLike): string {
   const lines = [`事件 #${event.seq}：${event.kind}，对象 ${event.entityKey}，发生在 ${event.occurredAt}`];
+  // 后台任务转为失败（background-models spec D3）：什么失败了、从什么时候起、系统做了什么、你能做什么。根因已经写在正文里。
+  if (event.kind === BACKGROUND_FAILING_KIND) {
+    lines.push(...backgroundFailingLines(event.payload));
+    return leadSystemEvent("event", lines.join("\n"), { level: event.level ?? undefined, origin: event.source, topic: "background_health" });
+  }
   const summary = eventSummary(event.payload);
   if (summary) lines.push(`摘要：${summary}`);
   const runId = idOf(event.payload.runId);

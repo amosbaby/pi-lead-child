@@ -20,6 +20,9 @@ import {
 import {
   assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
 } from "@pi-lead-child/lead";
+import {
+  BrokenBackgroundModels, createLeadCatalogSource, resolveBackgroundModel, selectedLeadModelSpec,
+} from "@pi-lead-child/lead";
 import { overflowLimits, overflowReminder, queueNotice, queueNoticeMs, waitingText } from "@pi-lead-child/lead";
 import {
   durationText, firstLine, overflowSecondReminder, RED_LINE_HANDOFF_TOOLS, redLineLimits, redLineMessage, writeCall,
@@ -48,7 +51,8 @@ import {
   resolveShadowOutcome, runShadowSession, type ShadowSessionFactory, type LeadShadowParts,
 } from "@pi-lead-child/lead";
 import { LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND, type LeadShadowDto } from "@pi-lead-child/protocol";
-import { getLeadShadow } from "@pi-lead-child/store";
+import type { BackgroundModelState } from "@pi-lead-child/protocol";
+import { getBackgroundModel, getLeadShadow } from "@pi-lead-child/store";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
 import { leadHealthMessages } from "./lead-health.messages.js";
 import { serverMessages } from "./server.messages.js";
@@ -120,6 +124,8 @@ import { pendingApprovals, getApproval, isStandingOrderProposal, pendingApproval
 import { blockerHasConversationRecord } from "@pi-lead-child/store";
 import { recordLeadTurnResponding, type EventRecord, type ReminderPush } from "@pi-lead-child/store";
 import { createWatchdog, escalateInterventionToUser, UI_ACTIONS } from "@pi-lead-child/engine";
+import { backgroundJobState, createBackgroundHealth } from "@pi-lead-child/engine";
+import { backgroundModelHealthHooks, resolvedModelWatch } from "./background-health-wiring.js";
 import { leadCapabilityNotice, recordLeadCapabilities } from "./lead-capabilities.js";
 import { agentConnectionHost, setAgentConnectionHost, type AgentConnectionHost } from "@pi-lead-child/engine";
 import { createScheduler } from "@pi-lead-child/engine";
@@ -542,6 +548,8 @@ export interface DaemonOpts {
   idleCompactSummarize?: IdleLaneRuntimeOptions["summarize"];
   // 测试注入 shadow 的会话工厂（lead 的 shadow/session.ts，假模型）。缺省按 Lead 的模型配置建。
   shadowSessionFactory?: ShadowSessionFactory;
+  // Tests drive the background health's clock (engine's background-health.ts: 3 failures over 5 minutes, 10 quiet minutes).
+  backgroundHealthNow?: () => Date;
   sessionFactory?: (args: {
     dataDir: string; dbPath: string; db: Db;
     onChildDone?: LeadDeps["onChildDone"]; onChildEvent?: LeadDeps["onChildEvent"];
@@ -862,6 +870,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // dispatchLeadWork、maybeWakeForDigest、wakeForSuspended），不排重试（leadWakeRetry），空闲车道不开要调模型的活。
   // 事件留在日志里，游标不动。用户本人的消息照常开一轮；答上了就解除（runTurnNow 的 finally），排着的事接着交给 Lead。
   // 暂停跨重启保留（2026-11-16，理由见 model-hold.ts 开头）：存在库里，启动时在 leadHealth 建好以后恢复。
+  // 后台任务的健康（engine 的 background-health.ts，.scratch/background-models spec D3）：后台模型、通道记忆、Hindsight 的失败和恢复
+  // 交给 Lead（system.background_failing 叫醒，system.background_recovered 只记一笔），不成风暴。模型暂停期间什么也不写，
+  // 暂停解除（下面 modelHold 的 onChange）以后还在失败的才写。轮询每分钟 tick 一次，结算到时的恢复。
+  const backgroundHealth = createBackgroundHealth({
+    db, log, held: () => modelHold.held,
+    ...(opts.backgroundHealthNow ? { now: opts.backgroundHealthNow } : {}),
+  });
   const modelHold = new ModelHold({
     log,
     breaker: modelBreakerLimitsFromEnv(process.env),
@@ -879,6 +894,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     onPersist: (snapshot) => writeLeadCallGuard(db, "model_hold", snapshot),
     onChange: (held) => {
       idleLane.modelHold(held);
+      // 暂停解除：写暂停期间压着的后台健康事件。
+      if (!held) backgroundHealth.holdLifted();
       // 顶栏的健康状态：暂停期间「下一次自动调用」的时间变了（nextScheduledAttempt），重发一次。
       leadHealth.refresh();
       noticeModelHold();
@@ -1043,6 +1060,69 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 操作层（engine 的 ui-actions/）用的服务。只建这一个对象：网关的页面入口和 Lead 的工具都拿它，两个入口调的是同一个实例。
   const uiActionServices: UiActionServices = { runtimeSettings };
+
+  // Lead's model catalog with prices (lead's model-config.ts leadModelCatalog). The provider is asked at most every 30 s:
+  // the message box's model picker, the background model (background-model.ts) and Hindsight's automatic slot share it.
+  const leadCatalog = createLeadCatalogSource(() => leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => {
+    noteResolvedBackgroundModel(result.models);
+    return result.models;
+  }));
+  // The resolved background model can change without background_model.set: a subscription switch, a new release, a
+  // model marked broken. Each fresh catalog read (at most every 30 s, no timer of its own) compares it with the last one;
+  // on a change Hindsight's automatic slot reconciles as after a set (reconcile restarts Hindsight only when its LLM differs).
+  const watchResolvedBackgroundModel = resolvedModelWatch((before, after) => {
+    log(`[background-model] the resolved background model changed (${before ?? "none"} -> ${after ?? "none"}); Hindsight's automatic slot follows`);
+    backgroundModelChanged();
+  });
+  function noteResolvedBackgroundModel(catalog: readonly LeadCatalogModel[]): void {
+    try {
+      const mainSpec = selectedLeadModelSpec(loadLeadModelConfig(opts.dataDir));
+      watchResolvedBackgroundModel(resolveBackgroundModel({
+        catalog, mainSpec, setting: backgroundModelSetting(), isBroken: brokenBackgroundModels.isBroken,
+      }).spec);
+    } catch (error) {
+      log(`[background-model] the resolved background model could not be checked: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  // Background models that failed with a configuration or quota error, skipped for 1 hour. The decision LLM marks them;
+  // background_model.read and Hindsight's automatic slot read them.
+  const brokenBackgroundModels = new BrokenBackgroundModels();
+  const backgroundModelSetting = (): string | null => {
+    try {
+      return getBackgroundModel(db).model;
+    } catch {
+      return null;
+    }
+  };
+  let backgroundModelSnapshot: BackgroundModelState | null = null;
+  const backgroundModelState = async (): Promise<BackgroundModelState> => {
+    const catalog = await leadCatalog.get().catch(() => [] as readonly LeadCatalogModel[]);
+    let main: string | null = null;
+    try {
+      main = selectedLeadModelSpec(loadLeadModelConfig(opts.dataDir));
+    } catch {
+      main = null;
+    }
+    const setting = backgroundModelSetting();
+    const choice = resolveBackgroundModel({ catalog, mainSpec: main, setting, isBroken: brokenBackgroundModels.isBroken });
+    backgroundModelSnapshot = {
+      setting, resolved: choice.spec, source: choice.source, main, cheap: choice.cheap,
+      broken: brokenBackgroundModels.list().map((entry) => ({ model: entry.model, until: new Date(entry.until).toISOString(), reason: entry.reason })),
+    };
+    return backgroundModelSnapshot;
+  };
+  let backgroundModelChanged: () => void = () => {};
+  uiActionServices.backgroundModels = {
+    state: backgroundModelState,
+    snapshot: () => {
+      void backgroundModelState().catch(() => {});
+      return backgroundModelSnapshot;
+    },
+    // Hindsight reads its automatic model when it starts: the memory controller re-resolves it (set below).
+    changed: () => backgroundModelChanged(),
+    // The health of each background job for the settings page and background_model.read.
+    jobs: () => backgroundHealth.states().map(backgroundJobState),
+  };
 
   interface TurnOutcome {
     ok: boolean;
@@ -2842,6 +2922,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 后端由 MemoryController 在下面接上，笔记定时写过去并跟踪任务；写入失败时告诉 Lead（一次故障一条）。
   const memory = new NotesMemory(db, null, {
     log,
+    // Hindsight 的写入任务完成或者失败：交给后台健康（任务 hindsight）。
+    onWriteOutcome: (result) => backgroundHealth.report("hindsight", result),
     onWriteFailed: (status) => {
       addInbox(db, {
         dedupScope: "memory-write-failed", severity: "attention", source: "structural",
@@ -3045,6 +3127,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
   });
   let lastConfigCheckAt = 0;
+  // 后台任务的健康：轮询里每分钟 tick 一次（启动后的第一拍就 tick：结算重启前留下的恢复）。
+  const BACKGROUND_HEALTH_TICK_MS = 60_000;
+  let lastBackgroundHealthTickAt = 0;
   // 只记录的主人操作（扫码配对的手机做的）读到哪里了。从启动时的最大 seq 开始：历史上的记录不一下子贴进会话。
   let ownerActionRecordCursor = maxEventSeq(db);
   // 账本的写入守卫（ledger-guard.ts）：每分钟核对一次触发器。缺了就补装；缺的是已经装过的表的触发器时报警
@@ -3081,13 +3166,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       publishControlEvent({ type: "snapshot.required", requiredScope: "tickets:view", payload: { resource } });
     },
     externalSecret: (name) => daemonOnlySecrets.get(name) ?? cachedKeychainSecret(name),
-    summaryModels: (settings) => summaryModels(opts.dataDir, settings),
+    summaryModels: (settings) => summaryModels(opts.dataDir, settings, process.env, fetch, {
+      setting: backgroundModelSetting(), catalog: () => leadCatalog.get(), isBroken: brokenBackgroundModels.isBroken,
+    }),
     programArguments: hindsightProgram(),
     ...(typeof opts.manageMemory === "object" ? opts.manageMemory : {}),
   }) : null;
   if (memoryControl) {
     // 设置 → 记忆的摘要模型和重试（操作层的 memory_settings）：页面和 Lead 调同一个函数。
     uiActionServices.memorySettings = memoryControl.memorySettingsService();
+    backgroundModelChanged = () => {
+      void memoryControl.backgroundModelChanged().catch((error: unknown) => log(`[memory] background model change not applied: ${error instanceof Error ? error.message : String(error)}`));
+    };
     void memoryControl.start().catch((error: any) => log(`[memory] start failed: ${error?.message ?? String(error)}; Lead memory uses notes only`));
   }
 
@@ -3167,6 +3257,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     llmFallback: () => loadDecisionModels(opts.dataDir).llmFallback,
     // 决策模型的 LLM 后端走 Lead 的账号：暂停期间不调，账号级的失败也报进来（lead 的 smart-model.ts）。
     modelHold,
+    // The background model (lead's background-model.ts): the shared priced catalog and the models skipped after a failure.
+    modelCatalog: leadCatalog,
+    brokenBackgroundModels,
+    // 后台模型每次调用的结果交给后台健康（任务 background_model）：失败时写明这次调用换到了哪个模型。
+    backgroundModelHooks: backgroundModelHealthHooks(backgroundHealth),
     dataDir: opts.dataDir, dbPath: opts.dbPath, db,
     onCompactionProgress: (progress: CompactionProgress) => compactionProgress(progress),
     ...(opts.skillDirs ? { skillDirs: opts.skillDirs } : {}),
@@ -3437,9 +3532,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       return leadModelName;
     }
   };
-  // 目录要问 provider（vibeproxy 的 /v1/models）。连着点开几次输入框的模型名时不用每次都问：30 秒内用上一次的。
-  let leadCatalogCache: { at: number; models: Promise<LeadCatalogModel[]> } | null = null;
-  const LEAD_CATALOG_TTL_MS = 30_000;
+  // 目录要问 provider（vibeproxy 的 /v1/models）。连着点开几次输入框的模型名时不用每次都问：30 秒内用上一次的（leadCatalog）。
   const rebuildModelFailover = () => {
     modelFailover = createLeadModelFailover({ models: loadLeadModelConfig(opts.dataDir).models, ...failoverOptions });
   };
@@ -3448,12 +3541,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 会话此刻挂着的模型：订阅的账号（pi-multi-pass 换上的 <base>-<n>）和「只这一条」的那一轮都照实写。
     inSession: () => leadCurrentModel?.() ?? null,
     async catalog() {
-      if (!leadCatalogCache || Date.now() - leadCatalogCache.at > LEAD_CATALOG_TTL_MS) {
-        const models = leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => result.models);
-        leadCatalogCache = { at: Date.now(), models };
-        models.catch(() => { leadCatalogCache = null; });
-      }
-      const models = await leadCatalogCache.models;
+      const models = await leadCatalog.get();
       // 额度封禁按模型算（不看推理强度）：同一个模型的几个强度都封着时，取最晚的那个时间。
       const blocked = new Map<string, number>();
       for (const entry of modelFailover?.blockedModels() ?? []) {
@@ -3584,7 +3672,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     lead: {
       reloadExtensions: (reason) => reloadLeadExtensions(reason),
       refreshAuth: async (providers) => {
-        leadCatalogCache = null;
+        leadCatalog.invalidate();
         await refreshModelAuth?.(providers);
       },
       forgetProvider: (provider) => forgetProvider?.(provider),
@@ -3624,7 +3712,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         if (switching && (!modelFailover || !switchLeadModel)) throw new UiActionError("unavailable", serverMessages(getLocale(db)).model.cannotSwitchWhileRunning);
         setLeadModelChainInConfig(specs, opts.dataDir);
         rebuildModelFailover();
-        leadCatalogCache = null;
+        leadCatalog.invalidate();
         if (!switching || primary === leadModelName) return "unchanged";
         // 你点名要用它：它的额度封禁不再挡着。它真的还不能用时，模型自动切换会再换走。
         modelFailover!.clearBlocked(primary);
@@ -3640,7 +3728,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         return "now";
       },
       async providersChanged() {
-        leadCatalogCache = null;
+        leadCatalog.invalidate();
         if (!refreshProviders) return;
         try {
           await refreshProviders();
@@ -5443,7 +5531,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
   // 记忆沉淀（slack-takeover 工单 07）：订阅频道里的对话整理成事实笔记（Lead 的 NotesMemory），模型是 Lead 会话的便宜模型。
   const channelMemory = startChannelMemory({
-    hub: channelHub, db, notes: memory, complete: () => leadComplete ?? null, log, options: opts.channels,
+    hub: channelHub, db, notes: memory, complete: () => leadComplete ?? null, documents: memory.channelDocuments, log,
+    // 真的整理（问了模型、或者交给了 Hindsight）的结果交给后台健康（任务 channel_memory）。
+    onOutcome: (result) => backgroundHealth.report("channel_memory", result),
+    options: opts.channels,
   });
   // 重启时被打断的子 agent 工单：交回发起方（回调还没登记的，派单器先留着，登记时交）。
   for (const outcome of reclaimedAgentTasks) agentTasks.deliver(outcome);
@@ -5736,6 +5827,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pollStep("channels", () => { void channelHub?.tick(); });
     // 记忆沉淀（工单 07）：整理攒够了的对话。在后台跑，不阻塞这一拍。
     pollStep("channel-memory", () => { void channelMemory?.tick(); });
+    // 后台任务的健康：每分钟结算一次到时的恢复，写到时可以写的事件（不等下一次调用）。
+    pollStep("background-health", () => {
+      const healthNow = Date.now();
+      if (healthNow - lastBackgroundHealthTickAt < BACKGROUND_HEALTH_TICK_MS) return;
+      lastBackgroundHealthTickAt = healthNow;
+      backgroundHealth.tick();
+    });
   }
 
   // ── 排着的外部消息的推送（工单 10）────────────────────────────────────────────────────

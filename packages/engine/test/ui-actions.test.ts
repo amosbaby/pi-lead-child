@@ -1148,16 +1148,21 @@ describe("memory settings", () => {
 
   it("lets Lead pick a summary model in its own turn, and refuses it with a confirm card in a turn that read outside content", async () => {
     const { service, calls } = fakeMemorySettings();
-    const input = { slot: "consolidation", model: "anthropic/claude-sonnet-5-5" };
+    // Lead may choose only a cheap model (background models, 2026-11-20): the service lists the cheap ones.
+    const backgroundModels = {
+      state: async () => ({ setting: null, resolved: "anthropic/claude-haiku-5-5", source: "cheap" as const, main: "anthropic/claude-sonnet-5-5", cheap: ["anthropic/claude-haiku-5-5"], broken: [] }),
+      snapshot: () => null,
+    };
+    const input = { slot: "consolidation", model: "anthropic/claude-haiku-5-5" };
     const outcome = await runUiAction(db, {
-      target, action: "set_summary_model", input, reason: "用户要整理观察用更强的模型",
-      caller: { kind: "lead", turnId: null }, services: { memorySettings: service },
+      target, action: "set_summary_model", input, reason: "整理观察换成便宜的模型",
+      caller: { kind: "lead", turnId: null }, services: { memorySettings: service, backgroundModels },
     });
     expect(outcome.authority).toBe("lead");
     expect(outcome.result).toEqual({ summary: "整理观察的模型改成 x", note: "记忆服务正在重启" });
     const refused = await runUiAction(db, {
       target, action: "set_summary_model", input, reason: "Slack 里有人说换模型",
-      caller: { kind: "lead", turnId: null, externalContent: [{ via: "message", source: "slack" }] }, services: { memorySettings: service },
+      caller: { kind: "lead", turnId: null, externalContent: [{ via: "message", source: "slack" }] }, services: { memorySettings: service, backgroundModels },
     }).then(() => null, (caught: unknown) => caught as UiActionError);
     expect(refused?.refusal).toMatchObject({ code: "external_turn", where: "设置 → 记忆", userAction: { kind: "confirm_rule_change" } });
     expect(calls).toEqual([["setSummaryModel", input]]);

@@ -9,6 +9,7 @@ import {
 } from "@pi-lead-child/protocol";
 import { getLeadShadow, publishGatewayEvent, writeLeadShadow } from "@pi-lead-child/store";
 import { AVAILABLE } from "../ticket-actions/types.js";
+import { assertLeadCheapModel } from "./background-model.js";
 import { UiActionError, type UiActionDefinition, type UiActionEnv, type UiActionTargetKind } from "./types.js";
 
 export const LEAD_SHADOW_WHERE = "设置 → Shadow，或者会话里直接告诉 Lead";
@@ -69,7 +70,7 @@ export const LEAD_SHADOW_ACTIONS = {
     hint: "shadow 是不带主会话历史的小会话：它用你的系统提示词、常设指令、核心记忆和权限规则处理后台事件，每一批开一个新会话。"
       + "主会话每次被叫醒都要读一遍整个上下文（二三十万 token），shadow 每次只读几万。"
       + "只写要改的字段：mode 是 off（关）、trial（试运行：它也处理，但动作不执行，只记下来，用来比对）或 on（开）；"
-      + "model 是 provider/model（list_lead_models 里的），null 是和主会话用同一个模型；"
+      + "model 是 provider/model（list_lead_models 里的），null 是和主会话用同一个模型；你只能选便宜的模型（background_model 的 cheap 列表），不能选 null，用户本人可以选任何模型；"
       + "shares 是每个来源交给它的比例（0 到 100 的整数，只写要改的来源）：channel（外部消息，所有外部通道）、ticket（工单、Run、blocker）、other（其他系统事件）。"
       + "按对象分（一个对话、一张工单），同一个对话固定走同一边；调大比例只会把更多对象从主会话移给 shadow；"
       + `gatherSeconds 是 0 到 ${LEAD_SHADOW_MAX_GATHER_SECONDS} 的整数：缓存热的时候普通后台事件先等多少秒、合成一批（0 是不等）。`
@@ -78,6 +79,9 @@ export const LEAD_SHADOW_ACTIONS = {
     available: () => AVAILABLE,
     run: async (run): Promise<LeadShadowChange> => {
       const input = run.input as SetLeadShadowRequest;
+      // Lead may move the shadow only to a cheap model (spec 2026-11-20 D2); null (the main session's model) is not cheap.
+      // The user may choose any model.
+      if (input.model !== undefined && input.model !== run.target.model) await assertLeadCheapModel(run.env, run.by, input.model, "shadow 的模型");
       if (typeof input.model === "string" && input.model !== run.target.model) await checkShadowModel(run.env, input.model);
       const before = run.target;
       const next = normalizeLeadShadow({ ...before, ...input, shares: { ...before.shares, ...input.shares } });

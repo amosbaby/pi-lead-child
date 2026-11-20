@@ -36,7 +36,8 @@ import { installToolAbortGuard, type ToolAbortGuardOptions } from "./tool-abort-
 import type { LeadAbortReason } from "./scheduler/controller.js";
 import { compactionChunksExtension, PREFIX_WARM_LONG_MS, PREFIX_WARM_MS, type CompactionProgress } from "./compaction-chunks.js";
 import {
-  getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory, renderStandingOrdersForLead,
+  getBackgroundModel, getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory,
+  renderStandingOrdersForLead,
 } from "@pi-lead-child/store";
 import { leadHasCapability } from "@pi-lead-child/store";
 import {
@@ -48,13 +49,17 @@ import {
   parseModelName,
   promptCacheKeyEnabled,
   cacheRetentionOf,
+  leadModelCatalog,
   registerLeadProviders,
   resolveLeadModel,
   selectedLeadModelSpec,
   type LeadModelConfig,
 } from "./model-config.js";
 import { cacheRetentionExtension, promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
-import { configuredLeadModelSpecs, createLeadSmartModel, isValidSmartModelSpec, selectSmartModelSpec } from "./smart-model.js";
+import {
+  createLeadSmartModel, isValidSmartModelSpec, registeredLeadCatalog, selectSmartModelSpec, type BackgroundModelHooks,
+} from "./smart-model.js";
+import { BrokenBackgroundModels, createLeadCatalogSource, type LeadCatalogSource } from "./background-model.js";
 import type { ModelHoldPort } from "./model-hold.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
@@ -241,6 +246,13 @@ export async function createLeadSession(opts: {
   llmFallback?: () => string | null;
   // 模型暂停（model-hold.ts）：决策模型的 LLM 后端据此停调模型，账号级的失败也报给它。daemon 建一个，所有会话共用。
   modelHold?: ModelHoldPort;
+  // The priced model catalog (background-model.ts), shared with the daemon's own 30 s cache. Not given: the session
+  // reads leadModelCatalog itself, cached for 30 s.
+  modelCatalog?: LeadCatalogSource;
+  // Background models that failed with a configuration or quota error (1 hour). The daemon shares it with background_model.read.
+  brokenBackgroundModels?: BrokenBackgroundModels;
+  // Health hooks of the background model (smart-model.ts BackgroundModelHooks).
+  backgroundModelHooks?: BackgroundModelHooks;
   // 「你运行的环境」一节里 daemon 提供的部分：决策模型的设置和记忆服务的状态（工单 13）。不给时那两行写「没有提供」。
   environment?: () => LeadDaemonEnvironment;
   // 用户给 agent 装的 skill 的目录（userSkillDirs）。daemon 的入口传；不传时只有 Lead 自带的。
@@ -307,17 +319,29 @@ export async function createLeadSession(opts: {
   const prefixFor = (current: { provider: string; id: string }) => requestPrefix.snapshot(current);
   // 写压缩摘要的便宜模型（compaction-chunks.ts 的 chooseSummaryRoute）：只在摘要用不上服务商的缓存时用它。每次压缩时读：
   //   0. config.json 的 lead.compactionModel（"main" 是总用 Lead 自己的模型）；
-  //   1. 否则按 SmartModel 的选法（PLC_SMART_MODEL，或者名字带 haiku 的最新模型）。
+  //   1. 否则按 SmartModel 的选法（PLC_SMART_MODEL，或者后台模型：kv lead.background_model，自动时按价格选的便宜模型，
+  //      background-model.ts）。目录用最近一次读到的（不等网络）；还没读到时用注册的模型，按名字里的型号选。
   // 选出来的就是 Lead 的模型、或者没有注册时，没有便宜模型。
+  const modelCatalog = opts.modelCatalog
+    ?? createLeadCatalogSource(() => leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => result.models));
+  const brokenBackgroundModels = opts.brokenBackgroundModels ?? new BrokenBackgroundModels();
+  const backgroundSetting = (): string | null => {
+    try {
+      return getBackgroundModel(opts.db).model;
+    } catch {
+      return null;
+    }
+  };
   // 前缀在服务商的缓存里留多久：按这个服务商的 cacheRetention（prompt-cache.ts 的 cacheRetentionExtension）。
   const prefixWarmMsFor = (main: { provider: string }) => (cacheRetentionOf(providerSettings, main.provider) === "long" ? PREFIX_WARM_LONG_MS : PREFIX_WARM_MS);
   const summaryModelFor = <M extends { provider: string; id: string }>(main: M): M | undefined => {
     const setting = loadPlcConfig(opts.dataDir).lead?.compactionModel?.trim();
     if (setting === "main") return undefined;
     const leadSpec = `${main.provider}/${main.id}`;
+    const snapshot = modelCatalog.snapshot();
     const chosen = setting && isValidSmartModelSpec(setting) ? setting : selectSmartModelSpec({
-      configuredSpecs: configuredLeadModelSpecs(providerSettings, (provider) => modelRuntime.getModels(provider).map((model) => model.id)),
-      leadSpec,
+      catalog: snapshot?.length ? snapshot : registeredLeadCatalog(providerSettings, modelRuntime),
+      leadSpec, setting: backgroundSetting(), isBroken: brokenBackgroundModels.isBroken,
     }).spec;
     if (chosen === leadSpec) return undefined;
     const { provider, id } = parseModelName(chosen);
@@ -337,6 +361,10 @@ export async function createLeadSession(opts: {
     // 说明出现时就打：读 backend 时才知道决策模型能不能用，原因要排在下面那一行之前。
     const built = createLeadSmartModel({
       modelRuntime, config: leadModels, leadSpec: spec, dataDir: opts.dataDir,
+      // Lead's model now: the configured first choice (a switch rewrites config.json), not a subscription account.
+      currentLeadSpec: () => selectedLeadModelSpec(loadLeadModelConfig(opts.dataDir)),
+      catalog: modelCatalog, backgroundModel: backgroundSetting, broken: brokenBackgroundModels,
+      ...(opts.backgroundModelHooks ?? {}),
       ...(opts.decisionModel ? { decisionModel: opts.decisionModel } : {}),
       ...(opts.llmFallback ? { llmFallback: opts.llmFallback } : {}),
       ...(opts.modelHold ? { hold: opts.modelHold } : {}),
@@ -742,6 +770,8 @@ export async function createLeadSession(opts: {
     refreshProviders: async () => {
       const config = loadLeadModelConfig(opts.dataDir);
       providerSettings = config;
+      // The background model is resolved from the catalog: read it again on the next call.
+      modelCatalog.invalidate();
       for (const note of await registerLeadProviders(modelRuntime, config)) {
         console.error(`[lead] ${note}`);
       }

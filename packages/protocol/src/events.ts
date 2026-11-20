@@ -219,6 +219,20 @@ const InboxPayload = Type.Object({
 export const LEAD_SELF_EVENT_KINDS = ["lead.compaction_failed", "lead.model_switched"] as const;
 export const LEAD_SELF_ENTITY_KEY = "lead:main";
 
+// 后台任务的健康（.scratch/background-models spec D3）：后台模型、通道记忆、Hindsight 这类不在 Lead 回合里的调用。
+// 只有「转为失败」和「恢复」两种事件，写入方是 engine 的 background-health.ts，它负责不让事件成风暴。
+// entity_key 是 background:<任务名>。
+export const BACKGROUND_FAILING_KIND = "system.background_failing";
+export const BACKGROUND_RECOVERED_KIND = "system.background_recovered";
+export const BACKGROUND_HEALTH_ENTITY_PREFIX = "background:";
+
+const BackgroundFoldedSchema = Type.Object({
+  job: Type.String({ minLength: 1 }),
+  reasonClass: Type.String({ minLength: 1 }),
+  reason: Type.String(),
+  since: Type.String(),
+});
+
 export const INTERNAL_EVENT_KINDS: readonly EventKindDefinition[] = [
   {
     kind: "user.message",
@@ -508,6 +522,47 @@ export const INTERNAL_EVENT_KINDS: readonly EventKindDefinition[] = [
       bindingId: Nullable(Id),
     }),
     description: "用户确认了一条 interrupt 级的事件（横幅上的「知道了」）。被确认的事件记成 interrupted_user。",
+  },
+  {
+    // 一个后台任务转为失败（background-models spec D3）：连续 3 次失败、跨度至少 5 分钟。写入方定级别 tell（叫醒 Lead）。
+    // 同一任务、同一类原因 6 小时内最多一条；所有任务合计每小时最多 4 条，多出来的折进下一条（folded）。
+    // 模型暂停（model hold）期间不写，解除以后还在失败的才写（afterHold）。
+    kind: BACKGROUND_FAILING_KIND,
+    sources: ["system"],
+    anomaly: true,
+    payload: Type.Object({
+      job: Type.String({ minLength: 1 }),
+      reasonClass: Type.String({ minLength: 1 }),
+      // 最近一次失败的原因：脱敏、截断过。
+      reason: Type.String(),
+      // 这一段失败从什么时候开始（第一次失败的时间，ISO）。
+      since: Type.String(),
+      // 到写这条事件时一共失败了几次。
+      failures: Type.Integer({ minimum: 1 }),
+      // 系统已经做了什么（例如「换到了模型 X」）。没有时是 null。
+      action: Nullable(Type.String()),
+      // Lead 能用的操作（例如 background_model.set）。没有时是 null。
+      operation: Nullable(Type.String()),
+      // 因为每小时的上限没有单独写、折进这一条的其他任务。
+      folded: Type.Array(BackgroundFoldedSchema),
+      // true：转为失败时模型在暂停，这一条是暂停解除以后补写的。
+      afterHold: Type.Boolean(),
+    }),
+    description: "一个后台任务（后台模型、通道记忆、Hindsight）连续失败，转为失败：原因、系统做了什么、Lead 能做什么。",
+  },
+  {
+    // 一个后台任务恢复了（background-models spec D3）：成功了一次，并且 10 分钟没有失败。record 级，不叫醒 Lead。
+    // 只在这一段失败写过 system.background_failing（或者折进过别的那一条）时才写。
+    kind: BACKGROUND_RECOVERED_KIND,
+    sources: ["system"],
+    payload: Type.Object({
+      job: Type.String({ minLength: 1 }),
+      reasonClass: Type.String({ minLength: 1 }),
+      since: Type.String(),
+      recoveredAt: Type.String(),
+      failures: Type.Integer({ minimum: 1 }),
+    }),
+    description: "一个转为失败的后台任务恢复了。",
   },
   {
     // 双写阶段（spec D15）的保护：一条事件构造、校验或分诊出错时，原来的写入照常提交，日志里改记这一条。

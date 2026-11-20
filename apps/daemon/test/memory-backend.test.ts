@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { hindsightProgram, summaryModels } from "../src/memory-backend.js";
 
-// Hindsight 的摘要模型（src/memory-backend.ts，spec D16）：缺省槽按 PLC_HINDSIGHT_LLM > 设置 > 最新的 haiku 选；整理观察槽按设置选，没选时跟缺省一样。
+// Hindsight 的摘要模型（src/memory-backend.ts，spec D16）：缺省槽按 PLC_HINDSIGHT_LLM > 设置 > 后台模型（kv lead.background_model，
+// 或者按价格算的第一个便宜模型，lead 的 background-model.ts）选；自动时从不选 Lead 自己的模型。整理观察槽按设置选，没选时跟缺省一样。
 
 function configDir(): string {
   const dir = tempDir("plc-memory-backend-");
@@ -17,18 +18,24 @@ function configDir(): string {
   return dir;
 }
 
-// provider 的 /v1/models（OpenAI 兼容）。
-const discovered = (ids: string[]): typeof fetch => (async () =>
-  new Response(JSON.stringify({ data: ids.map((id) => ({ id })) }), { status: 200 })) as typeof fetch;
+// provider 的 /v1/models（OpenAI 兼容）。Prices, when given, in magpie's shape: USD per token as strings.
+const discovered = (ids: string[], prices: Record<string, [string, string]> = {}): typeof fetch => (async () =>
+  new Response(JSON.stringify({
+    data: ids.map((id) => ({ id, ...(prices[id] ? { pricing: { prompt: prices[id]![0], completion: prices[id]![1] } } : {}) })),
+  }), { status: 200 })) as typeof fetch;
 
 const VIBE = { provider: "vibeproxy", baseUrl: "http://127.0.0.1:8317/v1" };
 
 describe("summaryModels", () => {
-  // 实测 vibeproxy discover 出来的顺序里，旧的 haiku 排在新的前面。
-  it("picks the newest haiku model the Lead providers offer, discovered models included, and the consolidation slot follows it", async () => {
+  // 2026-11-20: on a gateway without haiku the automatic slot had no model. Now the price decides: each price at most 1/4 of
+  // Lead's model's (claude-sonnet-5-5: 2 / 10 USD per 1M tokens). Discovered models count.
+  it("picks the cheap model by price from the Lead providers, discovered models included, and the consolidation slot follows it", async () => {
     const models = await summaryModels(configDir(), {}, {}, discovered([
       "claude-sonnet-5-5", "claude-haiku-4-5-20251001", "claude-haiku-5-5", "claude-3-5-haiku-20241022", "gpt-6-luna",
-    ]));
+    ], {
+      "claude-sonnet-5-5": ["0.000002", "0.00001"], "claude-haiku-4-5-20251001": ["0.000001", "0.000005"],
+      "claude-haiku-5-5": ["0.0000001", "0.0000005"], "claude-3-5-haiku-20241022": ["0.0000008", "0.000004"], "gpt-6-luna": ["0.0000006", "0.000003"],
+    }));
     expect(models.default).toEqual({
       slot: "default", spec: "vibeproxy/claude-haiku-5-5", source: "auto", setting: null, problem: null,
       llm: { ...VIBE, model: "claude-haiku-5-5", apiKey: null },
@@ -52,10 +59,23 @@ describe("summaryModels", () => {
     expect(broken.consolidation).toMatchObject({ source: "inherit", setting: "openrouter/opus", problem: expect.stringMatching(/服务商 openrouter 不在/) });
   });
 
-  it("has no model when no haiku model is available, so Hindsight runs recall-only", async () => {
+  it("has no model when no model is cheaper than Lead's, so Hindsight runs recall-only and never extracts on Lead's model", async () => {
     const models = await summaryModels(configDir(), {}, {}, discovered(["claude-sonnet-5-5"]));
     expect(models.default).toMatchObject({ source: "none", spec: null, llm: null });
     expect(models.consolidation).toMatchObject({ source: "none", llm: null });
+  });
+
+  it("follows the stored background model, and skips a broken one", async () => {
+    const ids = ["claude-sonnet-5-5", "claude-haiku-5-5", "gemini-3.8-flash-lite"];
+    const prices: Record<string, [string, string]> = {
+      "claude-sonnet-5-5": ["0.000002", "0.00001"], "claude-haiku-5-5": ["0.0000001", "0.0000005"], "gemini-3.8-flash-lite": ["0.0000002", "0.0000008"],
+    };
+    const chosen = await summaryModels(configDir(), {}, {}, discovered(ids, prices), { setting: "vibeproxy/gemini-3.8-flash-lite" });
+    expect(chosen.default).toMatchObject({ source: "auto", spec: "vibeproxy/gemini-3.8-flash-lite" });
+    const skipped = await summaryModels(configDir(), {}, {}, discovered(ids, prices), {
+      setting: "vibeproxy/gemini-3.8-flash-lite", isBroken: (spec) => spec === "vibeproxy/gemini-3.8-flash-lite",
+    });
+    expect(skipped.default).toMatchObject({ source: "auto", spec: "vibeproxy/claude-haiku-5-5" });
   });
 });
 

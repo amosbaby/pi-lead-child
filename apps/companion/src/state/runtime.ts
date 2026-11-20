@@ -61,6 +61,7 @@ import type {
   BusyPlacement,
   LeadShadowDto,
   SetLeadShadowRequest,
+  BackgroundModelReadResult,
   LeadAvatarDto,
   LeadAvatarSlackEmojiRequest,
   LeadAvatarSlot,
@@ -1576,6 +1577,22 @@ export class CompanionStateRuntime {
     const saved = (outcome.result as { shadow?: LeadShadowDto } | null)?.shadow;
     if (saved && typeof saved === 'object' && 'mode' in saved) this.control.setState({ leadShadow: saved });
     else await this.ensureResource(RESOURCE_KEYS.leadShadow, true);
+  }
+
+  // 设置 → 模型的「后台工作」（2026-11-20，.scratch/background-models/spec.md）：操作层的 background_model.read 和 .set，
+  // 和 Lead 的 perform_action 同一个函数，actor 是你本人。read 只读，不重取别的资源；结果原样交给卡片，卡片自己检查形状。
+  // 旧 daemon 没有这个目标时抛出 code 是 not_found 的错误。失败时抛出，原因是 daemon 写的那句话。
+  async readBackgroundModel(): Promise<BackgroundModelReadResult> {
+    const { client } = this.dependencies;
+    if (typeof client.performUiAction !== 'function') throw new Error(this.messages().noAction);
+    const outcome = await client.performUiAction('background_model', 'lead', 'read', { input: {} });
+    return outcome.result as BackgroundModelReadResult;
+  }
+
+  async setBackgroundModel(model: string | null): Promise<void> {
+    const { client } = this.dependencies;
+    if (typeof client.performUiAction !== 'function') throw new Error(this.messages().noAction);
+    await client.performUiAction('background_model', 'lead', 'set', { input: { model } });
   }
 
   // 设置页的「形象」：上传、去掉一种状态的图，改 Slack 署名的 emoji。改完马上换成 daemon 回的值，再取新图。
