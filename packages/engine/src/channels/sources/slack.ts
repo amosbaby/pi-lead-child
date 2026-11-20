@@ -72,6 +72,7 @@ import { createSlackSessionWebApi, SLACK_SESSION_COOKIE_PREFIX, SlackSessions, t
 import { signInToSlack, type SlackSignInOptions } from "./slack-session-login.js";
 import { createSlackSessionTransport, type SlackSessionTransportOptions } from "./slack-session-transport.js";
 import { createSlackSocketTransport, type SlackSocketOptions } from "./slack-socket.js";
+import { createSlackDocuments } from "./slack-documents.js";
 import { scrubSlackText, SLACK_FILES_HOST, slackFileUrlAllowed, type SlackWebApi } from "./slack-web-api.js";
 
 export type { SlackWebApi } from "./slack-web-api.js";
@@ -912,6 +913,11 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       if (!current.download) throw new Error("这个 Slack 客户端不能下载文件");
       return current.download(url, token, maxBytes);
     },
+    upload: (url, data) => {
+      const current = mode() === "session" ? sessionWeb : options.api;
+      if (!current.upload) throw new Error("这个 Slack 客户端不能上传文件");
+      return current.upload(url, data);
+    },
   };
   // 浏览器会话方式下「代你发消息」关着时的原因。能写时是 null。
   const writesBlocked = (): string | null => (mode() === "session" && options.sessionWrites?.() !== true
@@ -929,6 +935,22 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     posted.add(`${channel}:${ts}`);
     // 只留最近的一些（够认出推回来的那一条）。
     while (posted.size > POSTED_MAX) posted.delete(posted.values().next().value!);
+  }
+
+  // 用户的令牌分享出去的文件（Lead 建、换的 Markdown 文件，2026-11-20）：推回来的 file_share 消息带着它，认成系统发的。
+  const sharedFiles = new Set<string>();
+
+  function rememberShared(fileId: string): void {
+    sharedFiles.add(fileId);
+    while (sharedFiles.size > POSTED_MAX) sharedFiles.delete(sharedFiles.values().next().value!);
+  }
+
+  // 这条消息带的文件是不是系统分享的。正在分享时先等它（和 postedByUs 一样）。
+  async function sharedByUs(channel: string, files: unknown[] | undefined): Promise<boolean> {
+    const ids = (files ?? []).map((file) => (file as { id?: unknown } | null)?.id).filter(isString);
+    if (!ids.length) return false;
+    await postedByUs(channel, "");
+    return ids.some((id) => sharedFiles.has(id));
   }
 
   function trackPosting<T>(channel: string, call: Promise<T>): Promise<T> {
@@ -1725,6 +1747,14 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     ...(options.reply ? { waitSignal: "message" as const } : {}),
   });
 
+  const documents = createSlackDocuments({
+    web,
+    onShared(channel, fileId, sharing) {
+      rememberShared(fileId);
+      void trackPosting(channel, sharing).catch(() => undefined);
+    },
+  });
+
   return {
     id: SLACK_SOURCE,
     label: "Slack",
@@ -1743,6 +1773,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
     },
     writesBlocked,
     connection,
+    // canvas 和 Markdown 文件（2026-11-20）。
+    documents,
     eventKinds: [
       kind(SLACK_EVENT_KINDS.dm, "别人在 Slack 里给用户发了私信（或者在用户在的群聊里发了消息）。", { reply: true }),
       kind(SLACK_EVENT_KINDS.mention, "别人在 Slack 的频道里提到了用户。", { reply: true }),
@@ -1798,7 +1830,8 @@ export function createSlackChannelAdapter(options: SlackChannelOptions): Channel
       const text = slackMessageText(event);
       const place = placeOf(channel, channelType, event.ts, event.thread_ts);
       const fromSelf = Boolean(self) && event.user === self;
-      const echo = event.metadata?.event_type === SLACK_REPLY_METADATA_TYPE || (fromSelf && await postedByUs(channel, event.ts));
+      const echo = event.metadata?.event_type === SLACK_REPLY_METADATA_TYPE
+        || (fromSelf && (await postedByUs(channel, event.ts) || await sharedByUs(channel, event.files)));
       let kind: string;
       let role: ChannelInbound["role"];
       if (fromSelf && !echo && channelType === "im" && (await conversation(channel, context)).user === self) {

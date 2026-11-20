@@ -65,6 +65,8 @@ export const EXTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "read_signal_items",
   // External agenda entries (2026-11-12): meeting titles and locations are written by other people.
   "read_agenda_entries",
+  // 来源里的文档（canvas、Markdown 文件，2026-11-20）：别人也能编辑，和对话一样算。
+  "read_channel_document",
 ]);
 
 // 输出不算外部内容的工具。用户 2026-10-27：笔记、本机文件、工单状态、child 和子 agent 的报告、账本记录都不算；
@@ -105,6 +107,8 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "attach_to_ticket",
   // 处理消息事件的通用工具（统一消息事件工单 05）：结果是派出的工单、发出的话或者卡上的草稿、卡的状态。
   "dispatch_agent_task", "reply_to_source",
+  // 建、改来源里的文档（2026-11-20）：结果是文档的编号、标题和链接，没有原文。
+  "create_channel_document", "edit_channel_document",
   // 停掉一个后台作业（.scratch/tool-occupancy/spec.md）：结果是停了哪个作业、还有哪些在跑。
   "stop_job",
   // 改选交接说明里的一句（自动代你处理方案 B，D1）：结果是用户写的句子和重算的上限，没有外部的原文。

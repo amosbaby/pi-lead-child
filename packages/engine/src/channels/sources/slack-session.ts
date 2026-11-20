@@ -129,5 +129,17 @@ export function createSlackSessionWebApi(sessions: SlackSessions): SlackWebApi {
       }
       return readSlackFile(response, maxBytes);
     },
+    // upload_url 自己带着授权，所以不带会话的令牌（bearer: false）。
+    async upload(url, data) {
+      if (!slackFileUrlAllowed(url)) throw new Error(`slack file upload: only ${SLACK_FILES_HOST} addresses are allowed`);
+      const core = coreOrThrow("slack file upload");
+      let response: Response;
+      try {
+        response = await core.http.fetchAuthenticated(url, { method: "POST", body: new Uint8Array(data), signal: AbortSignal.timeout(15_000) }, { bearer: false });
+      } catch (error) {
+        throw new Error(`slack file upload: ${scrub(errorText(error), core)}`);
+      }
+      if (response.status !== 200) throw new Error(`slack file upload: HTTP ${response.status}`);
+    },
   };
 }

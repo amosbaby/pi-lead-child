@@ -142,6 +142,58 @@ export interface ChannelFile {
   data: Uint8Array;
 }
 
+/**
+ * 来源里的一份文档（ChannelAdapter.documents，2026-11-20：用户要 Lead 能写 Slack 的 canvas 和 Markdown 文件）。
+ * ref 不带来源名；url 是给人点开的地址，没有时是 null。
+ */
+export interface ChannelDocument {
+  ref: string;
+  kind: string;
+  title: string | null;
+  url: string | null;
+}
+
+/** 一份文档的 Markdown 原文。内容是不可信的外部资料（别人也能编辑）。 */
+export interface ChannelDocumentContent extends ChannelDocument {
+  markdown: string;
+}
+
+/** 文档里的一段：按段里的文字找，可以再限定段的种类（来源自己的说法，例如 h1、list）。要正好找到一段。 */
+export interface ChannelDocumentSection {
+  containsText: string;
+  types?: string[];
+}
+
+/** 改一份文档的一步。section 不给的 replace 换掉整份。 */
+export type ChannelDocumentChange =
+  | { operation: "replace"; markdown: string; section?: ChannelDocumentSection }
+  | { operation: "insert_at_start" | "insert_at_end"; markdown: string }
+  | { operation: "insert_before" | "insert_after"; markdown: string; section: ChannelDocumentSection }
+  | { operation: "delete"; section: ChannelDocumentSection }
+  | { operation: "rename"; title: string };
+
+/** 改完以后的文档。来源不能原地改、只能换一份新的时（例如 Slack 的文件），ref 是新的，replacedRef 是旧的。 */
+export interface ChannelDocumentEdited extends ChannelDocument {
+  replacedRef?: string;
+  // 换了新的以后旧的没删掉的原因（例如不是自己的文件）。删掉了或者没换时没有。
+  oldKept?: string;
+}
+
+/**
+ * 来源的文档：建、读、改。kinds 是这个来源有哪几种文档和每种是什么（给 Lead 看的一句话）。
+ * 编号不对、找不到时抛 ChannelFileNotFoundError；做不到的改法、缺权限、来源拒绝时抛错，错误的话是给人看的原因和下一步。
+ */
+export interface ChannelDocuments {
+  readonly kinds: Readonly<Record<string, string>>;
+  // target：放进哪个对话（resolveConversation 给的）。null 时只有用户自己能看。
+  create(
+    input: { kind: string; title: string; markdown: string; target: Record<string, string> | null },
+    context: ChannelAdapterContext,
+  ): Promise<ChannelDocument>;
+  read(ref: string, options: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelDocumentContent>;
+  edit(ref: string, change: ChannelDocumentChange, context: ChannelAdapterContext): Promise<ChannelDocumentEdited>;
+}
+
 /** 文件编号不对或者找不到（readFile）。 */
 export class ChannelFileNotFoundError extends Error {
   constructor(message: string) {
@@ -482,6 +534,8 @@ export interface ChannelAdapter {
    * 编号不对、找不到时抛 ChannelFileNotFoundError；别的原因（缺权限、下载失败）抛错，错误的话是给人看的原因。不支持时没有。
    */
   readFile?(ref: string, options: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelFile>;
+  /** 来源里的文档（例如 Slack 的 canvas 和 Markdown 文件）。不支持时没有。建和改是写，writesBlocked 时 hub 不调。 */
+  readonly documents?: ChannelDocuments;
   /** 只读：按人名、对话名找可以发消息的对话（Lead 代用户直接发消息，2026-10-23）。不支持时没有。 */
   findConversations?(query: string, context: ChannelAdapterContext): Promise<ChannelConversationCandidate[]>;
   /**

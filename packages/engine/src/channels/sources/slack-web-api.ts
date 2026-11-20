@@ -19,6 +19,11 @@ export interface SlackWebApi {
    * 超过 maxBytes、Slack 回的不是文件（例如令牌缺 files:read 时的登录网页）、网络错误时抛错。没有时不能下载文件。
    */
   download?(url: string, token: string, maxBytes: number): Promise<Uint8Array>;
+  /**
+   * 上传文件的内容（2026-11-20）：POST 到 files.getUploadURLExternal 给的 upload_url。这个地址自己带着授权，不发令牌；
+   * 只发往 https://files.slack.com。Slack 回的不是 200 时抛错。没有时不能上传文件。
+   */
+  upload?(url: string, data: Uint8Array): Promise<void>;
 }
 
 /** 令牌只发往这个主机（slackFileUrlAllowed）。 */
@@ -170,6 +175,16 @@ export function createSlackWebApi(options: SlackWebApiOptions = {}): SlackWebApi
         throw new Error(`slack file download: ${scrubSlackText(errorText(error), [token])}`);
       }
       return readSlackFile(response, maxBytes);
+    },
+    async upload(url, data) {
+      if (!slackFileUrlAllowed(url)) throw new Error(`slack file upload: only ${SLACK_FILES_HOST} addresses are allowed`);
+      let response: Response;
+      try {
+        response = await fetchFile(url, { method: "POST", body: new Uint8Array(data), signal: AbortSignal.timeout(options.timeoutMs ?? 15_000) });
+      } catch (error) {
+        throw new Error(`slack file upload: ${scrubSlackText(errorText(error), [])}`);
+      }
+      if (response.status !== 200) throw new Error(`slack file upload: HTTP ${response.status}`);
     },
     async call(method, args, token) {
       try {

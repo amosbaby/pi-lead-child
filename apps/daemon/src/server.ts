@@ -3282,6 +3282,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       },
       // 文件是哪条消息带来的（工单 #231：挂到工单上的附件记来源）。只读账本。
       fileOrigin: (fileId) => channelHub?.fileOrigin(fileId) ?? null,
+      // 来源里的文档（2026-11-20：Slack 的 canvas、Markdown 文件）：建、读、改。
+      createDocument: (input) => {
+        if (!channelHub) throw new Error("没有接任何外部通道");
+        return channelHub.createDocument(input);
+      },
+      readDocument: (documentId, maxBytes) => {
+        if (!channelHub) throw new Error("没有接任何外部通道");
+        return channelHub.readDocument(documentId, maxBytes);
+      },
+      editDocument: (documentId, change) => {
+        if (!channelHub) throw new Error("没有接任何外部通道");
+        return channelHub.editDocument(documentId, change);
+      },
     },
     turnUserActions,
     leadModelQuota,

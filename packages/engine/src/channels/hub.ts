@@ -139,7 +139,7 @@ import type {
   ChannelAdapter, ChannelAdapterContext, ChannelCredential, ChannelCredentialSource, ChannelDelivery,
   ChannelConversationCandidate, ChannelInbound, ChannelInboundRole, ChannelInterest, ChannelOpenCard, ChannelOpenLane, ChannelReaction,
   ChannelConversationRead, ChannelEditedMessage, ChannelFile, ChannelMarkPreview, ChannelRecentConversation, ChannelSentMessage,
-  ChannelCatchUpReport, ChannelTransportContext,
+  ChannelCatchUpReport, ChannelTransportContext, ChannelDocument, ChannelDocumentChange, ChannelDocumentContent, ChannelDocumentEdited,
 } from "./types.js";
 import { ChannelFileNotFoundError } from "./types.js";
 
@@ -2308,6 +2308,105 @@ export class ChannelHub {
       if (error instanceof ChannelFileNotFoundError) throw new ChannelActionError("not_found", error.message);
       throw new ChannelActionError("unavailable", `没有取到文件 ${fileId}：${errorText(error)}`);
     }
+  }
+
+  /** 有文档的来源和它们各有哪几种文档（Lead 的文档工具用）。 */
+  documentKinds(): Array<{ source: string; kinds: Readonly<Record<string, string>> }> {
+    return this.options.registry.list()
+      .filter((adapter) => adapter.documents)
+      .map((adapter) => ({ source: adapter.id, kinds: adapter.documents!.kinds }));
+  }
+
+  /**
+   * Lead 在来源里建一份文档（2026-11-20：例如多人编辑的富文本文档、Markdown 文件）。conversation 给了时放进那个对话（对话编号和
+   * send_message 的一样），来源从它的前缀来；没给时只有用户自己能看，source 不给时用唯一一个有文档的来源。
+   * 这是往来源里写：来源不能写（writesBlocked）时抛 unavailable。不能建这种文档、对话不对时抛 invalid_action、not_found。
+   */
+  async createDocument(input: {
+    source?: string | null; kind: string; title: string; markdown: string; conversation?: string | null;
+  }): Promise<ChannelDocument & { document: string }> {
+    const conversation = input.conversation?.trim() || null;
+    const adapter = this.documentAdapter(conversation ? conversation.split(":")[0] ?? "" : input.source ?? null);
+    const documents = adapter.documents!;
+    if (!Object.hasOwn(documents.kinds, input.kind)) {
+      throw new ChannelActionError("invalid_action", `来源 ${adapter.id} 没有「${input.kind}」这种文档；有：${Object.keys(documents.kinds).join("、")}`);
+    }
+    const context = await this.writableContext(adapter);
+    let target: Record<string, string> | null = null;
+    if (conversation) {
+      if (!adapter.resolveConversation) throw new ChannelActionError("unavailable", `来源 ${adapter.id} 不能把文档放进对话`);
+      try {
+        target = (await adapter.resolveConversation(conversation, context)).target;
+      } catch (error) {
+        throw new ChannelActionError("not_found", errorText(error));
+      }
+    }
+    try {
+      const created = await documents.create({ kind: input.kind, title: input.title, markdown: input.markdown, target }, context);
+      this.log(`[channels] document created source=${adapter.id} kind=${created.kind} ref=${created.ref}${conversation ? " in a conversation" : ""}`);
+      return { ...created, document: `${adapter.id}:${created.ref}` };
+    } catch (error) {
+      throw new ChannelActionError("outbound_failed", `没有建成文档：${errorText(error)}`);
+    }
+  }
+
+  /** Lead 读来源里的一份文档（documentId 是「来源名:编号」）。只读；内容是不可信的外部资料。 */
+  async readDocument(documentId: string, maxBytes: number): Promise<ChannelDocumentContent & { document: string }> {
+    const { adapter, ref } = this.documentRef(documentId);
+    const context = await this.context(adapter);
+    if (!context) throw new ChannelActionError("unavailable", `来源 ${adapter.id} 现在没有接上`);
+    try {
+      const content = await adapter.documents!.read(ref, { maxBytes }, context);
+      return { ...content, document: `${adapter.id}:${content.ref}` };
+    } catch (error) {
+      if (error instanceof ChannelFileNotFoundError) throw new ChannelActionError("not_found", error.message);
+      throw new ChannelActionError("unavailable", `没有读到文档 ${documentId}：${errorText(error)}`);
+    }
+  }
+
+  /** Lead 改来源里的一份文档。来源只能换一份新的时，返回新的编号（document）和旧的（replacedDocument）。 */
+  async editDocument(documentId: string, change: ChannelDocumentChange): Promise<ChannelDocumentEdited & { document: string; replacedDocument?: string }> {
+    const { adapter, ref } = this.documentRef(documentId);
+    const context = await this.writableContext(adapter);
+    try {
+      const edited = await adapter.documents!.edit(ref, change, context);
+      this.log(`[channels] document edited source=${adapter.id} kind=${edited.kind} ref=${edited.ref} operation=${change.operation}`);
+      return {
+        ...edited,
+        document: `${adapter.id}:${edited.ref}`,
+        ...(edited.replacedRef ? { replacedDocument: `${adapter.id}:${edited.replacedRef}` } : {}),
+      };
+    } catch (error) {
+      if (error instanceof ChannelFileNotFoundError) throw new ChannelActionError("not_found", error.message);
+      throw new ChannelActionError("outbound_failed", `没有改成文档 ${documentId}：${errorText(error)}`);
+    }
+  }
+
+  private documentAdapter(source: string | null): ChannelAdapter {
+    if (source) {
+      const adapter = this.options.registry.get(source);
+      if (!adapter?.documents) throw new ChannelActionError("unavailable", `来源 ${source} 没有文档`);
+      return adapter;
+    }
+    const all = this.options.registry.list().filter((adapter) => adapter.documents);
+    if (all.length !== 1) {
+      throw new ChannelActionError("invalid_action", all.length ? `有几个来源都有文档（${all.map((adapter) => adapter.id).join("、")}），说明用哪一个` : "没有哪个来源有文档");
+    }
+    return all[0]!;
+  }
+
+  private documentRef(documentId: string): { adapter: ChannelAdapter; ref: string } {
+    const bar = documentId.indexOf(":");
+    if (bar <= 0) throw new ChannelActionError("invalid_action", `文档编号要像「来源名:编号」：${documentId}`);
+    return { adapter: this.documentAdapter(documentId.slice(0, bar)), ref: documentId.slice(bar + 1).trim() };
+  }
+
+  private async writableContext(adapter: ChannelAdapter): Promise<ChannelAdapterContext> {
+    const blocked = adapter.writesBlocked?.() ?? null;
+    if (blocked) throw new ChannelActionError("unavailable", blocked);
+    const context = await this.context(adapter);
+    if (!context) throw new ChannelActionError("unavailable", `来源 ${adapter.id} 现在没有接上`);
+    return context;
   }
 
   /**

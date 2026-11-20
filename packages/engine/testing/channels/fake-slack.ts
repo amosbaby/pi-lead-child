@@ -78,6 +78,21 @@ export interface FakeSlackFile {
   data: Uint8Array;
   // files.info 给的下载地址。缺省是 files.slack.com 上的私有地址。
   url: string;
+  // 上传时给的标题、上传的人、文件种类（files.completeUploadExternal 建的文件才有）。
+  title?: string;
+  owner?: string;
+  filetype?: string;
+  // 分享到了哪里（completeUploadExternal 的 channel_id、thread_ts）。
+  shares?: Array<{ channel: string; ts: string; threadTs: string | null }>;
+}
+
+/** 一个 canvas（canvases.create）。内容按空行分成段，每段有编号和种类（h1、h2、h3、list、paragraph）。 */
+export interface FakeSlackCanvas {
+  id: string;
+  title: string;
+  owner: string;
+  channel: string | null;
+  sections: Array<{ id: string; type: string; markdown: string }>;
 }
 
 export interface FakeSlackOptions {
@@ -239,6 +254,11 @@ export class FakeSlack {
   readonly messages: FakeSlackMessage[] = [];
   // 上传过的文件（addFile），按编号。
   readonly files = new Map<string, FakeSlackFile>();
+  // canvas（canvases.create），按编号。
+  readonly canvases = new Map<string, FakeSlackCanvas>();
+  // files.getUploadURLExternal 给出去、还没完成的上传：按上传地址。
+  private readonly uploads = new Map<string, { id: string; filename: string; length: number; data: Uint8Array | null }>();
+  private nextSection = 1;
   // 收到的 Web API 调用（不含令牌）。
   readonly calls: Array<{ method: string; args: Record<string, unknown> }> = [];
   // fetch 收到的请求：方法、内容类型，和 Authorization 头里是不是 Bearer 令牌（不记令牌本身）。
@@ -314,6 +334,13 @@ export class FakeSlack {
       if (file.data.byteLength > maxBytes) throw new Error(`slack file download: the file is larger than ${maxBytes} bytes`);
       return file.data;
     },
+    // 只收 files.getUploadURLExternal 给的地址；长度要和当时说的一样（真的 Slack 在完成时报错，这里提前报）。
+    upload: async (url, data) => {
+      const pending = this.uploads.get(url);
+      if (!pending) throw new Error("slack file upload: HTTP 404");
+      if (data.byteLength !== pending.length) throw new Error("slack file upload: HTTP 400");
+      pending.data = data;
+    },
   };
 
   // 下载过的文件地址（api.download 和 fetch 都记）。
@@ -329,10 +356,150 @@ export class FakeSlack {
 
   /** 消息和 files.info 里的文件（和真的 Slack 一样，不带内容）。 */
   wireFile(file: FakeSlackFile): Record<string, unknown> {
+    const shares: Record<string, Record<string, Array<Record<string, unknown>>>> = {};
+    for (const share of file.shares ?? []) {
+      const scope = share.channel.startsWith("C") ? "public" : "private";
+      ((shares[scope] ??= {})[share.channel] ??= []).push({ ts: share.ts, ...(share.threadTs ? { thread_ts: share.threadTs } : {}) });
+    }
     return {
-      id: file.id, name: file.name, title: file.name, mimetype: file.mimetype, filetype: file.name.split(".").pop() ?? "",
+      id: file.id, name: file.name, title: file.title ?? file.name, mimetype: file.mimetype,
+      filetype: file.filetype ?? file.name.split(".").pop() ?? "",
       size: file.data.byteLength, mode: "hosted", url_private: file.url, url_private_download: `${file.url}?download=1`,
+      ...(file.owner ? { user: file.owner, permalink: `https://fake.slack.com/files/${file.owner}/${file.id}` } : {}),
+      ...(file.shares?.length ? { shares } : {}),
     };
+  }
+
+  /** canvas 的 Markdown 原文（canvases.getContent 给的）。 */
+  canvasMarkdown(id: string): string {
+    const canvas = this.canvases.get(id);
+    return canvas ? `${canvas.sections.map((section) => section.markdown).join("\n\n")}\n` : "";
+  }
+
+  private canvasSections(markdown: string): FakeSlackCanvas["sections"] {
+    return markdown.split(/\n{2,}/).map((block) => block.trim()).filter(Boolean).map((block) => ({
+      id: `temp:C:fake${this.nextSection++}`,
+      type: /^### /.test(block) ? "h3" : /^## /.test(block) ? "h2" : /^# /.test(block) ? "h1" : /^(- |\d+\. )/.test(block) ? "list" : "paragraph",
+      markdown: block,
+    }));
+  }
+
+  private markdownContent(value: unknown): string | null {
+    const content = value && typeof value === "object" ? value as { type?: unknown; markdown?: unknown } : null;
+    return content?.type === "markdown" && typeof content.markdown === "string" ? content.markdown : null;
+  }
+
+  // canvases.*：按 Slack 的文档。edit 一次只能一步；段按 sections.lookup 给的编号认。
+  private canvasMethod(method: string, args: Record<string, unknown>): Record<string, unknown> {
+    const write = method === "canvases.create" || method === "canvases.edit";
+    if (!this.scopes.includes(write ? "canvases:write" : "canvases:read")) {
+      return { ok: false, error: "missing_scope", needed: write ? "canvases:write" : "canvases:read" };
+    }
+    if (method === "canvases.create") {
+      const markdown = args.document_content === undefined ? "" : this.markdownContent(args.document_content);
+      if (markdown === null) return { ok: false, error: "invalid_arguments" };
+      const channel = typeof args.channel_id === "string" ? args.channel_id : null;
+      if (channel && !channel.startsWith("D") && !this.channelNames.has(channel)) return { ok: false, error: "channel_not_found" };
+      const id = `F0${String(this.nextFile++).padStart(6, "0")}`;
+      this.canvases.set(id, {
+        id, title: typeof args.title === "string" ? args.title : "Untitled", owner: this.self.id, channel, sections: this.canvasSections(markdown),
+      });
+      return { ok: true, canvas_id: id };
+    }
+    const canvas = this.canvases.get(String(args.canvas_id));
+    if (!canvas) return { ok: false, error: "canvas_not_found" };
+    if (method === "canvases.getContent") return { ok: true, content: this.canvasMarkdown(canvas.id) };
+    if (method === "canvases.sections.lookup") {
+      const criteria = (args.criteria ?? {}) as { contains_text?: unknown; section_types?: unknown };
+      const types = Array.isArray(criteria.section_types) ? criteria.section_types.map(String) : null;
+      const text = typeof criteria.contains_text === "string" ? criteria.contains_text : null;
+      if (!types && text === null) return { ok: false, error: "invalid_arguments" };
+      const sections = canvas.sections.filter((section) => (text === null || section.markdown.includes(text))
+        && (!types || types.includes(section.type) || (types.includes("any_header") && /^h[123]$/.test(section.type))));
+      return { ok: true, sections: sections.map((section) => ({ id: section.id })) };
+    }
+    if (method === "canvases.edit") {
+      const changes = Array.isArray(args.changes) ? args.changes as Array<Record<string, unknown>> : [];
+      if (changes.length !== 1) return { ok: false, error: "invalid_arguments" };
+      const change = changes[0]!;
+      const operation = String(change.operation);
+      if (operation === "rename") {
+        const title = this.markdownContent(change.title_content);
+        if (title === null || change.section_id !== undefined) return { ok: false, error: "invalid_arguments" };
+        canvas.title = title;
+        return { ok: true };
+      }
+      const at = typeof change.section_id === "string" ? canvas.sections.findIndex((section) => section.id === change.section_id) : -1;
+      const needsSection = ["insert_after", "insert_before", "delete"].includes(operation);
+      if (needsSection && at < 0) return { ok: false, error: "canvas_editing_failed", detail: "section not found" };
+      if (operation === "delete") {
+        canvas.sections.splice(at, 1);
+        return { ok: true };
+      }
+      const markdown = this.markdownContent(change.document_content);
+      if (markdown === null) return { ok: false, error: "invalid_arguments" };
+      const added = this.canvasSections(markdown);
+      if (operation === "insert_at_start") canvas.sections.unshift(...added);
+      else if (operation === "insert_at_end") canvas.sections.push(...added);
+      else if (operation === "insert_before") canvas.sections.splice(at, 0, ...added);
+      else if (operation === "insert_after") canvas.sections.splice(at + 1, 0, ...added);
+      else if (operation === "replace" && change.section_id === undefined) canvas.sections = added;
+      else if (operation === "replace" && at >= 0) canvas.sections.splice(at, 1, ...added);
+      else return { ok: false, error: "canvas_editing_failed", detail: `bad change ${operation}` };
+      return { ok: true };
+    }
+    return { ok: false, error: "unknown_method" };
+  }
+
+  // files.getUploadURLExternal、files.completeUploadExternal、files.delete：上传两步走，完成时可以分享到一个频道（和 thread）。
+  // Slack 没有改文件内容的方法。
+  private fileMethod(method: string, args: Record<string, unknown>): Record<string, unknown> {
+    if (!this.scopes.includes("files:write")) return { ok: false, error: "missing_scope", needed: "files:write" };
+    if (method === "files.getUploadURLExternal") {
+      const length = Number(args.length);
+      if (typeof args.filename !== "string" || !args.filename || !Number.isInteger(length) || length <= 0) return { ok: false, error: "invalid_arguments" };
+      const id = `F0${String(this.nextFile++).padStart(6, "0")}`;
+      const url = `https://files.slack.com/upload/v1/fake-${id}`;
+      this.uploads.set(url, { id, filename: args.filename, length, data: null });
+      return { ok: true, upload_url: url, file_id: id };
+    }
+    if (method === "files.completeUploadExternal") {
+      const list = Array.isArray(args.files) ? args.files as Array<{ id?: unknown; title?: unknown }> : [];
+      if (!list.length) return { ok: false, error: "invalid_arguments" };
+      const channel = typeof args.channel_id === "string" ? args.channel_id : null;
+      if (channel && !channel.startsWith("D") && !this.channelNames.has(channel)) return { ok: false, error: "channel_not_found" };
+      const threadTs = typeof args.thread_ts === "string" ? args.thread_ts : null;
+      const done: FakeSlackFile[] = [];
+      for (const entry of list) {
+        const found = [...this.uploads.entries()].find(([, upload]) => upload.id === entry.id);
+        if (!found || !found[1].data) return { ok: false, error: "file_not_found" };
+        this.uploads.delete(found[0]);
+        const { id, filename, data } = found[1];
+        const file: FakeSlackFile = {
+          id, name: filename, title: typeof entry.title === "string" ? entry.title : filename, mimetype: "text/plain",
+          filetype: /\.(md|markdown)$/i.test(filename) ? "markdown" : "text", data, owner: this.self.id,
+          url: `https://files.slack.com/files-pri/${this.teamId}-${id}/${encodeURIComponent(filename)}`, shares: [],
+        };
+        this.files.set(id, file);
+        done.push(file);
+      }
+      if (channel) {
+        const ts = this.ts();
+        this.messages.push({
+          channel, ts, user: this.self.id, team: this.teamId, text: "", deleted: false, files: done, ...(threadTs ? { thread_ts: threadTs } : {}),
+        });
+        for (const file of done) file.shares!.push({ channel, ts, threadTs });
+      }
+      return { ok: true, files: done.map((file) => this.wireFile(file)) };
+    }
+    if (method === "files.delete") {
+      const file = this.files.get(String(args.file));
+      if (!file) return { ok: false, error: "file_not_found" };
+      if (file.owner && file.owner !== this.self.id) return { ok: false, error: "cant_delete_file" };
+      this.files.delete(file.id);
+      return { ok: true };
+    }
+    return { ok: false, error: "unknown_method" };
   }
 
   // via：调用从哪里来。session 是网页版的会话令牌（有用户的全部权限，能调 client.counts）。
@@ -382,6 +549,15 @@ export class FakeSlack {
         };
       case "files.info": {
         if (!this.scopes.includes("files:read")) return { ok: false, error: "missing_scope", needed: "files:read" };
+        const canvas = this.canvases.get(String(args.file));
+        if (canvas) {
+          return {
+            ok: true, file: {
+              id: canvas.id, title: canvas.title, filetype: "quip", pretty_type: "Canvas", mimetype: "application/vnd.slack-docs",
+              user: canvas.owner, permalink: `https://fake.slack.com/docs/${this.teamId}/${canvas.id}`,
+            },
+          };
+        }
         const file = this.files.get(String(args.file));
         return file ? { ok: true, file: { ...this.wireFile(file), url_private_download: file.url } } : { ok: false, error: "file_not_found" };
       }
@@ -518,6 +694,15 @@ export class FakeSlack {
         message.deleted = true;
         return { ok: true, channel: message.channel, ts: message.ts };
       }
+      case "canvases.create":
+      case "canvases.edit":
+      case "canvases.getContent":
+      case "canvases.sections.lookup":
+        return this.canvasMethod(method, args);
+      case "files.getUploadURLExternal":
+      case "files.completeUploadExternal":
+      case "files.delete":
+        return this.fileMethod(method, args);
       default:
         return { ok: false, error: "unknown_method" };
     }
@@ -909,6 +1094,8 @@ export class FakeSlack {
       user: message.user, text: message.text, ts: message.ts, ...(message.thread_ts ? { thread_ts: message.thread_ts } : {}),
       ...(message.blocks ? { blocks: message.blocks } : {}),
       ...(message.metadata && withMetadata ? { metadata: message.metadata } : {}),
+      // 分享文件的消息（files.completeUploadExternal 带 channel_id）推回来时是 file_share。
+      ...(message.files?.length ? { subtype: "file_share", files: message.files.map((file) => this.wireFile(file)) } : {}),
     });
   }
 
