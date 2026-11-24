@@ -132,6 +132,12 @@ async function openFromComposer() {
   await waitFor(() => expect(screen.getByTestId('lead-model-option-openai-codex/gpt-5.5')).toBeTruthy());
 }
 
+// 推理强度在底部操作条左边的菜单里（视觉稿方案 C）：先点开菜单，再点一档。选了菜单收起。
+async function chooseEffort(effort: string) {
+  await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+  await act(async () => { fireEvent.click(screen.getByTestId(`lead-model-effort-${effort}`)); });
+}
+
 const connectionKeys = () => Array.from(screen.getByTestId('lead-model-connection-list').querySelectorAll('[data-testid^="lead-model-connection-"]'))
   .map((element) => element.getAttribute('data-testid')!.slice('lead-model-connection-'.length))
   .filter((key) => key !== 'list');
@@ -194,7 +200,7 @@ describe('the model picker', () => {
     await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    await chooseEffort('high');
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
     expect(switched).toEqual([{ model: 'vibeproxy/claude-opus-5-5', effort: 'high' }]);
     await waitFor(() => expect(screen.queryByTestId('lead-model-in-use')).toBeNull());
@@ -221,13 +227,185 @@ describe('the model picker', () => {
   });
 });
 
+// magpie 把同一个模型放在几条通道下（auto/、claude/、codex/），显示名相同（用户 2026-11-24）：名字后面的灰色小字写通道（route），
+// 头上的「正在用」一行也写它；搜索能搜到通道；两个都留着，选它交回去的还是原来的 id。
+describe('magpie routes', () => {
+  const fable = (id: string, route: string) => option(`magpie/${id}`, { name: 'Claude Fable 5.2', route, efforts: ['low', 'high'] });
+  const routed: LeadModelCatalog = {
+    current: { model: 'magpie/claude/claude-fable-5-2', effort: null },
+    selected: { model: 'magpie/claude/claude-fable-5-2', effort: null },
+    inSession: 'magpie/claude/claude-fable-5-2',
+    models: [fable('auto/claude-fable-5-2', 'routing group'), fable('claude/claude-fable-5-2', 'Claude Code'), option('magpie/codex/gpt-6-sol', { name: 'GPT-6 Sol', route: 'Codex' })],
+  };
+
+  it('writes the route after the name in each row and in the in-use line, keeps both same-name models, and searches it', async () => {
+    const { client, switched } = setup();
+    client.getLeadModels.mockResolvedValue(routed);
+    await act(async () => { fireEvent.click(await screen.findByTestId('lead-model-button')); });
+    await waitFor(() => expect(screen.getByTestId('lead-model-option-magpie/auto/claude-fable-5-2')).toBeTruthy());
+    expect(screen.getByTestId('lead-model-route-magpie/auto/claude-fable-5-2').textContent).toBe('routing group');
+    expect(screen.getByTestId('lead-model-route-magpie/claude/claude-fable-5-2').textContent).toBe('Claude Code');
+    expect(screen.getByTestId('lead-model-option-magpie/claude/claude-fable-5-2').getAttribute('aria-label')).toBe('Claude Fable 5.2 · Claude Code, selected');
+    expect(screen.getByTestId('lead-model-in-use-source').textContent).toBe('magpie · Claude Code · in use');
+
+    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: 'routing' } }); });
+    expect(screen.getByTestId('lead-model-option-magpie/auto/claude-fable-5-2')).toBeTruthy();
+    expect(screen.queryByTestId('lead-model-option-magpie/claude/claude-fable-5-2')).toBeNull();
+    await act(async () => { fireEvent.change(screen.getByTestId('lead-model-search'), { target: { value: '' } }); });
+
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-magpie/auto/claude-fable-5-2')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    expect(switched).toEqual([{ model: 'magpie/auto/claude-fable-5-2', effort: null }]);
+  });
+
+  it('writes no route for a model without one', async () => {
+    setup();
+    await openFromComposer();
+    expect(screen.queryByTestId('lead-model-route-openai-codex/gpt-5.5')).toBeNull();
+    expect(screen.getByTestId('lead-model-in-use-source').textContent).toBe('Codex · Home · in use');
+  });
+});
+
+// 视觉稿方案 C（用户 2026-11-24 定）：推理强度不在头上，在底部操作条左边，和两种用法同一区。
+describe('the reasoning effort menu', () => {
+  it('sits in the action bar, shows the current effort, lists Default and the efforts the model can send, and closes after a pick', async () => {
+    setup();
+    await openFromComposer();
+    // 主用 GPT-5.5 不能选强度：没有菜单，头上也没有强度。
+    expect(screen.queryByTestId('lead-model-effort')).toBeNull();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    const menu = screen.getByTestId('lead-model-effort-menu');
+    expect(menu.textContent).toBe('Reasoning · Default');
+    expect(screen.getByTestId('lead-model-footer').contains(menu)).toBe(true);
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(menu.getAttribute('aria-expanded')).toBe('false');
+
+    await act(async () => { fireEvent.click(menu); });
+    expect(menu.getAttribute('aria-expanded')).toBe('true');
+    const options = Array.from(screen.getByTestId('lead-model-effort-options').querySelectorAll('[data-testid^="lead-model-effort-"]'))
+      .map((element) => element.textContent);
+    expect(options).toEqual(['Default', 'Low', 'High']);
+    expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-label')).toBe('Default, selected');
+    expect(screen.getByTestId('lead-model-effort-default').getAttribute('aria-pressed')).toBe('true');
+
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+    expect(screen.getByTestId('lead-model-effort-menu').getAttribute('aria-expanded')).toBe('false');
+
+    // 换到不能选强度的模型：菜单消失。
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-sonnet-5')); });
+    expect(screen.queryByTestId('lead-model-effort')).toBeNull();
+  });
+
+  // 用户 2026-11-24 验收：菜单展开时把操作条撑高了，两颗按钮被挤到底下；触发块也比两颗按钮矮、字小。
+  // 现在选项是绝对定位的浮层（不占操作条的高度），触发块和两颗按钮是同一个 Button、同一个尺寸。
+  // happy-dom 不排版（高度都是 0），真实像素高度在 Dev Mode 的浏览器里量（EVIDENCE.md）；这里断言做到这一点的结构和样式。
+  it('opens the options as a floating layer that leaves the action bar alone, with a trigger styled like the two buttons', async () => {
+    setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    const footer = screen.getByTestId('lead-model-footer');
+    const children = Array.from(footer.children).length;
+    const footerHeight = footer.getBoundingClientRect().height;
+    const trigger = screen.getByTestId('lead-model-effort-menu');
+    const only = screen.getByTestId('lead-model-only-this');
+    const primary = screen.getByTestId('lead-model-make-primary');
+    // 同一个 Button：同一种元素、同一份尺寸样式（高度、内边距、字号、字重、圆角）。桌面是 sm，高 32。
+    expect(getComputedStyle(only).height).toBe('32px');
+    for (const property of ['height', 'padding-left', 'padding-right', 'border-top-left-radius'] as const) {
+      expect(getComputedStyle(trigger).getPropertyValue(property)).toBe(getComputedStyle(only).getPropertyValue(property));
+      expect(getComputedStyle(trigger).getPropertyValue(property)).toBe(getComputedStyle(primary).getPropertyValue(property));
+    }
+    expect(trigger.tagName).toBe(only.tagName);
+    const label = (button: HTMLElement) => button.querySelector('[dir], span, div[class*="font_"]') ?? button;
+    expect(getComputedStyle(label(trigger)).fontSize).toBe(getComputedStyle(label(only)).fontSize);
+    expect(getComputedStyle(label(trigger)).fontWeight).toBe(getComputedStyle(label(only)).fontWeight);
+
+    await act(async () => { fireEvent.click(trigger); });
+    const layer = screen.getByTestId('lead-model-effort-options');
+    expect(getComputedStyle(layer).position).toBe('absolute');
+    // 只有触发块用按钮的尺寸；选项是列表行（用户 2026-11-24）：文字靠左、常规字重，选中的一行高亮、行尾 check。
+    for (const option of ['default', 'low', 'high']) {
+      const text = screen.getByTestId(`effort-option-text-${option}`);
+      expect(['', 'start', 'left']).toContain(getComputedStyle(text).textAlign);
+      expect(['400', 'normal']).toContain(getComputedStyle(text).fontWeight);
+      expect(screen.getByTestId(`lead-model-effort-${option}`).tagName).not.toBe('BUTTON');
+    }
+    const chosen = screen.getByTestId('lead-model-effort-default');
+    expect(chosen.getAttribute('aria-pressed')).toBe('true');
+    expect(getComputedStyle(chosen).backgroundColor).not.toBe(getComputedStyle(screen.getByTestId('lead-model-effort-low')).backgroundColor);
+    // check 在文字后面、行尾：文字占满剩下的宽度（flex 1），check 是这一行的最后一个元素。
+    const row = screen.getByTestId('effort-option-text-default').parentElement!;
+    expect(row.lastElementChild).not.toBe(screen.getByTestId('effort-option-text-default'));
+    // 浮层挂在触发块的容器里，操作条的直接子元素不变：打开不会多出一行。
+    expect(Array.from(footer.children).length).toBe(children);
+    expect(footer.getBoundingClientRect().height).toBe(footerHeight);
+  });
+
+  it('works from the keyboard and closes on Escape or a click outside, leaving the picker open', async () => {
+    setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    // 触发块是 <button>（Tab、Enter、空格由浏览器处理）；选项是列表行，自己进 Tab 顺序，Enter 和空格等于点一下。
+    expect(screen.getByTestId('lead-model-effort-menu').tagName).toBe('BUTTON');
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+    expect(screen.getByTestId('lead-model-effort-high').getAttribute('tabindex')).toBe('0');
+    await act(async () => { fireEvent.keyDown(screen.getByTestId('lead-model-effort-high'), { key: ' ' }); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · High');
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+    expect(screen.getByTestId('lead-model-effort-high').getAttribute('aria-pressed')).toBe('true');
+
+    // Esc：只收起菜单，选择器还开着。
+    await act(async () => {
+      fireEvent.keyDown(screen.getByTestId('lead-model-effort-high'), { key: 'Escape' });
+      fireEvent.keyUp(screen.getByTestId('lead-model-effort-high'), { key: 'Escape' });
+    });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-picker-panel')).toBeTruthy();
+
+    // 点菜单外面：收起菜单，选择器还开着。
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-menu')); });
+    expect(screen.getByTestId('lead-model-effort-options')).toBeTruthy();
+    await act(async () => { fireEvent.pointerDown(screen.getByTestId('lead-model-search')); });
+    expect(screen.queryByTestId('lead-model-effort-options')).toBeNull();
+    expect(screen.getByTestId('lead-model-picker-panel')).toBeTruthy();
+  });
+
+  it('goes back to Default, which sends no effort', async () => {
+    const { switched } = setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    await chooseEffort('high');
+    await chooseEffort('default');
+    expect(screen.getByTestId('lead-model-effort-menu').textContent).toBe('Reasoning · Default');
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-make-primary')); });
+    expect(switched).toEqual([{ model: 'vibeproxy/claude-opus-5-5', effort: null }]);
+  });
+
+  it('is in the action bar of the phone sheet too', async () => {
+    viewport.wide = false;
+    setup();
+    await openFromComposer();
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-section-vibeproxy')); });
+    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
+    expect(screen.getByTestId('lead-model-effort-menu')).toBeTruthy();
+    expect(screen.getByTestId('lead-model-only-this')).toBeTruthy();
+  });
+});
+
 describe('only this message', () => {
   it('puts a removable chip above the composer and sends the next message once with that model', async () => {
     const { sendChat, switched } = setup();
     await openFromComposer();
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-connection-vibeproxy')); });
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-option-vibeproxy/claude-opus-5-5')); });
-    await act(async () => { fireEvent.click(screen.getByTestId('lead-model-effort-high')); });
+    await chooseEffort('high');
     await act(async () => { fireEvent.click(screen.getByTestId('lead-model-only-this')); });
     expect(switched).toEqual([]);
     expect(screen.getByTestId('turn-model-chip').textContent).toContain('Only this message: claude-opus-5-5 · High · vibeproxy');
