@@ -283,6 +283,10 @@ export async function createLeadSession(opts: {
   foregroundWaits?: ForegroundWaits;
   // 订阅账号的失败和成功（subscriptions.ts，模型配置方案 C 的 D5）：每次请求的结果记进去，daemon 换账号时问它。
   subscriptionAccounts?: SubscriptionAccountTracker;
+  // Where the session file lives. Not given: <dataDir>/lead-sessions, Lead's one main session. A topic (topic.ts)
+  // gives its own folder, so its session is a second Lead with the same prompt, tools and skills, and a clean context.
+  // One folder holds one session: the session continues the newest file in it.
+  sessionDir?: string;
   log?: (line: string) => void;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
@@ -305,6 +309,8 @@ export async function createLeadSession(opts: {
   forgetProvider: (provider: string) => void;
   // shadow（shadow/）：和主会话同一份工具定义和依赖，只换这一批自己的回合来历。系统提示词每批现取。
   shadow: LeadShadowParts;
+  // The session has no message yet (a new session file). A topic gives its background with the first prompt then.
+  isFresh: () => boolean;
 }> {
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
@@ -701,7 +707,7 @@ export async function createLeadSession(opts: {
     tools: [...customTools.map((t) => t.name), ...LEAD_ALL_BUILTIN_TOOLS, ...solPi.tools],
     customTools,
     // lead 长期会话：续接最近一次，持久化在 dataDir/lead-sessions
-    sessionManager: SessionManager.continueRecent(opts.dataDir, join(opts.dataDir, "lead-sessions")),
+    sessionManager: SessionManager.continueRecent(opts.dataDir, opts.sessionDir ?? join(opts.dataDir, "lead-sessions")),
   });
   // 用户排队的消息（工单 04，spec D6）：Lead 答完这一轮后，连着排队的几条一起放进同一轮。
   session.setFollowUpMode("all");
@@ -790,6 +796,7 @@ export async function createLeadSession(opts: {
       if (modelRuntime.getRegisteredProviderIds().includes(provider)) modelRuntime.unregisterProvider(provider);
     },
     shadow: leadShadowParts(toolDeps),
+    isFresh: () => session.messages.length === 0,
   };
 }
 

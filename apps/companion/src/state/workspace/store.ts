@@ -21,6 +21,10 @@ export interface WorkspaceStoreState extends WorkspaceData {
   closeRail(): void;
   openThread(): void;
   closeThread(): void;
+  openTopic(topicId: number): void;
+  closeTopic(): void;
+  markTopicSeen(topicId: number, turnId: string): void;
+  noteTopics(topics: ReadonlyArray<{ id: number; lastTurnId: string | null }>): void;
   openViews(): void;
   closeViews(): void;
   selectView(view: string): void;
@@ -55,6 +59,8 @@ export function createInitialWorkspaceData(hydrated = false): WorkspaceData {
     selectedAttemptId: null,
     railOpen: true,
     threadOpen: false,
+    topicOpenId: null,
+    topicSeenByTopic: {},
     viewsOpen: false,
     selectedView: null,
     ticketChatExpandedId: null,
@@ -100,14 +106,39 @@ export function createWorkspaceStore() {
     },
     // 右侧只有一个位置（patterns P16.2）：打开工单详情时收起视图面板，打开视图面板时收起工单详情。
     openThread: () => {
-      if (!get().threadOpen || get().viewsOpen) set({ threadOpen: true, viewsOpen: false });
+      const current = get();
+      if (!current.threadOpen || current.viewsOpen || current.topicOpenId !== null) set({ threadOpen: true, viewsOpen: false, topicOpenId: null });
+    },
+    // A topic's panel takes the same place on the right (P16.2). The topic stays in the list on the left, so the
+    // user comes back to it after the ticket detail or the views took the place.
+    openTopic: (topicId) => {
+      const current = get();
+      if (current.topicOpenId !== topicId || current.threadOpen || current.viewsOpen || current.compactPanel !== null) {
+        set({ topicOpenId: topicId, threadOpen: false, viewsOpen: false, compactPanel: null });
+      }
+    },
+    closeTopic: () => {
+      if (get().topicOpenId !== null) set({ topicOpenId: null });
+    },
+    markTopicSeen: (topicId, turnId) => {
+      if (get().topicSeenByTopic[topicId] === turnId) return;
+      set({ topicSeenByTopic: { ...get().topicSeenByTopic, [topicId]: turnId } });
+    },
+    // The baseline: a topic that this device sees for the first time counts as read up to its last turn.
+    noteTopics: (topics) => {
+      const seen = get().topicSeenByTopic;
+      const added = topics.filter((topic) => topic.lastTurnId !== null && seen[topic.id] === undefined);
+      if (added.length === 0) return;
+      set({ topicSeenByTopic: { ...seen, ...Object.fromEntries(added.map((topic) => [topic.id, topic.lastTurnId!])) } });
     },
     closeThread: () => {
       if (get().threadOpen) set({ threadOpen: false });
     },
     openViews: () => {
       const current = get();
-      if (!current.viewsOpen || current.threadOpen || current.compactPanel !== null) set({ viewsOpen: true, threadOpen: false, compactPanel: null });
+      if (!current.viewsOpen || current.threadOpen || current.compactPanel !== null || current.topicOpenId !== null) {
+        set({ viewsOpen: true, threadOpen: false, compactPanel: null, topicOpenId: null });
+      }
     },
     closeViews: () => {
       if (get().viewsOpen) set({ viewsOpen: false });
@@ -130,7 +161,7 @@ export function createWorkspaceStore() {
       set({ ticketChatSeenByTicket: { ...get().ticketChatSeenByTicket, [ticketId]: messageId } });
     },
     openCompactPanel: (compactPanel) => {
-      if (get().compactPanel !== compactPanel || get().viewsOpen) set({ compactPanel, viewsOpen: false });
+      if (get().compactPanel !== compactPanel || get().viewsOpen || get().topicOpenId !== null) set({ compactPanel, viewsOpen: false, topicOpenId: null });
     },
     closeCompactPanel: () => {
       if (get().compactPanel !== null) set({ compactPanel: null });

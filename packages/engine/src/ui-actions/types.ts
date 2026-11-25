@@ -102,6 +102,19 @@ export interface UiActionServices {
   // 信号源（daemon 的 signal-source-runner，用户 2026-11-12）：试跑一次、马上跑一次。连接中心和 Lead 的沙箱接好以后才有；
   // 没有时（测试、没接沙箱）建、试跑、改命令、马上跑被拒绝，暂停、恢复、删除照常。
   signalSources?: SignalSourceService;
+  // Topics (daemon's topics.ts, user 2026-11-25): the live sessions of the topics. Only after Lead's session is built.
+  // Without it (tests) a topic that was opened without an opening has none, and nothing answers in it.
+  topics?: TopicsService;
+}
+
+export interface TopicsService {
+  // The topic was opened without an opening: its own session writes one as the first turn. Returns before the model answers.
+  generateOpening(topicId: number, options: { bindingId: number | null }): void;
+  // The topic was closed: release its live session.
+  closed(topicId: number): void;
+  // Is this model (provider/id with an optional effort suffix) one that Lead can use? Throws an Error that says why not
+  // and which ones are available. The topic's session switches to its model at its next turn.
+  checkModel(spec: string): Promise<void>;
 }
 
 export interface SignalSourceService {

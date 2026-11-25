@@ -116,6 +116,8 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   // 交接（lead-scheduler spec P2）：hand_off 的结果是建了哪张单、交接包多大。resume_unit 的结果是挂起时存下的交接包，
   // 是账本记录；包里外部工具的结果不放原文（handoff-package.ts），所以不算。
   "hand_off", "resume_unit",
+  // open_topic (topic.ts): the result says which topic was opened. Lead wrote the title and the opening itself.
+  "open_topic",
   // shadow（shadow/shadow.ts）：读 Lead 自带的 skill 是本机文件；finish_shadow 的结果只是「收到」。
   "read_skill", "finish_shadow", "more_tools",
 ]);

@@ -150,6 +150,7 @@ import {
 import { multiPassActive } from "@pi-lead-child/engine";
 import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-child/gateway";
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
+import { TopicRuntime } from "./topics.js";
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
@@ -554,6 +555,8 @@ export interface DaemonOpts {
   backgroundHealthNow?: () => Date;
   sessionFactory?: (args: {
     dataDir: string; dbPath: string; db: Db;
+    // Given for the session of a topic (topics.ts): the folder of its session file. Lead's main session has none.
+    sessionDir?: string;
     onChildDone?: LeadDeps["onChildDone"]; onChildEvent?: LeadDeps["onChildEvent"];
     childPi?: LeadDeps["childPi"];
     runtimeRegistry?: LeadDeps["runtimeRegistry"];
@@ -3415,6 +3418,41 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     currentModel: leadCurrentModel, refreshModelAuth, forgetProvider,
   } = leadSlot.result();
   log(`lead ready (model=${modelName}, session=${session.sessionId})`);
+  // Topics (topics.ts, user 2026-11-25): each topic is a second Lead session, built from the same options as the main
+  // one. What belongs to the main session stays with it: the scheduler and its hooks, hand-offs, the idle lane, the
+  // red-line tool gate, background jobs (their results go to the main conversation) and the model restart. The topic
+  // gives its own turn id and turn origin, so authority and the external-content rules follow the topic's own turn.
+  const topics = new TopicRuntime({
+    db, dataDir: opts.dataDir, log,
+    createSession: (request) => {
+      const {
+        scheduler: _scheduler, idleLane: _idleLane, schedulerHooks: _schedulerHooks, handoff: _handoff, toolGate: _toolGate,
+        backgroundJobs: _backgroundJobs, backgroundJobRegistry: _backgroundJobRegistry, abortReason: _abortReason,
+        foregroundWaits: _foregroundWaits, onCompactionProgress: _onCompactionProgress, announceLeadStatus: _announceLeadStatus,
+        scheduleLeadModelRestart: _scheduleLeadModelRestart, schedulerLog: _schedulerLog, turnUserActions: _turnUserActions,
+        ...shared
+      } = leadSessionOptions;
+      return factory({
+        ...shared,
+        sessionDir: request.sessionDir,
+        currentTurnId: request.currentTurnId,
+        turnOrigin: request.turnOrigin,
+        cancelBudgetTurnId: request.currentTurnId,
+        turnUserActions: createTurnUserActions(),
+      });
+    },
+    publish: (event) => { publishControlEvent(event); },
+    // A topic without a model of its own uses the model the main conversation uses now.
+    defaultModel: () => leadModelName,
+  });
+  const interruptedTopicTurns = topics.failUnfinished();
+  if (interruptedTopicTurns) log(`topics: ${interruptedTopicTurns} unfinished turn(s) from before the restart marked as failed`);
+  uiActionServices.topics = {
+    generateOpening: (topicId, options) => topics.generateOpening(topicId, options),
+    closed: (topicId) => topics.closed(topicId),
+    // The same check as for Lead's own model (lead_model.switch): in the catalog, and the effort is one it supports.
+    checkModel: (spec) => assertConfiguredLeadModel(spec, loadLeadModelConfig(opts.dataDir)),
+  };
   // 部署改了 Lead 能用的工具或操作时，下一轮告诉它一次（lead-capabilities.ts，2026-11-02）。
   let capabilityNotice: string | null = null;
   try {
@@ -7145,6 +7183,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // Lead 的会话收文件（acceptChatMessage 写进这一轮的文件夹）：网关据此宣布 CHAT_FILES_CAPABILITY。
         chatFiles: true,
         ticketMessageV2: handleTicketMessage,
+        // Topics (topics.ts): a message in a topic, and stopping the reply a topic is writing.
+        topicMessage: (command) => topics.send(command),
+        topicStop: (topicId) => topics.stop(topicId),
         addClient: (send) => { senders.add(send); return () => senders.delete(send); },
         recheckRuntimes: (runtime) => healthRecovery.recheck({ runtime }),
       }, {
@@ -7469,6 +7510,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 所有 Run 都已经分离或结束。同一进程里之后启动的 Run（例如测试）照常看管，宿主退出时照常停止。
     acceptRunningChildren();
     retainChildrenOnHostExit(false);
+    topics.dispose();
     session.dispose?.();
     // 被中断的这一轮还在写它的记录时，等它写完再关库。pi 的 dispose 之后这一轮几毫秒内就结束。
     if (currentTurn) await settledWithin(currentTurn, 500);

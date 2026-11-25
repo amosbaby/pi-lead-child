@@ -33,6 +33,9 @@ import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from ".
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
 import { SignalSourceInputSchema, SignalSourceUpdateSchema } from "./signal-sources.ts";
 import { AgendaEntryPatchSchema, AgendaFeedInputSchema, AgendaFeedUpdateSchema, AgendaSnapshotSchema } from "./agenda-feeds.ts";
+import {
+  CloseTopicRequestSchema, OpenTopicRequestSchema, RenameTopicRequestSchema, ReopenTopicRequestSchema, SetTopicModelRequestSchema,
+} from "./topics.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { SetWakePaceRequestSchema } from "./wake-pace.ts";
 import { SetLeadShadowRequestSchema } from "./lead-shadow.ts";
@@ -117,12 +120,15 @@ export const ActionPermissionSchema = Type.Union([
 //   agenda_feeds  External agenda feeds (agenda-feeds.ts): create one. The id is always "agenda".
 //   agenda_feed  One feed: update, pause, resume, delete, sync a snapshot (Lead only). The id is the feed name.
 //   agenda_entry  One external entry: mute it or change its lead time. The id is the entry id.
+//   topics  The list of topics (topics.ts, user 2026-11-25): open one. The id is always "lead".
+//   topic  One topic: rename, close (with a conclusion for the main conversation), reopen, set its model. The id is the topic id.
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model", "lead_context",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
   "widget_board", "widget", "channel_connection", "channel_subscriptions", "connections", "connection", "skills", "skill", "host_bypass",
   "busy_placement", "wake_pace", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
+  "topics", "topic",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -486,6 +492,19 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   agenda_entry: {
     // Mute one entry or change its lead time.
     update: AgendaEntryPatchSchema,
+  },
+  // Topics (topics.ts): a second Lead conversation with a clean context.
+  topics: {
+    // Open a topic. Lead gives the title and its own opening; the page gives the selected text.
+    open: OpenTopicRequestSchema,
+  },
+  topic: {
+    rename: RenameTopicRequestSchema,
+    // Close the topic. With a conclusion, the main conversation gets what the topic decided.
+    close: CloseTopicRequestSchema,
+    // The model of this topic only: { choice: { model, effort } }, or { choice: null } to follow the main conversation.
+    set_model: SetTopicModelRequestSchema,
+    reopen: ReopenTopicRequestSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

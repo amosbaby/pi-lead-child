@@ -43,6 +43,7 @@ export * from "./signal-sources.js";
 export { BUSY_PLACEMENT_WHERE, type BusyPlacementChange } from "./busy-placement.js";
 export { WAKE_PACE_WHERE, type WakePaceChange } from "./wake-pace.js";
 export { LEAD_SHADOW_WHERE, type LeadShadowChange } from "./lead-shadow.js";
+export { TOPICS_WHERE } from "./topics.js";
 export {
   assertLeadCheapModel, BACKGROUND_MODEL_WHERE, type BackgroundModelChange, type BackgroundModelTarget,
 } from "./background-model.js";

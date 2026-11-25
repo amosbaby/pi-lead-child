@@ -57,6 +57,11 @@ export type LeadModelPickerProps = {
   onTurnModel?: (choice: LeadModelChoice) => void;
   // 「换成主用」做成以后（例如「换个模型重发」接着重发）。
   onSwitched?: () => void;
+  // A topic's own model (features/topics, protocol's topic.set_model). Given by the topic's panel: the picker then
+  // changes this topic only. current: the model the topic uses now (its own, or the main conversation's). own: the
+  // topic has a model of its own. onApply(null): follow the main conversation again. The two buttons of the main
+  // conversation ("only this message", "make primary") are not there.
+  topic?: { current: string | null; own: boolean; onApply: (choice: LeadModelChoice | null) => Promise<void> };
   testID?: string;
 };
 
@@ -73,7 +78,7 @@ export function LeadModelPicker(props: LeadModelPickerProps) {
   return <LeadModelPickerBody {...props} />;
 }
 
-function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, testID = 'lead-model-picker' }: LeadModelPickerProps) {
+function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, topic, testID = 'lead-model-picker' }: LeadModelPickerProps) {
   const locale = useLocale();
   const m = leadModelMessages(locale);
   const runtime = useCompanionRuntime();
@@ -93,6 +98,13 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
   const [effortOpen, setEffortOpen] = useState(false);
   const [notice, setNotice] = useState<{ tone: 'secondary' | 'danger'; text: string } | null>(null);
 
+  const topicCurrent = topic?.current ?? null;
+  const topicChoice = useMemo<LeadModelChoice | null>(() => {
+    if (!topicCurrent?.trim() || topicCurrent === 'unknown') return null;
+    const parsed = parseLeadModelSpec(topicCurrent);
+    return { model: parsed.model, effort: parsed.effort as LeadModelChoice['effort'] };
+  }, [topicCurrent]);
+
   useEffect(() => {
     if (!open) return undefined;
     let current = true;
@@ -100,14 +112,15 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
       (catalog) => {
         if (!current) return;
         setState({ status: 'ready', catalog });
-        // 打开时选着的是分工的主用：「只这一条」要先点一个别的模型。
-        setDraft((value) => value ?? catalog.selected);
-        setConnectionKey((value) => value ?? connectionKeyOf(catalog.selected.model));
+        // 打开时选着的是分工的主用：「只这一条」要先点一个别的模型。A topic opens on the model it uses now.
+        const first = topicChoice ?? catalog.selected;
+        setDraft((value) => value ?? first);
+        setConnectionKey((value) => value ?? connectionKeyOf(first.model));
       },
       (error: unknown) => { if (current) setState({ status: 'error', message: errorText(error) }); },
     );
     return () => { current = false; };
-  }, [open, runtime, attempt]);
+  }, [open, runtime, attempt, topicChoice]);
 
   const catalog = state.status === 'ready' ? state.catalog : null;
   const connections = useMemo(
@@ -116,8 +129,10 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
   );
   const windows = useMemo(() => contextWindows(modelSettings), [modelSettings]);
   const chain = modelSettings?.brain.chain ?? (catalog ? [catalog.selected] : []);
-  const inSession = catalog?.inSession ?? catalog?.current.model ?? null;
-  const inUse = catalog ? (catalog.inSession ? { model: catalog.inSession, effort: catalog.current.effort } : catalog.current) : null;
+  // In a topic, "in use" is the topic's model, not the main conversation's.
+  const inSession = topic ? topicChoice?.model ?? null : catalog?.inSession ?? catalog?.current.model ?? null;
+  const inUse = topic ? topicChoice
+    : catalog ? (catalog.inSession ? { model: catalog.inSession, effort: catalog.current.effort } : catalog.current) : null;
   const draftOption = catalog && draft ? catalog.models.find((model) => sameSlot(model.model, draft.model)) ?? null : null;
   const selectedConnection = connections.find((entry) => entry.key === connectionKey) ?? connections[0] ?? null;
 
@@ -147,8 +162,19 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
     onTurnModel(draft);
     onClose();
   } : null;
+  // A topic: the choice goes to this topic only (null: follow the main conversation again).
+  const applyToTopic = (choice: LeadModelChoice | null) => {
+    if (!topic || switching || (choice === null ? !topic.own : !draft)) return;
+    setSwitching(true);
+    setNotice(null);
+    topic.onApply(choice).then(
+      () => { setSwitching(false); onClose(); },
+      (error: unknown) => { setSwitching(false); setNotice({ tone: 'danger', text: errorText(error) }); },
+    );
+  };
   const makePrimary = () => {
     if (!draft || switching) return;
+    if (topic) { applyToTopic(draft); return; }
     setSwitching(true);
     setNotice(null);
     runtime.switchLeadModel(draft).then(
@@ -196,11 +222,12 @@ function LeadModelPickerBody({ open, anchor, onClose, onTurnModel, onSwitched, t
           onPick={(effort) => { setDraft({ ...draft, effort }); setEffortOpen(false); setNotice(null); }}
         />
       ) : null}
-      notice={notice?.text ?? (busy ? m.afterTurn : null)}
+      notice={notice?.text ?? (topic ? m.topicNotice : busy ? m.afterTurn : null)}
       noticeTone={notice?.tone ?? 'secondary'}
-      onlyThis={onlyThis}
-      onlyThisDisabled={!draft || sameAsInUse || switching}
-      makePrimaryDisabled={!draft || sameAsPrimary || switching}
+      onlyThis={topic ? (topic.own ? () => applyToTopic(null) : null) : onlyThis}
+      onlyThisDisabled={topic ? switching : !draft || sameAsInUse || switching}
+      makePrimaryDisabled={topic ? !draft || switching || (topic.own && sameAsInUse) : !draft || sameAsPrimary || switching}
+      {...(topic ? { labels: { only: m.followMain, primary: m.useInTopic } } : {})}
       switching={switching}
       onMakePrimary={makePrimary}
     />
@@ -334,7 +361,9 @@ function PickerHeader({ sheet, catalog, inUse, inSession, connections, search, o
   );
 }
 
-function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThisDisabled, makePrimaryDisabled, switching, onMakePrimary }: {
+function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThisDisabled, makePrimaryDisabled, switching, onMakePrimary, labels }: {
+  // The words on the two buttons when they are not the main conversation's (a topic's picker).
+  labels?: { only: string; primary: string };
   sheet: boolean;
   effortMenu: ReactNode;
   notice: string | null;
@@ -348,10 +377,10 @@ function PickerFooter({ sheet, effortMenu, notice, noticeTone, onlyThis, onlyThi
   const m = useMessages(leadModelMessages);
   const size = sheet ? 'lg' as const : 'sm' as const;
   const only = onlyThis ? (
-    <Button testID="lead-model-only-this" label={m.onlyThis} variant="outline" tone="neutral" size={size} fullWidth={sheet} disabled={onlyThisDisabled} onPress={onlyThis} />
+    <Button testID="lead-model-only-this" label={labels?.only ?? m.onlyThis} variant="outline" tone="neutral" size={size} fullWidth={sheet} disabled={onlyThisDisabled} onPress={onlyThis} />
   ) : null;
   const primary = (
-    <Button testID="lead-model-make-primary" label={switching ? m.switching : m.makePrimary} variant="solid" tone="accent" size={size} fullWidth={sheet} disabled={makePrimaryDisabled} onPress={onMakePrimary} />
+    <Button testID="lead-model-make-primary" label={switching ? m.switching : labels?.primary ?? m.makePrimary} variant="solid" tone="accent" size={size} fullWidth={sheet} disabled={makePrimaryDisabled} onPress={onMakePrimary} />
   );
   if (sheet) {
     // 手机：两颗按钮各占一半（P13.2b：最多一个主按钮和一个次按钮）。

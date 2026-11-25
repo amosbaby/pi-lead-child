@@ -56,4 +56,6 @@ export interface LeadEngineFactoryResult {
   forgetProvider?: (provider: string) => void;
   // shadow（shadow/）：和主会话同一份工具定义和系统提示词。没有时 daemon 不开 shadow（测试的假会话）。
   shadow?: LeadShadowParts;
+  // The session has no message yet (topic.ts). Not given (a test stand-in): the daemon takes a session it just built as new.
+  isFresh?: () => boolean;
 }

@@ -5,7 +5,10 @@
 //     组件库的 RangeSelectText，不要原生模块）。
 import { useState } from 'react';
 
-import { Box, Column, Icon, IconButton, Pressable, RangeSelectText, Row, Text } from '@pi-lead-child/components';
+import { Box, Button, Column, Icon, IconButton, Pressable, RangeSelectText, Row, Text } from '@pi-lead-child/components';
+import type { ChatQuoteSource } from '@pi-lead-child/protocol';
+
+import { topicsMessages } from '@/features/topics/topics.messages';
 
 import { useMessages } from '@/i18n';
 
@@ -96,8 +99,14 @@ export function QuoteTray({ compact = false }: { compact?: boolean }) {
 }
 
 // 手机：正在引用的一段（Q-5）。收起时是两行：「正在引用 · 点开改范围」和原文；展开时是整段，用系统选区改范围。
-export function QuotingSlot({ onFocusInput }: { onFocusInput: () => void }) {
+// onSideTopic: "Side chat" on a phone (features/topics, theme K-1). After you swipe or long-press a part of an answer,
+// this slot shows it; the button opens a topic from it instead of a reply. Given only when the daemon has topics.
+export function QuotingSlot({ onFocusInput, onSideTopic }: {
+  onFocusInput: () => void;
+  onSideTopic?: (source: Extract<ChatQuoteSource, { kind: 'turn' }>, text: string) => void;
+}) {
   const m = useMessages(quoteMessages);
+  const topicWords = useMessages(topicsMessages);
   const pending = useQuoteDrafts((state) => state.pending);
   const [expanded, setExpanded] = useState(false);
   if (!pending) return null;
@@ -127,6 +136,23 @@ export function QuotingSlot({ onFocusInput }: { onFocusInput: () => void }) {
           <Text size="secondary" tone="strong" numberOfLines={2}>{pending.text}</Text>
         )}
       </Column>
+      {onSideTopic && !pending.editingId && pending.source.kind === 'turn' ? (
+        <Button
+          testID="quoting-side-topic"
+          label={topicWords.sideChat}
+          accessibilityLabel={topicWords.sideChatLabel}
+          icon="branch"
+          size="sm"
+          variant="ghost"
+          tone="neutral"
+          onPress={() => {
+            const { source, text } = pending;
+            if (source.kind !== 'turn') return;
+            quoteDrafts.getState().cancel();
+            onSideTopic(source, text);
+          }}
+        />
+      ) : null}
       {pending.editingId ? null : (
         <IconButton testID="quoting-cancel" icon="close" label={m.cancelQuote} variant="ghost" tone="neutral" size="xs" iconSize={14}
           iconColor="text-secondary" onPress={() => quoteDrafts.getState().cancel()} />

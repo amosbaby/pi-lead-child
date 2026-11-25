@@ -45,7 +45,7 @@ const INSTANT_WRITES = [
   "add_comment", "record_decision", "create_continuation", "ack_reminder", "update_item", "reschedule_reminder", "defer_item",
   "confirm_item", "render_ui", "follow_up", "cancel_follow_up", "record_disposition", "watch", "wait_for_user_action",
   "cancel_wait", "record_handback", "mark_channel_card_handled", "propose_standing_order_change", "update_lead_profile",
-  "update_design_preferences", "repick_situation", "hand_off", "resume_unit", "submit_result", "update_plan", "stop_job",
+  "update_design_preferences", "repick_situation", "hand_off", "resume_unit", "open_topic", "submit_result", "update_plan", "stop_job",
 ] as const;
 
 // 本机文件、网络读、子进程读：有自己的时限或者很快，但不止读数据库。

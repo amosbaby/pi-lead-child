@@ -12,6 +12,7 @@ import {
 } from "./ticket-chat.ts";
 import { LEAD_QUEUE_OPT_IN, LEAD_QUEUE_RESOURCE } from "./lead-queue.ts";
 import { LEAD_STEP_OPT_IN, LEAD_STEP_RESOURCE } from "./lead-scheduler.ts";
+import { TOPICS_OPT_IN, TOPICS_RESOURCE, TopicSchema } from "./topics.ts";
 import { TurnPlacementSchema } from "./lead-follow-ups.ts";
 import { LEAD_ACTIVITY_OPT_IN, LEAD_ACTIVITY_RESOURCE } from "./lead-activity.ts";
 import { ReminderSettingsSchema } from "./reminders.ts";
@@ -1060,6 +1061,14 @@ export const ConversationTurnSchema = StrictObject({
 });
 export type ConversationTurn = Static<typeof ConversationTurnSchema>;
 
+// GET /v1/topics/:id (topics.ts): a topic and its turns, oldest first. A turn has the shape of a conversation turn
+// (ticketId is null, toolCalls is always present), so the client uses the same message store for it.
+export const TopicDetailResponseSchema = StrictObject({
+  topic: TopicSchema,
+  turns: Type.Array(ConversationTurnSchema),
+});
+export type TopicDetailResponse = Static<typeof TopicDetailResponseSchema>;
+
 // GET /v1/conversation/turns 的 include 取值：每一轮带上开始回答的时刻（answerStartedAt）。旧 daemon 不认识，回 400。
 export const CONVERSATION_ANSWER_STARTED_INCLUDE = "answer_started";
 
@@ -1333,6 +1342,7 @@ export * from "./agenda-feeds.ts";
 export * from "./busy-placement.ts";
 export * from "./wake-pace.ts";
 export * from "./lead-shadow.ts";
+export * from "./topics.ts";
 export * from "./background-model.ts";
 export * from "./host-commands.ts";
 export * from "./delivery.ts";
@@ -1444,7 +1454,13 @@ export type GatewayEvent = Static<typeof GatewayEventSchema>;
 // 工单回复的动作按钮有了判断结果（snapshot.required，resource 是 ticket-reply-actions，ticket-chat.ts）只发给
 // 声明了 include=reply_actions 的连接，理由同上。
 // Lead 忙时排着的外部消息变了（snapshot.required，resource 是 lead-queue，工单 10）只发给声明了 include=lead_queue 的连接，理由同上。
+// The turns of a topic (topics.ts) use the lead.* types with topicId in the payload, and a change to a topic sends
+// snapshot.required with resource "topics". Both go only to connections that declared include=topics: an old client
+// would show a topic's turn in the main conversation, and would read the unknown resource as "fetch everything again".
+// This check is first: a topic event never goes to a connection that does not know topics, whatever else it carries.
 export function gatewayEventOptIn(event: Pick<GatewayEvent, "type" | "payload">): string | null {
+  if (event.type.startsWith("lead.") && "topicId" in event.payload) return TOPICS_OPT_IN;
+  if (event.type === "snapshot.required" && event.payload.resource === TOPICS_RESOURCE) return TOPICS_OPT_IN;
   if (event.type === "daemon.status.changed" && "lead" in event.payload) return "lead_health";
   if (event.type.startsWith("lead.tool.") && "surface" in event.payload) return "ui_surfaces";
   if (event.type === "snapshot.required" && event.payload.resource === LEAD_ACTIVITY_RESOURCE) return LEAD_ACTIVITY_OPT_IN;

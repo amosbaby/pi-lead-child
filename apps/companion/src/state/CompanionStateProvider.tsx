@@ -56,6 +56,8 @@ const connectivity: ConnectivitySource = {
 export function CompanionStateProvider({ children }: PropsWithChildren) {
   const [runtime] = useState(() => createCompanionStateRuntime({
     client: new ControlPlaneClient({
+      // This app keeps the turns of topics apart from the main conversation (state/topics.ts).
+      topics: true,
       credentials: platformCredentialStore,
       randomBytes: platformRandomBytes,
       sha256: platformSha256,

@@ -16,6 +16,10 @@ _Avoid_: Lead session (when the shadow is meant too), main thread
 Lead handling background events in a small session without the conversation history: the same identity, rules, tools and permissions, one new session for each batch of events. What it cannot or should not handle, it hands back to the main session.
 _Avoid_: desk, background desk, 后台值班, sub-agent, triage shadow
 
+**Topic** (话题):
+A second conversation between the user and Lead with a clean context: the same Lead (identity, tools, skills, memory), its own session, no events. The user opens one to discuss a large subject; the main session handles events at the same time. A topic can bring a conclusion back to the main session when it is closed.
+_Avoid_: side session, fork, thread, sub-agent (a topic is Lead itself, and the user talks to it)
+
 **Hand back**:
 The shadow giving an event to the main session, with why, what it found and what it suggests.
 _Avoid_: escalate (in text for the user), forward

@@ -104,7 +104,7 @@ import type {
   UiActionView,
   TicketSummary,
 } from '@pi-lead-child/protocol';
-import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, LEAD_SHADOW_SETTINGS_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
+import { CHAT_PLACEMENT_PREFERENCE_CAPABILITY, LEAD_SHADOW_SETTINGS_CAPABILITY, LEAD_TOPICS_CAPABILITY, compareConversationTurns, isBusyPlacement, LEAD_AVATAR_CAPABILITY, leadActivityCardFromItem, leadModelSpec, redactSecretText, TicketSummarySchema } from '@pi-lead-child/protocol';
 import { Value } from 'typebox/value';
 
 import {
@@ -139,9 +139,13 @@ import {
   optimisticUserMessageId,
   resolveOptimisticUserMessage,
   setOutboxMessageState,
+  setTurnUserAttachments, setTurnUserText,
   turnLacksQuestion,
 } from './control-plane/actions';
+import { topicIdOfEvent, topicSessionId, TOPIC_SESSION_PREFIX } from './topics';
 import { reduceGatewayEvent, type StreamMutation } from './control-plane/eventReducer';
+import type { ValidatedGatewayEvent } from './control-plane/protocolAdapter';
+import type { OpenTopicRequest, TopicDto } from '@pi-lead-child/protocol';
 import {
   CONVERSATION_TURN_INVALIDATION,
   conversationTurnInvalidation,
@@ -224,6 +228,7 @@ export type CompanionTransport = Pick<
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
   | 'getBusyPlacement' | 'getLeadShadow'
+  | 'getTopics' | 'getTopic' | 'sendTopicMessage' | 'stopTopic'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences'
   | 'getChannelSettings' | 'testChannelSecrets' | 'saveChannelSecrets' | 'clearChannelSecrets' | 'getChannelConnection' | 'getChannelSubscriptions'
@@ -1568,6 +1573,72 @@ export class CompanionStateRuntime {
     else await this.ensureResource(RESOURCE_KEYS.busyPlacement, true);
   }
 
+  // ── Topics (protocol's topics.ts, user 2026-11-25) ─────────────────────────────────────────────
+  // Opening, renaming, closing and reopening are operations (topics.open, topic.rename/close/reopen): the same
+  // functions as Lead's tools, here with you as the actor. Each one puts the returned topic into the store at once;
+  // the gateway's snapshot.required (resource topics) reads the list again for the other devices.
+  private upsertTopic(topic: TopicDto): void {
+    const current = this.control.getState().topics ?? [];
+    const next = current.some((entry) => entry.id === topic.id)
+      ? current.map((entry) => (entry.id === topic.id ? topic : entry))
+      : [topic, ...current];
+    this.control.setState({ topics: next });
+  }
+
+  private async topicAction(type: 'topics' | 'topic', id: string | number, action: string, input: Record<string, unknown>): Promise<TopicDto | null> {
+    const { client } = this.dependencies;
+    if (typeof client.performUiAction !== 'function') throw new Error(this.messages().noAction);
+    const outcome = await client.performUiAction(type, id, action, { input });
+    const result = outcome.result as { topic?: TopicDto; id?: number } | null;
+    const topic = result && typeof result === 'object' && 'topic' in result ? result.topic ?? null : result as TopicDto | null;
+    if (topic && typeof topic === 'object' && typeof topic.id === 'number' && typeof topic.title === 'string') {
+      this.upsertTopic(topic);
+      return topic;
+    }
+    await this.ensureResource(RESOURCE_KEYS.topics, true);
+    return null;
+  }
+
+  /** Open a topic from a selected text of the main conversation. Returns the new topic. */
+  async openTopic(input: OpenTopicRequest): Promise<TopicDto | null> {
+    return this.topicAction('topics', 'lead', 'open', { ...input });
+  }
+
+  async renameTopic(topicId: number, title: string): Promise<void> {
+    await this.topicAction('topic', topicId, 'rename', { title });
+  }
+
+  async closeTopic(topicId: number): Promise<void> {
+    await this.topicAction('topic', topicId, 'close', {});
+  }
+
+  async reopenTopic(topicId: number): Promise<void> {
+    await this.topicAction('topic', topicId, 'reopen', {});
+  }
+
+  /** The model of this topic only. null: the topic follows the main conversation's model again. */
+  async setTopicModel(topicId: number, choice: LeadModelChoice | null): Promise<void> {
+    await this.topicAction('topic', topicId, 'set_model', { choice });
+  }
+
+  /** A message in a topic. The topic's own Lead session answers it; the reply comes with the event stream. */
+  async sendTopicMessage(
+    topicId: number, text: string, attachments: { images?: readonly ChatImageInput[]; files?: readonly ChatFileInput[] } = {},
+  ): Promise<void> {
+    const sent = await this.memoryClient('sendTopicMessage')(topicId, text, attachments);
+    const sessionId = topicSessionId(topicId);
+    // Show the message at once on this device. The lead.turn.started event does the same on the others.
+    applyControlPlaneMutation(this.control, sessionId, {
+      type: 'lead.ensure-shell', turnId: sent.turnId, ticketId: null, occurredAt: new Date().toISOString(),
+    });
+    setTurnUserText(this.control, sent.turnId, text);
+    setTurnUserAttachments(this.control, sent.turnId, attachments.images ?? [], attachments.files ?? []);
+  }
+
+  async stopTopic(topicId: number): Promise<void> {
+    await this.memoryClient('stopTopic')(topicId);
+  }
+
   // shadow 的设置（设置 → Shadow，2026-11-19）：操作层的 lead_shadow.set，和 Lead 的 perform_action 同一个函数，actor 是你本人。
   // 只写要改的字段。做完马上换成操作回的值（回答里没有时重取）；网关之后的 snapshot.required（resource 是 lead-shadow）也会触发重取。
   // 失败时抛出，原因是 daemon 写的那句话（例如模型目录里没有这个模型）。
@@ -1920,6 +1991,14 @@ export class CompanionStateRuntime {
         this.invalidateForEvent(event.seq, this.expandInvalidations(adapted.invalidations));
         return;
       }
+      // A turn of a topic (protocol's topics.ts) belongs to the topic's own session in the store. It never reaches the
+      // main conversation's path below.
+      const topicId = topicIdOfEvent(event);
+      if (topicId !== null) {
+        this.applyTopicEvent(topicId, adapted.event, event.seq);
+        this.control.setState({ lastAppliedGatewaySeq: event.seq });
+        return;
+      }
       const sessionId = this.activeSessionId;
       if (!sessionId) {
         this.control.setState({ error: 'Lead session is unavailable', lastAppliedGatewaySeq: event.seq });
@@ -1946,6 +2025,24 @@ export class CompanionStateRuntime {
       this.invalidateForEvent(event.seq, this.expandInvalidations(invalidations));
       this.control.setState({ lastAppliedGatewaySeq: event.seq });
     });
+  }
+
+  // One event of a topic's turn. The mutations are the same as for the main conversation, applied to the topic's
+  // session. Two things differ: a ticket that a tool created gets no live card (that card belongs to the main
+  // conversation), and the corrections that read one turn of the main conversation are replaced by reading the topic.
+  private applyTopicEvent(topicId: number, event: ValidatedGatewayEvent, seq: number): void {
+    const sessionId = topicSessionId(topicId);
+    const reduction = reduceGatewayEvent(event);
+    for (const mutation of reduction.control) {
+      if (mutation.type === 'lead.upsert-live-ticket-card') continue;
+      applyControlPlaneMutation(this.control, sessionId, mutation);
+    }
+    if (event.type === 'lead.turn.started' && event.turnId) {
+      const userText = (event.payload as { userText?: unknown }).userText;
+      if (typeof userText === 'string') setTurnUserText(this.control, event.turnId, userText);
+    }
+    for (const mutation of reduction.streams) this.applyStreamMutation(mutation);
+    if (event.type === 'lead.message.completed') this.invalidateForEvent(seq, [RESOURCE_KEYS.topic(topicId)]);
   }
 
   // 网关没有补发断开期间的事件（client 的 ConnectionHistory 是 skipped：新的凭证、落后太多）。手上的快照可能漏了中间的变化：
@@ -2584,6 +2681,18 @@ export class CompanionStateRuntime {
         const value = await this.memoryClient('getLeadShadow')(signal);
         if (!canCommit()) return;
         this.control.setState({ leadShadow: value });
+      } else if (key === RESOURCE_KEYS.topics) {
+        const value = await this.memoryClient('getTopics')(signal);
+        if (!canCommit()) return;
+        this.control.setState({ topics: value });
+      } else if (key.startsWith(TOPIC_SESSION_PREFIX)) {
+        const topicId = Number(key.slice(TOPIC_SESSION_PREFIX.length));
+        const detail = await this.memoryClient('getTopic')(topicId, signal);
+        if (!canCommit()) return;
+        // The whole topic comes at once: it replaces what the store holds for it, and a reply that is still
+        // streaming keeps the part the snapshot does not have yet (applyConversationSnapshot).
+        this.applyConversationSnapshot(topicSessionId(topicId), detail.turns, { kind: 'window', complete: true });
+        this.upsertTopic(detail.topic);
       } else if (key === RESOURCE_KEYS.leadAvatar) {
         const value = await this.memoryClient('getLeadAvatar')(signal);
         if (!canCommit()) return;
@@ -2813,6 +2922,10 @@ export class CompanionStateRuntime {
       return this.scopes.has('tickets:view') && this.capabilities.has(LEAD_SHADOW_SETTINGS_CAPABILITY)
         && typeof this.dependencies.client.getLeadShadow === 'function';
     }
+    if (key === RESOURCE_KEYS.topics || key.startsWith(TOPIC_SESSION_PREFIX)) {
+      return this.scopes.has('chat') && this.capabilities.has(LEAD_TOPICS_CAPABILITY)
+        && typeof this.dependencies.client.getTopics === 'function';
+    }
     if (key === RESOURCE_KEYS.leadAvatar) {
       return this.scopes.has('tickets:view') && this.capabilities.has(LEAD_AVATAR_CAPABILITY)
         && typeof this.dependencies.client.getLeadAvatar === 'function';
@@ -2889,6 +3002,12 @@ export class CompanionStateRuntime {
     const expanded = new Set(keys.filter((key) => key !== 'core' && key !== 'agenda:current' && !key.startsWith(CONVERSATION_TURN_INVALIDATION)));
     // 只说一轮的事件（Lead 说完一句、这一轮失败了）：记下这一轮，conversation:current 只取它（refreshConversation）。
     // 直接说 conversation:current 的（重连、认不出的事件）要取最近一段。
+    // The list of topics changed (a turn failed, a topic was closed on another device): read the open topic again too.
+    if (expanded.has(RESOURCE_KEYS.topics)) {
+      for (const [key, resource] of Object.entries(this.control.getState().resourceState)) {
+        if (key.startsWith(TOPIC_SESSION_PREFIX) && resource !== undefined && resource.observerCount > 0) expanded.add(key);
+      }
+    }
     for (const key of keys) {
       if (key.startsWith(CONVERSATION_TURN_INVALIDATION)) {
         this.pendingTurnCorrections.add(key.slice(CONVERSATION_TURN_INVALIDATION.length));
@@ -3064,6 +3183,7 @@ type MemoryClientMethod =
   | 'getLeadProfile' | 'updateLeadProfile'
   | 'getHostBypass' | 'enableHostBypass' | 'disableHostBypass'
   | 'getBusyPlacement' | 'getLeadShadow'
+  | 'getTopics' | 'getTopic' | 'sendTopicMessage' | 'stopTopic'
   | 'getLeadAvatar' | 'getLeadAvatarImage' | 'uploadLeadAvatarSlot' | 'clearLeadAvatarSlot' | 'setLeadAvatarSlackEmoji' | 'previewSlackEmoji'
   | 'getDesignPreferences' | 'updateDesignPreferences';
 

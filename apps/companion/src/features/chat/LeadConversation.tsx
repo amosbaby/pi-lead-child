@@ -1,4 +1,4 @@
-import { Density, PopoverAnchorView, type PopoverAnchor, type PopoverAnchorHandle } from '@pi-lead-child/components';
+import { Density } from '@pi-lead-child/components';
 import {
   AbsenceTail, Box, Button, Card, ChatList, Column, ConversationColumn, Dot, Icon, IconButton, ImageThumbnail, ImageViewer, KeyboardArea, LeadAvatar, MessageBubble, NoticeRow,
   Pressable, Row,
@@ -6,12 +6,14 @@ import {
   Text,
 } from '@pi-lead-child/components';
 import {
-  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_IMAGES_CAPABILITY, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, CHAT_QUOTES_CAPABILITY, CHAT_FILES_CAPABILITY, type ChatFile, type ChatFileInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
+  blockerNoticeTicketId, CHAT_FOLLOW_UP_ACTIONS_CAPABILITY, CHAT_TURN_MODEL_CAPABILITY, leadModelSpec, type LeadModelChoice, CHAT_PLACEMENT_CAPABILITY, CHAT_PLACEMENT_PREFERENCE_CAPABILITY, type ChatImageInput, type ChatQuoteInput, CHAT_QUOTES_CAPABILITY, type ChatFile, type ChatFileInput, isDaemonNoticeOrigin, isLeadRestartInterruption, isSystemTurnOrigin,
   ownerActionRefOfTurn, SYSTEM_TURN_ORIGINS, ticketNeedsUser,
   ticketNeedsUserLabel, ticketTurn, type ChatPlacement, type KernelTicketWorkItemV2,
   type ChannelCardDto,
   type LeadActivityCard, type ReminderCard, type SetupChecklistCard, type SetupHintCard,
   type TicketSummary,
+  type TopicDto,
+  type ChatQuoteSource,
   validateUiSurface,
 } from '@pi-lead-child/protocol';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
@@ -28,11 +30,6 @@ import { splitMaintenanceNotice } from './maintenanceNotice';
 import { LeadIdentity } from '../../components/LeadIdentity';
 import { HomeDrawer } from '../home/HomeDrawer';
 import { HomeTopBar } from '../home/HomeTopBar';
-import { LeadPlusSheet, type PlusTile } from '../home/LeadPlusSheet';
-import { homeMessages } from '../home/home.messages';
-import { canPickImages, canTakePhoto } from '@/data/chatImagePicker';
-import { canPickFiles } from '@/data/chatFilePicker';
-import { measureSheetCover, type SheetCover } from '@pi-lead-child/components';
 import { useLeadAvatarSource } from '../../components/useLeadAvatarSource';
 import { WebUpdateNotice } from '../../components/WebUpdateNotice';
 import { ticketContextLabel, ticketSummaryToTicket } from '../workspace/model';
@@ -52,6 +49,8 @@ import {
   useOverview,
   useTicketInterventions,
   useTickets,
+  useTopics,
+  useTopicsSupported,
   useTurn,
   useTurnIds,
   useWorkItems,
@@ -66,6 +65,8 @@ import { quoteDrafts } from './quoteDrafts';
 import { flashQuote } from './quoteFlash';
 import { QuoteSource } from './QuoteSource';
 import { SelectionReplyLayer } from './SelectionReplyLayer';
+import { TopicAutoOpen, TopicConcludedRow, TopicOpenedLine, TopicSeenBaseline, TurnTopicLinks } from '@/features/topics/TopicReferences';
+import { useOpenTopic } from '@/features/topics/useOpenTopic';
 import { QuoteGesturesContext } from './quoteSources';
 import { RESOURCE_KEYS } from '../../state/types';
 
@@ -76,10 +77,12 @@ import { presentOutage } from './outagePresentation';
 import { failureActionLabels, presentTurnFailure, turnFailureGroupKey, type FailureAction } from './failurePresentation';
 import { InterventionCard } from './InterventionCard';
 import {
-  LeadModelComposerTrigger, LeadModelPicker, LeadModelResendLink, leadModelTriggerText, TurnModelChip, useModelAccounts,
+  LeadModelResendLink, leadModelTriggerText, TurnModelChip, useModelAccounts,
 } from './LeadModelPicker';
 import { compactErrorNotice, compactNotice } from './compactCommand';
-import { MessageComposer, type MessageComposerHandle } from './MessageComposer';
+import { LeadComposerDock } from './LeadComposerDock';
+import { useConversationScope } from './conversationScope';
+import type { MessageComposerHandle } from './MessageComposer';
 import { AssistantTurnView } from './AssistantTurnView';
 import { MessagePartView } from './MessagePartView';
 import { MarkdownMessage } from './MarkdownMessage';
@@ -128,11 +131,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   // 手机首页（主题 11.20）：抽屉开没开，和等你的工单（和角标、收件箱同一条规则，ticketNeedsUser）。
   const router = useRouter();
   const [menuOpen, setMenuOpen] = useState(false);
-  const [plusOpen, setPlusOpen] = useState(false);
-  // 加号面板盖住输入框（2026-11-19 用户定）：打开前先收起键盘，量输入框在屏幕上的位置。
-  const [plusCover, setPlusCover] = useState<SheetCover | null>(null);
-  const homeText = homeMessages(locale);
-  const composerRef = useRef<MessageComposerHandle>(null);
+  const composerRef = useRef<MessageComposerHandle | null>(null);
   const waiting = useMemo(() => ticketsNeedingUser(tickets), [tickets]);
   const setTicketFilter = useWorkspaceStore((state) => state.setTicketFilter);
   const openWaiting = () => {
@@ -203,6 +202,8 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       .filter((card) => card.kind !== 'ticket_execution' || !firedReminderIds.includes(card.ticketId)),
     [boundInterventionIds, cards, firedReminderIds, turnsById],
   );
+  // Topics (features/topics): the list gives the lines that point at them in this conversation.
+  const topics = useTopics();
   const timeline = useMemo(
     () => buildLeadTimeline(messages, leadCards, directTicketTurns, {
       // 只有失败、没有内容的 Lead 主动回合才合并（例如每次心跳巡检一个 503）。
@@ -214,6 +215,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       reminderTurnIds,
       setupChecklist,
       setupHints,
+      topics,
       isPendingTurn: (turnId) => {
         const turn = turnsById[turnId];
         return turn !== undefined && isUndeliveredTurn(turn);
@@ -252,7 +254,7 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       isOutageNotice: (message) => message.role === 'assistant' && message.turnId !== null
         && turnsById[message.turnId]?.originKind === SYSTEM_TURN_ORIGINS.fallbackNotice,
     }),
-    [carriedOwnerActionIds, currentBindingId, directTicketTurns, leadActivity, leadCards, locale, messagePartsById, messages, partIdsByMessage, reminderTurnIds, reminders, setupChecklist, setupHints, timelineChannelCards, turnsById],
+    [carriedOwnerActionIds, currentBindingId, directTicketTurns, leadActivity, leadCards, locale, messagePartsById, messages, partIdsByMessage, reminderTurnIds, reminders, setupChecklist, setupHints, timelineChannelCards, topics, turnsById],
   );
   const cardsById = useMemo(
     () => Object.fromEntries(leadCards.map((card) => [card.id, card])) as Record<string, ConversationCardEntity>,
@@ -290,37 +292,14 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
   // Lead 忙时发出的话一律先排队，排着的事都在输入卡片上半截的状态栏里，想马上插进这一轮就点那一条的 Steer。
   const canSteerQueued = useControlPlaneStore((state) => state.capabilities.includes(CHAT_FOLLOW_UP_ACTIONS_CAPABILITY));
   const queueTray = useComposerQueueTray({ leadName, actions: canSteerQueued });
-  // daemon 收图片时，输入框才有「+」和粘贴图片（protocol 的 chat-images.ts）。
-  const canSendImages = useControlPlaneStore((state) => state.capabilities.includes(CHAT_IMAGES_CAPABILITY));
-  // daemon 收文件时（chat.files.v1）：加号面板有「文件」，桌面上的「+」什么文件都能选（图片照旧按图片发）。
-  const canSendFiles = useControlPlaneStore((state) => state.capabilities.includes(CHAT_FILES_CAPABILITY));
-  // Lead 现在用的模型：桌面上写在输入框工具栏右边、发送按钮前面（2026-11-16 用户），点开换模型（LeadModelPicker）；手机上在加号面板里。
-  // 只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
+  // 输入框和它周围的东西（留白、图片和文件、模型名和换模型的浮层、/model、手机上的加号面板）在 LeadComposerDock 里：
+  // 主会话和话题面板画的是同一个组件。这里只给主会话自己的那几样。
+  // Lead 现在用的模型。只订阅模型这一项：订阅整个 overview 时，Lead 降级重试一次，整个会话就重画一次（2026-11-14）。
   const leadModel = useControlPlaneStore((state) => state.overview?.model);
   const modelAccounts = useModelAccounts();
-  // 换模型的浮层：桌面上对着点开它的那个东西（输入框上的模型名，或者输入 /model 时的输入框），手机上是底部面板。同一时间只开一个（P2.8）。
-  const [picker, setPicker] = useState<{ anchor: PopoverAnchor | null } | null>(null);
   // 「只这一条」（D8）：下一条消息用的单轮模型。daemon 宣布了 chat.turn-model.v1 才有。
   const canTurnModel = useControlPlaneStore((state) => state.capabilities.includes(CHAT_TURN_MODEL_CAPABILITY));
   const [turnModel, setTurnModel] = useState<LeadModelChoice | null>(null);
-  const composerAnchorRef = useRef<PopoverAnchorHandle>(null);
-  // 加号面板盖住输入框：先收起键盘，再量输入框在屏幕上的位置（measureSheetCover）。
-  const openPlus = useCallback(() => {
-    measureSheetCover(composerAnchorRef.current?.measure, (cover) => {
-      setPlusCover(cover);
-      setPlusOpen(true);
-    });
-  }, []);
-  // 加号面板上面一排（主题 H-7）：daemon 收图片、这台设备能选图片时有「拍照」（能拍照时）和「图片」。
-  const plusTiles = useMemo(() => {
-    const tiles: PlusTile[] = [];
-    if (canSendImages && canPickImages) {
-      if (canTakePhoto) tiles.push({ id: 'camera', icon: 'camera', label: homeText.camera, onPress: () => composerRef.current?.pickImages('camera') });
-      tiles.push({ id: 'photos', icon: 'image', label: homeText.photos, onPress: () => composerRef.current?.pickImages('library') });
-    }
-    if (canSendFiles && canPickFiles) tiles.push({ id: 'files', icon: 'file', label: homeText.files, onPress: () => composerRef.current?.pickFiles() });
-    return tiles;
-  }, [canSendFiles, canSendImages, homeText]);
   // daemon 按「Lead 忙时你发的消息」的设置放没带 mode 的消息时（设置 → Lead → 身份与风格，主题 11.13、11.19，用户 2026-11-09），
   // 输入框不再带 mode，交给 daemon；没有这个能力的旧 daemon 照旧一律排队。输入框上有「插话 / 排队」可选时，照你选的发。
   const placesByPreference = useControlPlaneStore((state) => state.capabilities.includes(CHAT_PLACEMENT_PREFERENCE_CAPABILITY));
@@ -340,6 +319,15 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
       : images.length ? runtime.sendChat(message, undefined, mode, images) : runtime.sendChat(message, undefined, mode);
     void sent.catch(() => {});
   };
+  // "Side chat" on a selected text (features/topics, P18): open a topic from it, then open its panel. The same
+  // operation as Lead's open_topic. The topic's own session writes the opening while the panel is already open.
+  const topicsSupported = useTopicsSupported();
+  const openTopicPanel = useOpenTopic();
+  const openSideTopic = useCallback((source: Extract<ChatQuoteSource, { kind: 'turn' }>, text: string) => {
+    runtime.openTopic({ quote: { source, text } })
+      .then((topic) => { if (topic) openTopicPanel(topic.id); })
+      .catch((reason: unknown) => { console.warn('[topics] could not open a topic from the selection', reason); });
+  }, [openTopicPanel, runtime]);
   // 引用浮层里按 ⌘Enter 或发送钮：托盘里的和这一段一起马上发出，正文是空的（说明就是你要说的话，P17.5）。
   const sendQuotesNow = () => {
     const quotes = quoteDrafts.getState().take();
@@ -550,71 +538,38 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
           : <EmptyConversation title={m.empty.notConnectedTitle(leadName)} body={m.empty.notConnectedBody(leadName)} />}
       />
 
-      {/* 输入框放进和会话同样的内容列：同样的留白、同样最宽 700、同样居中，左右边和上面的对话对齐。
+      {/* 输入框（LeadComposerDock）：和会话同样的内容列，同样的留白、同样最宽 700、同样居中，左右边和上面的对话对齐。
           原来输入框上方那一行「执行中 · 需要处理 + 工单标签 + 查看全部」去掉了（方案 C，主题 11.14）：
           执行中挪到顶栏，要你处理的事在左栏的收件箱里，排着的事在输入框上的状态栏里。 */}
-      <Column
-        shrink={0}
-        px="page-x"
-        {...(compact
-          // 手机上输入框卡片悬浮在页面上（主题 H-6）：没有分隔线，四周留白。
-          ? { px: 'dock-x', py: 'float-row-y' } as const
-          : { pt: 8, pb: 20 } as const)}
-      >
-        <ConversationColumn testID="conversation-footer-column" gap={compact ? 0 : 11}>
-        {/* interrupt 级的事（工单 06，spec D10）：输入框上方的横幅，用户点「知道了」之前一直在。 */}
-        <InterruptBanner />
-        {/* 量输入框的位置：输入 /model 时换模型的浮层对着它，从输入框上方打开。 */}
-        <PopoverAnchorView ref={composerAnchorRef} layout="block">
-        <MessageComposer
-          compact={compact}
-          contextKey="lead"
-          // 提示只写一句话，不解释输入框能做什么（2026-10-15 方案 A：不要冗余的文字提示）。
-          // 断线时也能写：消息存在本机，连接恢复后发送。
-          placeholder={connected ? m.composer.placeholder(leadName) : m.composer.offline}
-          onSend={send}
-          attachImages={canSendImages}
-          attachFiles={canSendFiles}
-          quotes={canQuote}
-          // 输入框上不放模型（模型配置方案 C 的 S4）：输入 /model 打开换模型的浮层，这句话不发给 Lead。
-          onModelCommand={() => composerAnchorRef.current?.measure((anchor) => setPicker({ anchor }))}
+      <LeadComposerDock
+        compact={compact}
+        contextKey="lead"
+        // 提示只写一句话，不解释输入框能做什么（2026-10-15 方案 A：不要冗余的文字提示）。
+        // 断线时也能写：消息存在本机，连接恢复后发送。
+        placeholder={connected ? m.composer.placeholder(leadName) : m.composer.offline}
+        onSend={send}
+        model={leadModel}
+        picker={{ onTurnModel: setTurnModel }}
+        composerRef={composerRef}
+        // interrupt 级的事（工单 06，spec D10）：输入框上方的横幅，用户点「知道了」之前一直在。
+        above={<InterruptBanner />}
+        composer={{
+          quotes: canQuote,
+          ...(topicsSupported ? { onSideTopic: openSideTopic } : {}),
           // /compact [provider/id] [instructions]: compact Lead's context; this text does not go to Lead.
-          onCompactCommand={(request) => runtime.compactLeadContext(request).then(
+          onCompactCommand: (request) => runtime.compactLeadContext(request).then(
             (result) => compactNotice(result, locale),
             (error: unknown) => compactErrorNotice(error, locale),
-          )}
-          chip={canTurnModel && turnModel ? (
+          ),
+          chip: canTurnModel && turnModel ? (
             <TurnModelChip text={leadModelTriggerText(leadModelSpec(turnModel), modelAccounts, locale) ?? turnModel.model} onRemove={() => setTurnModel(null)} />
-          ) : null}
-          {...(compact
-            ? { float: true, onPlus: openPlus, ref: composerRef }
-            : { modelControl: <LeadModelComposerTrigger current={leadModel} accounts={modelAccounts} onOpen={(anchor) => setPicker({ anchor })} /> })}
+          ) : null,
           // 新 daemon：排着的事在输入卡片上半截的状态栏里（主题 11.13）。
           // 旧 daemon（没有 Steer 和取消）：照旧在发送前选「插话/排队」，排着的外部消息在那一行的右边（工单 10）。
-          {...(canSteerQueued
+          ...(canSteerQueued
             ? { tray: queueTray }
-            : canPlace && leadBusy ? { placement: { value: placement, onChange: setPlacement }, placementStatus: <LeadQueueBar /> } : {})}
-        />
-        </PopoverAnchorView>
-        </ConversationColumn>
-      </Column>
-      {compact ? (
-        <LeadPlusSheet
-          open={plusOpen}
-          onClose={() => setPlusOpen(false)}
-          // 拍照、图片、文件（主题 H-7），只放这台设备和 daemon 现在能用的。
-          tiles={plusTiles}
-          cover={plusCover}
-          // 手机上换模型从这里进（主题 H-7、11.18，用户 2026-11-16）：加号面板收起，换模型的底部面板升起。
-          modelText={leadModelTriggerText(leadModel, modelAccounts, locale)}
-          onOpenModel={() => setPicker({ anchor: null })}
-        />
-      ) : null}
-      <LeadModelPicker
-        open={picker !== null}
-        anchor={picker?.anchor ?? null}
-        onClose={() => setPicker(null)}
-        onTurnModel={setTurnModel}
+            : canPlace && leadBusy ? { placement: { value: placement, onChange: setPlacement }, placementStatus: <LeadQueueBar /> } : {}),
+        }}
       />
       {compact ? (
         <HomeDrawer
@@ -625,7 +580,9 @@ export function LeadConversation({ compact = false, railOpen = true, onOpenRail,
         />
       ) : null}
       {/* 桌面上的选字回复（设计规范 P17、主题 Q-1–Q-3）：画在页面最上层，不占会话列表的位置。手机上从右滑和长按开始。 */}
-      <SelectionReplyLayer enabled={canQuote && !compact} onSendNow={sendQuotesNow} />
+      <SelectionReplyLayer enabled={canQuote && !compact} onSendNow={sendQuotesNow} {...(topicsSupported ? { onSideTopic: openSideTopic } : {})} />
+      <TopicSeenBaseline />
+      <TopicAutoOpen />
     </KeyboardArea></Density>
     </QuoteGesturesContext.Provider>
     </QuoteJumpContext.Provider>
@@ -688,6 +645,8 @@ function ConversationRowView({ item, context }: { item: LeadConversationRow; con
   if (item.kind === 'reminder') return <ReminderFireCard cardKey={item.reminderKey} />;
   if (item.kind === 'setup-checklist') return <SetupChecklistCardItem />;
   if (item.kind === 'setup-hint') return <SetupHintCardItem cardKey={item.hintKey} />;
+  if (item.kind === 'topic-opened') return <TopicOpenedLine topicId={item.topicId} />;
+  if (item.kind === 'topic-concluded') return <TopicConcludedRow topicId={item.topicId} />;
   const card = cardsById[item.cardId];
   // 单独成行的工单卡没有回复可以标：同一天已经完整画过的，折叠以后就不再画（见上面消息里的同一条规则）。
   if (collapsedCardIds.has(item.cardId)) return null;
@@ -713,7 +672,10 @@ function EmptyConversation({ title, body }: { title: string; body: string }) {
   );
 }
 
-function ConversationMessage({
+// One message of a conversation with Lead. The main conversation draws its rows with it, and so does the panel of a
+// topic (features/topics, with no cards): one component, so your message, its images and files, Lead's reply and a
+// failure look and work the same in both. What differs in a topic comes from the conversation scope (conversationScope.ts).
+export function ConversationMessage({
   cardIds,
   activityIds,
   cardsById,
@@ -742,6 +704,8 @@ function ConversationMessage({
   suppressedTicketIds?: readonly number[];
 }) {
   const runtime = useCompanionRuntime();
+  // null: the main conversation. A topic gives where "Send again" goes and the wording of its fixed errors.
+  const scope = useConversationScope();
   const message = useMessage(messageId);
   const partIds = useMessagePartIds(messageId);
   const parts = useMessageParts(messageId);
@@ -776,7 +740,9 @@ function ConversationMessage({
   const delivered = useControlPlaneStore((state) => Boolean(message?.turnId && state.deliveredTurnIds[message.turnId]));
   const cardSlots = useTurnCardSlots(cardIds, cardsById, dispatchScopes);
   if (!message) return null;
-  if (isHiddenUserMessage(message)) return null;
+  if (!scope && isHiddenUserMessage(message)) return null;
+  // In a topic, a turn that Lead started (the opening) has no message from you: only Lead's side of it is drawn.
+  if (scope && message.role === 'user' && !(textPart?.kind === 'text' && textPart.text.trim()) && !parts.some((part) => isImagePart(part) || isFilePart(part))) return null;
 
   // 拿到了回答的插话轮次就是普通的助手消息；只有一句话没说就收尾的那种才是空气泡，
   // 用户由此以为 lead 没响应——实际它已收到并在当前轮里执行了（见 ./steeredNotice）。
@@ -850,9 +816,13 @@ function ConversationMessage({
     continued,
     locale,
   }) : null;
-  const failureActions = (failurePresentation?.actions ?? []).flatMap((action) => {
+  // A topic's fixed error (conversationScope.ts): its own headline and details, and "Send again".
+  const fixedFailure = failure && scope ? scope.fixedFailure(failure.message) : null;
+  const failureActions = (fixedFailure ? ['resend' as const] : failurePresentation?.actions ?? []).flatMap((action) => {
     // 只有还在本地、没有送达的消息能「重试」或「移除」。
     if ((action === 'retry' || action === 'remove') && message.source !== 'optimistic') return [];
+    // A conversation that takes no message now (a closed topic) has no "Send again".
+    if (action === 'resend' && scope && !scope.send) return [];
     return [{ label: failureActionLabels(locale)[action], onPress: () => runFailureAction(action) }];
   });
   const runFailureAction = (action: FailureAction) => {
@@ -866,6 +836,20 @@ function ConversationMessage({
   const resend = (turnModel?: LeadModelChoice) => {
     const text = turnUserPart?.kind === 'text' ? turnUserPart.text : '';
     const quotes = turnUserQuotes.length ? turnUserQuotes : undefined;
+    // A topic: the same words, images and files go to the topic again.
+    if (scope) {
+      const send = scope.send;
+      if (!send) return;
+      void Promise.all([
+        Promise.all(turnUserImages.map((part): Promise<ChatImageInput> | ChatImageInput =>
+          part.data !== undefined ? { mimeType: part.mimeType, data: part.data } : runtime.loadChatImage(part.imageId ?? ''))),
+        Promise.all(turnUserFiles.map((part): Promise<ChatFileInput> | ChatFileInput =>
+          part.data !== undefined
+            ? { name: part.name, mimeType: part.mimeType, data: part.data }
+            : runtime.loadChatFile(part.fileId ?? '').then((file) => ({ name: file.name, mimeType: file.mimeType, data: file.data })))),
+      ]).then(([images, files]) => send(text, { images, files })).catch(() => {});
+      return;
+    }
     if (turnUserFiles.length) {
       void Promise.all([
         Promise.all(turnUserImages.map((part): Promise<ChatImageInput> | ChatImageInput =>
@@ -921,7 +905,7 @@ function ConversationMessage({
       {userImages.length ? <UserMessageImages images={userImages} /> : null}
       {userFiles.length ? <UserMessageFiles files={userFiles} /> : null}
       {bubble && userBubble ? (
-        <QuoteSourceFor turnId={message.turnId} role="user" text={rawText}>
+        <QuoteSourceFor turnId={scope ? null : message.turnId} role="user" text={rawText}>
         <MessageBubble testID="user-bubble">
           {userQuotes.length ? (
             <Column gap="card-row" testID="user-message-quotes">
@@ -952,7 +936,7 @@ function ConversationMessage({
       {bubble && !user ? (
         // Lead 的回复不加气泡，直接排在白底上，Lead 主动发起的也一样（方案 A）。只有 daemon 自己写的系统通知铺一层浅底色。
         // 消息头、正文、依据、附件之间是 reply-block，和正文的段落间距一样（2026-10-21，原来是 10）。
-        <QuoteSourceFor turnId={systemNotice ? null : message.turnId} role="assistant" text={rawText}>
+        <QuoteSourceFor turnId={systemNotice || scope ? null : message.turnId} role="assistant" text={rawText}>
         <Column gap="reply-block" {...(systemNotice ? { px: 14, py: 12, rounded: 'xl', bg: 'accent-wash' } as const : {})}>
           <AssistantTurnView
             compact={compact}
@@ -974,6 +958,8 @@ function ConversationMessage({
         <AbsenceTail testID="interrupted-by-steer" text={m.steered.interruptedBySteer} />
       ) : null}
       {!user && activityIds?.length ? <TurnActivity ids={activityIds} /> : null}
+      {/* The topics that Lead opened in this turn: one line each, at the end of the reply (features/topics, P18). */}
+      {!user ? <TurnTopicLinks turnId={message.turnId} /> : null}
       {/* Three or more same-kind cards of this turn (reminders, new tickets) show as one line (P9.10, turnCardGroups.ts). */}
       {!user && cardSlots.map((slot) => slot.kind === 'group' ? (
         <TurnCardGroupView key={slot.group.key} group={slot.group} />
@@ -989,7 +975,11 @@ function ConversationMessage({
           selectedTicketId={selectedTicketId}
         />
       ) : null)}
-      {failurePresentation && !maintenanceNotice ? (
+      {fixedFailure ? (
+        <Box w="100%">
+          <FailureCard headline={fixedFailure.headline} tone="warning" details={fixedFailure.details} actions={failureActions} />
+        </Box>
+      ) : failurePresentation && !maintenanceNotice ? (
         <Box {...(user ? { self: 'flex-end', maxW: '100%' } as const : { w: '100%' } as const)}>
           <FailureCard
             headline={failurePresentation.headline}
@@ -997,7 +987,8 @@ function ConversationMessage({
             details={failurePresentation.details}
             actions={failureActions}
             presentation={failurePresentation}
-            modelSwitch={failurePresentation.actions.includes('resend') && leadModel && leadModel !== 'unknown'
+            // "Send again with another model" changes Lead's main model: not offered in a topic, which has its own.
+            modelSwitch={!scope && failurePresentation.actions.includes('resend') && leadModel && leadModel !== 'unknown'
               ? { current: leadModel, link: <LeadModelResendLink onResend={resend} /> }
               : null}
           />
@@ -1497,7 +1488,11 @@ export type LeadTimelineItem =
   | { kind: 'reminder'; key: string; reminderKey: string; at: number }
   // 首次启动引导（.scratch/onboarding）：准备清单卡（Lead 第一次上线时）和建议卡（用户自己的一轮结束时）。
   | { kind: 'setup-checklist'; key: string; at: number }
-  | { kind: 'setup-hint'; key: string; hintKey: string; at: number };
+  | { kind: 'setup-hint'; key: string; hintKey: string; at: number }
+  // Topics (features/topics, design rules P18). opened: you opened a topic from a selected text, a system line at
+  // that time. concluded: a topic brought its conclusion back, an end row at that time.
+  | { kind: 'topic-opened'; key: string; topicId: number; at: number }
+  | { kind: 'topic-concluded'; key: string; topicId: number; at: number };
 
 export type LeadTimelineOptions = {
   // 能和相邻的同一种失败合并时返回同一个键，否则返回 null。
@@ -1530,6 +1525,9 @@ export type LeadTimelineOptions = {
   setupHints?: readonly SetupHintCard[];
   // 这一轮的消息还没送到 Lead（排队中、已插入）：它的两行排在最后，送到时不挪位置（conversationMessageTimes）。
   isPendingTurn?: (turnId: string) => boolean;
+  // Topics (features/topics): a line when you opened one from a selected text, and a row when one brought a
+  // conclusion back. A topic that Lead opened has its line in that reply of Lead instead (TurnTopicLinks).
+  topics?: readonly TopicDto[];
 };
 
 export function buildLeadTimeline(
@@ -1663,6 +1661,16 @@ export function buildLeadTimeline(
   for (const hint of options.setupHints ?? []) {
     const at = Date.parse(hint.at);
     if (Number.isFinite(at)) insertAtTime({ kind: 'setup-hint', key: hint.key, hintKey: hint.key, at });
+  }
+  for (const topic of options.topics ?? []) {
+    const openedAt = Date.parse(topic.createdAt);
+    if (topic.openedBy === 'user' && Number.isFinite(openedAt)) {
+      insertAtTime({ kind: 'topic-opened', key: `topic-opened:${topic.id}`, topicId: topic.id, at: openedAt });
+    }
+    const concludedAt = topic.conclusion && topic.concludedAt ? Date.parse(topic.concludedAt) : Number.NaN;
+    if (Number.isFinite(concludedAt)) {
+      insertAtTime({ kind: 'topic-concluded', key: `topic-concluded:${topic.id}`, topicId: topic.id, at: concludedAt });
+    }
   }
   const itemTime = (item: LeadTimelineItem) => timelineItemTime(item, messagesById, turnsById, cardsById, messageTimes);
   for (const card of options.channelCards ?? []) placeChannelNews(result, card, itemTime);
@@ -1998,6 +2006,7 @@ function timelineItemTime(
   if (item.kind === 'card') return Date.parse(cardsById?.get(item.cardId)?.createdAt ?? '');
   if (item.kind === 'lead-activity' || item.kind === 'channel-card' || item.kind === 'channel-news') return item.at;
   if (item.kind === 'reminder' || item.kind === 'setup-checklist' || item.kind === 'setup-hint') return item.at;
+  if (item.kind === 'topic-opened' || item.kind === 'topic-concluded') return item.at;
   return Number.NaN;
 }
 

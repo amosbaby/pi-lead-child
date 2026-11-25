@@ -312,4 +312,44 @@ describe('quoting on the phone composer', () => {
     fireEvent.click(screen.getByTestId('send-message'));
     expect(onSend).toHaveBeenCalledWith('', [], [{ source: leadSource, text: ANSWER, note: '这句对吗' }]);
   });
+
+  // "Side chat" on a phone (features/topics, theme K-1a): after you swipe or long-press a part of an answer, the quoting
+  // slot has a button that opens a topic from that part instead of a reply.
+  it('opens a side chat from the part in hand, and has no such button without topics or for an external message card', async () => {
+    const runtime = createCompanionStateRuntime({
+      client: {} as CompanionRuntimeDependencies['client'],
+      credentials: {} as CompanionRuntimeDependencies['credentials'],
+      scheduler: { schedule: () => 0, cancel: () => {}, now: () => 0 },
+    });
+    const onSideTopic = vi.fn();
+    const view = renderUI(
+      <CompanionRuntimeProvider runtime={runtime}>
+        <MessageComposer contextKey="lead" placeholder="Message" onSend={vi.fn()} float quotes onSideTopic={onSideTopic} />
+      </CompanionRuntimeProvider>,
+    );
+    act(() => quoteDrafts.getState().begin({ source: leadSource, text: ANSWER, context: ANSWER }));
+    fireEvent.click(await screen.findByTestId('quoting-side-topic'));
+    expect(onSideTopic).toHaveBeenCalledWith(leadSource, ANSWER);
+    // The part is not kept as a quote: it went to the topic.
+    await waitFor(() => expect(screen.queryByTestId('quoting-slot')).toBeNull());
+    expect(quoteDrafts.getState().pending).toBeNull();
+
+    // The words of someone else (an external message card) do not open a topic.
+    act(() => quoteDrafts.getState().begin({ source: { kind: 'card', cardId: 7 }, text: 'hello', context: 'hello' }));
+    expect(await screen.findByTestId('quoting-slot')).toBeTruthy();
+    expect(screen.queryByTestId('quoting-side-topic')).toBeNull();
+    act(() => quoteDrafts.getState().cancel());
+    view.unmount();
+
+    // A daemon without topics: the composer gets no callback, so there is no button.
+    renderUI(
+      <CompanionRuntimeProvider runtime={runtime}>
+        <MessageComposer contextKey="lead" placeholder="Message" onSend={vi.fn()} float quotes />
+      </CompanionRuntimeProvider>,
+    );
+    act(() => quoteDrafts.getState().begin({ source: leadSource, text: ANSWER, context: ANSWER }));
+    expect(await screen.findByTestId('quoting-slot')).toBeTruthy();
+    expect(screen.queryByTestId('quoting-side-topic')).toBeNull();
+    act(() => quoteDrafts.getState().cancel());
+  });
 });

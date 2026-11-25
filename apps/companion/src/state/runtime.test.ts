@@ -1990,4 +1990,153 @@ describe('agent logs', () => {
       expect(getConversationTurnsById).not.toHaveBeenCalled();
     });
   });
+
+  // Topics (protocol's topics.ts, 2026-11-25): a topic is its own session in the store. Its turns come as lead.*
+  // events with topicId in the payload; they must never show in the main conversation.
+  describe('topics', () => {
+    const topic = (overrides: Partial<import('@pi-lead-child/protocol').TopicDto> = {}): import('@pi-lead-child/protocol').TopicDto => ({
+      id: 3, title: '工单协同优化', state: 'open', openedBy: 'lead', originTurnId: 'turn-1', originQuote: null, originRole: null, model: null,
+      conclusion: null, concludedAt: null, turnCount: 1, lastTurnId: 'tturn_0', lastActivityAt: '2026-11-25T03:00:00.000Z',
+      createdAt: '2026-11-25T03:00:00.000Z', updatedAt: '2026-11-25T03:00:00.000Z', ...overrides,
+    });
+    const topicTurn = (id: string, userText: string, assistantText: string): import('@pi-lead-child/protocol').ConversationTurn => ({
+      id, originBindingId: 7, originKind: 'paired:companion:topic', ticketId: null, state: 'completed', userText, assistantText,
+      error: null, createdAt: '2026-11-25T03:01:00.000Z', updatedAt: '2026-11-25T03:01:05.000Z', toolCalls: [],
+    });
+    const topicEvent = (seq: number, type: GatewayEvent['type'], payload: Record<string, unknown>): GatewayEvent => ({
+      ...gatewayEvent(seq, type, { ...payload, topicId: 3 }), turnId: 'tturn_2', ticketId: null, audienceBindingId: null,
+    });
+    const textOf = (runtime: ReturnType<typeof createCompanionStateRuntime>, messageId: string) => {
+      const part = runtime.control.getState().messagePartsById[`${messageId}:text`];
+      return part?.kind === 'text' ? part.text : null;
+    };
+
+    it('keeps the turns of a topic in the topic\'s own session, and reads the topic again when a reply is complete', async () => {
+      const clock = scheduler();
+      const getTopic = vi.fn(async () => ({ topic: topic({ turnCount: 2, lastTurnId: 'tturn_1' }), turns: [topicTurn('tturn_1', '3 轮够吗', '够。')] }));
+      const getConversationTurnsById = vi.fn(async () => []);
+      const client = transport({
+        connect: connectWithCapabilities(['lead.topics.v1']),
+        getTopics: vi.fn(async () => [topic()]), getTopic, getConversationTurnsById,
+      });
+      let handlers: ConnectionHandlers = {};
+      client.connect = vi.fn(async (next = {}) => {
+        handlers = next;
+        await connectWithCapabilities(['lead.topics.v1'])(next);
+      });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: clock });
+      await runtime.start();
+      const release = runtime.observeResource(RESOURCE_KEYS.topic(3));
+      await runtime.whenIdle();
+      await vi.waitFor(() => expect(getTopic).toHaveBeenCalledTimes(1));
+      const mainBefore = [...(runtime.control.getState().messageIdsBySession['session-1'] ?? [])];
+
+      handlers.onEvent?.(topicEvent(1, 'lead.turn.started', {
+        messageId: 'msg_tturn_2', commandId: null, originKind: 'paired:companion:topic', mode: 'started', userText: '那第四轮呢',
+      }));
+      handlers.onEvent?.({ ...topicEvent(2, 'lead.message.delta', { messageId: 'msg_tturn_2', delta: '没有第四轮。' }) });
+      await runtime.whenIdle();
+      clock.runAll();
+
+      const state = runtime.control.getState();
+      // The live turn is in the topic's session with your words, and the main conversation did not change.
+      const topicMessages = state.messageIdsBySession['topic:3'] ?? [];
+      expect(topicMessages.map((id) => state.messagesById[id]?.turnId)).toEqual(['tturn_1', 'tturn_1', 'tturn_2', 'tturn_2']);
+      const live = state.turnsById.tturn_2!;
+      expect(live.sessionId).toBe('topic:3');
+      expect(textOf(runtime, live.userMessageId)).toBe('那第四轮呢');
+      expect(state.messageIdsBySession['session-1'] ?? []).toEqual(mainBefore);
+
+      handlers.onEvent?.(topicEvent(3, 'lead.message.completed', { messageId: 'msg_tturn_2', text: '没有第四轮。' }));
+      await runtime.whenIdle();
+      clock.runAll();
+      await vi.waitFor(() => expect(getTopic).toHaveBeenCalledTimes(2));
+      // The single-turn correction of the main conversation is not used for a topic's turn.
+      expect(getConversationTurnsById).not.toHaveBeenCalled();
+      expect(runtime.control.getState().messageIdsBySession['session-1'] ?? []).toEqual(mainBefore);
+      release();
+    });
+
+    it('reads the list of topics again when the daemon says topics changed', async () => {
+      const clock = scheduler();
+      const getTopics = vi.fn(async () => [topic()]);
+      const client = transport({ getTopics });
+      let handlers: ConnectionHandlers = {};
+      client.connect = vi.fn(async (next = {}) => {
+        handlers = next;
+        await connectWithCapabilities(['lead.topics.v1'])(next);
+      });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: clock });
+      await runtime.start();
+      const release = runtime.observeResource(RESOURCE_KEYS.topics);
+      await vi.waitFor(() => expect(getTopics).toHaveBeenCalledTimes(1));
+      await runtime.whenIdle();
+      expect(runtime.control.getState().topics?.map((entry) => entry.id)).toEqual([3]);
+
+      handlers.onEvent?.({ ...gatewayEvent(1, 'snapshot.required', { resource: 'topics' }), turnId: null, ticketId: null });
+      await runtime.whenIdle();
+      clock.runAll();
+      await vi.waitFor(() => expect(getTopics).toHaveBeenCalledTimes(2));
+      release();
+    });
+
+    it('does not read topics from a daemon that does not announce them', async () => {
+      const getTopics = vi.fn(async () => [topic()]);
+      const client = transport({ getTopics });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: scheduler() });
+      await runtime.start();
+      const release = runtime.observeResource(RESOURCE_KEYS.topics);
+      await runtime.whenIdle();
+      expect(getTopics).not.toHaveBeenCalled();
+      expect(runtime.control.getState().topics).toBeNull();
+      release();
+    });
+
+    it('opens a topic through the same operation as Lead, and shows your message in a topic at once', async () => {
+      const opened = topic({ id: 5, title: '核查者先把问题发给执行者', openedBy: 'user', originQuote: '核查者先把问题发给执行者，', originRole: 'assistant' });
+      const performUiAction = vi.fn(async () => ({ target: { type: 'topics', id: 'lead' }, action: 'open', result: opened }));
+      const sendTopicMessage = vi.fn(async () => ({ topicId: 5, turnId: 'tturn_9', state: 'streaming' as const }));
+      const client = transport({
+        connect: connectWithCapabilities(['lead.topics.v1']),
+        performUiAction: performUiAction as never, sendTopicMessage, getTopics: vi.fn(async () => []),
+      });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: scheduler() });
+      await runtime.start();
+
+      const quote = { source: { kind: 'turn' as const, turnId: 'turn-1', role: 'assistant' as const }, text: '核查者先把问题发给执行者，' };
+      await expect(runtime.openTopic({ quote })).resolves.toMatchObject({ id: 5 });
+      expect(performUiAction).toHaveBeenCalledWith('topics', 'lead', 'open', { input: { quote } });
+      expect(runtime.control.getState().topics?.map((entry) => entry.id)).toEqual([5]);
+
+      await runtime.sendTopicMessage(5, '先聊这个');
+      expect(sendTopicMessage).toHaveBeenCalledWith(5, '先聊这个', {});
+      const state = runtime.control.getState();
+      const turn = state.turnsById.tturn_9!;
+      expect(turn.sessionId).toBe('topic:5');
+      expect(textOf(runtime, turn.userMessageId)).toBe('先聊这个');
+      expect(state.messageIdsBySession['topic:5']).toEqual([turn.userMessageId, turn.assistantMessageId]);
+    });
+
+    it('sends the images and the files of a message in a topic, and shows them at once with the same part ids as the loaded turn', async () => {
+      const sendTopicMessage = vi.fn(async () => ({ topicId: 5, turnId: 'tturn_9', state: 'streaming' as const }));
+      const client = transport({
+        connect: connectWithCapabilities(['lead.topics.v1']), sendTopicMessage, getTopics: vi.fn(async () => []),
+      });
+      const runtime = createCompanionStateRuntime({ client, credentials: credentialStore(), scheduler: scheduler() });
+      await runtime.start();
+
+      const images = [{ mimeType: 'image/png' as const, data: 'aGVsbG8=' }];
+      const files = [{ name: 'notes.txt', mimeType: 'text/plain', data: 'bm90ZXM=' }];
+      await runtime.sendTopicMessage(5, '', { images, files });
+      expect(sendTopicMessage).toHaveBeenCalledWith(5, '', { images, files });
+
+      const state = runtime.control.getState();
+      const messageId = state.turnsById.tturn_9!.userMessageId;
+      const parts = (state.partIdsByMessage[messageId] ?? []).map((partId) => state.messagePartsById[partId]!);
+      expect(parts.filter((part) => part.kind !== 'text')).toEqual([
+        { kind: 'image', id: `${messageId}:image:0`, mimeType: 'image/png', data: 'aGVsbG8=' },
+        { kind: 'file', id: `${messageId}:file:0`, name: 'notes.txt', mimeType: 'text/plain', size: 5, data: 'bm90ZXM=' },
+      ]);
+    });
+  });
 });

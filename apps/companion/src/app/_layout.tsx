@@ -36,6 +36,7 @@ export default function RootLayout() {
             <Stack.Screen name="ticket/[id]" />
             {/* 视图面板（2026-10-30）：原生上是自己的一页，网页上在工作台的右侧（Workbench.web.tsx）。 */}
             <Stack.Screen name="views" />
+            <Stack.Screen name="topic/[id]" />
             <Stack.Screen name="pair" options={{ presentation: 'modal' }} />
             {/* 设置：桌面上整页替换工作台，手机上是自己的栈（app/settings/_layout.tsx）。 */}
             <Stack.Screen name="settings" />

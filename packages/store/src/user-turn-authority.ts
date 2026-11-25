@@ -1,6 +1,7 @@
 import { bindingOriginLabel, bindingOriginOf, type BindingOrigin, type Scope } from "@pi-lead-child/protocol";
 import type { Db } from "./db.js";
 import { bindingScopes } from "./gateway.js";
+import { TOPIC_TURN_ID_PREFIX } from "./topics.js";
 
 // 对话里的结构化授权（authorize_retry，以及工单操作层里 Lead 代你做的操作，engine 的 ticket-actions/authority.ts）
 // 以哪一轮为凭：当前还在进行的已配对用户轮次。
@@ -92,10 +93,14 @@ function steerAwaitingAnswer(db: Db, turnId: string): boolean {
 export function activePairedUserTurn(db: Db, turnId: string | null, label: string, scope: Scope): PairedUserTurn {
   if (!turnId) throw new Error(`${label} requires the current authenticated user turn`);
   if (turnId.startsWith(SCHEDULED_TURN_PREFIX)) return scheduledUserTurn(db, turnId, label, scope);
+  // A turn of a topic (topics.ts) lives in topic_turns, with the same columns. A message that the user sends in a
+  // topic is the user's own live turn, as in the main conversation: an authenticated device sent it. The opening that
+  // the topic's session writes has no credential and no paired origin, so it does not pass the checks below.
+  const table = turnId.startsWith(TOPIC_TURN_ID_PREFIX) ? "topic_turns" : "channel_turns";
   const turn = db.prepare(
     `SELECT t.id, t.origin_binding_id, t.origin_kind, t.state, t.created_at,
             b.status AS binding_status, b.kind AS binding_kind, b.origin AS binding_origin, b.scopes AS binding_scopes
-     FROM channel_turns t LEFT JOIN bindings b ON b.id = t.origin_binding_id
+     FROM ${table} t LEFT JOIN bindings b ON b.id = t.origin_binding_id
      WHERE t.id=?`,
   ).get(turnId) as {
     id: string;

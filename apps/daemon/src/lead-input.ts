@@ -27,7 +27,7 @@ import {
   type Db, type EventRecord, type InboxRow, type SeqRange,
 } from "@pi-lead-child/store";
 import {
-  BACKGROUND_RECOVERED_KIND, COMPONENT_CALL_KINDS, CONNECTION_STATUS_CHANGED_KIND, CORE_MEMORY_CHANGED_KIND, DAEMON_STARTED_KIND, EVENT_SOURCES, LEAD_SELF_EVENT_KINDS,
+  BACKGROUND_RECOVERED_KIND, TOPIC_CONCLUDED_KIND, COMPONENT_CALL_KINDS, CONNECTION_STATUS_CHANGED_KIND, CORE_MEMORY_CHANGED_KIND, DAEMON_STARTED_KIND, EVENT_SOURCES, LEAD_SELF_EVENT_KINDS,
   LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, SIGNAL_RECEIVED_KIND, USER_REQUEST_EXPIRED_KIND,
   OWNER_ACTION_DISOWNED_KIND, OWNER_ACTION_PERFORMED_KIND, PUSHED_SECURITY_ALERT_KINDS, REMINDER_PUSHED_KIND,
   REMINDER_UNACKNOWLEDGED_KIND, reminderNeedsCheck, SYSTEM_TURN_ORIGINS, ticketNeedsUser, ticketNeedsUserLabel,
@@ -1306,6 +1306,11 @@ function recordNote(event: EventRecord): string | null {
     case LEAD_WAIT_SATISFIED_KIND: return `你在等的事有了下一步（等待 #${String(payload.waitId)}，详情在同一件事的另一条事件里）`;
     // 后台任务恢复了（background-models spec D3）：record 级，只记一句，不叫醒你。
     case BACKGROUND_RECOVERED_KIND: return backgroundRecoveredNote(payload);
+    // A topic brought its conclusion back (protocol's topics.ts): the main conversation did not see the topic's turns,
+    // so the note carries the conclusion. The whole text is in list_actions(topic, <id>).
+    case TOPIC_CONCLUDED_KIND:
+      return `话题「${oneLine(String(payload.title ?? ""), 40)}」（编号 ${String(payload.topicId)}）结束了，用户在话题里和你定的结论：`
+        + `${oneLine(String(payload.conclusion ?? ""), 600)}。用户已经知道这个结论，不用再告诉他；后面的事按它做`;
     default: return null;
   }
 }

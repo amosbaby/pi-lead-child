@@ -29,6 +29,9 @@ import {
   CHAT_FOLLOW_UP_ACTIONS_CAPABILITY,
   CHAT_PLACEMENT_PREFERENCE_CAPABILITY,
   LEAD_SHADOW_SETTINGS_CAPABILITY,
+  LEAD_TOPICS_CAPABILITY,
+  SendTopicMessageRequestSchema,
+  type SendTopicMessageResponse,
   CHAT_TURN_MODEL_CAPABILITY,
   leadModelSpec,
   type LeadModelChoice,
@@ -161,6 +164,7 @@ import { getRun, isTerminalRunState } from "@pi-lead-child/store";
 import { InterruptAckError } from "@pi-lead-child/store";
 import { InterventionConflictError } from "@pi-lead-child/engine";
 import type { Db } from "@pi-lead-child/store";
+import { topicDetailResponse, topicsResponse } from "./topic-routes.js";
 import {
   latestGatewaySeq,
   listGatewayEventBatch,
@@ -292,6 +296,15 @@ export interface PairedBridge {
     itemId: number;
     commandId: string;
   }) => { mode: ChatSendMode; turnId: string };
+  // Topics (protocol's topics.ts): a message that the user sends in a topic. The daemon's topic runtime answers it.
+  // With it, the gateway announces LEAD_TOPICS_CAPABILITY. It throws PairedCommandError for a message it refuses.
+  topicMessage?: (command: {
+    topicId: number; text: string; bindingId: number; bindingKind: string; bindingName: string;
+    // Checked and decoded by the gateway, as for a message in the main conversation.
+    images?: ChatImageData[]; files?: ChatFileData[];
+  }) => SendTopicMessageResponse;
+  // Stop the reply that a topic is writing. false: the topic was not writing one.
+  topicStop?: (topicId: number) => boolean;
   addClient: (send: (obj: unknown) => void) => () => void;
   // 用户的手动重检（工单 04）。探针要检查 daemon 执行时用的 adapter，所以由 daemon 执行。
   recheckRuntimes?: (runtime?: KernelRuntimeId) => Promise<RuntimeRecheckResponse["results"]>;
@@ -1645,6 +1658,67 @@ export async function startPairedServer(
         requireAuth(req, "tickets:view");
         json(req, res, 200, { shadow: getLeadShadow(bridge.db) });
         return;
+      }
+
+      // Topics (protocol's topics.ts, user 2026-11-25). Reads come from the tables. Opening, renaming and closing go
+      // through the operation layer (POST /v1/actions/topics/lead/open, /v1/actions/topic/:id/…), the same operations
+      // as Lead's tools. A message goes to the daemon's topic runtime.
+      if (req.method === "GET" && url.pathname === "/v1/topics") {
+        requireAuth(req, "chat");
+        json(req, res, 200, topicsResponse(bridge.db));
+        return;
+      }
+      const topicRoute = /^\/v1\/topics\/([1-9]\d{0,9})(\/messages|\/stop)?$/u.exec(url.pathname);
+      if (topicRoute) {
+        const topicId = Number(topicRoute[1]);
+        const tail = topicRoute[2] ?? "";
+        if (req.method === "GET" && tail === "") {
+          const { scopes } = requireAuth(req, "chat");
+          const detail = topicDetailResponse(bridge.db, topicId, scopes);
+          if (!detail) throw new HttpError(404, "not_found", "topic not found");
+          json(req, res, 200, detail);
+          return;
+        }
+        if (req.method === "POST" && tail === "/messages") {
+          const { binding } = requireAuth(req, "chat");
+          if (!bridge.topicMessage) throw new HttpError(503, "internal_error", "topics are not available yet");
+          // A message with images and files is tens of MB, as in the main conversation (CHAT_SEND_MAX_BYTES).
+          const body = parseJson(await readBody(req, Math.max(maxBodyBytes, CHAT_SEND_MAX_BYTES)));
+          if (!Value.Check(SendTopicMessageRequestSchema, body)) {
+            throw new HttpError(400, "invalid_request", "text must be a string; images and files have the shape of a chat message");
+          }
+          // The same checks as chat.send: the daemon must accept them, and the bytes must be what they claim to be.
+          let images: ChatImageData[] | undefined;
+          if (body.images !== undefined) {
+            if (!bridge.chatV2) throw new HttpError(400, "invalid_request", "this daemon does not accept images");
+            const decoded = decodeChatImages(body.images);
+            if (!decoded.ok) throw new HttpError(400, "invalid_request", decoded.error);
+            images = decoded.images;
+          }
+          let files: ChatFileData[] | undefined;
+          if (body.files !== undefined) {
+            if (!bridge.chatV2 || !bridge.chatFiles) throw new HttpError(400, "invalid_request", "this daemon does not accept files");
+            const decoded = decodeChatFiles(body.files);
+            if (!decoded.ok) throw new HttpError(400, "invalid_request", decoded.error);
+            files = decoded.files;
+          }
+          if (!body.text.trim() && !images && !files) throw new HttpError(400, "invalid_request", "the message is empty");
+          try {
+            json(req, res, 200, bridge.topicMessage({
+              topicId, text: body.text, bindingId: binding.id, bindingKind: binding.kind, bindingName: binding.display_name,
+              ...(images ? { images } : {}), ...(files ? { files } : {}),
+            }));
+          } catch (err) {
+            if (err instanceof PairedCommandError) throw new HttpError(PAIRED_COMMAND_STATUS[err.code], err.code, err.message);
+            throw err;
+          }
+          return;
+        }
+        if (req.method === "POST" && tail === "/stop") {
+          requireAuth(req, "chat");
+          json(req, res, 200, { stopped: bridge.topicStop?.(topicId) ?? false });
+          return;
+        }
       }
 
       // 换 Lead 的模型：操作层的 lead_model / switch，和 Lead 的 switch_lead_model 是同一个操作。
@@ -3573,6 +3647,8 @@ export async function startPairedServer(
           CHAT_PLACEMENT_CAPABILITY,
           // 设置页读 shadow 的设置（GET /v1/lead/shadow）。
           LEAD_SHADOW_SETTINGS_CAPABILITY,
+          // Topics (protocol's topics.ts): the daemon gave its topic runtime.
+          ...(bridge.topicMessage ? [LEAD_TOPICS_CAPABILITY] : []),
           // 排着的追问能插进这一轮、能取消（daemon 交来了这个服务时）。
           ...(bridge.uiActionServices?.followUps ? [CHAT_FOLLOW_UP_ACTIONS_CAPABILITY] : []),
           // 没带 mode 的消息按「Lead 忙时你发的消息」的设置放（daemon 说它这样做时）。

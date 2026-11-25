@@ -12,6 +12,7 @@ import type {
   HostBypassDto,
   BusyPlacementDto,
   LeadShadowDto,
+  TopicDto,
   LeadProfileDto,
   DesignPreferencesDto,
   RuntimeSettingsDto,
@@ -78,6 +79,8 @@ export type ResourceKey =
   | 'host-bypass'
   | 'busy-placement'
   | 'lead-shadow'
+  | 'topics'
+  | `topic:${number}`
   | 'design-preferences'
   | 'channel-settings'
   | 'conversation:current'
@@ -124,6 +127,10 @@ export const RESOURCE_KEYS = {
   busyPlacement: 'busy-placement' as const,
   // shadow 的设置（GET /v1/lead/shadow，2026-11-19）。设置 → Shadow 在屏幕上时才取。
   leadShadow: 'lead-shadow' as const,
+  // Topics (GET /v1/topics, protocol's topics.ts). The conversation reads the list while it is on screen.
+  topics: 'topics' as const,
+  // One topic and its turns (GET /v1/topics/:id). Read while the topic's panel is open.
+  topic: (topicId: number) => `topic:${topicId}` as const,
   designPreferences: 'design-preferences' as const,
   channelSettings: 'channel-settings' as const,
   workItems: 'work-items' as const,
@@ -375,6 +382,8 @@ export interface ControlPlaneData {
   busyPlacement: BusyPlacementDto | null;
   /** shadow 的设置（GET /v1/lead/shadow）：模式、比例、模型、合批等待。设置页在屏幕上时才取；没取到时为 null。 */
   leadShadow: LeadShadowDto | null;
+  /** Topics (GET /v1/topics): open ones first. null: not read yet, or the daemon has none. */
+  topics: TopicDto[] | null;
   /** 界面的外观偏好（GET /v1/design/preferences）。连上以后就取；没取到时用缺省值画。 */
   designPreferences: DesignPreferencesDto | null;
   /** 外部消息通道的凭据和状态（GET /v1/channels/settings）：每个来源一行，没有密钥的值。没取到时为 null。 */
@@ -503,6 +512,10 @@ export interface WorkspaceData {
   selectedAttemptId: number | null;
   railOpen: boolean;
   threadOpen: boolean;
+  /** The topic whose panel is open on the right (P16.2: one place for the ticket detail, the views and a topic). */
+  topicOpenId: number | null;
+  /** For each topic, the last turn this device showed. A later turn marks the topic as having a new reply. */
+  topicSeenByTopic: Record<number, string>;
   // 右侧的视图面板开着（P16.2：和工单详情共用右侧的位置，打开一个时另一个收起）。手机上是盖在内容上的面板。
   viewsOpen: boolean;
   // 视图面板上选中的视图（tab）。null 时是第一个。只记在这台设备上，不同步。

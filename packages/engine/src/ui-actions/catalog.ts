@@ -40,6 +40,7 @@ import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
 } from "./agenda-feeds.js";
 import { SIGNAL_SOURCE_ACTIONS, SIGNAL_SOURCE_TARGET, SIGNAL_SOURCES_ACTIONS, SIGNAL_SOURCES_TARGET } from "./signal-sources.js";
+import { TOPIC_ACTIONS, TOPIC_TARGET, TOPICS_ACTIONS, TOPICS_TARGET } from "./topics.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
 import { CHANNEL_SUBSCRIPTIONS_ACTIONS, CHANNEL_SUBSCRIPTIONS_TARGET } from "./channel-subscriptions.js";
 import { joinProblems } from "./problems.messages.js";
@@ -1271,6 +1272,8 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   signal_source: SIGNAL_SOURCE_TARGET,
   agenda_feeds: AGENDA_FEEDS_TARGET,
   agenda_feed: AGENDA_FEED_TARGET,
+  topics: TOPICS_TARGET,
+  topic: TOPIC_TARGET,
   agenda_entry: AGENDA_ENTRY_TARGET,
 };
 
@@ -1337,5 +1340,7 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   // External agenda feeds: create, update, pause, resume, delete, sync (Lead only); per-entry mute. See agenda-feeds.ts.
   agenda_feeds: AGENDA_FEEDS_ACTIONS,
   agenda_feed: AGENDA_FEED_ACTIONS,
+  topics: TOPICS_ACTIONS,
+  topic: TOPIC_ACTIONS,
   agenda_entry: AGENDA_ENTRY_ACTIONS,
 };

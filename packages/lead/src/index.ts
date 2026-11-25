@@ -43,6 +43,7 @@ export * from "./watch-commands.js";
 export * from "./wait-tools.js";
 export * from "./ui-action-tools.js";
 export * from "./hand-off-tool.js";
+export * from "./topic.js";
 export * from "./background-jobs.js";
 export { ticketRunAnnotation } from "./read-tools.js";
 export * from "./overflow.js";

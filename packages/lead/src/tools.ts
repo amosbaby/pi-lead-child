@@ -205,6 +205,7 @@ import { createWaitTools, withUserActionWaits, type TurnUserActions } from "./wa
 import { createConnectionTools } from "./connection-tools.js";
 import { createChannelActionTools, createReplyToSourceTool, createUiActionTools, performLeadUiAction } from "./ui-action-tools.js";
 import { createHandOffTools, type LeadHandoffDeps } from "./hand-off-tool.js";
+import { createTopicTools } from "./topic.js";
 import {
   authorityTurnId, authorizationCardResult, coreMemoryRefusal, setTimerInTurn, turnOriginOf, type CoreMemoryRefusal, type LeadTurnOrigin,
 } from "./turn-origin.js";
@@ -5080,6 +5081,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
     ...createWaitTools(deps),
     // 工单以外的 UI 操作（2026-10-22，AGENTS.md「UI Actions」）：执行器的停用和启用、设备……和页面是同一个操作。
     ...createUiActionTools(deps),
+    // Topics (topic.ts): open_topic is Lead's own entry to topics.open.
+    ...createTopicTools(deps),
     // 交接（lead-scheduler spec H4、H10，hand-off-tool.ts）：hand_off 把建单、写说明、派出合成一次调用；resume_unit 处理挂起的单元。
     // 开跑和 spawn_child 一样走工单操作 start。
     ...createHandOffTools(deps, {
