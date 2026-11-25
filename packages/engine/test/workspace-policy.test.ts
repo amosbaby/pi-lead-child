@@ -16,6 +16,7 @@ import {
   prepareRunWorkspace, requestSharedWorkspace, setDeploymentRepositoriesForTesting, setPullRequestReviewTarget,
 } from "../src/coordinator/workspace-policy.js";
 import { sweepWorkspaces } from "../src/coordinator/workspace.js";
+import { awaitWorktreeDependencies, forgetWorktreeDependenciesForTests } from "../src/coordinator/worktree-dependencies.js";
 import { forgetGitFacts, setGitFactsLog } from "../src/coordinator/git-facts.js";
 import { parseRepositorySpec, recordTicketRepository, startRepositoryClone } from "../src/coordinator/repository-checkout.js";
 
@@ -243,6 +244,58 @@ describe("the system decides that a ticket is a coding ticket", () => {
 
 // 2026-11-03：一张大仓库（6,863 个文件）工单开跑时，git worktree add 在 daemon 的主线程上同步跑了约 19 秒。
 // 这段时间 Slack 收不到 pong，判定连接已断；Companion 网页端也掉线重连；Lead 的 spawn_child 一直等着。
+// 2026-11-25：#465 的执行者等了 6 分钟以上的依赖克隆，一行都没开始做。现在建好 worktree 就启动，提示里写依赖状态。
+describe("the executor does not wait for dependencies", () => {
+  const savedBunInstall = process.env.BUN_INSTALL;
+  afterEach(() => {
+    if (savedBunInstall === undefined) delete process.env.BUN_INSTALL;
+    else process.env.BUN_INSTALL = savedBunInstall;
+    forgetWorktreeDependenciesForTests();
+  });
+
+  function bunRepo(body: string): string {
+    writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", private: true }));
+    writeFileSync(join(repo, "bun.lock"), "{}\n");
+    git(repo, "add", ".");
+    git(repo, "commit", "-qm", "bun project");
+    const home = join(dir, "bun-home");
+    mkdirSync(join(home, "bin"), { recursive: true });
+    writeFileSync(join(home, "bin", "bun"), `#!/bin/sh\n${body}\n`);
+    chmodSync(join(home, "bin", "bun"), 0o755);
+    process.env.BUN_INSTALL = home;
+    return home;
+  }
+
+  it("starts the runtime while bun install is still running, and tells the executor how to wait", async () => {
+    const gate = join(dir, "gate");
+    bunRepo(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-bun`);
+    const itemId = genericTicket();
+    // 以前 runItem 会等依赖准备完才启动 runtime：bun 在等 gate，这一行就永远不返回。
+    const { request } = await run(itemId);
+    expect(request.prompt).toContain("still being prepared in the background");
+    expect(request.prompt).toContain("git rev-parse --git-path plc-deps-status");
+    expect(request.prompt).toContain("install them here yourself");
+    expect(request.prompt).not.toContain("are not installed in this worktree");
+    writeFileSync(gate, "");
+    const result = await awaitWorktreeDependencies(request.workdir);
+    expect(result?.installedWith).toContain("bun install --frozen-lockfile");
+    const statusFile = join(git(request.workdir, "rev-parse", "--absolute-git-dir"), "plc-deps-status");
+    expect(readFileSync(statusFile, "utf8")).toMatch(/^ready: installed with bun install/);
+  }, 30_000);
+
+  it("tells the executor to install the dependencies itself when the preparation already failed", async () => {
+    bunRepo("exit 1");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    // 同一张工单的下一个 Run 复用 worktree，这时准备已经做完：提示写结果，不再写「还在准备」。
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies were not prepared");
+    expect(second.request.prompt).toContain("install them here yourself");
+    expect(second.request.prompt).not.toContain("still being prepared");
+  }, 30_000);
+});
+
 describe("preparing a new worktree does not stop the daemon", () => {
   let savedPath: string | undefined;
   afterEach(() => {
