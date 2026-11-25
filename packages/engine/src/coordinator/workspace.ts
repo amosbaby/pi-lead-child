@@ -536,13 +536,14 @@ function failProvisioning(db: Db, itemId: number, workspace: Workspace, error: u
 function prepareDependencies(db: Db, workspace: Workspace, source: string): void {
   if (!existsSync(workspace.path)) return;
   void startWorktreeDependencies(source, workspace.path, (result) => {
-    if (!result.cloned.length && !result.error && !result.fallbackReason) return;
+    if (!result.cloned.length && !result.error && !result.fallbackReason && !result.selectionNote) return;
     addActivity(db, {
       itemId: workspace.owner_item_id, actor: "system", kind: "decision",
       payload: {
         decision: "workspace_dependencies", workspaceId: workspace.id, cloned: result.cloned, error: result.error,
         ...(result.installedWith ? { installedWith: result.installedWith } : {}),
         ...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
+        ...(result.selectionNote ? { selectionNote: result.selectionNote } : {}),
       },
     });
   });

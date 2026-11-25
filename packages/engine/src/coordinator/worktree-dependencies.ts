@@ -10,11 +10,22 @@
 // bun 的仓库（有 bun.lock 或 bun.lockb）同样先用 bun install --frozen-lockfile 装（2026-11-25）：#465 给一个 bun 仓库建
 // worktree，克隆 node_modules/.bun 跑了 6 分钟以上还没完，执行者一直在等。bun 有全局缓存，通常快得多；装不上时回到克隆。
 //
-// npm 的仓库（有 package-lock.json）在 pnpm、bun 之后、克隆之前用 npm ci 装（npmInstall，#493）：#473 一次拷 3 份 node_modules
-// 花了约 11 分钟（本机有杀毒软件，拷大量小文件很慢）。命令是 npm ci --prefer-offline --ignore-scripts --no-audit --no-fund，
-// 10 分钟超时。npm workspaces 的单仓只在根目录跑一次：npm ci 把依赖提升到根 node_modules，工作区包的链接也由它建，
-// 装好就返回，不再对子包克隆。找不到 npm（daemon 的 PATH 来自 launchd）、npm ci 失败或超时，就回到克隆，
-// 并把原因写进结果的 fallbackReason（状态文件和活动记录里能看到）。
+// 包管理器按锁文件认，做成一张对照表（PACKAGE_MANAGERS，#493）：pnpm-lock.yaml→pnpm；bun.lock / bun.lockb→bun；
+// package-lock.json→npm；yarn.lock→yarn。以后加一种包管理器只加一行（锁文件、找可执行文件的办法、安装命令）。
+// 表里每一种走同一条路：找得到可执行文件就在根目录装一次（10 分钟超时，都带 --ignore-scripts 或同等的开关，
+// 因为 daemon 在沙箱外装），装好就返回、不再克隆；找不到、装失败或超时，就回到克隆，并把原因写进结果的 fallbackReason
+// （状态文件和活动记录里能看到），装了一半的 node_modules 先删掉。各自的命令：
+//   pnpm  pnpm install --frozen-lockfile --prefer-offline --ignore-scripts
+//   bun   bun install --frozen-lockfile --ignore-scripts
+//   npm   npm ci --prefer-offline --ignore-scripts --no-audit --no-fund（#473 一次拷 3 份 node_modules 花了约 11 分钟，本机有杀毒软件）。
+//         npm workspaces 的单仓只在根目录装一次：npm ci 把依赖提升到根 node_modules，工作区包的链接也由它建，不再对子包克隆。
+//   yarn  1（classic）：yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive；
+//         2 及以上（berry）：yarn install --immutable，用环境变量 YARN_ENABLE_SCRIPTS=false 关安装脚本。版本看 package.json 的
+//         packageManager 字段，没有就看 .yarnrc.yml、yarn.lock 里的 __metadata。berry 默认是 PnP（.yarnrc.yml 里 nodeLinker
+//         不是 node-modules 或 pnpm），没有 node_modules 可克隆：装不上时结果的 error 写「PnP 仓库，不能退回拷贝」，不假装成功。
+// 一个仓库有几种锁文件时只选一种：package.json 的 packageManager 字段点名了其中一种就用它，没有就按表里的顺序选；
+// 结果的 selectionNote 写明选了哪一种、为什么。找 npm、yarn 的办法见 findBinary 一带：daemon 的 PATH 来自 launchd，
+// 常常没有用户装的 node，所以会看 nvm、volta、Homebrew、corepack 等常见位置。
 //
 // 执行者不等依赖（2026-11-25）：建好 worktree 就启动，依赖在后台准备。准备做完时写一个状态文件（worktree 的 git 目录里，
 // 不在工作区里，不会进提交），提示里给执行者一条等它的命令；准备还在做时也可以查 peekWorktreeDependencies。
@@ -22,7 +33,7 @@
 // 克隆在后台异步做：大仓库在本机要几分钟（有 Sophos 时更久），同步做会卡住 daemon（2026-10-14 的停摆）。
 // 只克隆 git 忽略的 node_modules；克隆失败不影响 Run，执行者可以在沙箱里自己装。
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, type Dirent } from "node:fs";
+import { existsSync, readdirSync, readFileSync, type Dirent } from "node:fs";
 import { readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -37,6 +48,8 @@ export interface DependencyPreparation {
   installedWith?: string;
   // 先试了包管理器、没成功才回到克隆（或没有可克隆的）时，写明为什么没成功。目前只有 npm 这条路径会写。
   fallbackReason?: string;
+  // 仓库有几种锁文件时，写明选了哪一种包管理器、为什么。只有一种锁文件时为 undefined。
+  selectionNote?: string;
 }
 
 const pending = new Map<string, Promise<DependencyPreparation>>();
@@ -104,51 +117,6 @@ function cloneArgs(source: string, target: string): { command: string; args: str
   return null;
 }
 
-// pnpm 的可执行文件：daemon 的 PATH 是 launchd 给的，常常没有用户装的 pnpm（~/Library/pnpm）。找不到时为 null。
-function pnpmBinary(env: NodeJS.ProcessEnv = process.env): string | null {
-  const candidates = [
-    env.PNPM_HOME ? join(env.PNPM_HOME, "pnpm") : null,
-    env.HOME ? join(env.HOME, "Library", "pnpm", "pnpm") : null,
-    ...(env.PATH ?? "").split(":").filter(Boolean).map((dir) => join(dir, "pnpm")),
-  ].filter((path): path is string => Boolean(path));
-  return candidates.find((path) => existsSync(path)) ?? null;
-}
-
-// pnpm 的仓库先用 pnpm 装（2026-10-29）：一个大的前端仓库 的 node_modules 有十几万个文件，开着 Sophos 克隆了 19 分钟，
-// Run #185 一直停在启动前，被当成卡死停掉；克隆来的还是用户 checkout 那个分支的依赖，执行者又自己装了一遍。
-// pnpm 按 lockfile 从本机的仓库硬链接，通常一两分钟。daemon 在沙箱外装，能写 pnpm 的仓库、能用 .npmrc 的凭证。
-// --ignore-scripts：依赖的安装脚本不在沙箱外跑；要跑时执行者在沙箱里 pnpm rebuild。装不上时回到克隆。
-async function pnpmInstall(worktree: string): Promise<DependencyPreparation | null> {
-  if (!existsSync(join(worktree, "pnpm-lock.yaml"))) return null;
-  const pnpm = pnpmBinary();
-  if (!pnpm) return null;
-  const result = await run(pnpm, ["install", "--frozen-lockfile", "--prefer-offline", "--ignore-scripts", "--reporter=silent"], worktree, 10 * 60_000);
-  if (result.code !== 0) return null;
-  return { cloned: [], skipped: null, error: null, installedWith: "pnpm install --frozen-lockfile --prefer-offline --ignore-scripts" };
-}
-
-// bun 的可执行文件：和 pnpm 一样，daemon 的 PATH 常常没有用户装的 bun（~/.bun/bin）。找不到时为 null。
-function bunBinary(env: NodeJS.ProcessEnv = process.env): string | null {
-  const candidates = [
-    env.BUN_INSTALL ? join(env.BUN_INSTALL, "bin", "bun") : null,
-    env.HOME ? join(env.HOME, ".bun", "bin", "bun") : null,
-    ...(env.PATH ?? "").split(":").filter(Boolean).map((dir) => join(dir, "bun")),
-  ].filter((path): path is string => Boolean(path));
-  return candidates.find((path) => existsSync(path)) ?? null;
-}
-
-// bun 的仓库用 bun 装（2026-11-25）：见文件开头。--ignore-scripts 的理由和 pnpm 一样（daemon 在沙箱外装）。
-// 装不上（没有 bun、退出码不是 0、超时）时返回 null，调用方回到克隆；先删掉装了一半的 node_modules，不然克隆会跳过它们。
-async function bunInstall(worktree: string): Promise<DependencyPreparation | null> {
-  if (!existsSync(join(worktree, "bun.lock")) && !existsSync(join(worktree, "bun.lockb"))) return null;
-  const bun = bunBinary();
-  if (!bun) return null;
-  const result = await run(bun, ["install", "--frozen-lockfile", "--ignore-scripts"], worktree, 10 * 60_000);
-  if (result.code === 0) return { cloned: [], skipped: null, error: null, installedWith: "bun install --frozen-lockfile --ignore-scripts" };
-  await removeInstalledNodeModules(worktree);
-  return null;
-}
-
 // 装了一半的 node_modules 要删掉，不然克隆会因为目标已存在而跳过它们。只删 git 忽略的：装出来的 node_modules 是忽略的，别的东西不碰。
 async function removeInstalledNodeModules(worktree: string): Promise<void> {
   for (const dir of await findNodeModulesDirs(worktree)) {
@@ -157,13 +125,17 @@ async function removeInstalledNodeModules(worktree: string): Promise<void> {
   }
 }
 
-// 系统里装 npm 的固定位置：Homebrew（Apple 芯片、Intel）。测试可以换掉它，免得测到本机真装的 npm。
-const DEFAULT_SYSTEM_NPM_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
-let systemNpmDirs = DEFAULT_SYSTEM_NPM_DIRS;
+// 系统里装 npm、yarn 的固定位置：Homebrew（Apple 芯片、Intel）。测试可以换掉它，免得测到本机真装的包管理器。
+const DEFAULT_SYSTEM_BIN_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
+let systemBinDirs = DEFAULT_SYSTEM_BIN_DIRS;
 
-/** 测试用：换掉固定的 npm 目录（不传就恢复）。 */
-export function setNpmSystemDirsForTests(dirs?: string[]): void {
-  systemNpmDirs = dirs ?? DEFAULT_SYSTEM_NPM_DIRS;
+/** 测试用：换掉固定的目录（不传就恢复）。 */
+export function setSystemBinDirsForTests(dirs?: string[]): void {
+  systemBinDirs = dirs ?? DEFAULT_SYSTEM_BIN_DIRS;
+}
+
+function pathDirs(env: NodeJS.ProcessEnv): string[] {
+  return (env.PATH ?? "").split(":").filter(Boolean);
 }
 
 function versionParts(name: string): number[] {
@@ -189,21 +161,180 @@ function nvmNodeBinDirs(env: NodeJS.ProcessEnv): string[] {
   }
 }
 
-// npm 的可执行文件：daemon 的 PATH 是 launchd 给的，常常没有用户装的 node 和 npm。按这个顺序找：PATH、当前 nvm 的 NVM_BIN、
-// nvm 装的各版本、volta、Homebrew。找不到时为 null。
-function npmBinary(env: NodeJS.ProcessEnv = process.env): string | null {
-  const dirs = [
-    ...(env.PATH ?? "").split(":").filter(Boolean),
+// node 工具（npm、yarn、corepack）常见的目录：当前 nvm 的 NVM_BIN、nvm 装的各版本、volta、Homebrew。
+function nodeToolDirs(env: NodeJS.ProcessEnv): string[] {
+  return [
     ...(env.NVM_BIN ? [env.NVM_BIN] : []),
     ...nvmNodeBinDirs(env),
     ...(env.VOLTA_HOME ? [join(env.VOLTA_HOME, "bin")] : env.HOME ? [join(env.HOME, ".volta", "bin")] : []),
-    ...systemNpmDirs,
+    ...systemBinDirs,
   ];
+}
+
+function findIn(dirs: Array<string | undefined>, name: string): string | null {
   for (const dir of dirs) {
-    const path = join(dir, "npm");
+    if (!dir) continue;
+    const path = join(dir, name);
     if (existsSync(path)) return path;
   }
   return null;
+}
+
+// 可执行文件：command 加上放在安装参数前面的 prefix（corepack 的 yarn 是 `corepack yarn ...`）。
+interface Binary { command: string; prefix: string[] }
+
+// 一次安装：参数、额外的环境变量、写进 installedWith 的完整命令、出错信息里叫它的名字。
+interface InstallPlan { args: string[]; env?: Record<string, string>; installedWith: string; label: string }
+
+interface PackageManager {
+  name: string;
+  // 这种包管理器的锁文件（相对仓库根目录）。有其中任何一个就算用这种。
+  lockfiles: string[];
+  // 找不到可执行文件时，写进原因里的「找过哪里」。
+  searched: string;
+  // npm、yarn 是 `#!/usr/bin/env node` 的脚本：daemon 的 PATH 里没有 node 时跑不起来，所以把它所在的目录放到 PATH 最前面
+  // （nvm、volta、Homebrew 里 node 和它们在同一个目录）。
+  needsNodeOnPath?: boolean;
+  binary(worktree: string, env: NodeJS.ProcessEnv): Binary | null;
+  plan(worktree: string): InstallPlan;
+  // 装不上时不能退回克隆的原因（yarn 的 PnP 仓库没有 node_modules 可克隆）；能克隆时为 null。
+  noCopyFallback?(worktree: string): string | null;
+}
+
+function readPackageJson(worktree: string): { packageManager?: unknown } {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(worktree, "package.json"), "utf8"));
+    return parsed && typeof parsed === "object" ? (parsed as { packageManager?: unknown }) : {};
+  } catch {
+    return {};
+  }
+}
+
+// package.json 的 packageManager 字段（例如 "yarn@4.1.0+sha224.abc"）：名字和版本。没写或格式不对时为 null。
+function declaredPackageManager(worktree: string): { name: string; version: string } | null {
+  const field = readPackageJson(worktree).packageManager;
+  if (typeof field !== "string") return null;
+  const match = /^([a-z]+)@([^\s+]+)/.exec(field.trim());
+  return match ? { name: match[1]!, version: match[2]! } : null;
+}
+
+function readFileOrEmpty(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+// yarn 1 还是 2 及以上（berry）：先看 packageManager 字段；没有就看 .yarnrc.yml（只有 berry 用它），再看 yarn.lock 里的 __metadata（berry 的格式）。
+function isYarnBerry(worktree: string): boolean {
+  const declared = declaredPackageManager(worktree);
+  if (declared?.name === "yarn") return versionParts(declared.version)[0]! >= 2;
+  if (existsSync(join(worktree, ".yarnrc.yml"))) return true;
+  return /^__metadata:/m.test(readFileOrEmpty(join(worktree, "yarn.lock")));
+}
+
+// berry 开着 PnP 时没有 node_modules：.yarnrc.yml 里 nodeLinker 不是 node-modules（pnpm 的链接方式也有 node_modules）；没写就是默认的 PnP。
+function isYarnPnp(worktree: string): boolean {
+  const linker = /^nodeLinker:\s*["']?([\w-]+)["']?\s*(?:#.*)?$/m.exec(readFileOrEmpty(join(worktree, ".yarnrc.yml")))?.[1];
+  return linker !== "node-modules" && linker !== "pnpm";
+}
+
+function yarnBinary(worktree: string, env: NodeJS.ProcessEnv): Binary | null {
+  const dirs = [
+    ...pathDirs(env), env.HOME ? join(env.HOME, ".yarn", "bin") : undefined,
+    env.HOME ? join(env.HOME, ".config", "yarn", "global", "node_modules", ".bin") : undefined, ...nodeToolDirs(env),
+  ];
+  const yarn = findIn(dirs, "yarn");
+  if (yarn) return { command: yarn, prefix: [] };
+  // 没有直接装的 yarn：package.json 的 packageManager 点名了 yarn 时，让 corepack 按这个版本取（corepack 随 node 装，没 `corepack enable` 就没有 yarn 命令）。
+  if (declaredPackageManager(worktree)?.name !== "yarn") return null;
+  const corepack = findIn(dirs, "corepack");
+  return corepack ? { command: corepack, prefix: ["yarn"] } : null;
+}
+
+// 这张表的顺序也是仓库有几种锁文件、又没写 packageManager 时的选择顺序。pnpm、bun 的命令和找法原样搬来，没有改。
+const PACKAGE_MANAGERS: PackageManager[] = [
+  {
+    // pnpm 的仓库先用 pnpm 装（2026-10-29）：一个大的前端仓库 的 node_modules 有十几万个文件，开着 Sophos 克隆了 19 分钟，
+    // Run #185 一直停在启动前，被当成卡死停掉；克隆来的还是用户 checkout 那个分支的依赖，执行者又自己装了一遍。
+    // pnpm 按 lockfile 从本机的仓库硬链接，通常一两分钟。daemon 在沙箱外装，能写 pnpm 的仓库、能用 .npmrc 的凭证。
+    // --ignore-scripts：依赖的安装脚本不在沙箱外跑；要跑时执行者在沙箱里 pnpm rebuild。daemon 的 PATH 常常没有用户装的 pnpm（~/Library/pnpm）。
+    name: "pnpm",
+    lockfiles: ["pnpm-lock.yaml"],
+    searched: "daemon 的 PATH、PNPM_HOME、~/Library/pnpm 里都没有",
+    binary: (_worktree, env) => {
+      const pnpm = findIn([env.PNPM_HOME, env.HOME ? join(env.HOME, "Library", "pnpm") : undefined, ...pathDirs(env)], "pnpm");
+      return pnpm ? { command: pnpm, prefix: [] } : null;
+    },
+    plan: () => ({
+      args: ["install", "--frozen-lockfile", "--prefer-offline", "--ignore-scripts", "--reporter=silent"],
+      installedWith: "pnpm install --frozen-lockfile --prefer-offline --ignore-scripts", label: "pnpm install",
+    }),
+  },
+  {
+    // bun 的仓库用 bun 装（2026-11-25）：#465 给一个 bun 仓库建 worktree，克隆 node_modules/.bun 跑了 6 分钟以上还没完。
+    // daemon 的 PATH 常常没有用户装的 bun（~/.bun/bin）。
+    name: "bun",
+    lockfiles: ["bun.lock", "bun.lockb"],
+    searched: "daemon 的 PATH、BUN_INSTALL、~/.bun/bin 里都没有",
+    binary: (_worktree, env) => {
+      const bun = findIn([env.BUN_INSTALL ? join(env.BUN_INSTALL, "bin") : undefined, env.HOME ? join(env.HOME, ".bun", "bin") : undefined, ...pathDirs(env)], "bun");
+      return bun ? { command: bun, prefix: [] } : null;
+    },
+    plan: () => ({
+      args: ["install", "--frozen-lockfile", "--ignore-scripts"],
+      installedWith: "bun install --frozen-lockfile --ignore-scripts", label: "bun install",
+    }),
+  },
+  {
+    name: "npm",
+    lockfiles: ["package-lock.json"],
+    searched: "daemon 的 PATH 里没有，nvm、volta、Homebrew 的常见位置也没有",
+    needsNodeOnPath: true,
+    binary: (_worktree, env) => {
+      const npm = findIn([...pathDirs(env), ...nodeToolDirs(env)], "npm");
+      return npm ? { command: npm, prefix: [] } : null;
+    },
+    plan: () => ({
+      args: ["ci", "--prefer-offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
+      installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund", label: "npm ci",
+    }),
+  },
+  {
+    name: "yarn",
+    lockfiles: ["yarn.lock"],
+    searched: "daemon 的 PATH、~/.yarn/bin、nvm、volta、Homebrew 的常见位置里都没有，也没有可用的 corepack",
+    needsNodeOnPath: true,
+    binary: yarnBinary,
+    plan: (worktree) => isYarnBerry(worktree)
+      ? { args: ["install", "--immutable"], env: { YARN_ENABLE_SCRIPTS: "false" }, installedWith: "YARN_ENABLE_SCRIPTS=false yarn install --immutable", label: "yarn install（berry）" }
+      : {
+        args: ["install", "--frozen-lockfile", "--prefer-offline", "--ignore-scripts", "--non-interactive"],
+        installedWith: "yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive", label: "yarn install（classic）",
+      },
+    noCopyFallback: (worktree) => (isYarnBerry(worktree) && isYarnPnp(worktree) ? "PnP 仓库，不能退回拷贝" : null),
+  },
+];
+
+/**
+ * 按锁文件选这个仓库的包管理器。没有锁文件时返回 null（这个仓库不用包管理器装，直接克隆）。
+ * 只有一种锁文件时就是它；有几种时，package.json 的 packageManager 字段点名了其中一种就用它，没有就按表里的顺序，note 里写明为什么。
+ */
+function selectPackageManager(worktree: string): { manager: PackageManager; note?: string } | null {
+  const present = PACKAGE_MANAGERS.filter((manager) => manager.lockfiles.some((file) => existsSync(join(worktree, file))));
+  const [first] = present;
+  if (!first) return null;
+  if (present.length === 1) return { manager: first };
+  const found = present.map((manager) => manager.name).join("、");
+  const declared = declaredPackageManager(worktree);
+  const named = declared ? present.find((manager) => manager.name === declared.name) : undefined;
+  if (named) return { manager: named, note: `有几种锁文件（${found}），package.json 的 packageManager 字段写的是 ${declared!.name}，选了 ${named.name}` };
+  const order = PACKAGE_MANAGERS.map((manager) => manager.name).join("、");
+  const why = declared
+    ? `packageManager 字段写的是 ${declared.name}，但它的锁文件不在其中`
+    : "package.json 没有 packageManager 字段";
+  return { manager: first, note: `有几种锁文件（${found}），${why}，按固定顺序（${order}）选了 ${first.name}` };
 }
 
 // 原因写进一行状态文件，所以压成一行、截短。
@@ -213,36 +344,41 @@ function oneLine(text: string, max = 300): string {
 }
 
 /**
- * npm 的仓库用 npm ci 装（#493）：见文件开头。返回 { installed }：装好了；{ fallback }：该用 npm 但没成功，附原因，调用方回到克隆；
- * null：不是 npm 的仓库（没有 package-lock.json）。
- * npm 是 `#!/usr/bin/env node` 的脚本：daemon 的 PATH 里没有 node 时它自己跑不起来，所以把 npm 所在的目录放到 PATH 最前面
- * （nvm、volta、Homebrew 里 node 和 npm 在同一个目录）。
+ * 用选中的包管理器装一次依赖（根目录）。{ installed }：装好了；{ fallback }：没成功，附原因，调用方回到克隆。
+ * 装不上时先删掉装了一半的 node_modules。
  */
-async function npmInstall(worktree: string): Promise<{ installed: DependencyPreparation } | { fallback: string } | null> {
-  if (!existsSync(join(worktree, "package-lock.json"))) return null;
-  const npm = npmBinary();
-  if (!npm) return { fallback: "找不到 npm（daemon 的 PATH 里没有，nvm、volta、Homebrew 的常见位置也没有）" };
+async function installWith(manager: PackageManager, worktree: string): Promise<{ installed: DependencyPreparation } | { fallback: string }> {
+  const binary = manager.binary(worktree, process.env);
+  if (!binary) return { fallback: `找不到 ${manager.name}（${manager.searched}）` };
+  const plan = manager.plan(worktree);
   const timeoutMs = 10 * 60_000;
-  const env = { ...process.env, PATH: [dirname(npm), process.env.PATH].filter(Boolean).join(":") };
-  const result = await run(npm, ["ci", "--prefer-offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], worktree, timeoutMs, env);
-  if (result.code === 0) {
-    return { installed: { cloned: [], skipped: null, error: null, installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund" } };
-  }
+  const env = {
+    ...process.env,
+    ...(manager.needsNodeOnPath ? { PATH: [dirname(binary.command), process.env.PATH].filter(Boolean).join(":") } : {}),
+    ...plan.env,
+  };
+  const result = await run(binary.command, [...binary.prefix, ...plan.args], worktree, timeoutMs, env);
+  if (result.code === 0) return { installed: { cloned: [], skipped: null, error: null, installedWith: plan.installedWith } };
   await removeInstalledNodeModules(worktree);
-  if (result.timedOut) return { fallback: `npm ci 超过 ${timeoutMs / 60_000} 分钟，已停掉` };
-  return { fallback: `npm ci 失败：${oneLine(result.output) || `退出码 ${result.code}`}` };
+  if (result.timedOut) return { fallback: `${plan.label} 超过 ${timeoutMs / 60_000} 分钟，已停掉` };
+  return { fallback: `${plan.label} 失败：${oneLine(result.output) || `退出码 ${result.code}`}` };
 }
 
 async function prepare(source: string, worktree: string): Promise<DependencyPreparation> {
   if (!existsSync(join(worktree, "package.json"))) return { cloned: [], skipped: "不是 Node 项目（没有 package.json）", error: null };
   if (existsSync(join(worktree, "node_modules"))) return { cloned: [], skipped: "worktree 里已经有 node_modules", error: null };
-  const installed = await pnpmInstall(worktree);
-  if (installed) return installed;
-  const bunInstalled = await bunInstall(worktree);
-  if (bunInstalled) return bunInstalled;
-  const npmResult = await npmInstall(worktree);
-  if (npmResult && "installed" in npmResult) return npmResult.installed;
-  const because = npmResult ? { fallbackReason: npmResult.fallback } : {};
+  const selected = selectPackageManager(worktree);
+  const note = selected?.note ? { selectionNote: selected.note } : {};
+  let because = {};
+  if (selected) {
+    const attempt = await installWith(selected.manager, worktree);
+    if ("installed" in attempt) return { ...attempt.installed, ...note };
+    // 没有 node_modules 可克隆的仓库（yarn 的 PnP），退回拷贝没有意义：把失败如实写在 error 里，不假装成功。
+    const noCopy = selected.manager.noCopyFallback?.(worktree);
+    if (noCopy) return { cloned: [], skipped: null, error: `${noCopy}：${attempt.fallback}`, fallbackReason: attempt.fallback, ...note };
+    because = { fallbackReason: attempt.fallback };
+  }
+  because = { ...because, ...note };
   const dirs = (await findNodeModulesDirs(source)).filter((dir) => existsSync(join(worktree, dirname(dir), "package.json")));
   if (!dirs.length) return { cloned: [], skipped: "用户的 checkout 里没有装好的依赖", error: null, ...because };
   const cloned: string[] = [];
@@ -262,11 +398,12 @@ async function prepare(source: string, worktree: string): Promise<DependencyPrep
 }
 
 function statusLine(result: DependencyPreparation): string {
-  const because = result.fallbackReason ? ` (installing with npm did not work: ${oneLine(result.fallbackReason)})` : "";
-  if (result.error) return `failed: ${result.error}${because}`;
-  if (result.installedWith) return `ready: installed with ${result.installedWith}`;
-  if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout${because}`;
-  return `none: ${result.skipped ?? "nothing to prepare"}${because}`;
+  const because = result.fallbackReason ? ` (installing with the package manager did not work: ${oneLine(result.fallbackReason)})` : "";
+  const chosen = result.selectionNote ? ` (${oneLine(result.selectionNote)})` : "";
+  if (result.error) return `failed: ${result.error}${chosen}`;
+  if (result.installedWith) return `ready: installed with ${result.installedWith}${chosen}`;
+  if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout${because}${chosen}`;
+  return `none: ${result.skipped ?? "nothing to prepare"}${because}${chosen}`;
 }
 
 // 准备做完时写状态文件；开始时先删掉旧的（同一个 worktree 再准备一次时，不能让执行者读到上一次的结果）。

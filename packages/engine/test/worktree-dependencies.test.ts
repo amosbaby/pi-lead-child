@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
   awaitWorktreeDependencies, DEPENDENCY_STATUS_FILE, findNodeModulesDirs, forgetWorktreeDependenciesForTests,
-  peekWorktreeDependencies, setNpmSystemDirsForTests, startWorktreeDependencies,
+  peekWorktreeDependencies, setSystemBinDirsForTests, startWorktreeDependencies,
 } from "../src/coordinator/worktree-dependencies.js";
 
 const supported = process.platform === "darwin" || process.platform === "linux";
@@ -144,7 +144,10 @@ describe.runIf(supported)("startWorktreeDependencies in a bun repository", () =>
     writeFileSync(join(worktree, "bun.lock"), "{}\n");
     process.env.BUN_INSTALL = fakeBun("mkdir -p node_modules/half-installed\nexit 1");
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result).toEqual({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
+    // 行为和以前一样（克隆、先删装了一半的）；2026-11-25 起结果里多了退回的原因。
+    expect(result).toEqual({
+      cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null, fallbackReason: "bun install 失败：退出码 1",
+    });
     expect(existsSync(join(worktree, "node_modules", "half-installed"))).toBe(false);
     expect(readFileSync(join(worktree, "node_modules", "left-pad", "index.js"), "utf8")).toContain("1");
   }, 60_000);
@@ -171,32 +174,36 @@ describe.runIf(supported)("startWorktreeDependencies in a bun repository", () =>
 
 // #493：npm 的仓库（有 package-lock.json）在 pnpm、bun 之后、克隆之前用 npm ci 装；#473 拷 3 份 node_modules 花了约 11 分钟。
 // 用假的 npm（脚本）代替真的：它记下参数和 PATH，按退出码和是否留下装了一半的 node_modules 表现。
-function fakeNpmBin(body: string, dir = tempDir("plc-deps-npm-bin-")): string {
-  const script = join(dir, "npm");
+function fakeBin(name: string, body: string, dir = tempDir(`plc-deps-${name}-bin-`)): string {
+  mkdirSync(dir, { recursive: true });
+  const script = join(dir, name);
   writeFileSync(script, `#!/bin/sh\n${body}\n`);
   chmodSync(script, 0o755);
   return dir;
 }
+const fakeNpmBin = (body: string, dir?: string): string => fakeBin("npm", body, dir);
+
+// 一个找不到 npm、yarn、corepack 的环境：PATH 只有 git 和系统的 /usr/bin:/bin，没有 nvm、volta，也没有 Homebrew 的固定目录。
+function withoutPackageManagers(): void {
+  const gitDir = tempDir("plc-deps-git-bin-");
+  symlinkSync(execFileSync("which", ["git"], { encoding: "utf8" }).trim(), join(gitDir, "git"));
+  process.env.PATH = `${gitDir}:/usr/bin:/bin`;
+  process.env.HOME = tempDir("plc-deps-home-");
+  for (const key of ["NVM_BIN", "NVM_DIR", "VOLTA_HOME"]) delete process.env[key];
+  setSystemBinDirsForTests([]);
+}
 
 describe.runIf(supported)("startWorktreeDependencies in an npm repository", () => {
   const saved = { ...process.env };
-  const realPath = (process.env.PATH ?? "").split(":").filter(Boolean);
-  // 一个找不到 npm 的环境：PATH 里去掉有 npm 的目录（git 要留着），没有 nvm、volta，也没有 Homebrew 的固定目录。
-  function withoutNpm(): void {
-    process.env.PATH = realPath.filter((dir) => !existsSync(join(dir, "npm"))).join(":");
-    process.env.HOME = tempDir("plc-deps-npm-home-");
-    for (const key of ["NVM_BIN", "NVM_DIR", "VOLTA_HOME"]) delete process.env[key];
-    setNpmSystemDirsForTests([]);
-  }
   afterEach(() => {
     process.env = { ...saved };
-    setNpmSystemDirsForTests();
+    setSystemBinDirsForTests();
   });
 
   it("installs once at the root with npm ci instead of cloning any node_modules, workspace packages included", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-    withoutNpm();
+    withoutPackageManagers();
     const out = tempDir("plc-deps-npm-out-");
     const bin = fakeNpmBin(`echo "$@" > ${out}/args\necho "$PATH" > ${out}/path\npwd >> ${out}/calls\nmkdir -p node_modules/from-npm`);
     process.env.PATH = `${bin}:${process.env.PATH}`;
@@ -217,18 +224,18 @@ describe.runIf(supported)("startWorktreeDependencies in an npm repository", () =
   it("skips npm and clones when npm cannot be found, and says why", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-    withoutNpm();
+    withoutPackageManagers();
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result).toMatchObject({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
     expect(result.fallbackReason).toMatch(/找不到 npm/);
     expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
-      .toMatch(/^ready: cloned node_modules.*\(installing with npm did not work: 找不到 npm/);
+      .toMatch(/^ready: cloned node_modules.*\(installing with the package manager did not work: 找不到 npm/);
   }, 60_000);
 
   it("falls back to cloning when npm ci fails, drops the half-installed node_modules and says why", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-    withoutNpm();
+    withoutPackageManagers();
     process.env.PATH = `${fakeNpmBin("mkdir -p node_modules/half-installed\necho 'npm error code EUSAGE' >&2\necho 'npm error lock file is out of sync' >&2\nexit 1")}:${process.env.PATH}`;
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result).toMatchObject({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
@@ -239,7 +246,7 @@ describe.runIf(supported)("startWorktreeDependencies in an npm repository", () =
 
   it("does not use npm in a repository without package-lock.json, and leaves no fallback reason", async () => {
     const { repo, worktree } = monorepo();
-    withoutNpm();
+    withoutPackageManagers();
     const out = tempDir("plc-deps-npm-out-");
     process.env.PATH = `${fakeNpmBin(`echo called > ${out}/called`)}:${process.env.PATH}`;
     const result = await startWorktreeDependencies(repo, worktree);
@@ -250,7 +257,7 @@ describe.runIf(supported)("startWorktreeDependencies in an npm repository", () =
   it("finds npm in the newest nvm node version and in a fixed system directory when PATH has none", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-    withoutNpm();
+    withoutPackageManagers();
     const out = tempDir("plc-deps-npm-out-");
     for (const version of ["v18.19.0", "v20.9.0", "v9.0.0"]) {
       fakeNpmBin(`echo ${version} > ${out}/version\nmkdir -p node_modules/from-npm`, (() => {
@@ -265,10 +272,173 @@ describe.runIf(supported)("startWorktreeDependencies in an npm repository", () =
 
     forgetWorktreeDependenciesForTests();
     rmSync(join(worktree, "node_modules"), { recursive: true, force: true });
-    withoutNpm();
-    setNpmSystemDirsForTests([fakeNpmBin("mkdir -p node_modules/from-system")]);
+    withoutPackageManagers();
+    setSystemBinDirsForTests([fakeNpmBin("mkdir -p node_modules/from-system")]);
     const system = await startWorktreeDependencies(repo, worktree);
     expect(system.installedWith).toContain("npm ci");
     expect(existsSync(join(worktree, "node_modules", "from-system"))).toBe(true);
   }, 60_000);
+});
+
+// 2026-11-25：包管理器按锁文件认（PACKAGE_MANAGERS），加了 yarn：1（classic）和 2 及以上（berry）分开，PnP 没有 node_modules 可拷。
+// 假的 yarn 记下参数和 YARN_ENABLE_SCRIPTS，再装出一个 node_modules。
+describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+    setSystemBinDirsForTests();
+  });
+
+  const YARN1_LOCK = "# yarn lockfile v1\n";
+  const BERRY_LOCK = "__metadata:\n  version: 8\n";
+  const LEFT_PAD_CLONED = { cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null };
+
+  // worktree 里放锁文件、package.json（可带 packageManager）和 .yarnrc.yml，PATH 里放一个假的 yarn。返回它记录的目录。
+  function yarnRepo(options: { lock: string; packageManager?: string; yarnrc?: string; yarnBody?: string; extraLocks?: Record<string, string> }): {
+    repo: string; worktree: string; out: string;
+  } {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "yarn.lock"), options.lock);
+    for (const [name, content] of Object.entries(options.extraLocks ?? {})) writeFileSync(join(worktree, name), content);
+    writeFileSync(join(worktree, "package.json"), JSON.stringify({ name: "root", workspaces: ["packages/*"], ...(options.packageManager ? { packageManager: options.packageManager } : {}) }));
+    if (options.yarnrc !== undefined) writeFileSync(join(worktree, ".yarnrc.yml"), options.yarnrc);
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-yarn-out-");
+    const body = options.yarnBody ?? `echo "$@" > ${out}/args\necho "$YARN_ENABLE_SCRIPTS" > ${out}/scripts\nmkdir -p node_modules/from-yarn`;
+    process.env.PATH = `${fakeBin("yarn", body)}:${process.env.PATH}`;
+    return { repo, worktree, out };
+  }
+
+  it("installs a yarn 1 (classic) repository with the classic command and no clone", async () => {
+    const { repo, worktree, out } = yarnRepo({ lock: YARN1_LOCK });
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({
+      cloned: [], skipped: null, error: null,
+      installedWith: "yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive",
+    });
+    expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
+    expect(readFileSync(join(out, "scripts"), "utf8").trim()).toBe("");
+    expect(existsSync(join(worktree, "node_modules", "from-yarn"))).toBe(true);
+    expect(existsSync(join(worktree, "node_modules", "left-pad"))).toBe(false);
+  }, 60_000);
+
+  it.each([
+    ["packageManager says yarn 4", { lock: BERRY_LOCK, packageManager: "yarn@4.1.0+sha224.abc", yarnrc: "nodeLinker: node-modules\n" }],
+    ["there is a .yarnrc.yml", { lock: YARN1_LOCK, yarnrc: "nodeLinker: node-modules\n" }],
+    ["yarn.lock has __metadata", { lock: BERRY_LOCK, yarnrc: "nodeLinker: node-modules\n" }],
+  ])("installs a yarn berry repository with yarn install --immutable and scripts off when %s", async (_why, options) => {
+    const { repo, worktree, out } = yarnRepo(options);
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({ cloned: [], skipped: null, error: null, installedWith: "YARN_ENABLE_SCRIPTS=false yarn install --immutable" });
+    expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("install --immutable");
+    expect(readFileSync(join(out, "scripts"), "utf8").trim()).toBe("false");
+  }, 60_000);
+
+  it("a yarn 1 packageManager field wins over a stray .yarnrc.yml", async () => {
+    const { repo, worktree, out } = yarnRepo({ lock: YARN1_LOCK, packageManager: "yarn@1.22.19", yarnrc: "nodeLinker: node-modules\n" });
+    await startWorktreeDependencies(repo, worktree);
+    expect(readFileSync(join(out, "args"), "utf8")).toContain("--frozen-lockfile");
+  }, 60_000);
+
+  it("says a PnP repository cannot fall back to copying when yarn install fails, and does not pretend it worked", async () => {
+    // nodeLinker 没写：berry 默认就是 PnP。
+    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, packageManager: "yarn@4.1.0", yarnBody: "echo 'YN0028: lockfile would have been modified' >&2\nexit 1" });
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.cloned).toEqual([]);
+    expect(result.installedWith).toBeUndefined();
+    expect(result.error).toMatch(/^PnP 仓库，不能退回拷贝：yarn install（berry） 失败：YN0028/);
+    expect(existsSync(join(worktree, "node_modules"))).toBe(false);
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8")).toMatch(/^failed: PnP 仓库，不能退回拷贝/);
+  }, 60_000);
+
+  it("also treats nodeLinker: pnp as PnP, and a missing yarn in a PnP repository as an error, not a skip", async () => {
+    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, yarnrc: "nodeLinker: pnp\n" });
+    withoutPackageManagers();
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: expect.stringMatching(/^PnP 仓库，不能退回拷贝：找不到 yarn/) });
+  }, 60_000);
+
+  it("keeps a successful PnP install as a success", async () => {
+    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, yarnrc: "nodeLinker: pnp\n", yarnBody: "echo '' > .pnp.cjs" });
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, installedWith: "YARN_ENABLE_SCRIPTS=false yarn install --immutable" });
+  }, 60_000);
+
+  it("falls back to cloning when yarn install fails in a node-modules repository, and says why", async () => {
+    const { repo, worktree } = yarnRepo({
+      lock: YARN1_LOCK, yarnBody: "mkdir -p node_modules/half-installed\necho 'error An unexpected error occurred' >&2\nexit 1",
+    });
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject(LEFT_PAD_CLONED);
+    expect(result.fallbackReason).toBe("yarn install（classic） 失败：error An unexpected error occurred");
+    expect(existsSync(join(worktree, "node_modules", "half-installed"))).toBe(false);
+  }, 60_000);
+
+  it("skips yarn and clones when yarn cannot be found, and says why", async () => {
+    const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK });
+    withoutPackageManagers();
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject(LEFT_PAD_CLONED);
+    expect(result.fallbackReason).toMatch(/^找不到 yarn/);
+  }, 60_000);
+
+  it("runs yarn through corepack when packageManager names yarn and no yarn command exists", async () => {
+    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, packageManager: "yarn@4.1.0", yarnrc: "nodeLinker: node-modules\n" });
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-corepack-out-");
+    process.env.PATH = `${fakeBin("corepack", `echo "$@" > ${out}/args\nmkdir -p node_modules/from-corepack`)}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.installedWith).toBe("YARN_ENABLE_SCRIPTS=false yarn install --immutable");
+    expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("yarn install --immutable");
+  }, 60_000);
+
+  it("finds yarn in ~/.yarn/bin when PATH has none", async () => {
+    const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK });
+    withoutPackageManagers();
+    fakeBin("yarn", "mkdir -p node_modules/from-home-yarn", join(process.env.HOME as string, ".yarn", "bin"));
+    expect((await startWorktreeDependencies(repo, worktree)).installedWith).toContain("yarn install");
+    expect(existsSync(join(worktree, "node_modules", "from-home-yarn"))).toBe(true);
+  }, 60_000);
+
+  describe("when a repository has several lockfiles", () => {
+    // npm 和 yarn 都是假的，各记下自己被叫过。
+    function both(packageManager?: string): { repo: string; worktree: string; out: string } {
+      const made = yarnRepo({ lock: YARN1_LOCK, ...(packageManager ? { packageManager } : {}), extraLocks: { "package-lock.json": "{}\n" } });
+      process.env.PATH = `${fakeNpmBin(`echo npm > ${made.out}/called\nmkdir -p node_modules/from-npm`)}:${process.env.PATH}`;
+      process.env.PATH = `${fakeBin("yarn", `echo yarn > ${made.out}/called\nmkdir -p node_modules/from-yarn`)}:${process.env.PATH}`;
+      return made;
+    }
+
+    it("follows the packageManager field and says so", async () => {
+      const { repo, worktree, out } = both("yarn@1.22.19");
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(readFileSync(join(out, "called"), "utf8").trim()).toBe("yarn");
+      expect(result.selectionNote).toBe("有几种锁文件（npm、yarn），package.json 的 packageManager 字段写的是 yarn，选了 yarn");
+      expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8")).toContain("选了 yarn");
+    }, 60_000);
+
+    it("uses the fixed order when there is no packageManager field, and says so", async () => {
+      const { repo, worktree, out } = both();
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(readFileSync(join(out, "called"), "utf8").trim()).toBe("npm");
+      expect(result.selectionNote).toBe("有几种锁文件（npm、yarn），package.json 没有 packageManager 字段，按固定顺序（pnpm、bun、npm、yarn）选了 npm");
+    }, 60_000);
+
+    it("uses the fixed order when the packageManager field names a manager whose lockfile is missing", async () => {
+      const { repo, worktree, out } = both("pnpm@9.0.0");
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(readFileSync(join(out, "called"), "utf8").trim()).toBe("npm");
+      expect(result.selectionNote).toContain("packageManager 字段写的是 pnpm，但它的锁文件不在其中");
+    }, 60_000);
+
+    it("only tries the chosen manager: when it fails the repository is cloned, the other one is not tried", async () => {
+      const { repo, worktree, out } = both("yarn@1.22.19");
+      process.env.PATH = `${fakeBin("yarn", `echo yarn > ${out}/called\nexit 1`)}:${process.env.PATH}`;
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(readFileSync(join(out, "called"), "utf8").trim()).toBe("yarn");
+      expect(result).toMatchObject(LEFT_PAD_CLONED);
+      expect(result.fallbackReason).toMatch(/^yarn install（classic） 失败/);
+      expect(result.selectionNote).toContain("选了 yarn");
+    }, 60_000);
+  });
 });
