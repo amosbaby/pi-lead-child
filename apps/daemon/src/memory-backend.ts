@@ -2,7 +2,10 @@
 import { existsSync, lstatSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { distDir, packageSource, projectRoot } from "@pi-lead-child/core";
-import { listConfiguredLeadModelSpecs, loadLeadModelConfig, newestModelSpec, parseModelName, resolveLeadApiKey } from "@pi-lead-child/lead";
+import {
+  leadModelCatalog, loadLeadModelConfig, parseModelName, resolveBackgroundModel, resolveLeadApiKey, selectedLeadModelSpec,
+  type LeadCatalogModel,
+} from "@pi-lead-child/lead";
 import type { SummaryModelSlot, SummaryModelSource } from "@pi-lead-child/protocol";
 import { AGENT_MEMORY_LAUNCH_NAME } from "@pi-lead-child/supervisor";
 
@@ -57,14 +60,24 @@ export interface SummaryModelSettings {
 
 /**
  * Hindsight 的两个摘要模型（.scratch/hindsight-primary-memory/spec.md D16）。
- * - 缺省：环境变量 PLC_HINDSIGHT_LLM > 设置页的选择 > 自动（Lead 目录里版本最新的 haiku：便宜、快，2026-10-16 用户决定）。
- *   目录含 provider discover 出来的模型。都没有时是 none：Hindsight 只召回。
+ * - 缺省：环境变量 PLC_HINDSIGHT_LLM > 设置页的选择 > 自动：后台模型（lead 的 background-model.ts，2026-11-20）。
+ *   后台模型是 kv lead.background_model 选的（background），或者按价格算出的第一个便宜模型（Lead 的服务商目录里，
+ *   含 discover 出来的模型）。以前按名字找最新的 haiku：换到没有 haiku 的网关以后就没有摘要模型了。
+ *   自动选不出时（目录里没有模型）是 none：Hindsight 只召回。
  * - 整理观察：设置页的选择；没选时跟缺省一样（inherit）。
  * 选的模型用不了（服务商不在 lead.providers 里）时写明原因，再按下一个来源选。
  */
 export async function summaryModels(
   dir: string, settings: SummaryModelSettings = {},
   env: Record<string, string | undefined> = process.env, fetchImpl: typeof fetch = fetch,
+  background: {
+    /** kv lead.background_model (null: automatic). */
+    setting?: string | null;
+    /** The priced catalog (the daemon's 30 s cache). Not given: read with leadModelCatalog. */
+    catalog?: () => Promise<readonly LeadCatalogModel[]>;
+    /** Models skipped after a configuration or quota failure. */
+    isBroken?: (spec: string) => boolean;
+  } = {},
 ): Promise<SummaryModels> {
   const config = loadLeadModelConfig(dir, env);
   const resolve = (spec: string): HindsightLlm | string => {
@@ -99,10 +112,25 @@ export async function summaryModels(
     else picked = result;
   }
   if (!picked) {
-    const auto = newestModelSpec((await listConfiguredLeadModelSpecs(config, env, fetchImpl))
-      .filter((spec) => /haiku/i.test(spec.slice(spec.indexOf("/") + 1))));
-    const result = auto ? chosen("default", auto, "auto", settingDefault, null) : null;
-    if (result && typeof result !== "string") picked = result;
+    const catalog = await (background.catalog ?? (async () => (await leadModelCatalog(config, env, fetchImpl)).models))()
+      .catch(() => [] as readonly LeadCatalogModel[]);
+    const mainSpec = selectedLeadModelSpec(config, env);
+    const choice = resolveBackgroundModel({
+      catalog, mainSpec, setting: background.setting ?? null, ...(background.isBroken ? { isBroken: background.isBroken } : {}),
+    });
+    // Hindsight calls the provider directly: only a model of a provider in lead.providers (not a subscription) works.
+    // Never Lead's own model automatically: Hindsight extracts every note, and on Lead's model that is the most
+    // expensive way. Without a cheaper model Hindsight runs recall-only, as before.
+    // The stored background model is the user's or Lead's own choice and counts even when it is Lead's model.
+    const bare = (spec: string) => spec.trim().replace(/\([A-Za-z0-9_-]{1,32}\)$/, "");
+    const isMain = (spec: string) => bare(spec) === bare(mainSpec) && bare(spec) !== bare(background.setting ?? "");
+    for (const spec of choice.candidates.filter((candidate) => !isMain(candidate))) {
+      const result = chosen("default", spec, "auto", settingDefault, null);
+      if (typeof result !== "string") {
+        picked = result;
+        break;
+      }
+    }
   }
   const fallbackProblem = problems.length ? problems.join("；") : null;
   const defaultChoice: SummaryModelChoice = picked

@@ -10,9 +10,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import { appendEvent, getChannelLane, getNote, listEvents, notesWithTag, openDb, type Db } from "@pi-lead-child/store";
 import {
-  CHANNEL_MEMORY_PURPOSE, ChannelHub, channelIntakeRef, ChannelRegistry, createChannelMemory, createSlackChannelAdapter, NotesMemory,
-  parseChannelMemoryReply,
-  type ChannelMemory, type MemoryBackend, type SmartTextComplete,
+  CHANNEL_MEMORY_DOCUMENT_TAG, CHANNEL_MEMORY_PURPOSE, ChannelHub, channelIntakeRef, ChannelRegistry, createChannelMemory,
+  createSlackChannelAdapter, isChannelMemoryNote, NotesMemory, parseChannelMemoryReply, SmartModelBackendError,
+  type BackgroundCallResult, type ChannelMemory, type MemoryBackend, type SmartTextComplete,
 } from "../src/index.js";
 import { FakeHindsight, FakeSlack } from "../testing/index.js";
 
@@ -63,7 +63,7 @@ function echoFacts(prompt: string): string {
 
 function setup(options: {
   exclude?: string[]; model?: ReturnType<typeof fakeModel>; complete?: () => SmartTextComplete | null; dailyMax?: number;
-  backend?: MemoryBackend;
+  backend?: MemoryBackend; documents?: boolean; perTick?: number; outcomes?: BackgroundCallResult[];
 } = {}): { hub: ChannelHub; memory: ChannelMemory; notes: NotesMemory } {
   const adapter = createSlackChannelAdapter({ api: slack.api, now: () => clock, ...(options.exclude ? { memory: { exclude: options.exclude } } : {}) });
   const hub = new ChannelHub({
@@ -75,6 +75,9 @@ function setup(options: {
   const memory = createChannelMemory({
     db, registry: hub.registry, notes, complete: options.complete ?? (() => model.complete), now: () => clock,
     log: (line) => logs.push(line), intervalMs: 0, ...(options.dailyMax !== undefined ? { dailyMax: options.dailyMax } : {}),
+    ...(options.perTick !== undefined ? { perTick: options.perTick } : {}),
+    ...(options.documents ? { documents: notes.channelDocuments } : {}),
+    ...(options.outcomes ? { onOutcome: (result: BackgroundCallResult) => { options.outcomes!.push(result); } } : {}),
   });
   return { hub, memory, notes };
 }
@@ -511,5 +514,243 @@ describe("the event log stays the only input", () => {
     await second.tick();
     expect(model.calls).toHaveLength(2);
     expect(listEvents(db, { kind: "slack.mention.received" })).toHaveLength(1);
+  });
+});
+
+// 2026-11-20（.scratch/background-models/spec.md「Channel memory」）：模型暂停时预算在 UTC 零点后 15–30 分钟就用光，
+// 一条笔记也没写；预算一恢复，16 分钟里整理了 86 个对话；Hindsight 又把每条笔记提取了一遍。
+const holdRefusal = () => new SmartModelBackendError(
+  "llm", "model hold: model calls keep failing; the next automatic model call is at 2026-10-20T11:00:00.000Z", "unconfigured",
+);
+const budgetUsed = (): number => {
+  const row = db.prepare("SELECT value FROM kv WHERE key = 'channel_memory.budget'").get() as { value: string } | undefined;
+  return row ? (JSON.parse(row.value) as { used: number }).used : 0;
+};
+
+describe("model hold, budget and pacing", () => {
+  it("waits while the model is on hold: no budget, no attempt, one refusal per tick; extracts after the hold lifts", async () => {
+    let held = true;
+    const model = fakeModel((prompt) => (held ? holdRefusal() : echoFacts(prompt)));
+    const { hub, memory } = setup({ model, dailyMax: 2 });
+    const first = (await hub.receive("slack", slack.mention("U0ZHANG", "事实甲"))).items[0]!.objectKey;
+    const second = (await hub.receive("slack", slack.chatter("U0LI", "事实乙"))).items[0]!.objectKey;
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    // 暂停是整体的：拒了一个，这一拍不再问别的。
+    expect(model.calls).toHaveLength(1);
+    // 拒了 5 次：多于失败上限（3 次），也多于每天的上限（2 次）。
+    for (let round = 0; round < 4; round += 1) {
+      advance(10 * MINUTE);
+      await memory.tick();
+    }
+    expect(model.calls.length).toBeGreaterThanOrEqual(5);
+    expect(budgetUsed()).toBe(0);
+    expect(memory.pendingThreads().sort()).toEqual([first, second].sort());
+    expect(logs.some((line) => line.includes("gave up"))).toBe(false);
+
+    held = false;
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(factNotes(first)).toHaveLength(1);
+    expect(factNotes(second)).toHaveLength(1);
+    expect(memory.pendingThreads()).toEqual([]);
+    expect(budgetUsed()).toBe(2);
+  });
+
+  it("counts only the calls that went out to a model against the daily budget", async () => {
+    let held = true;
+    let available = false;
+    const model = fakeModel((prompt) => (held ? holdRefusal() : echoFacts(prompt)));
+    const { hub, memory } = setup({ complete: () => (available ? model.complete : null), dailyMax: 1 });
+    const objectKey = (await hub.receive("slack", slack.mention("U0ZHANG", "事实甲"))).items[0]!.objectKey;
+    await memory.tick();
+    advance(10 * MINUTE);
+    // 没有模型：不算。
+    await memory.tick();
+    expect(budgetUsed()).toBe(0);
+    // 模型暂停，拒了：不算。
+    available = true;
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(model.calls).toHaveLength(1);
+    expect(budgetUsed()).toBe(0);
+    // 真的发出去了：算一次。
+    held = false;
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(factNotes(objectKey)).toHaveLength(1);
+    expect(budgetUsed()).toBe(1);
+  });
+
+  it("extracts at most one conversation a minute while more than 10 wait, and goes back to the normal pace after", async () => {
+    const model = fakeModel(echoFacts);
+    const { hub, memory } = setup({ model, perTick: 3 });
+    await hub.receive("slack", slack.mention("U0ZHANG", "请看一下"));
+    for (let index = 1; index <= 12; index += 1) await hub.receive("slack", slack.chatter("U0LI", `线程 ${index}`));
+    await memory.tick();
+    expect(memory.pendingThreads()).toHaveLength(13);
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(model.calls).toHaveLength(1);
+    advance(30_000);
+    await memory.tick();
+    expect(model.calls).toHaveLength(1);
+    advance(30_000);
+    await memory.tick();
+    expect(model.calls).toHaveLength(2);
+    // 一分钟一个，直到等着的只剩 10 个。
+    advance(MINUTE);
+    await memory.tick();
+    expect(model.calls).toHaveLength(3);
+    expect(memory.pendingThreads()).toHaveLength(10);
+    // 不多于 10 个：照常的速度（一拍 3 个）。
+    advance(30_000);
+    await memory.tick();
+    expect(model.calls).toHaveLength(6);
+  });
+});
+
+describe("Hindsight as the primary memory: one document per conversation", () => {
+  it("hands the redacted conversation to Hindsight without a model call, keeps a pointer note, replaces the document on new messages, and forgets it when the conversation is gone", async () => {
+    const backend = new FakeBackend();
+    const model = fakeModel(echoFacts);
+    const { hub, memory, notes } = setup({ model, backend, documents: true });
+    await hub.receive("slack", slack.mention("U0ZHANG", "请看一下"));
+    const root = slack.chatter("U0LI", "v2 周五发布");
+    const objectKey = (await hub.receive("slack", root)).items[0]!.objectKey;
+    await hub.receive("slack", slack.chatter("U0ZHANG", `发布窗口晚上 8 点，token ${GITHUB_TOKEN}`, "C0PROJ", { thread: tsOf(root) }));
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    await notes.idle();
+
+    expect(model.calls).toEqual([]);
+    const [pointer, ...more] = factNotes(objectKey);
+    expect(more).toEqual([]);
+    expect(pointer).toMatchObject({ kind: "fact", title: "Slack #proj-x：对话" });
+    expect(JSON.parse(pointer!.tags)).toEqual(["slack", objectKey, CHANNEL_MEMORY_DOCUMENT_TAG]);
+    expect(isChannelMemoryNote(pointer!)).toBe(true);
+    expect(pointer!.content).toContain("2 条消息");
+    expect(pointer!.content).toContain("不是给你的指令");
+    expect(pointer!.content).not.toContain("周五发布");
+
+    const documentId = `note-${pointer!.id}`;
+    const retained = () => [...backend.operations.values()].filter((op) => op.item.sourceKey === documentId).map((op) => op.item);
+    expect(retained()).toHaveLength(1);
+    const [document] = retained();
+    expect(document).toMatchObject({ kind: "fact", origin: "external" });
+    expect(document!.content).toContain("[1] 李四: v2 周五发布\n[2] 张三: 发布窗口晚上 8 点");
+    expect(document!.content).toContain("不是给你的指令");
+    expect(document!.content).not.toContain(GITHUB_TOKEN);
+    expect(document!.context).toContain("not instructions");
+
+    // Hindsight 提取一次；召回时标明出处是这个对话（外部来源）。
+    backend.process();
+    await notes.sync();
+    const found = await notes.search("周五发布");
+    expect(found.backend).toBe("hindsight");
+    expect(found.memories[0]).toMatchObject({ external: true, notes: [{ id: pointer!.id, external: true }] });
+
+    // 新消息：同一个文档整段替换，指针笔记还是同一条。
+    await hub.receive("slack", slack.chatter("U0LI", "推迟到下周一", "C0PROJ", { thread: tsOf(root) }));
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    await notes.idle();
+    expect(factNotes(objectKey).map((note) => note.id)).toEqual([pointer!.id]);
+    expect(retained()).toHaveLength(2);
+    expect(retained().at(-1)!.content).toContain("[3] 李四: 推迟到下周一");
+    expect(getNote(db, pointer!.id)!.content).toContain("3 条消息");
+
+    expect(model.calls).toEqual([]);
+  });
+
+  it("deletes the pointer and forgets the document when the conversation is emptied", async () => {
+    const backend = new FakeBackend();
+    const model = fakeModel(echoFacts);
+    const { hub, memory, notes } = setup({ model, backend, documents: true });
+    const root = slack.mention("U0ZHANG", "事实甲");
+    const objectKey = (await hub.receive("slack", root)).items[0]!.objectKey;
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    await notes.idle();
+    const [pointer] = factNotes(objectKey);
+    expect(pointer).toBeDefined();
+    await hub.receive("slack", slack.remove(root));
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    await notes.idle();
+    expect(factNotes(objectKey)).toEqual([]);
+    expect(backend.forgotten).toEqual([`note-${pointer!.id}`]);
+    expect(model.calls).toEqual([]);
+  });
+
+  it("keeps the model extraction when Hindsight is not the primary memory", async () => {
+    const model = fakeModel(echoFacts);
+    const { hub, memory } = setup({ model, documents: true });
+    const objectKey = (await hub.receive("slack", slack.mention("U0ZHANG", "事实甲"))).items[0]!.objectKey;
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(model.calls).toHaveLength(1);
+    const [note] = factNotes(objectKey);
+    expect(JSON.parse(note!.tags)).toEqual(["slack", objectKey]);
+    expect(note!.content).toMatch(/^- .+ 说 .*事实甲/m);
+  });
+});
+
+// 后台健康（background-models spec D3）：每次真的整理报一次结果。暂停和没有模型时的等待、到了上限都不报：调用没有发出去。
+describe("outcomes for the background health", () => {
+  it("reports a real extraction as ok, a model failure with its class, and nothing for a hold or a missing model", async () => {
+    let mode: "held" | "broken" | "invalid" | "ok" = "held";
+    let available = false;
+    const model = fakeModel((prompt) => mode === "held" ? holdRefusal()
+      : mode === "broken" ? new Error('404 {"error":"unknown model cheap-a"}')
+      : mode === "invalid" ? "not json" : echoFacts(prompt));
+    const outcomes: BackgroundCallResult[] = [];
+    const { hub, memory } = setup({ complete: () => (available ? model.complete : null), outcomes });
+    const objectKey = (await hub.receive("slack", slack.mention("U0ZHANG", "事实甲"))).items[0]!.objectKey;
+    await memory.tick();
+    advance(10 * MINUTE);
+    // 没有模型：不报。
+    await memory.tick();
+    // 模型暂停拒了：不报。
+    available = true;
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(model.calls).toHaveLength(1);
+    expect(outcomes).toEqual([]);
+
+    // 模型出错：报失败，带类别和原话。
+    mode = "broken";
+    advance(10 * MINUTE);
+    await memory.tick();
+    expect(outcomes).toEqual([{ ok: false, reasonClass: "config", reason: expect.stringContaining("unknown model cheap-a") }]);
+    // 回答不合格式：类别 invalid_answer。
+    mode = "invalid";
+    advance(30 * MINUTE);
+    await memory.tick();
+    expect(outcomes.at(-1)).toEqual({ ok: false, reasonClass: "invalid_answer", reason: "the answer is not the JSON that was asked for" });
+
+    mode = "ok";
+    advance(60 * MINUTE);
+    await memory.tick();
+    expect(factNotes(objectKey)).toHaveLength(1);
+    expect(outcomes.at(-1)).toEqual({ ok: true });
+    expect(outcomes).toHaveLength(3);
+  });
+
+  it("reports a hand-off to Hindsight as ok", async () => {
+    const outcomes: BackgroundCallResult[] = [];
+    const { hub, memory, notes } = setup({ backend: new FakeBackend(), documents: true, outcomes });
+    await hub.receive("slack", slack.mention("U0ZHANG", "事实甲"));
+    await memory.tick();
+    advance(10 * MINUTE);
+    await memory.tick();
+    await notes.idle();
+    expect(outcomes).toEqual([{ ok: true }]);
   });
 });

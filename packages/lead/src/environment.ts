@@ -14,11 +14,13 @@
 //   - collectLeadEnvironment 读各数据源，拼出快照。每个数据源读不到时只影响它自己那一行。
 // 短暂的状态不列：runtime 的 degraded（自动重试到了上限，派发照常进行，过一会儿自己消失）不列；
 // 连接的 degraded（暂时连不上，daemon 在重试）按「已连接」列。这两样用 get_runtime_health、list_connections 现查。
+import type { LeadShadowDto } from "@pi-lead-child/protocol";
 import type { ConnectionHub } from "@pi-lead-child/connections";
 import { projectRoot, SANDBOX_SECRET_HOSTS_ENV, sandboxSecrets, tildeHome } from "@pi-lead-child/core";
 import { currentModelCatalog } from "@pi-lead-child/engine";
 import { redactAndCap, type DecisionModelDto, type MemorySettingsDto } from "@pi-lead-child/protocol";
-import { getHostBypass, incidentModel, listUnhealthyRuntimeTargets, type Db } from "@pi-lead-child/store";
+import {
+  getLeadShadow, getHostBypass, incidentModel, listUnhealthyRuntimeTargets, type Db } from "@pi-lead-child/store";
 import { disabledRuntimes } from "@pi-lead-child/runtime";
 import { realpathSync } from "node:fs";
 import { homedir } from "node:os";
@@ -99,6 +101,21 @@ export interface LeadEnvironmentSnapshot {
   hostBypass?: { enabled: boolean } | null;
   // Where Lead's own code is (stableCodeRoot). Null when unknown; missing means unknown.
   codeRoot?: string | null;
+  // 你的分身 shadow 的设置（lead_shadow，用户 2026-11-19）。读不到时为 null；不给时当作读不到。
+  shadow?: LeadShadowDto | null;
+}
+
+const SHADOW_MODE_WORDS: Record<LeadShadowDto["mode"], string> = {
+  off: "关（后台事件都由你在主会话里处理）",
+  trial: "试运行（shadow 也处理，但动作不执行，只记下来比对）",
+  on: "开（按比例交给 shadow，它处理不了的交回给你）",
+};
+
+function shadowLine(shadow: LeadShadowDto | null | undefined): string {
+  if (!shadow) return "- 你的分身 shadow：读不到设置。";
+  const shares = `外部消息 ${shadow.shares.channel}%、工单 ${shadow.shares.ticket}%、其他系统事件 ${shadow.shares.other}%`;
+  return `- 你的分身 shadow：${SHADOW_MODE_WORDS[shadow.mode]}；比例：${shares}；模型：${shadow.model ?? "和你相同"}；`
+    + `合批窗口 ${shadow.gatherSeconds} 秒。改用 perform_action(target_type='lead_shadow', action='set')。`;
 }
 
 // ── 纯函数：快照 → 文字 ─────────────────────────────────────────────────────────────────
@@ -332,6 +349,7 @@ export function renderEnvironmentDetails(snapshot: LeadEnvironmentSnapshot, env:
     ...runtimeLines(snapshot.runtimes),
     connectionLine(snapshot.connections),
     ...hostBypassLines(snapshot.hostBypass ?? null),
+    shadowLine(snapshot.shadow),
     sandboxSecretsLine(env),
     ...codeRootLines(snapshot.codeRoot ?? null),
   ].join("\n");
@@ -427,5 +445,6 @@ export function collectLeadEnvironment(sources: LeadEnvironmentSources): LeadEnv
       : null,
     hostBypass: attempt(() => ({ enabled: getHostBypass(sources.db, new Date()).enabled }), null),
     codeRoot: attempt(() => (sources.codeRoot ? sources.codeRoot() : leadCodeRoot()), null),
+    shadow: attempt(() => getLeadShadow(sources.db), null),
   };
 }

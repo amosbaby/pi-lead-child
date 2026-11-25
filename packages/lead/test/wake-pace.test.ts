@@ -25,6 +25,19 @@ describe("wakePaceDecision", () => {
     expect(wakePaceDecision(facts({ firstWaitingAt: 0 }))).toEqual({ wake: true, why: "window_end" });
   });
 
+  it("gathers events that arrive close together, warm or cold, when a gather window is set", () => {
+    const SECOND = 1_000;
+    const warm = { lastModelCallAt: 100 * MINUTE - MINUTE, gatherMs: 20 * SECOND };
+    expect(wakePaceDecision(facts({ ...warm, coldBatchMs: 0 }))).toEqual({ wake: false, at: 100 * MINUTE + 20 * SECOND });
+    expect(wakePaceDecision(facts({ ...warm, firstWaitingAt: 100 * MINUTE - 20 * SECOND }))).toEqual({ wake: true, why: "gathered" });
+    // Cold with a cold window: the longer cold rule holds.
+    expect(wakePaceDecision(facts({ gatherMs: 20 * SECOND }))).toEqual({ wake: false, at: 130 * MINUTE });
+    // Cold without a cold window: the gather window still merges neighbours.
+    expect(wakePaceDecision(facts({ coldBatchMs: 0, gatherMs: 20 * SECOND }))).toEqual({ wake: false, at: 100 * MINUTE + 20 * SECOND });
+    expect(wakePaceDecision(facts({ ...warm, urgent: true }))).toEqual({ wake: true, why: "urgent" });
+    expect(wakePaceDecision(facts({ ...warm, coldBatchMs: 0, gatherMs: 0 }))).toEqual({ wake: true, why: "off" });
+  });
+
   it("never holds something urgent", () => {
     expect(wakePaceDecision(facts({ urgent: true }))).toEqual({ wake: true, why: "urgent" });
   });

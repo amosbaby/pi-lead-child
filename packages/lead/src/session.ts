@@ -16,11 +16,13 @@ import {
   SettingsManager,
   type ExtensionFactory,
   type Skill,
+  type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { createLeadToolset, GRANT_GATED_LEAD_TOOLS, type LeadDeps } from "./tools.js";
 import { LEAD_CODEMODE_INLINE_BUDGET, LEAD_CODEMODE_TOOLS } from "./tool-exposure.js";
 import { CONNECTION_QUIET_TOOLS } from "./connection-tools.js";
 import { renderLeadSystemPrompt } from "./prompt.js";
+import { SHADOW_LEAD_TOOL_NAMES, renderShadowSystemPrompt } from "./shadow/shadow.js";
 import { IDENTITY_SECTION, renderLeadIdentity } from "./identity.js";
 import { designPreferencesFields } from "@pi-lead-child/protocol";
 import { APPEARANCE_SECTION, renderAppearance } from "./appearance.js";
@@ -34,7 +36,8 @@ import { installToolAbortGuard, type ToolAbortGuardOptions } from "./tool-abort-
 import type { LeadAbortReason } from "./scheduler/controller.js";
 import { compactionChunksExtension, PREFIX_WARM_LONG_MS, PREFIX_WARM_MS, type CompactionProgress } from "./compaction-chunks.js";
 import {
-  getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory, renderStandingOrdersForLead,
+  getBackgroundModel, getDesignPreferences, getLeadProfile, getReplyStyle, leadProfileFields, recordDecisionModelCall, renderCoreMemory,
+  renderStandingOrdersForLead,
 } from "@pi-lead-child/store";
 import { leadHasCapability } from "@pi-lead-child/store";
 import {
@@ -46,13 +49,17 @@ import {
   parseModelName,
   promptCacheKeyEnabled,
   cacheRetentionOf,
+  leadModelCatalog,
   registerLeadProviders,
   resolveLeadModel,
   selectedLeadModelSpec,
   type LeadModelConfig,
 } from "./model-config.js";
 import { cacheRetentionExtension, promptCacheKeyExtension, RequestPrefixRecorder } from "./prompt-cache.js";
-import { configuredLeadModelSpecs, createLeadSmartModel, isValidSmartModelSpec, selectSmartModelSpec } from "./smart-model.js";
+import {
+  createLeadSmartModel, isValidSmartModelSpec, registeredLeadCatalog, selectSmartModelSpec, type BackgroundModelHooks,
+} from "./smart-model.js";
+import { BrokenBackgroundModels, createLeadCatalogSource, type LeadCatalogSource } from "./background-model.js";
 import type { ModelHoldPort } from "./model-hold.js";
 import { createCredibilityExtension } from "./credibility/extension.js";
 import { LEAD_CODEMODE_TOOL, LEAD_HAND_TOOLS, leadHandsExtension } from "./hands.js";
@@ -239,6 +246,13 @@ export async function createLeadSession(opts: {
   llmFallback?: () => string | null;
   // 模型暂停（model-hold.ts）：决策模型的 LLM 后端据此停调模型，账号级的失败也报给它。daemon 建一个，所有会话共用。
   modelHold?: ModelHoldPort;
+  // The priced model catalog (background-model.ts), shared with the daemon's own 30 s cache. Not given: the session
+  // reads leadModelCatalog itself, cached for 30 s.
+  modelCatalog?: LeadCatalogSource;
+  // Background models that failed with a configuration or quota error (1 hour). The daemon shares it with background_model.read.
+  brokenBackgroundModels?: BrokenBackgroundModels;
+  // Health hooks of the background model (smart-model.ts BackgroundModelHooks).
+  backgroundModelHooks?: BackgroundModelHooks;
   // 「你运行的环境」一节里 daemon 提供的部分：决策模型的设置和记忆服务的状态（工单 13）。不给时那两行写「没有提供」。
   environment?: () => LeadDaemonEnvironment;
   // 用户给 agent 装的 skill 的目录（userSkillDirs）。daemon 的入口传；不传时只有 Lead 自带的。
@@ -269,6 +283,10 @@ export async function createLeadSession(opts: {
   foregroundWaits?: ForegroundWaits;
   // 订阅账号的失败和成功（subscriptions.ts，模型配置方案 C 的 D5）：每次请求的结果记进去，daemon 换账号时问它。
   subscriptionAccounts?: SubscriptionAccountTracker;
+  // Where the session file lives. Not given: <dataDir>/lead-sessions, Lead's one main session. A topic (topic.ts)
+  // gives its own folder, so its session is a second Lead with the same prompt, tools and skills, and a clean context.
+  // One folder holds one session: the session continues the newest file in it.
+  sessionDir?: string;
   log?: (line: string) => void;
 }): Promise<{
   session: LeadEngine; modelName: string; syncToolAccess: () => void; reloadExtensions: () => Promise<void>;
@@ -289,6 +307,10 @@ export async function createLeadSession(opts: {
   refreshModelAuth: (providers: readonly string[]) => Promise<void>;
   // 删掉的订阅账号：从会话的 ModelRuntime 里注销（扩展重新加载不会注销以前注册的 provider）。
   forgetProvider: (provider: string) => void;
+  // shadow（shadow/）：和主会话同一份工具定义和依赖，只换这一批自己的回合来历。系统提示词每批现取。
+  shadow: LeadShadowParts;
+  // The session has no message yet (a new session file). A topic gives its background with the first prompt then.
+  isFresh: () => boolean;
 }> {
   const modelRuntime = await ModelRuntime.create({
     allowModelNetwork: false,
@@ -303,17 +325,29 @@ export async function createLeadSession(opts: {
   const prefixFor = (current: { provider: string; id: string }) => requestPrefix.snapshot(current);
   // 写压缩摘要的便宜模型（compaction-chunks.ts 的 chooseSummaryRoute）：只在摘要用不上服务商的缓存时用它。每次压缩时读：
   //   0. config.json 的 lead.compactionModel（"main" 是总用 Lead 自己的模型）；
-  //   1. 否则按 SmartModel 的选法（PLC_SMART_MODEL，或者名字带 haiku 的最新模型）。
+  //   1. 否则按 SmartModel 的选法（PLC_SMART_MODEL，或者后台模型：kv lead.background_model，自动时按价格选的便宜模型，
+  //      background-model.ts）。目录用最近一次读到的（不等网络）；还没读到时用注册的模型，按名字里的型号选。
   // 选出来的就是 Lead 的模型、或者没有注册时，没有便宜模型。
+  const modelCatalog = opts.modelCatalog
+    ?? createLeadCatalogSource(() => leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => result.models));
+  const brokenBackgroundModels = opts.brokenBackgroundModels ?? new BrokenBackgroundModels();
+  const backgroundSetting = (): string | null => {
+    try {
+      return getBackgroundModel(opts.db).model;
+    } catch {
+      return null;
+    }
+  };
   // 前缀在服务商的缓存里留多久：按这个服务商的 cacheRetention（prompt-cache.ts 的 cacheRetentionExtension）。
   const prefixWarmMsFor = (main: { provider: string }) => (cacheRetentionOf(providerSettings, main.provider) === "long" ? PREFIX_WARM_LONG_MS : PREFIX_WARM_MS);
   const summaryModelFor = <M extends { provider: string; id: string }>(main: M): M | undefined => {
     const setting = loadPlcConfig(opts.dataDir).lead?.compactionModel?.trim();
     if (setting === "main") return undefined;
     const leadSpec = `${main.provider}/${main.id}`;
+    const snapshot = modelCatalog.snapshot();
     const chosen = setting && isValidSmartModelSpec(setting) ? setting : selectSmartModelSpec({
-      configuredSpecs: configuredLeadModelSpecs(providerSettings, (provider) => modelRuntime.getModels(provider).map((model) => model.id)),
-      leadSpec,
+      catalog: snapshot?.length ? snapshot : registeredLeadCatalog(providerSettings, modelRuntime),
+      leadSpec, setting: backgroundSetting(), isBroken: brokenBackgroundModels.isBroken,
     }).spec;
     if (chosen === leadSpec) return undefined;
     const { provider, id } = parseModelName(chosen);
@@ -333,6 +367,10 @@ export async function createLeadSession(opts: {
     // 说明出现时就打：读 backend 时才知道决策模型能不能用，原因要排在下面那一行之前。
     const built = createLeadSmartModel({
       modelRuntime, config: leadModels, leadSpec: spec, dataDir: opts.dataDir,
+      // Lead's model now: the configured first choice (a switch rewrites config.json), not a subscription account.
+      currentLeadSpec: () => selectedLeadModelSpec(loadLeadModelConfig(opts.dataDir)),
+      catalog: modelCatalog, backgroundModel: backgroundSetting, broken: brokenBackgroundModels,
+      ...(opts.backgroundModelHooks ?? {}),
       ...(opts.decisionModel ? { decisionModel: opts.decisionModel } : {}),
       ...(opts.llmFallback ? { llmFallback: opts.llmFallback } : {}),
       ...(opts.modelHold ? { hold: opts.modelHold } : {}),
@@ -669,7 +707,7 @@ export async function createLeadSession(opts: {
     tools: [...customTools.map((t) => t.name), ...LEAD_ALL_BUILTIN_TOOLS, ...solPi.tools],
     customTools,
     // lead 长期会话：续接最近一次，持久化在 dataDir/lead-sessions
-    sessionManager: SessionManager.continueRecent(opts.dataDir, join(opts.dataDir, "lead-sessions")),
+    sessionManager: SessionManager.continueRecent(opts.dataDir, opts.sessionDir ?? join(opts.dataDir, "lead-sessions")),
   });
   // 用户排队的消息（工单 04，spec D6）：Lead 答完这一轮后，连着排队的几条一起放进同一轮。
   session.setFollowUpMode("all");
@@ -738,6 +776,8 @@ export async function createLeadSession(opts: {
     refreshProviders: async () => {
       const config = loadLeadModelConfig(opts.dataDir);
       providerSettings = config;
+      // The background model is resolved from the catalog: read it again on the next call.
+      modelCatalog.invalidate();
       for (const note of await registerLeadProviders(modelRuntime, config)) {
         console.error(`[lead] ${note}`);
       }
@@ -755,5 +795,48 @@ export async function createLeadSession(opts: {
     forgetProvider: (provider) => {
       if (modelRuntime.getRegisteredProviderIds().includes(provider)) modelRuntime.unregisterProvider(provider);
     },
+    shadow: leadShadowParts(toolDeps),
+    isFresh: () => session.messages.length === 0,
+  };
+}
+
+/** shadow 要的两样东西（shadow/shadow.ts）：这一批的工具、现在的系统提示词。 */
+export interface LeadShadowParts {
+  /**
+   * Lead 的工具（同一份定义，同一组依赖），换成这一批的回合来历：没有用户的一轮（currentTurnId 为 null），
+   * 回合来历由 daemon 按这一批的事件和读过的工具记。只留 shadow 的那些（wrapShadowTools 再筛一次并套上规则）。
+   */
+  tools(turn: { turnOrigin: NonNullable<LeadDeps["turnOrigin"]>; turnUserActions?: LeadDeps["turnUserActions"] }): ToolDefinition<any>[];
+  /** Lead 的系统提示词（常设指令、核心记忆现取）加身份和代回复风格（renderShadowSystemPrompt）。 */
+  systemPrompt(): string;
+  /** 这个连接的这个工具是不是只读（shadow 的 call_connection_tool 只放行只读的）。没接连接时一律不是。 */
+  connectionReadOnly(connection: string, tool: string): boolean;
+}
+
+export function leadShadowParts(toolDeps: LeadDeps): LeadShadowParts {
+  const wanted = new Set(SHADOW_LEAD_TOOL_NAMES);
+  return {
+    tools: (turn) => {
+      const { handoff: _handoff, turnEvidence: _evidence, ...shared } = toolDeps;
+      return createLeadToolset({
+        ...shared,
+        currentTurnId: () => null,
+        cancelBudgetTurnId: () => null,
+        turnOrigin: turn.turnOrigin,
+        ...(turn.turnUserActions ? { turnUserActions: turn.turnUserActions } : {}),
+      }).filter((tool) => wanted.has(tool.name));
+    },
+    systemPrompt: () => {
+      const db = toolDeps.db;
+      const read = <T>(what: () => T, fallback: T): T => {
+        try { return what(); } catch { return fallback; }
+      };
+      return renderShadowSystemPrompt({
+        lead: renderLeadSystemPrompt(read(() => renderCoreMemory(db), null), read(() => renderStandingOrdersForLead(db), null)),
+        identity: read(() => renderLeadIdentity(leadProfileFields(getLeadProfile(db))), null),
+        replyStyle: read(() => renderReplyStyle(getReplyStyle(db).text), null),
+      });
+    },
+    connectionReadOnly: (connection, tool) => toolDeps.connections?.isReadOnlyTool(connection, tool) ?? false,
   };
 }

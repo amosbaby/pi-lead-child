@@ -5,9 +5,13 @@
 //   · 托盘里的引用在原文上留标记（Q-3，CSS Custom Highlight API，不改 DOM）：悬停时标记和托盘那一行一起加深，
 //     点标记回到同一个浮层改这一条（P17.4），按钮换成「保存」和「删掉」。
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react';
-import { Button, Column, Icon, IconButton, Row, Text, TextField, ViewportOverlay, palette } from '@pi-lead-child/components';
+import { Box, Button, Column, elevation, Icon, IconButton, Pressable, Row, Text, TextField, ViewportOverlay, palette } from '@pi-lead-child/components';
 
 import { useMessages } from '@/i18n';
+
+import type { ChatQuoteSource } from '@pi-lead-child/protocol';
+
+import { topicsMessages } from '@/features/topics/topics.messages';
 
 import { quoteMessages } from './quote.messages';
 import { quoteDrafts, useQuoteDrafts, type PendingQuote } from './quoteDrafts';
@@ -123,13 +127,22 @@ function rangesOfDrafts(drafts: readonly { id: string; source: PendingQuote['sou
 // 有 DOM 选区的地方（web）才有选字回复。
 const HAS_DOM_SELECTION = typeof document !== 'undefined' && typeof window !== 'undefined' && typeof window.getSelection === 'function';
 
-export function SelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; onSendNow: () => void }) {
+type SelectionReplyLayerProps = {
+  enabled: boolean;
+  onSendNow: () => void;
+  // "Side chat" (features/topics, design rules P18): open a topic from the selected text. Given only when the daemon
+  // has topics. The second button is there for a text of the conversation (a turn), not for an external message card.
+  onSideTopic?: (source: Extract<ChatQuoteSource, { kind: 'turn' }>, text: string) => void;
+};
+
+export function SelectionReplyLayer(props: SelectionReplyLayerProps) {
   if (!HAS_DOM_SELECTION) return null;
-  return <DomSelectionReplyLayer enabled={enabled} onSendNow={onSendNow} />;
+  return <DomSelectionReplyLayer {...props} />;
 }
 
-function DomSelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; onSendNow: () => void }) {
+function DomSelectionReplyLayer({ enabled, onSendNow, onSideTopic }: SelectionReplyLayerProps) {
   const m = useMessages(quoteMessages);
+  const topicWords = useMessages(topicsMessages);
   const drafts = useQuoteDrafts((state) => state.drafts);
   const pending = useQuoteDrafts((state) => state.pending);
   const activeId = useQuoteDrafts((state) => state.activeId);
@@ -167,19 +180,35 @@ function DomSelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; onSe
     setPicked(null);
   }, []);
 
-  // 快捷键 R：选区上有「回复」时打开浮层。输入框里打字时不算。
+  // "Side chat" on the selection: the text and where it is go to the caller, and the selection is cleared.
+  const sideTopic = useCallback((choice: Picked) => {
+    const source = quoteSourceOf(choice.key);
+    if (!source || source.kind !== 'turn' || !onSideTopic) return;
+    setPicked(null);
+    window.getSelection()?.removeAllRanges();
+    onSideTopic(source, choice.text);
+  }, [onSideTopic]);
+  const canSideTopic = Boolean(onSideTopic && picked && quoteSourceOf(picked.key)?.kind === 'turn');
+
+  // 快捷键 R：选区上有「回复」时打开浮层。输入框里打字时不算。F: "Side chat", when the button is there.
   useEffect(() => {
     if (!picked) return undefined;
     const onKey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       if (target && (target.isContentEditable || /^(INPUT|TEXTAREA)$/u.test(target.tagName))) return;
-      if (event.key.toLowerCase() !== 'r' || event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (event.key.toLowerCase() === 'f' && canSideTopic) {
+        event.preventDefault();
+        sideTopic(picked);
+        return;
+      }
+      if (event.key.toLowerCase() !== 'r') return;
       event.preventDefault();
       open(picked);
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [open, picked]);
+  }, [canSideTopic, open, picked, sideTopic]);
 
   // 原文上的标记：托盘里的、手上正在写的（新的一段保持选区的样子，所以不算）。悬停或正在改的一条用加深的样子。
   useEffect(() => {
@@ -290,7 +319,14 @@ function DomSelectionReplyLayer({ enabled, onSendNow }: { enabled: boolean; onSe
   const panelOpen = Boolean(pending && panelSpot);
   return (
     <>
-      {picked && !panelOpen ? <ReplyPill spot={picked.spot} label={m.reply} onPress={() => open(picked)} /> : null}
+      {picked && !panelOpen ? (
+        <ReplyPill
+          spot={picked.spot}
+          label={m.reply}
+          onPress={() => open(picked)}
+          {...(canSideTopic ? { side: { label: topicWords.sideChat, hint: topicWords.sideChatLabel, onPress: () => sideTopic(picked) } } : {})}
+        />
+      ) : null}
       {hoverSpot && !panelOpen && activeId ? <HoverHint spot={hoverSpot} label={m.editHint} /> : null}
       {panelOpen && pending && panelSpot ? (
         <QuotePanel
@@ -311,14 +347,67 @@ function clampLeft(center: number, width: number): number {
 }
 
 // Q-1：选区上方正中，放不下时放在下方。
-function ReplyPill({ spot, label, onPress }: { spot: Spot; label: string; onPress: () => void }) {
+// Without "Side chat" (the daemon has no topics): the one "Reply" button, as before.
+// With it (theme 11.26, K-1): one raised bar with two parts and a thin line between them, as in the design:
+// "Reply  R" and "Side chat  F". The letter is the shortcut.
+function ReplyPill({ spot, label, onPress, side }: {
+  spot: Spot; label: string; onPress: () => void;
+  side?: { label: string; hint: string; onPress: () => void };
+}) {
   const above = spot.top - GAP_FROM_TEXT - PILL_HEIGHT;
   const top = above >= VIEWPORT_MARGIN ? above : spot.bottom + GAP_FROM_TEXT;
   const center = (spot.left + spot.right) / 2;
+  if (!side) {
+    return (
+      <ViewportOverlay top={top} left={center} centerX keepSelection>
+        <Button testID="quote-reply-button" label={label} icon="reply" size="sm" variant="outline" tone="neutral" onPress={onPress} />
+      </ViewportOverlay>
+    );
+  }
   return (
     <ViewportOverlay top={top} left={center} centerX keepSelection>
-      <Button testID="quote-reply-button" label={label} icon="reply" size="sm" variant="outline" tone="neutral" onPress={onPress} />
+      <Row
+        testID="selection-actions"
+        items="center"
+        h={PILL_HEIGHT}
+        // spacing-exempt: the bar's own spec (theme K-1): 32 high, 4 inside, the parts are 24 high
+        px={4}
+        bg="surface"
+        rounded="md"
+        boxShadow={elevation.raised}
+      >
+        <BarPart testID="quote-reply-button" icon="reply" label={label} shortcut="R" onPress={onPress} />
+        {/* spacing-exempt: the divider of the bar, 1 wide and 16 high, 2 on each side */}
+        <Box w={1} h={16} mx={2} bg="border-soft" />
+        <BarPart testID="side-topic-button" icon="branch" label={side.label} hint={side.hint} shortcut="F" onPress={side.onPress} />
+      </Row>
     </ViewportOverlay>
+  );
+}
+
+function BarPart({ testID, icon, label, hint, shortcut, onPress }: {
+  testID: string; icon: 'reply' | 'branch'; label: string; hint?: string; shortcut: string; onPress: () => void;
+}) {
+  return (
+    <Pressable
+      testID={testID}
+      aria-label={hint ?? label}
+      aria-keyshortcuts={shortcut}
+      feedback="none"
+      onPress={onPress}
+      // spacing-exempt: a part of the bar (theme K-1): 24 high, 8 left and right
+      h={24}
+      px={8} // spacing-exempt: see the line above
+      rounded="sm"
+      justify="center"
+      bg={{ default: 'transparent', hover: 'surface-muted' }}
+    >
+      <Row items="center" gap="icon-label">
+        <Icon name={icon} size={16} color="text" />
+        <Text size="label" weight="semibold">{label}</Text>
+        <Text size="meta" mono tone="muted">{shortcut}</Text>
+      </Row>
+    </Pressable>
   );
 }
 

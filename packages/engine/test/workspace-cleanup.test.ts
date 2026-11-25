@@ -183,6 +183,124 @@ describe("the sweep and an isolated worktree of a finished ticket", () => {
   });
 });
 
+// 分支在 GitHub 上合并（squash 或普通合并），用户本地的 main 没有 pull：以前只比本地 HEAD 的祖先关系，
+// 永远算成「没合并」，清理一直等用户说合并还是放弃，分支 git branch -d 也删不掉。
+describe("a branch that was merged on origin", () => {
+  let origin: string;
+
+  beforeEach(() => {
+    origin = join(dir, "origin.git");
+    execFileSync("git", ["init", "-q", "--bare", "-b", "main", origin]);
+    git(repo, "remote", "add", "origin", origin);
+    git(repo, "push", "-q", "origin", "main");
+    git(repo, "fetch", "-q", "origin");
+    git(repo, "remote", "set-head", "origin", "main");
+  });
+
+  // 像 GitHub 那样合并：推上分支，在另一份 clone 里合并进 main 并推回去。用户的 checkout 只 fetch，本地 main 不动。
+  function mergeOnOrigin(branch: string, mode: "squash" | "merge"): void {
+    git(repo, "push", "-q", "origin", `${branch}:refs/heads/${branch}`);
+    const hub = join(dir, `hub-${randomBytes(3).toString("hex")}`);
+    execFileSync("git", ["clone", "-q", origin, hub]);
+    git(hub, "config", "user.email", "hub@example.test");
+    git(hub, "config", "user.name", "Hub");
+    commitIn(hub, `other-${hub.slice(-6)}.txt`, "someone else's change\n");
+    git(hub, "fetch", "-q", "origin", branch);
+    if (mode === "squash") {
+      git(hub, "merge", "--squash", "-q", "FETCH_HEAD");
+      git(hub, "commit", "-qm", "squashed");
+    } else {
+      git(hub, "merge", "--no-ff", "--no-edit", "-q", "FETCH_HEAD");
+    }
+    git(hub, "push", "-q", "origin", "main");
+    git(repo, "fetch", "-q", "origin");
+  }
+
+  async function waitingForDecision() {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, `feature-${itemId}.txt`, "feature\n");
+    commitIn(worktree.path, `feature-${itemId}-more.txt`, "more\n");
+    finish(itemId);
+    await sweepWorkspaces(db, later(0));
+    expect(getWorkspace(db, worktree.id)?.state).toBe("pending_integration");
+    return { itemId, worktree, asked: inboxOf("workspace_merge_decision").length };
+  }
+
+  it("cleans up a squash-merged branch as merged, deletes the branch and does not ask the user again", async () => {
+    const { itemId, worktree, asked } = await waitingForDecision();
+    mergeOnOrigin(worktree.branch!, "squash");
+
+    expect(await sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, awaitingDecision: 0, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(existsSync(worktree.path)).toBe(false);
+    expect(git(repo, "branch", "--list", worktree.branch!)).toBe("");
+    expect(inboxOf("workspace_merge_decision")).toHaveLength(asked);
+    expect(decisionsOf(itemId, "workspace_cleaned").at(-1)).toMatchObject({ merged: true, branchDeleted: true });
+  });
+
+  it("does not ask about a squash-merged branch of a ticket that just finished", async () => {
+    const itemId = codingTicket();
+    const worktree = isolatedFor(itemId);
+    commitIn(worktree.path, "feature.txt", "feature\n");
+    mergeOnOrigin(worktree.branch!, "squash");
+    finish(itemId);
+
+    expect(await sweepWorkspaces(db, later(0))).toMatchObject({ awaitingDecision: 0, failed: [] });
+    expect(inboxOf("workspace_merge_decision")).toHaveLength(0);
+    expect(await sweepWorkspaces(db, later(8))).toMatchObject({ cleaned: 1, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(git(repo, "branch", "--list", worktree.branch!)).toBe("");
+  });
+
+  it("still asks the user when the branch got a new commit after the squash merge", async () => {
+    const { worktree } = await waitingForDecision();
+    mergeOnOrigin(worktree.branch!, "squash");
+    commitIn(worktree.path, "after.txt", "not on main\n");
+
+    expect(await sweepWorkspaces(db, later(30))).toMatchObject({ cleaned: 0, awaitingDecision: 1, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "pending_integration", merge_status: "pending" });
+    expect(existsSync(worktree.path)).toBe(true);
+    expect(git(repo, "branch", "--list", worktree.branch!)).toContain(worktree.branch!);
+    expect(JSON.parse(inboxOf("workspace_merge_decision").at(-1)!.payload).unmergedCommits).toBeGreaterThan(0);
+  });
+
+  it("keeps a squash-merged branch whose directory is gone when it has a new commit, and deletes it otherwise", async () => {
+    const kept = await waitingForDecision();
+    const gone = await waitingForDecision();
+    mergeOnOrigin(kept.worktree.branch!, "squash");
+    mergeOnOrigin(gone.worktree.branch!, "squash");
+    commitIn(kept.worktree.path, "after.txt", "not on main\n");
+    for (const path of [kept.worktree.path, gone.worktree.path]) rmSync(path, { recursive: true, force: true });
+
+    expect(await sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, awaitingDecision: 1, failed: [] });
+    expect(getWorkspace(db, gone.worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(git(repo, "branch", "--list", gone.worktree.branch!)).toBe("");
+    expect(git(repo, "branch", "--list", kept.worktree.branch!)).toContain(kept.worktree.branch!);
+  });
+
+  it("recognizes a normal merge on origin while the user's local main lags behind", async () => {
+    const { worktree } = await waitingForDecision();
+    mergeOnOrigin(worktree.branch!, "merge");
+    expect(git(repo, "rev-list", "--count", `HEAD..${worktree.branch!}`)).not.toBe("0");
+
+    expect(await sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, awaitingDecision: 0, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(git(repo, "branch", "--list", worktree.branch!)).toBe("");
+  });
+
+  it("does not delete a squash-merged branch that plc did not create", async () => {
+    const { worktree } = await waitingForDecision();
+    git(repo, "branch", "-m", worktree.branch!, "feature/mine");
+    db.prepare("UPDATE workspaces SET branch='feature/mine' WHERE id=?").run(worktree.id);
+    mergeOnOrigin("feature/mine", "squash");
+
+    expect(await sweepWorkspaces(db, later(0))).toMatchObject({ cleaned: 1, failed: [] });
+    expect(getWorkspace(db, worktree.id)).toMatchObject({ state: "archived", merge_status: "merged" });
+    expect(git(repo, "branch", "--list", "feature/mine")).toContain("feature/mine");
+  });
+});
+
 // 审查 2026-10-19 第 2 条：合并冲突把 worktree 改成 blocked，以前扫描不看 blocked，再也没有提醒。
 describe("a worktree whose merge conflicted", () => {
   async function conflicted() {
@@ -371,6 +489,33 @@ describe("orphan directories under <repo>.plc-workspaces", () => {
     // 下一次扫描不再重复问。
     await sweepWorkspaces(db, new Date());
     expect(inboxOf("workspace_orphan_decision")).toHaveLength(2);
+  });
+
+  // 子工单在父工单的 worktree 里开自己的隔离 worktree：它登记在 <父 worktree>.plc-workspaces/<子> 下。
+  // 扫描以前只比较第一层目录和登记路径是否相等，把 <父 worktree>.plc-workspaces 当成孤儿去问用户。
+  it("keeps a directory that holds a registered nested workspace, and still asks about look-alikes", async () => {
+    const parentPath = isolatedFor(codingTicket()).path;
+    const childTicket = createItem(db, { title: "nested", brief: "b", createdBy: "lead", workdir: parentPath });
+    const child = isolatedFor(childTicket);
+    const container = workspaceRootFor(realpathSync(repo));
+    const holder = workspaceRootFor(realpathSync(parentPath));
+    expect(realpathSync(child.path).startsWith(`${holder}/`)).toBe(true);
+    expect(realpathSync(holder).startsWith(`${realpathSync(container)}/`)).toBe(true);
+    // 名字是登记子路径的字符串前缀，但里面没有登记的工作区。
+    const prefix = join(container, `${parentPath.split("/").pop()}.plc-work`);
+    mkdirSync(prefix);
+    writeFileSync(join(prefix, "file.txt"), "someone's files\n");
+    // 同样的形状，但里面的子目录没有登记。
+    const stale = join(container, "item-9-stale.plc-workspaces");
+    mkdirSync(join(stale, "item-10-gone"), { recursive: true });
+    writeFileSync(join(stale, "item-10-gone", "file.txt"), "left over\n");
+    for (const path of [holder, prefix, stale]) age(path, 10);
+
+    const result = await sweepWorkspaces(db, new Date());
+    expect(result).toMatchObject({ cleaned: 0, awaitingDecision: 2, failed: [] });
+    expect(existsSync(join(child.path, "source.txt"))).toBe(true);
+    const asked = inboxOf("workspace_orphan_decision").map((row) => JSON.parse(row.payload).path as string);
+    expect(asked.sort()).toEqual([realpathSync(prefix), realpathSync(stale)].sort());
   });
 });
 

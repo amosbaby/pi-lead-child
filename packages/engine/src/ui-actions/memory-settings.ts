@@ -6,6 +6,7 @@
 //   - retry_failed_writes：失败的笔记重新写进 Hindsight。不改规则。
 import type { SetSummaryModelRequest, SummaryModelSlotRequest } from "@pi-lead-child/protocol";
 import { AVAILABLE, unavailable } from "../ticket-actions/types.js";
+import { assertLeadCheapModel } from "./background-model.js";
 import {
   UiActionError,
   type MemorySettingsChange, type MemorySettingsService, type MemorySettingsSummary, type UiActionDefinition, type UiActionEnv,
@@ -44,11 +45,17 @@ export const MEMORY_SETTINGS_ACTIONS = {
     permission: "lead_allowed", changesRules: true, external: false, irreversible: false,
     where: MEMORY_SETTINGS_WHERE,
     hint: "选 Hindsight 的摘要模型。slot 是 default（提取事实，也是缺省）或 consolidation（整理观察）；"
-      + "model 写 list_lead_models 列出的 provider/id，null 时缺省槽改回自动（最新的 haiku），整理观察槽改回跟缺省一样。"
+      + "model 写 list_lead_models 列出的 provider/id，null 时缺省槽改回自动（后台模型），整理观察槽改回跟缺省一样。"
+      + "你只能选便宜的模型（background_model 的 cheap 列表）或者 null；用户本人可以选任何模型。"
       + "改了以后记忆服务重启几秒，期间 search_notes 只用全文检索。",
     defaultReason: "在设置页选了摘要模型",
     available: () => AVAILABLE,
-    run: (run) => memorySettings(run.env).setSummaryModel(run.input as SetSummaryModelRequest),
+    run: async (run) => {
+      const request = run.input as SetSummaryModelRequest;
+      // Lead may choose only a cheap model (spec 2026-11-20 D2): Hindsight extracts every note with it. null is automatic.
+      if (request.model !== null) await assertLeadCheapModel(run.env, run.by, request.model, "Hindsight 的摘要模型");
+      return memorySettings(run.env).setSummaryModel(request);
+    },
     forLead: changeForLead,
     detail: changeDetail,
   },

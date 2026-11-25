@@ -14,11 +14,14 @@ import {
   isLeadSessionReleased, LeadSessionSlot, releaseWaitMsFromEnv, type LeadReleaseRequest,
 } from "@pi-lead-child/lead";
 import {
-  createLeadSession, DEFAULT_LOOKUP_ROOTS, findPullRequestRef, isExternalTextTool, LEAD_QUIET_TOOLS, leadSystemEvent, leadUserMessage,
+  createLeadSession, DEFAULT_LOOKUP_ROOTS, findPullRequestRef, isExternalTextTool, LEAD_QUIET_TOOLS, leadSystemEvent, leadUserMessage, touchedBy,
   listLookupCandidates, watchCommandRunner, withExternalContent, type LeadSystemEventKind, type LeadTurnOrigin,
 } from "@pi-lead-child/lead";
 import {
   assertConfiguredLeadModel, leadModelCatalog, loadLeadModelConfig, setLeadModelChainInConfig, setLeadModelInConfig, type LeadCatalogModel,
+} from "@pi-lead-child/lead";
+import {
+  BrokenBackgroundModels, createLeadCatalogSource, resolveBackgroundModel, selectedLeadModelSpec,
 } from "@pi-lead-child/lead";
 import { overflowLimits, overflowReminder, queueNotice, queueNoticeMs, waitingText } from "@pi-lead-child/lead";
 import {
@@ -35,6 +38,8 @@ import {
 import { isSummaryTokenCapError, leadCompactionInstructions, LEAD_COMPACTION_BUDGETS, type CompactionProgress } from "@pi-lead-child/lead";
 import { contextUsageLine, leadContextUsage, type LeadContextUsage } from "@pi-lead-child/lead";
 import { isInterruptedForSteer } from "@pi-lead-child/lead";
+import { compactionBeforeTurn } from "@pi-lead-child/lead";
+import { ClockGapDetector, clockGapThreshold, EMPTY_RED_LINE_FAILURE, modelHoldAfterUnit } from "@pi-lead-child/lead";
 import {
   AutoCallBudget, autoCallBudgetLimits, autoCallUsageLine, cacheRetentionOf, ModelHold, modelBreakerLimitsFromEnv, PREFIX_WARM_LONG_MS,
   PREFIX_WARM_MS, uncachedTokens, wakePaceDecision, type ModelHoldPort,
@@ -42,7 +47,14 @@ import {
 import { manualCompactionHold, modelHoldError, type IdleLaneRuntimeOptions, type ManualCompactReport } from "@pi-lead-child/lead";
 import { resolveCompactModel } from "@pi-lead-child/protocol";
 import { userMessagePlacement } from "./user-placement.js";
-import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type DigestBatchPolicy } from "./lead-input.js";
+import { createLeadInput, defaultDigestBatch, isReminderFireEvent, leadEventRoute, type ShadowBatch, type DigestBatchPolicy } from "./lead-input.js";
+import {
+  createShadowSessionFactory, createShadowToolset, ShadowRecorder, shadowBatchText, LEAD_SKILLS_DIR,
+  resolveShadowOutcome, runShadowSession, type ShadowSessionFactory, type LeadShadowParts,
+} from "@pi-lead-child/lead";
+import { LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND, type LeadShadowDto } from "@pi-lead-child/protocol";
+import type { BackgroundModelState } from "@pi-lead-child/protocol";
+import { getBackgroundModel, getLeadShadow } from "@pi-lead-child/store";
 import { compactionEndOutcome, createLeadHealthTracker, isEmptyLengthStop, leadContextFullError } from "./lead-health.js";
 import { leadHealthMessages } from "./lead-health.messages.js";
 import { serverMessages } from "./server.messages.js";
@@ -64,7 +76,7 @@ import {
   CHANNEL_CARDS_SNAPSHOT_RESOURCE, CHANNEL_SETTINGS_SNAPSHOT_RESOURCE, EVENT_SOURCES, LEAD_QUEUE_RESOURCE, LEAD_STEP_RESOURCE, MESSAGE_EVENT_KIND, type GrantLocalRepo, type LeadQueue,
 } from "@pi-lead-child/protocol";
 import {
-  DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, isUserActionRequest, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch, type UserActionRequest,
+  DAEMON_ENTITY_KEY, DAEMON_STARTED_KIND, LEAD_WAIT_EXPIRED_KIND, type LocalMcpLaunch,
 } from "@pi-lead-child/protocol";
 import { leadModelSpec, MODEL_SETTINGS_RESOURCE, parseLeadModelSpec, SETUP_RESOURCE, type LeadModelChoice } from "@pi-lead-child/protocol";
 import { connectLeadProviderKeys, ModelSettings } from "./model-settings.js";
@@ -114,6 +126,8 @@ import { pendingApprovals, getApproval, isStandingOrderProposal, pendingApproval
 import { blockerHasConversationRecord } from "@pi-lead-child/store";
 import { recordLeadTurnResponding, type EventRecord, type ReminderPush } from "@pi-lead-child/store";
 import { createWatchdog, escalateInterventionToUser, UI_ACTIONS } from "@pi-lead-child/engine";
+import { backgroundJobState, createBackgroundHealth } from "@pi-lead-child/engine";
+import { backgroundModelHealthHooks, resolvedModelWatch } from "./background-health-wiring.js";
 import { leadCapabilityNotice, recordLeadCapabilities } from "./lead-capabilities.js";
 import { agentConnectionHost, setAgentConnectionHost, type AgentConnectionHost } from "@pi-lead-child/engine";
 import { createScheduler } from "@pi-lead-child/engine";
@@ -136,6 +150,7 @@ import {
 import { multiPassActive } from "@pi-lead-child/engine";
 import { AishAdapter, type AishTimeouts, type StreamHandle } from "@pi-lead-child/gateway";
 import { PairedCommandError, startPairedServer, type PairedBridge } from "@pi-lead-child/gateway";
+import { TopicRuntime } from "./topics.js";
 import { defaultWebRoot, gatewayBaseUrl } from "@pi-lead-child/gateway";
 import { bindingScopes, channelOwnerBinding, createCliBinding, getBinding } from "@pi-lead-child/store";
 import {
@@ -159,6 +174,7 @@ import {
   ExposureListener, isWildcardHost, listenWithFallback, resolveGatewayListen, wildcardExposure,
 } from "./gateway-listen.js";
 import { createControlPlaneService, isLeadActivityEvent } from "@pi-lead-child/gateway";
+import { shadowRoute, eventShadowFacts, eventHandoffLane, eventMustBeTold, pendingUserActionOfEvent, splitForShadow } from "./shadow-routing.js";
 import { createUserActionService } from "@pi-lead-child/gateway";
 import {
   activeLeadGrant, activePairedUserTurn, grantLeadCapability, revokeLeadCapability,
@@ -504,24 +520,6 @@ function idleTicketOption(dataDir: string, log: (line: string) => void): { idleT
   return { idleTicketMs: Math.round(value * 3_600_000) };
 }
 
-// 交给 Lead 的一条事件里还没做的「需要用户做什么」：等待超时（lead.wait_expired）里的，和 inbox 说明（例如连接授权失效，
-// payload.payload.userAction）里的。等待了结（lead.wait_satisfied）里的那一件用户已经做完了，不算（2026-10-19 审查：
-// 用户授权完成以后叫醒 Lead 的那一轮，没有控件的卡片被退回，还提示 Lead 再放一次授权按钮）。
-function pendingUserActionOfEvent(event: EventRecord): UserActionRequest | null {
-  if (event.kind === LEAD_WAIT_EXPIRED_KIND) {
-    return isUserActionRequest(event.payload.userAction) ? event.payload.userAction : null;
-  }
-  if (!event.kind.startsWith("inbox.")) return null;
-  const inner = event.payload.payload;
-  const nested = inner && typeof inner === "object" ? (inner as { userAction?: unknown }).userAction : undefined;
-  return isUserActionRequest(nested) ? nested : null;
-}
-
-// 这条事件要不要告诉用户：写入方标了 mustTell（等待的 mustTell，store 的 lead-waits.ts；模型切换）。
-function eventMustBeTold(event: EventRecord): boolean {
-  return event.payload.mustTell === true;
-}
-
 // 额度用尽时在重置以前跳过的模型（model-failover.ts）存在 kv 的这一项里。
 const LEAD_MODEL_QUOTA_KEY = "lead.model_quota_blocked";
 
@@ -551,8 +549,14 @@ export interface DaemonOpts {
   modelDiscovery?: boolean;
   // Tests replace the child process that writes the idle lane's summaries (lead's idle-compaction.ts).
   idleCompactSummarize?: IdleLaneRuntimeOptions["summarize"];
+  // 测试注入 shadow 的会话工厂（lead 的 shadow/session.ts，假模型）。缺省按 Lead 的模型配置建。
+  shadowSessionFactory?: ShadowSessionFactory;
+  // Tests drive the background health's clock (engine's background-health.ts: 3 failures over 5 minutes, 10 quiet minutes).
+  backgroundHealthNow?: () => Date;
   sessionFactory?: (args: {
     dataDir: string; dbPath: string; db: Db;
+    // Given for the session of a topic (topics.ts): the folder of its session file. Lead's main session has none.
+    sessionDir?: string;
     onChildDone?: LeadDeps["onChildDone"]; onChildEvent?: LeadDeps["onChildEvent"];
     childPi?: LeadDeps["childPi"];
     runtimeRegistry?: LeadDeps["runtimeRegistry"];
@@ -753,8 +757,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 第一次建立游标时（04 之前的库），还没处理完的 inbox 行转成事件，交给 Lead 一次。
   // 通道的 hub（工单 11）在后面建（它要推送和网关事件）。当前局面里每条道一行，从它取。
   let channelHub: ChannelHub | null = null;
+  // 主会话这一轮的工具碰过的工单（tool_execution_start 记，每一轮开始时清空）。shadow 不动它们上面的事。
+  const leadUnitTickets = new Set<string>();
+  // shadow 开着时，哪些事留给它（shadow-routing.ts）。Lead 的会话建好以后才有（下面「shadow」一节）。
+  let shadowReservation: (() => ((event: EventRecord) => boolean) | null) | null = null;
   const leadInput = createLeadInput({
     db, log,
+    shadowReservation: () => shadowReservation?.() ?? null,
     tickets: () => listTicketSummaries?.() ?? [],
     lanes: (objectKeys) => channelHub?.laneLines(objectKeys) ?? new Map(),
     ...(Number(process.env.PLC_LEAD_SITUATION_BUDGET) > 0 ? { budgetTokens: Number(process.env.PLC_LEAD_SITUATION_BUDGET) } : {}),
@@ -827,10 +836,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       pendingInput: () => hasUnansweredUserTurn()
         || (leadInput.pendingMessages().length > 0 && !(leadWakeRetry && leadWakeRetry.at > Date.now())),
       contextRatio: () => leadContextRatio(),
-      thresholdRatio: () => {
-        const usage = currentContextUsage();
-        return usage && usage.compactAt !== null && usage.window > 0 ? usage.compactAt / usage.window : null;
-      },
+      thresholdRatio: () => leadCompactThresholdRatio(),
       runPrecipitation: () => runPrecipitation(),
       writeInFlight: () => Object.values(sched.unit?.tools ?? {}).find((tool) => tool.write)?.name ?? null,
       yieldUnit: (by) => {
@@ -866,6 +872,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // dispatchLeadWork、maybeWakeForDigest、wakeForSuspended），不排重试（leadWakeRetry），空闲车道不开要调模型的活。
   // 事件留在日志里，游标不动。用户本人的消息照常开一轮；答上了就解除（runTurnNow 的 finally），排着的事接着交给 Lead。
   // 暂停跨重启保留（2026-11-16，理由见 model-hold.ts 开头）：存在库里，启动时在 leadHealth 建好以后恢复。
+  // 后台任务的健康（engine 的 background-health.ts，.scratch/background-models spec D3）：后台模型、通道记忆、Hindsight 的失败和恢复
+  // 交给 Lead（system.background_failing 叫醒，system.background_recovered 只记一笔），不成风暴。模型暂停期间什么也不写，
+  // 暂停解除（下面 modelHold 的 onChange）以后还在失败的才写。轮询每分钟 tick 一次，结算到时的恢复。
+  const backgroundHealth = createBackgroundHealth({
+    db, log, held: () => modelHold.held,
+    ...(opts.backgroundHealthNow ? { now: opts.backgroundHealthNow } : {}),
+  });
   const modelHold = new ModelHold({
     log,
     breaker: modelBreakerLimitsFromEnv(process.env),
@@ -883,6 +896,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     onPersist: (snapshot) => writeLeadCallGuard(db, "model_hold", snapshot),
     onChange: (held) => {
       idleLane.modelHold(held);
+      // 暂停解除：写暂停期间压着的后台健康事件。
+      if (!held) backgroundHealth.holdLifted();
       // 顶栏的健康状态：暂停期间「下一次自动调用」的时间变了（nextScheduledAttempt），重发一次。
       leadHealth.refresh();
       noticeModelHold();
@@ -1029,6 +1044,15 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 两盏灯（lead 的 overflow.ts 和 red-line.ts，用户 2026-11-03）的状态和红线的阶段在调度器里（core.ts）。
   // 这里只留交接窗口的定时器：它是执行层的东西，到点时告诉调度器（handoff.timeout）。
   let handoffTimer: NodeJS.Timeout | null = null;
+  // 进程停住的时间（机器睡眠、合盖）：轮询和交接窗口的定时器每次被叫到时报一下（lead 的 clock-gap.ts）。停住的那一段
+  // 不算进就地预算和交接窗口（2026-11-24 夜里的挂起风暴）。
+  const clockGap = new ClockGapDetector({ thresholdMs: clockGapThreshold(), expectedMs: Number(process.env.PLC_NOTICE_POLL_MS ?? 3000) });
+  function noteClockGap(): void {
+    const gapMs = clockGap.observe(Date.now());
+    if (gapMs <= 0) return;
+    log(schedulerLine("clock.gap_seen", { gapMs, unit: sched.unit?.id ?? "-" }));
+    sched.dispatch({ type: "clock.gap", gapMs });
+  }
   const RED_LINE_TOOLS: ReadonlySet<string> = new Set(RED_LINE_HANDOFF_TOOLS);
   let publishControlEvent: (args: Parameters<typeof publishGatewayEvent>[1]) => ReturnType<typeof publishGatewayEvent> =
     (args) => publishGatewayEvent(db, args);
@@ -1047,6 +1071,69 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
 
   // 操作层（engine 的 ui-actions/）用的服务。只建这一个对象：网关的页面入口和 Lead 的工具都拿它，两个入口调的是同一个实例。
   const uiActionServices: UiActionServices = { runtimeSettings };
+
+  // Lead's model catalog with prices (lead's model-config.ts leadModelCatalog). The provider is asked at most every 30 s:
+  // the message box's model picker, the background model (background-model.ts) and Hindsight's automatic slot share it.
+  const leadCatalog = createLeadCatalogSource(() => leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => {
+    noteResolvedBackgroundModel(result.models);
+    return result.models;
+  }));
+  // The resolved background model can change without background_model.set: a subscription switch, a new release, a
+  // model marked broken. Each fresh catalog read (at most every 30 s, no timer of its own) compares it with the last one;
+  // on a change Hindsight's automatic slot reconciles as after a set (reconcile restarts Hindsight only when its LLM differs).
+  const watchResolvedBackgroundModel = resolvedModelWatch((before, after) => {
+    log(`[background-model] the resolved background model changed (${before ?? "none"} -> ${after ?? "none"}); Hindsight's automatic slot follows`);
+    backgroundModelChanged();
+  });
+  function noteResolvedBackgroundModel(catalog: readonly LeadCatalogModel[]): void {
+    try {
+      const mainSpec = selectedLeadModelSpec(loadLeadModelConfig(opts.dataDir));
+      watchResolvedBackgroundModel(resolveBackgroundModel({
+        catalog, mainSpec, setting: backgroundModelSetting(), isBroken: brokenBackgroundModels.isBroken,
+      }).spec);
+    } catch (error) {
+      log(`[background-model] the resolved background model could not be checked: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  // Background models that failed with a configuration or quota error, skipped for 1 hour. The decision LLM marks them;
+  // background_model.read and Hindsight's automatic slot read them.
+  const brokenBackgroundModels = new BrokenBackgroundModels();
+  const backgroundModelSetting = (): string | null => {
+    try {
+      return getBackgroundModel(db).model;
+    } catch {
+      return null;
+    }
+  };
+  let backgroundModelSnapshot: BackgroundModelState | null = null;
+  const backgroundModelState = async (): Promise<BackgroundModelState> => {
+    const catalog = await leadCatalog.get().catch(() => [] as readonly LeadCatalogModel[]);
+    let main: string | null = null;
+    try {
+      main = selectedLeadModelSpec(loadLeadModelConfig(opts.dataDir));
+    } catch {
+      main = null;
+    }
+    const setting = backgroundModelSetting();
+    const choice = resolveBackgroundModel({ catalog, mainSpec: main, setting, isBroken: brokenBackgroundModels.isBroken });
+    backgroundModelSnapshot = {
+      setting, resolved: choice.spec, source: choice.source, main, cheap: choice.cheap,
+      broken: brokenBackgroundModels.list().map((entry) => ({ model: entry.model, until: new Date(entry.until).toISOString(), reason: entry.reason })),
+    };
+    return backgroundModelSnapshot;
+  };
+  let backgroundModelChanged: () => void = () => {};
+  uiActionServices.backgroundModels = {
+    state: backgroundModelState,
+    snapshot: () => {
+      void backgroundModelState().catch(() => {});
+      return backgroundModelSnapshot;
+    },
+    // Hindsight reads its automatic model when it starts: the memory controller re-resolves it (set below).
+    changed: () => backgroundModelChanged(),
+    // The health of each background job for the settings page and background_model.read.
+    jobs: () => backgroundHealth.states().map(backgroundJobState),
+  };
 
   interface TurnOutcome {
     ok: boolean;
@@ -2846,6 +2933,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 后端由 MemoryController 在下面接上，笔记定时写过去并跟踪任务；写入失败时告诉 Lead（一次故障一条）。
   const memory = new NotesMemory(db, null, {
     log,
+    // Hindsight 的写入任务完成或者失败：交给后台健康（任务 hindsight）。
+    onWriteOutcome: (result) => backgroundHealth.report("hindsight", result),
     onWriteFailed: (status) => {
       addInbox(db, {
         dedupScope: "memory-write-failed", severity: "attention", source: "structural",
@@ -3049,6 +3138,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     }
   });
   let lastConfigCheckAt = 0;
+  // 后台任务的健康：轮询里每分钟 tick 一次（启动后的第一拍就 tick：结算重启前留下的恢复）。
+  const BACKGROUND_HEALTH_TICK_MS = 60_000;
+  let lastBackgroundHealthTickAt = 0;
   // 只记录的主人操作（扫码配对的手机做的）读到哪里了。从启动时的最大 seq 开始：历史上的记录不一下子贴进会话。
   let ownerActionRecordCursor = maxEventSeq(db);
   // 账本的写入守卫（ledger-guard.ts）：每分钟核对一次触发器。缺了就补装；缺的是已经装过的表的触发器时报警
@@ -3085,13 +3177,18 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       publishControlEvent({ type: "snapshot.required", requiredScope: "tickets:view", payload: { resource } });
     },
     externalSecret: (name) => daemonOnlySecrets.get(name) ?? cachedKeychainSecret(name),
-    summaryModels: (settings) => summaryModels(opts.dataDir, settings),
+    summaryModels: (settings) => summaryModels(opts.dataDir, settings, process.env, fetch, {
+      setting: backgroundModelSetting(), catalog: () => leadCatalog.get(), isBroken: brokenBackgroundModels.isBroken,
+    }),
     programArguments: hindsightProgram(),
     ...(typeof opts.manageMemory === "object" ? opts.manageMemory : {}),
   }) : null;
   if (memoryControl) {
     // 设置 → 记忆的摘要模型和重试（操作层的 memory_settings）：页面和 Lead 调同一个函数。
     uiActionServices.memorySettings = memoryControl.memorySettingsService();
+    backgroundModelChanged = () => {
+      void memoryControl.backgroundModelChanged().catch((error: unknown) => log(`[memory] background model change not applied: ${error instanceof Error ? error.message : String(error)}`));
+    };
     void memoryControl.start().catch((error: any) => log(`[memory] start failed: ${error?.message ?? String(error)}; Lead memory uses notes only`));
   }
 
@@ -3171,6 +3268,11 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     llmFallback: () => loadDecisionModels(opts.dataDir).llmFallback,
     // 决策模型的 LLM 后端走 Lead 的账号：暂停期间不调，账号级的失败也报进来（lead 的 smart-model.ts）。
     modelHold,
+    // The background model (lead's background-model.ts): the shared priced catalog and the models skipped after a failure.
+    modelCatalog: leadCatalog,
+    brokenBackgroundModels,
+    // 后台模型每次调用的结果交给后台健康（任务 background_model）：失败时写明这次调用换到了哪个模型。
+    backgroundModelHooks: backgroundModelHealthHooks(backgroundHealth),
     dataDir: opts.dataDir, dbPath: opts.dbPath, db,
     onCompactionProgress: (progress: CompactionProgress) => compactionProgress(progress),
     ...(opts.skillDirs ? { skillDirs: opts.skillDirs } : {}),
@@ -3286,6 +3388,19 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       },
       // 文件是哪条消息带来的（工单 #231：挂到工单上的附件记来源）。只读账本。
       fileOrigin: (fileId) => channelHub?.fileOrigin(fileId) ?? null,
+      // 来源里的文档（2026-11-20：Slack 的 canvas、Markdown 文件）：建、读、改。
+      createDocument: (input) => {
+        if (!channelHub) throw new Error("没有接任何外部通道");
+        return channelHub.createDocument(input);
+      },
+      readDocument: (documentId, maxBytes) => {
+        if (!channelHub) throw new Error("没有接任何外部通道");
+        return channelHub.readDocument(documentId, maxBytes);
+      },
+      editDocument: (documentId, change) => {
+        if (!channelHub) throw new Error("没有接任何外部通道");
+        return channelHub.editDocument(documentId, change);
+      },
     },
     turnUserActions,
     leadModelQuota,
@@ -3303,6 +3418,41 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     currentModel: leadCurrentModel, refreshModelAuth, forgetProvider,
   } = leadSlot.result();
   log(`lead ready (model=${modelName}, session=${session.sessionId})`);
+  // Topics (topics.ts, user 2026-11-25): each topic is a second Lead session, built from the same options as the main
+  // one. What belongs to the main session stays with it: the scheduler and its hooks, hand-offs, the idle lane, the
+  // red-line tool gate, background jobs (their results go to the main conversation) and the model restart. The topic
+  // gives its own turn id and turn origin, so authority and the external-content rules follow the topic's own turn.
+  const topics = new TopicRuntime({
+    db, dataDir: opts.dataDir, log,
+    createSession: (request) => {
+      const {
+        scheduler: _scheduler, idleLane: _idleLane, schedulerHooks: _schedulerHooks, handoff: _handoff, toolGate: _toolGate,
+        backgroundJobs: _backgroundJobs, backgroundJobRegistry: _backgroundJobRegistry, abortReason: _abortReason,
+        foregroundWaits: _foregroundWaits, onCompactionProgress: _onCompactionProgress, announceLeadStatus: _announceLeadStatus,
+        scheduleLeadModelRestart: _scheduleLeadModelRestart, schedulerLog: _schedulerLog, turnUserActions: _turnUserActions,
+        ...shared
+      } = leadSessionOptions;
+      return factory({
+        ...shared,
+        sessionDir: request.sessionDir,
+        currentTurnId: request.currentTurnId,
+        turnOrigin: request.turnOrigin,
+        cancelBudgetTurnId: request.currentTurnId,
+        turnUserActions: createTurnUserActions(),
+      });
+    },
+    publish: (event) => { publishControlEvent(event); },
+    // A topic without a model of its own uses the model the main conversation uses now.
+    defaultModel: () => leadModelName,
+  });
+  const interruptedTopicTurns = topics.failUnfinished();
+  if (interruptedTopicTurns) log(`topics: ${interruptedTopicTurns} unfinished turn(s) from before the restart marked as failed`);
+  uiActionServices.topics = {
+    generateOpening: (topicId, options) => topics.generateOpening(topicId, options),
+    closed: (topicId) => topics.closed(topicId),
+    // The same check as for Lead's own model (lead_model.switch): in the catalog, and the effort is one it supports.
+    checkModel: (spec) => assertConfiguredLeadModel(spec, loadLeadModelConfig(opts.dataDir)),
+  };
   // 部署改了 Lead 能用的工具或操作时，下一轮告诉它一次（lead-capabilities.ts，2026-11-02）。
   let capabilityNotice: string | null = null;
   try {
@@ -3331,6 +3481,28 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   let leadModelName = modelName;
   // The model of Lead's session now (provider/id, no effort suffix), with the subscription account when there is one.
   const leadSessionModelSpec = (): string => parseLeadModelSpec(leadCurrentModel?.() ?? leadModelName).model;
+
+  // ── shadow（用户 2026-11-19，lead 的 shadow/，.scratch/lead-background-shadow/spec.md）──────────────────
+  // 后台事件先交给一个不带主会话历史的小会话：同一份系统提示词、常设指令、核心记忆、工具定义和权限规则，每批一个新会话。
+  // 哪些事交给它是代码定的（shadow-routing.ts）；它处理不了或不该处理的交回主会话，带着它查到的东西（lead-input.ts 的 endShadow）。
+  // 测试的假会话没有 shadow：那时不开 shadow。
+  const shadowParts: LeadShadowParts | null = leadSlot.result().shadow ?? null;
+  const shadowFactory: ShadowSessionFactory = opts.shadowSessionFactory ?? createShadowSessionFactory({
+    dataDir: opts.dataDir, log, fallbackModel: () => parseLeadModelSpec(leadModelName).model,
+  });
+  const shadowSettings = (): LeadShadowDto => getLeadShadow(db);
+  // 主会话这一轮正在处理的对象：它拿着的事件的对象，加上它的工具这一轮碰过的工单（leadUnitTickets）。
+  const leadBusyEntities = (): Set<string> => new Set([...leadInput.leadEntities(), ...(sched.busy ? leadUnitTickets : [])]);
+  const shadowFactsFor = (settings: Pick<LeadShadowDto, "mode" | "shares">, leadEntities: ReadonlySet<string>) => eventShadowFacts({
+    settings, escalatedByShadow: (seq) => leadInput.escalatedByShadow(seq), isReminder: isReminderFireEvent, leadEntities,
+  });
+  shadowReservation = () => {
+    if (!shadowParts || sched.draining || modelHold.held) return null;
+    const settings = shadowSettings();
+    if (settings.mode !== "on") return null;
+    const facts = shadowFactsFor(settings, leadBusyEntities());
+    return (event) => shadowRoute(event, facts).shadow;
+  };
   // 模型切换（model-failover.ts）：会话能在运行中换模型、也配了模型时才有。
   // 额度用尽、在重置以前跳过的模型存在 kv 里（2026-10-19）：daemon 重启以后不再去撞一次额度。
   // 额度按周重置的规则读 config.json 的 lead.quotaResets，没有时用 DEFAULT_LEAD_QUOTA_RESETS（笔记 #46）。
@@ -3406,9 +3578,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       return leadModelName;
     }
   };
-  // 目录要问 provider（vibeproxy 的 /v1/models）。连着点开几次输入框的模型名时不用每次都问：30 秒内用上一次的。
-  let leadCatalogCache: { at: number; models: Promise<LeadCatalogModel[]> } | null = null;
-  const LEAD_CATALOG_TTL_MS = 30_000;
+  // 目录要问 provider（vibeproxy 的 /v1/models）。连着点开几次输入框的模型名时不用每次都问：30 秒内用上一次的（leadCatalog）。
   const rebuildModelFailover = () => {
     modelFailover = createLeadModelFailover({ models: loadLeadModelConfig(opts.dataDir).models, ...failoverOptions });
   };
@@ -3417,12 +3587,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 会话此刻挂着的模型：订阅的账号（pi-multi-pass 换上的 <base>-<n>）和「只这一条」的那一轮都照实写。
     inSession: () => leadCurrentModel?.() ?? null,
     async catalog() {
-      if (!leadCatalogCache || Date.now() - leadCatalogCache.at > LEAD_CATALOG_TTL_MS) {
-        const models = leadModelCatalog(loadLeadModelConfig(opts.dataDir)).then((result) => result.models);
-        leadCatalogCache = { at: Date.now(), models };
-        models.catch(() => { leadCatalogCache = null; });
-      }
-      const models = await leadCatalogCache.models;
+      const models = await leadCatalog.get();
       // 额度封禁按模型算（不看推理强度）：同一个模型的几个强度都封着时，取最晚的那个时间。
       const blocked = new Map<string, number>();
       for (const entry of modelFailover?.blockedModels() ?? []) {
@@ -3438,6 +3603,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
             model: spec, provider: model.provider, id: model.id, prefix: model.group, source: model.source, name: model.name,
             image: model.input.includes("image"), efforts: model.efforts, defaultEffort: model.defaultEffort,
             blockedUntil: until === undefined ? null : new Date(until).toISOString(),
+            // 通道只有 magpie 有（lead 的 magpieRoute）；网关只把它给带 live=1 的客户端。
+            ...(model.route ? { route: model.route } : {}),
           };
         }),
       };
@@ -3553,7 +3720,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     lead: {
       reloadExtensions: (reason) => reloadLeadExtensions(reason),
       refreshAuth: async (providers) => {
-        leadCatalogCache = null;
+        leadCatalog.invalidate();
         await refreshModelAuth?.(providers);
       },
       forgetProvider: (provider) => forgetProvider?.(provider),
@@ -3593,7 +3760,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         if (switching && (!modelFailover || !switchLeadModel)) throw new UiActionError("unavailable", serverMessages(getLocale(db)).model.cannotSwitchWhileRunning);
         setLeadModelChainInConfig(specs, opts.dataDir);
         rebuildModelFailover();
-        leadCatalogCache = null;
+        leadCatalog.invalidate();
         if (!switching || primary === leadModelName) return "unchanged";
         // 你点名要用它：它的额度封禁不再挡着。它真的还不能用时，模型自动切换会再换走。
         modelFailover!.clearBlocked(primary);
@@ -3609,7 +3776,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         return "now";
       },
       async providersChanged() {
-        leadCatalogCache = null;
+        leadCatalog.invalidate();
         if (!refreshProviders) return;
         try {
           await refreshProviders();
@@ -3818,6 +3985,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     if (event.type === "tool_execution_start") {
       // 输出算外部内容的工具（turn-origin.ts 的清单，没声明的也算）：这一轮算读过外部内容，记下是哪个工具。
       if (isExternalTextTool(event.toolName)) runOrigin = withExternalContent(runOrigin, { via: "tool", tool: event.toolName });
+      // 这一轮的工具碰过的工单：这一轮还在跑时，这些工单上的事不交给 shadow（shadow-routing.ts 的 lead_on_it）。
+      for (const object of touchedBy(String(event.toolName), event.args)) {
+        if (object.kind === "ticket") leadUnitTickets.add(`ticket:${object.ref.replace(/^#/u, "")}`);
+      }
       // 告诉调度器：正在跑的工具（红线停下以前，正在跑的写操作先做完），顶层的调用次数（黄灯；codemode 脚本里的嵌套调用不算）。
       sched.dispatch({
         type: "tool.start", id: String(event.toolCallId), name: String(event.toolName),
@@ -4008,8 +4179,16 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 写到上限时按更严的预算再写一次。都不成时：上一次是溢出恢复失败（上下文确实满了），这一轮不调模型，按上下文溢出失败
   // （模型切换按连续溢出算）；只是到了压缩线，照常调模型（还有一点余量），失败只记下。
   async function recoverLeadContext(): Promise<void> {
-    const due = compactionDue;
-    if (due === null || typeof session.compact !== "function") return;
+    // 开一轮以前也按现在的用量看一眼（lead 的 turn-compaction.ts）：过了压缩线先压缩，超过窗口必须先压缩。
+    // 以前只在上一次自动压缩失败时才补（2026-11-24 夜里上下文涨到窗口的 111% 才开始的一轮）。
+    if (typeof session.compact !== "function") return;
+    const ratio = leadContextRatio();
+    const due = compactionBeforeTurn({ due: compactionDue, ratio, thresholdRatio: leadCompactThresholdRatio() });
+    if (due === null) return;
+    if (due !== compactionDue) {
+      log(`context at ${ratio === null ? "?" : (ratio * 100).toFixed(0)}% before the turn: compacting first (${due})`);
+      compactionDue = due;
+    }
     // 压缩刚失败过（不管是谁发起的）：退避到时以前不补压缩，compactionDue 留着，到时的那一轮再补（2026-11-15 的重试风暴：
     // 模型一直出错时，每一轮开头都补压缩一次、失败一次）。溢出照常补：不压缩这一轮就答不了。
     const retryAt = idleLane.compactionRetryAt();
@@ -4053,6 +4232,12 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 替身会话没有这个接口时读最后一次回答的用量（precipitate.ts）。
   // pi 的估算按 4 个字符 1 个 token 算，对数字、编号多的文字偏少（开发模式下估算 85%，服务商报的是 94%）；pi 自己的
   // 压缩线按服务商报的用量判断（_checkCompaction）。所以取两者中大的：最后一次回答报的用量（四项相加）和 pi 的估算。
+  // 压缩线占窗口的比例（pi 的压缩参数）。不知道时为 null。
+  function leadCompactThresholdRatio(): number | null {
+    const usage = currentContextUsage();
+    return usage && usage.compactAt !== null && usage.window > 0 ? usage.compactAt / usage.window : null;
+  }
+
   function leadContextRatio(): number | null {
     if (typeof session.getContextUsage !== "function") return contextUsageRatio(session);
     const usage = session.getContextUsage();
@@ -4328,6 +4513,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     only?: EventRecord[];
     // 单元的车道（lead-scheduler spec P2）：为挂起的单元叫醒 Lead 时用挂起的那个单元的车道。不给时按来源定（D2）。
     lane?: Lane;
+    // 这一轮是为挂起的单元叫醒 Lead 开的（值是那个交接包的编号）：它被停下、又什么都没做时不再挂起成新的单元。
+    suspendedWake?: string;
     // 预算的暂停不拦这一轮（外部通道里在等的人、到点的提醒、用户本人设的跟进；wakeForEvents）。账号级的暂停和熔断照样拦：
     // 那时模型调不通。
     pastBudget?: true;
@@ -4607,6 +4794,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pendingSteerSink = null;
     // Lead 的输入（工单 04）：这一次运行交给 Lead 的事和当前局面在这里记账，这一轮成功以后游标才前进。
     leadInput.beginRun(runKindOf(options));
+    leadUnitTickets.clear();
     // 这一轮的「需要用户做什么」从空开始（wait-tools.ts）：工具返回的、交给这一轮的事件里带的，render_ui 据此检查卡片。
     turnUserActions.reset();
     // 交给这一轮、要告诉用户的事（等待的 mustTell）：Lead 一言不发时，系统替它说（见 finally）。
@@ -4658,6 +4846,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (delivered?.events.length) publishLeadQueue();
       deliveredInboxIds = delivered?.inboxIds ?? [];
       const deliveredEvents = delivered?.events ?? [];
+      // 试运行（lead_shadow 的 trial）：同一批事也交给一个 shadow 会话，只记下它会怎么做。
+      if (deliveredEvents.length) startShadowTrial(deliveredEvents);
       runOrigin = {
         ...withExternalEvents(runOrigin, deliveredEvents),
         timer: channelTurn ? null : userTimerOf(deliveredEvents),
@@ -4688,6 +4878,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       // 交接包的目标（H3）：用户的原话，或者交给这一轮的事和系统的说明。只进交接包，不进日志。
       handoffs.beginUnit({
         unitId, turnId: channelTurn?.turn.id ?? null,
+        ...(options.suspendedWake ? { wakeFor: options.suspendedWake } : {}),
         goal: {
           text: channelTurn ? channelTurn.turn.user_text : [delivered?.text ?? "", unwrapNote(message)].filter(Boolean).join("\n\n"),
           source: unitSource, origin: options.system ?? null, lane: sched.unit?.lane ?? 0,
@@ -4924,7 +5115,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (digested) log(`digest: ${digested} event(s) digested`);
       if (deliveredInboxIds.length) outcome.inboxIds = deliveredInboxIds;
       // 这一轮答上了：模型账号是好的，解除模型暂停（暂停期间只有用户本人的消息能开一轮）。下面的 dispatchLeadWork 接着交排着的事。
-      if (succeeded) modelHold.lift(options.system ? "lead_turn" : "user_turn");
+      // 例外：这个单元一个工具都没调就被红线停下了（模型一直没回答）。它不算答上，记一次失败：连续 3 次熔断，暂停自动调用，
+      // 告诉用户（model-hold.ts），不再一轮轮静默地挂起（2026-11-24 夜里的挂起风暴）。
+      const holdAfterUnit = modelHoldAfterUnit(succeeded, sched.unit);
+      if (holdAfterUnit === "fail") {
+        log(schedulerLine("unit.empty_cut", { unit: sched.unit?.id ?? "-", aborts: sched.unit?.aborts.map((reason) => reason.kind).join(",") ?? "-" }));
+        modelHold.failed("turn", EMPTY_RED_LINE_FAILURE);
+      } else if (holdAfterUnit === "lift") modelHold.lift(options.system ? "lead_turn" : "user_turn");
       if (carriedEvents && !offline && !interrupted) {
         if (succeeded || modelHold.held) {
           // 模型暂停：不排重试，事件留在游标后面，解除以后再交。
@@ -5315,6 +5512,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   channelHub = startedChannels?.hub ?? null;
   // 来源的连接方式（设置 → 消息通道，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道设置在通道接好以后才认得来源。
   if (startedChannels) uiActionServices.channelConnections = channelSettings;
+  // 来源的固定订阅（设置 → 消息通道 → 固定订阅，2026-11-25）：加、删一条。
+  if (startedChannels) uiActionServices.channelSubscriptions = channelSettings;
   // 外部消息卡的动作交给操作层（engine 的 ui-actions/ 的 channel_card）：页面的按钮和 Lead 代用户回复用同一个对象
   // （用户 2026-10-23）。通道在 Lead 会话之后才建好，所以在这里补上。
   if (channelHub) {
@@ -5405,7 +5604,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   }
   // 记忆沉淀（slack-takeover 工单 07）：订阅频道里的对话整理成事实笔记（Lead 的 NotesMemory），模型是 Lead 会话的便宜模型。
   const channelMemory = startChannelMemory({
-    hub: channelHub, db, notes: memory, complete: () => leadComplete ?? null, log, options: opts.channels,
+    hub: channelHub, db, notes: memory, complete: () => leadComplete ?? null, documents: memory.channelDocuments, log,
+    // 真的整理（问了模型、或者交给了 Hindsight）的结果交给后台健康（任务 channel_memory）。
+    onOutcome: (result) => backgroundHealth.report("channel_memory", result),
+    options: opts.channels,
   });
   // 重启时被打断的子 agent 工单：交回发起方（回调还没登记的，派单器先留着，登记时交）。
   for (const outcome of reclaimedAgentTasks) agentTasks.deliver(outcome);
@@ -5418,6 +5620,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 空闲车道的心跳（P4）：单元结束时和空闲满 graceMs 时都会看一眼；这里兜住启动时（会话还没建好）和别的漏掉的时机。
   const IDLE_HEARTBEAT_MS = 30_000;
   function pollNotices(): void {
+    // 先看进程有没有停住过：下面的预算检查要用扣掉睡眠以后的时间。
+    pollStep("clock-gap", () => noteClockGap());
     pollStep("idle-lane", () => {
       if (!sched.busy && !sched.starting) idleLane.check({ ifOlderThanMs: Math.min(IDLE_HEARTBEAT_MS, idleLane.limits.graceMs) });
     });
@@ -5588,6 +5792,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pollStep("suspended-units", () => wakeForSuspended());
     pollStep("lead-input", () => {
       flushCommittedEvents(db);
+      dispatchShadow();
       dispatchLeadWork();
     });
     // 设置状态（首次启动引导）：节流到 5 秒重算一次；变了的卡由下一次 lead-activity 的比较推出去。
@@ -5697,6 +5902,13 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     pollStep("channels", () => { void channelHub?.tick(); });
     // 记忆沉淀（工单 07）：整理攒够了的对话。在后台跑，不阻塞这一拍。
     pollStep("channel-memory", () => { void channelMemory?.tick(); });
+    // 后台任务的健康：每分钟结算一次到时的恢复，写到时可以写的事件（不等下一次调用）。
+    pollStep("background-health", () => {
+      const healthNow = Date.now();
+      if (healthNow - lastBackgroundHealthTickAt < BACKGROUND_HEALTH_TICK_MS) return;
+      lastBackgroundHealthTickAt = healthNow;
+      backgroundHealth.tick();
+    });
   }
 
   // ── 排着的外部消息的推送（工单 10）────────────────────────────────────────────────────
@@ -5770,6 +5982,152 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     maybeWakeForDigest();
   }
 
+  // shadow 同时最多跑几批。到了上限，留给它的事等前面的一批结束。
+  const SHADOW_MAX_RUNS = 3;
+  let shadowGatherTimer: { at: number; timer: NodeJS.Timeout } | null = null;
+  let shadowTrialRuns = 0;
+
+  // 合批窗口（lead_shadow 的 gatherSeconds，spec D5）。测试用 PLC_SHADOW_GATHER_MS 设（vitest.config.ts 缺省 0）。
+  function shadowGatherMs(settings: LeadShadowDto): number {
+    const fromEnv = process.env.PLC_SHADOW_GATHER_MS;
+    return fromEnv !== undefined && fromEnv !== "" && Number.isFinite(Number(fromEnv)) ? Math.max(0, Number(fromEnv)) : settings.gatherSeconds * 1_000;
+  }
+
+  // 把留给 shadow 的事交出去（mode on）。外部的人的消息马上交；别的事从最早一件算起等合批窗口，合成一批。
+  // Lead 忙不忙都可以交：这些事 Lead 的一轮不取（reservedForShadow）。
+  function dispatchShadow(): void {
+    if (!shadowParts || sched.draining || modelHold.held || !network.online) return;
+    const settings = shadowSettings();
+    if (settings.mode !== "on" || leadInput.shadowRuns() >= SHADOW_MAX_RUNS) return;
+    const candidates = leadInput.pendingForShadow();
+    if (!candidates.length) return;
+    const people = candidates.filter((event) => event.kind === MESSAGE_EVENT_KIND);
+    const others = candidates.filter((event) => event.kind !== MESSAGE_EVENT_KIND);
+    let ready = people;
+    if (others.length) {
+      const arrived = others.map((event) => Date.parse(event.receivedAt)).filter(Number.isFinite);
+      const at = (arrived.length ? Math.min(...arrived) : Date.now()) + shadowGatherMs(settings);
+      if (Date.now() >= at) {
+        ready = [...people, ...others];
+      } else if (!shadowGatherTimer || shadowGatherTimer.at !== at) {
+        if (shadowGatherTimer) clearTimeout(shadowGatherTimer.timer);
+        const timer = setTimeout(() => { shadowGatherTimer = null; dispatchShadow(); }, Math.max(0, at - Date.now()) + 5);
+        timer.unref?.();
+        shadowGatherTimer = { at, timer };
+      }
+    }
+    if (!ready.length) return;
+    const batch = leadInput.takeForShadow(ready);
+    if (!batch) return;
+    publishLeadQueue();
+    void runShadowBatch(batch, settings, "on");
+  }
+
+  // 试运行（mode trial，spec D6）：Lead 照常处理这一轮的事；其中该交给 shadow 的，同时交给一个 shadow 会话，
+  // 它的动作不执行，只记下它会怎么做（lead.shadow_run），用来比对。同一时间只跑一批试运行。
+  function startShadowTrial(events: readonly EventRecord[]): void {
+    if (!shadowParts || shadowTrialRuns > 0 || modelHold.held) return;
+    const settings = shadowSettings();
+    if (settings.mode !== "trial") return;
+    const { shadow } = splitForShadow(events, shadowFactsFor({ mode: "on", shares: settings.shares }, new Set()));
+    if (!shadow.length) return;
+    shadowTrialRuns += 1;
+    const batch = { ...leadInput.renderForShadow(shadow), id: `trial-${Date.now()}` };
+    void runShadowBatch(batch, settings, "trial").finally(() => { shadowTrialRuns -= 1; });
+  }
+
+  // 一批：建会话、跑、按结论收尾。on：做完的算处理完，交回的带着说明留给 Lead；trial：只记下来。
+  async function runShadowBatch(batch: ShadowBatch & { id: string }, settings: LeadShadowDto, mode: "on" | "trial"): Promise<void> {
+    const parts = shadowParts!;
+    const recorder = new ShadowRecorder();
+    const ids = [...batch.ids.keys()];
+    let origin = withExternalEvents({ external: false, timer: null }, batch.events);
+    const tools = createShadowToolset(parts.tools({ turnOrigin: () => origin }), {
+      recorder, dryRun: mode === "trial", userWatching: () => clientCount() > 0, messageIds: batch.messageIds,
+      connectionReadOnly: (connection, tool) => parts.connectionReadOnly(connection, tool),
+      onInnerToolStart: (name) => {
+        if (isExternalTextTool(name)) origin = withExternalContent(origin, { via: "tool", tool: name });
+      },
+      skillsDir: LEAD_SKILLS_DIR,
+    });
+    const model = settings.model ?? parseLeadModelSpec(leadModelName).model;
+    log(`shadow: ${batch.id} (${mode}) ${ids.length} item(s) #${ids.join(",#")} with ${model}`);
+    let outcome: ReturnType<typeof resolveShadowOutcome>;
+    let result: Awaited<ReturnType<typeof runShadowSession>> | null = null;
+    try {
+      const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      result = await runShadowSession({
+        factory: shadowFactory,
+        request: { systemPrompt: parts.systemPrompt(), tools, model },
+        text: shadowBatchText({
+          clock: leadSystemEvent("clock", `当前时间：${localIso(new Date())}，时区 ${tz}`),
+          presence: leadSystemEvent("presence", userPresenceText()),
+          events: batch.text, ids,
+        }),
+        finished: () => recorder.report !== null,
+        onToolStart: (name) => {
+          if (isExternalTextTool(name)) origin = withExternalContent(origin, { via: "tool", tool: name });
+        },
+        // shadow 的调用也是系统自己发起的：记进自动调用的预算，超了就暂停（和 Lead 的系统单元一样）。试运行也算。
+        onCall: (usage, stopReason) => {
+          if (stopReason === "aborted") return;
+          const over = autoBudget.record(uncachedTokens(usage as Parameters<typeof uncachedTokens>[0]));
+          if (over) modelHold.pause(over.until, over.detail);
+        },
+      });
+      outcome = resolveShadowOutcome({
+        ids, report: recorder.report, error: result.error, userActions: recorder.userActions,
+        needsDisposition: (id) => batch.needsDisposition.has(id), disposed: (id) => recorder.disposed.has(id),
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outcome = resolveShadowOutcome({ ids, report: null, error: message, needsDisposition: () => true, disposed: () => false });
+    }
+    const seqsOf = (entryIds: readonly number[]) => entryIds.flatMap((id) => batch.ids.get(id) ?? []);
+    const eventBySeq = new Map(batch.events.map((event) => [event.seq, event] as const));
+    try {
+      db.transaction(() => {
+        if (mode === "on") {
+          for (const entry of outcome.done) {
+            const seqs = seqsOf(entry.ids);
+            appendEvent(db, {
+              source: "lead", kind: LEAD_SHADOW_HANDLED_KIND, entityKey: eventBySeq.get(seqs[0]!)?.entityKey ?? "lead:shadow", level: "record",
+              payload: { ids: entry.ids, seqs, line: entry.line, batch: batch.id, model: result?.model ?? model, summary: `shadow：${entry.line}` },
+            });
+          }
+        }
+        appendEvent(db, {
+          source: "lead", kind: LEAD_SHADOW_RUN_KIND, entityKey: "lead:shadow", level: "record",
+          payload: {
+            batch: batch.id, mode, model: result?.model ?? model, modelNote: result?.modelNote ?? null, error: result?.error ?? null,
+            durationMs: result?.durationMs ?? null, usage: result?.usage ?? null,
+            seqs: batch.events.map((event) => event.seq), ids,
+            done: outcome.done, escalated: outcome.escalated,
+            dispositions: Object.fromEntries(recorder.disposed), notified: recorder.notified,
+            calls: recorder.calls.map((call) => ({ name: call.name, dry: call.dry, refused: call.refused ?? null })),
+            summary: `shadow ${batch.id}（${mode}）：做完 ${outcome.done.flatMap((entry) => entry.ids).length} 件，交回 ${outcome.escalated.flatMap((entry) => entry.ids).length} 件`,
+          },
+        });
+      })();
+    } catch (error) {
+      log(`shadow: recording ${batch.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (mode === "on") {
+      const escalated = new Map<number, string>();
+      for (const entry of outcome.escalated) for (const seq of seqsOf(entry.ids)) escalated.set(seq, entry.note);
+      try {
+        leadInput.endShadow(batch.id, { done: outcome.done.flatMap((entry) => seqsOf(entry.ids)), escalated });
+      } catch (error) {
+        log(`shadow: settling ${batch.id} failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      publishLeadQueue();
+    }
+    const usage = result?.usage;
+    log(`shadow: ${batch.id} (${mode}) done=${outcome.done.flatMap((entry) => entry.ids).length} escalated=${outcome.escalated.flatMap((entry) => entry.ids).length}`
+      + `${usage ? ` calls=${usage.calls} input=${usage.input} cacheRead=${usage.cacheRead} output=${usage.output}` : ""}${result?.error ? ` error=${result.error}` : ""}`);
+    if (mode === "on") dispatchLeadWork();
+  }
+
   const EVENT_WAKE_TEXT = "（系统检测到新的异常、完成的工作或要你决定的事，上面是它们的说明（带 # 编号，以及 Run 号、影响、下一步、根因和证据）。"
     + "请现在就处理：要看工单当前的完整状态和根因，用 get_ticket_status，"
     + "能自己处理的直接处理（例如用 recover_ticket_run 换模型、换 runtime 或带着新指令再跑）。"
@@ -5819,7 +6177,8 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 外部的人的消息、到点的提醒、用户设的跟进不到这里（wakeForEvents 在前面单独处理）。要等时排一个定时器，到点再派发。
   function wakePaceHolds(): boolean {
     const minutes = getWakePace(db).coldBatchMinutes;
-    if (minutes <= 0 && !wakePaceWait) return false;
+    const gatherMs = shadowGatherMs(shadowSettings());
+    if (minutes <= 0 && gatherMs <= 0 && !wakePaceWait) return false;
     const pending = leadInput.pendingMessages();
     const arrived = pending.map((event) => Date.parse(event.receivedAt)).filter(Number.isFinite);
     let warmMs = PREFIX_WARM_MS;
@@ -5836,6 +6195,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       now: Date.now(), coldBatchMs: minutes * minuteMs, lastModelCallAt: lastLeadModelCallAt, warmMs,
       firstWaitingAt: arrived.length ? Math.min(...arrived) : null,
       urgent: pending.some((event) => event.level === "interrupt" || handoffLaneOf(event) <= 1),
+      gatherMs,
     });
     if (decision.wake) {
       if (wakePaceWait) {
@@ -5889,7 +6249,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     const next = handoffs.nextWake();
     if (!next) return;
     log(schedulerLine("suspended.wake_start", { pkg: next.pkg.id, of: next.pkg.unitId, lane: `L${next.lane}`, raised: next.raised }));
-    void runTurn(SUSPENDED_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, lane: next.lane }).then((outcome) => {
+    void runTurn(SUSPENDED_WAKE_TEXT, { system: SYSTEM_TURN_ORIGINS.blocker, lane: next.lane, suspendedWake: next.pkg.id }).then((outcome) => {
       if (!outcome.deferred && !outcome.offline) handoffs.noteWake(next.pkg.id, next.lane);
     });
   }
@@ -5897,9 +6257,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
   // 交给这一轮的事件里，交回的结果带着原来的车道：交接出去的工单（run-finished.ts 的 handoffLane）、转到后台的作业
   // （resultLane）。没有时是 9（不提级）。
   function handoffLaneOf(event: EventRecord): number {
-    const inner = event.payload.payload as Record<string, unknown> | undefined;
-    const lane = typeof event.payload.handoffLane === "number" ? event.payload.handoffLane : inner?.handoffLane ?? inner?.resultLane;
-    return typeof lane === "number" && Number.isInteger(lane) && lane >= 0 && lane <= 4 ? lane : 9;
+    return eventHandoffLane(event);
   }
 
   // 外部来源交来的事件：通道 hub 的事（channel.*），外部来源登记的事件（例如连接），和带外部标记的消息事件
@@ -6000,6 +6358,10 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       case "unit.suspend":
         handoffs.suspend(effect.reason);
         return;
+      // 交接窗口因为机器睡眠往后推了：再等剩下的那一段。
+      case "handoff.rearm":
+        armHandoffTimer(effect.inMs, schedulerLimits().handoffMs);
+        return;
       default:
         return;
     }
@@ -6025,6 +6387,21 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     return counted.length ? counted : atStop;
   }
 
+  // 交接窗口的定时器。到点时先看进程有没有停住过（机器睡眠时定时器在醒来那一刻到点）：停住过，调度器把窗口往后推，
+  // 给出 handoff.rearm，这里再定一次时。
+  function armHandoffTimer(inMs: number, windowMs: number): void {
+    if (handoffTimer) clearNodeTimeout(handoffTimer);
+    handoffTimer = setNodeTimeout(() => {
+      handoffTimer = null;
+      if (schedRedLinePhase(sched.state) !== "handoff") return;
+      noteClockGap();
+      const effects = sched.dispatch({ type: "handoff.timeout" });
+      if (effects.some((effect) => effect.type === "handoff.rearm")) return;
+      log(`lead red line: the hand-off took over ${Math.round(windowMs / 1_000)}s; ending the turn`);
+    }, Math.max(0, inMs));
+    handoffTimer.unref();
+  }
+
   // 红线中断以后，这一次 prompt 返回了：在同一轮里马上给 Lead 红线消息。pi 先送这条，再送排着的插话；排队的消息
   // 等 Lead 交接完（这一段最后的回答）才送，那时工具限制已经解除。交接超过 PLC_LEAD_HANDOFF_MS 时再中断一次，这一轮结束。
   // 交接是这个单元的第二段运行：用一个新的 controller（AbortSignal 只能触发一次）。
@@ -6038,13 +6415,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
       if (!handoff) return;
       activeTurnError = null;
       sched.nextSegment();
-      handoffTimer = setNodeTimeout(() => {
-        handoffTimer = null;
-        if (schedRedLinePhase(sched.state) !== "handoff") return;
-        log(`lead red line: the hand-off took over ${Math.round(handoff.timeoutMs / 1_000)}s; ending the turn`);
-        sched.dispatch({ type: "handoff.timeout" });
-      }, handoff.timeoutMs);
-      handoffTimer.unref();
+      armHandoffTimer(handoff.timeoutMs, handoff.timeoutMs);
       // 交接这一段 Lead 说了什么：没说话时系统替它写一句确认（lead-scheduler spec H6）。
       const spokenBefore = activeChannelTurn?.assistantText.length ?? 0;
       try {
@@ -6812,6 +7183,9 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
         // Lead 的会话收文件（acceptChatMessage 写进这一轮的文件夹）：网关据此宣布 CHAT_FILES_CAPABILITY。
         chatFiles: true,
         ticketMessageV2: handleTicketMessage,
+        // Topics (topics.ts): a message in a topic, and stopping the reply a topic is writing.
+        topicMessage: (command) => topics.send(command),
+        topicStop: (topicId) => topics.stop(topicId),
         addClient: (send) => { senders.add(send); return () => senders.delete(send); },
         recheckRuntimes: (runtime) => healthRecovery.recheck({ runtime }),
       }, {
@@ -7136,6 +7510,7 @@ async function runDaemon(opts: DaemonOpts, ownership: InstanceLock): Promise<Dae
     // 所有 Run 都已经分离或结束。同一进程里之后启动的 Run（例如测试）照常看管，宿主退出时照常停止。
     acceptRunningChildren();
     retainChildrenOnHostExit(false);
+    topics.dispose();
     session.dispose?.();
     // 被中断的这一轮还在写它的记录时，等它写完再关库。pi 的 dispose 之后这一轮几毫秒内就结束。
     if (currentTurn) await settledWithin(currentTurn, 500);

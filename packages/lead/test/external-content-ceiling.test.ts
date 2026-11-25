@@ -68,7 +68,7 @@ describe("each tool declares whether its output is external content", () => {
     expect([...EXTERNAL_TEXT_TOOLS].sort()).toEqual(
       // 信号源交来的内容（read_signal_items，2026-11-12）：邮件、日历里别人写的话，也算。
       // External agenda entries (read_agenda_entries, 2026-11-12): meeting titles and locations are other people's words.
-      ["call_connection_tool", "read_agenda_entries", "read_channel_conversation", "read_channel_file", "read_connection_result",
+      ["call_connection_tool", "read_agenda_entries", "read_channel_conversation", "read_channel_document", "read_channel_file", "read_connection_result",
         "read_signal_items", "read_ticket_attachment"],
     );
     for (const name of [

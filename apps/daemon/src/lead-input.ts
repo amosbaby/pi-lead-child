@@ -27,16 +27,16 @@ import {
   type Db, type EventRecord, type InboxRow, type SeqRange,
 } from "@pi-lead-child/store";
 import {
-  COMPONENT_CALL_KINDS, CONNECTION_STATUS_CHANGED_KIND, CORE_MEMORY_CHANGED_KIND, DAEMON_STARTED_KIND, EVENT_SOURCES, LEAD_SELF_EVENT_KINDS,
+  BACKGROUND_RECOVERED_KIND, TOPIC_CONCLUDED_KIND, COMPONENT_CALL_KINDS, CONNECTION_STATUS_CHANGED_KIND, CORE_MEMORY_CHANGED_KIND, DAEMON_STARTED_KIND, EVENT_SOURCES, LEAD_SELF_EVENT_KINDS,
   LEAD_INSTALL_CHANGED_KIND, LEAD_WAIT_EXPIRED_KIND, LEAD_WAIT_LIMITS, LEAD_WAIT_SATISFIED_KIND, MEMORY_FACT_CHANGED_KIND, MESSAGE_EVENT_KIND, SIGNAL_RECEIVED_KIND, USER_REQUEST_EXPIRED_KIND,
   OWNER_ACTION_DISOWNED_KIND, OWNER_ACTION_PERFORMED_KIND, PUSHED_SECURITY_ALERT_KINDS, REMINDER_PUSHED_KIND,
   REMINDER_UNACKNOWLEDGED_KIND, reminderNeedsCheck, SYSTEM_TURN_ORIGINS, ticketNeedsUser, ticketNeedsUserLabel,
-  TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX, isSchedulerEventKind,
+  TICKET_REPLY_ACTIONS_KIND, LEAD_QUEUE_EXCERPT_MAX, isSchedulerEventKind, LEAD_SHADOW_HANDLED_KIND, LEAD_SHADOW_RUN_KIND,
   type LeadQueueEntry, type SystemTurnOrigin, type TicketSummary,
 } from "@pi-lead-child/protocol";
 import { localIso } from "@pi-lead-child/core";
 import {
-  DEFAULT_SITUATION_BUDGET_TOKENS, leadEventBlock, leadInboxEntryEvent, leadInboxEvents, leadMessageEventBlock, leadReminderEventBlock, leadSystemEvent,
+  backgroundRecoveredNote, DEFAULT_SITUATION_BUDGET_TOKENS, leadEventBlock, leadInboxEntryEvent, leadInboxEvents, leadMessageEventBlock, leadReminderEventBlock, leadSystemEvent,
   leadSignalEventBlock, leadWaitEventBlock, renderLeadSituation, ticketRunAnnotation,
   type LeadReminderCardState, type SituationDigestGroup, type SituationRecordGroup,
 } from "@pi-lead-child/lead";
@@ -66,6 +66,9 @@ export function leadEventRoute(event: Pick<EventRecord, "kind" | "level"> & { pa
   if (COMPONENT_TELEMETRY_KINDS.has(event.kind)) return "skip";
   // 调度器的记录（lead-scheduler spec D12）只留档，做统计和排查用，不进 Lead 的上下文。
   if (isSchedulerEventKind(event.kind)) return "skip";
+  // shadow 每次会话的记录（lead.shadow_run）只留档：比对和报告用，不进 Lead 的上下文。它处理完的每件事另有 lead.shadow_handled，
+  // 进当前局面的「shadow 处理了」一节。
+  if (event.kind === LEAD_SHADOW_RUN_KIND) return "skip";
   // 工单回复下面的动作按钮（2026-10-19，ticket-reply-actions.ts）：只给界面用。工单对话答完一轮另有 ticket_agent.turn_completed。
   if (event.kind === TICKET_REPLY_ACTIONS_KIND) return "skip";
   // 主人操作（工单 15）：系统自己推送给用户、自己贴会话卡，「不是我」由用户处理，Lead 不用为它开一轮。
@@ -186,6 +189,9 @@ export interface LeadInputOptions {
   lanes?: (objectKeys: readonly string[]) => Map<string, string>;
   // 多久没有动静的工单在当前局面里折叠成一行（毫秒，2026-10-19）。不给或者不是正数时用 DEFAULT_IDLE_TICKET_MS。
   idleTicketMs?: number;
+  // shadow 开着时（用户 2026-11-19，daemon 的 shadow-routing.ts）：返回「这件事留给 shadow」的判断，Lead 的一轮不取这些事。
+  // 每次读 Lead 的输入时调一次（读一次设置）；shadow 关着时返回 null。shadow 交回来的事不再留（escalatedByShadow）。
+  shadowReservation?: () => ((event: EventRecord) => boolean) | null;
 }
 
 // 长期没有动静的工单折叠成一行（2026-10-19）：审查期间 Lead 的当前局面里列着 8 月的旧工单，每一轮都占上下文。
@@ -213,6 +219,15 @@ export interface TakenMessages {
   // 交给 Lead 的文字：每件事一个 <system_event>。
   text: string;
   inboxIds: number[];
+}
+
+/** 交给 shadow 的一批（takeForShadow）。ids：事件块里写的编号 → 它代表的事件序号（合并进来的跟着）。 */
+export interface ShadowBatch extends TakenMessages {
+  ids: Map<number, number[]>;
+  // 要有处置才算做完的编号（收件箱的事、外部消息事件：record_disposition 认它们）。
+  needsDisposition: Set<number>;
+  // 外部消息事件的编号。
+  messageIds: Set<number>;
 }
 
 export interface SituationContext {
@@ -290,6 +305,12 @@ export class LeadInput {
   // 这个对话排着的消息交出去了，或者都移出了队列，就忘掉它：以后再来的消息按先后排。
   private readonly promoted = new Map<string, number>();
   private promotions = 0;
+  // shadow 正在处理的几批（takeForShadow 到 endShadow），按批的编号。和 Lead 的一轮分开记：两边可以同时跑。
+  private readonly shadows = new Map<string, Map<number, EventRecord>>();
+  private shadowBatches = 0;
+  // shadow 交回给 Lead 的事：序号 → shadow 的说明。交给 Lead 时附在事件后面；Lead 这一轮成功以后忘掉。不再交给 shadow。
+  // 只在内存里：daemon 重启以后这些事照常交给 Lead，只是没有说明。
+  private readonly shadowNotes = new Map<number, string>();
 
   constructor(options: LeadInputOptions) {
     this.db = options.db;
@@ -388,7 +409,7 @@ export class LeadInput {
   // Lead 才知道又有一张工单因为同一个根因出了事。
   private carriedMerges(events: readonly EventRecord[], cache: Map<number, InboxRow | null>): Map<number, EventRecord[]> {
     const carried = new Map<number, EventRecord[]>();
-    const open = (event: EventRecord) => !this.done(event, cache) && !this.run?.inFlight.has(event.seq);
+    const open = (event: EventRecord) => !this.done(event, cache) && !this.run?.inFlight.has(event.seq) && !this.inShadow(event.seq);
     let bySeq: Map<number, EventRecord> | null = null;
     for (const event of events) {
       const target = mergedTargetOf(event);
@@ -406,8 +427,33 @@ export class LeadInput {
     const cache = new Map<number, InboxRow | null>();
     const { events } = this.readAfter();
     const carried = flattenSeqs(this.carriedMerges(events, cache));
+    const reserved = this.reservation();
     return events.filter((event) => leadEventRoute(event) === "message"
-      && !this.done(event, cache) && !this.run?.inFlight.has(event.seq) && !carried.has(event.seq));
+      && !this.done(event, cache) && !this.run?.inFlight.has(event.seq) && !this.inShadow(event.seq) && !carried.has(event.seq)
+      && !reserved(event));
+  }
+
+  /** 留给 shadow、还没交出去的事（按发生的先后）。 */
+  pendingForShadow(): EventRecord[] {
+    const cache = new Map<number, InboxRow | null>();
+    const { events } = this.readAfter();
+    const carried = flattenSeqs(this.carriedMerges(events, cache));
+    const reserved = this.reservation();
+    return events.filter((event) => leadEventRoute(event) === "message"
+      && !this.done(event, cache) && !this.run?.inFlight.has(event.seq) && !this.inShadow(event.seq) && !carried.has(event.seq)
+      && reserved(event));
+  }
+
+  // 这一次读输入时「留给 shadow」的判断。
+  private reservation(): (event: EventRecord) => boolean {
+    const predicate = this.options.shadowReservation?.() ?? null;
+    if (!predicate) return () => false;
+    return (event) => !this.shadowNotes.has(event.seq) && predicate(event);
+  }
+
+  private inShadow(seq: number): boolean {
+    for (const inFlight of this.shadows.values()) if (inFlight.has(seq)) return true;
+    return false;
   }
 
   /**
@@ -482,7 +528,7 @@ export class LeadInput {
    * 对方改的消息并不并进排着的那条消息事件（统一消息事件 spec D6）。
    */
   taken(seq: number): boolean {
-    return seq <= this.cursorSeq || this.isSettled(seq) || this.run?.inFlight.has(seq) === true;
+    return seq <= this.cursorSeq || this.isSettled(seq) || this.run?.inFlight.has(seq) === true || this.inShadow(seq);
   }
 
   /**
@@ -493,12 +539,106 @@ export class LeadInput {
   takeMessages(options: { events?: EventRecord[]; limit?: number; steered?: boolean } = {}): TakenMessages {
     const run = this.run ?? (this.run = { kind: "events", id: this.runId(), inFlight: new Map(), shown: new Set() });
     const events = (options.events ?? this.pendingMessages()).slice(0, options.limit ?? 30);
+    const taken = this.renderTaken(events, run.inFlight, { steered: options.steered === true, notes: true });
+    return { events: taken.events, text: taken.text, inboxIds: taken.inboxIds };
+  }
+
+  /**
+   * 交给 shadow 的一批（用户 2026-11-19，lead 的 shadow/）：和 takeMessages 一样排版、标成在路上（inbox 行 delivered），
+   * 但记在 shadow 自己的账上，Lead 的一轮照常跑。几批可以同时在跑，每批一个编号。没有事件时返回 null。
+   */
+  takeForShadow(events: readonly EventRecord[]): (ShadowBatch & { id: string }) | null {
+    if (!events.length) return null;
+    const id = `shadow-${++this.shadowBatches}`;
+    const inFlight = new Map<number, EventRecord>();
+    this.shadows.set(id, inFlight);
+    this.afterCache = null;
+    return { ...this.renderTaken(events.slice(0, 30), inFlight, { steered: false, notes: false }), id };
+  }
+
+  /** 试运行（lead_shadow 的 trial）：排版同样的一批给 shadow 看，不标成在路上，也不改 inbox 行。 */
+  renderForShadow(events: readonly EventRecord[]): ShadowBatch {
+    return this.renderTaken(events.slice(0, 30), new Map(), { steered: false, notes: false, mark: false });
+  }
+
+  /** shadow 在跑几批。 */
+  shadowRuns(): number {
+    return this.shadows.size;
+  }
+
+  /** Lead 这一轮拿着的事件的对象（shadow 不动这些对象上的事）。 */
+  leadEntities(): Set<string> {
+    return new Set([...(this.run?.inFlight.values() ?? [])].map((event) => event.entityKey));
+  }
+
+  /** shadow 交回过这件事：它直接交给 Lead，不再交给 shadow。 */
+  escalatedByShadow(seq: number): boolean {
+    return this.shadowNotes.has(seq);
+  }
+
+  /**
+   * shadow 的一批结束。done：做完的事件序号，算处理完（和 Lead 一轮成功一样：事件记「看过了」、inbox 行消化掉、游标前进）。
+   * escalated：交回给 Lead 的序号和说明，下一轮交给 Lead 时附上。interrupted（daemon 停机）：inbox 行回到 pending，照常交给 Lead。
+   */
+  endShadow(id: string, result: { done: readonly number[]; escalated: ReadonlyMap<number, string>; interrupted?: boolean }): void {
+    const inFlight = this.shadows.get(id);
+    this.shadows.delete(id);
+    this.afterCache = null;
+    if (!inFlight) return;
+    const shadow = { inFlight };
+    const cache = new Map<number, InboxRow | null>();
+    const rowIds = (seqs: Iterable<number>) => {
+      const ids = new Set<number>();
+      for (const seq of seqs) {
+        const event = shadow.inFlight.get(seq);
+        const row = event ? this.inboxRow(event, cache) : null;
+        if (row) ids.add(row.id);
+      }
+      return ids;
+    };
+    if (result.interrupted) {
+      returnInboxToPending(this.db, [...rowIds(shadow.inFlight.keys())]);
+      return;
+    }
+    for (const [seq, note] of result.escalated) if (shadow.inFlight.has(seq)) this.shadowNotes.set(seq, note);
+    // 交回给 Lead 的 inbox 行回到 pending：它们还没处理完，界面照旧显示等 Lead。
+    const handedBack = rowIds([...result.escalated.keys()].filter((seq) => shadow.inFlight.has(seq)));
+    const done = result.done.filter((seq) => shadow.inFlight.has(seq) && !result.escalated.has(seq));
+    const at = this.now().toISOString();
+    this.db.transaction(() => {
+      if (handedBack.size) returnInboxToPending(this.db, [...handedBack]);
+      for (const seq of done) this.settled.add(seq);
+      const dispose = this.db.prepare(
+        "UPDATE events SET disposition = ?, disposition_detail = ?, disposed_at = ? WHERE seq = ? AND disposition IS NULL",
+      );
+      for (const seq of done) {
+        const event = shadow.inFlight.get(seq)!;
+        if (!this.inboxRow(event, cache)) dispose.run("seen", "lead_shadow", at, seq);
+      }
+      const consumed = [...rowIds(done)].filter((id) => !handedBack.has(id) && this.inboxRowSettled(id) && this.inboxRowDue(id));
+      if (consumed.length) {
+        markInbox(this.db, consumed, "consumed");
+        recordSeenDispositions(this.db, consumed, new Date(at));
+      }
+      this.advance();
+    })();
+  }
+
+  // 排版交给 Lead 或 shadow 的事件，标成在路上（inFlight），inbox 行标成 delivered。
+  // notes：shadow 交回过的事，附上它的说明（只给 Lead）。ids：事件块里写的编号 → 序号（shadow 按它给结论）。
+  private renderTaken(
+    events: readonly EventRecord[], inFlight: Map<number, EventRecord>, options: { steered: boolean; notes: boolean; mark?: boolean },
+  ): ShadowBatch {
     const cache = new Map<number, InboxRow | null>();
     // 在把它们标成在路上之前算：合并到的那一条在路上时，合并进来的不再跟着它。
     const merges = this.carriedMerges(this.readAfter().events, cache);
     const blocks: string[] = [];
     const inboxIds: number[] = [];
     const delivered: EventRecord[] = [];
+    const ids = new Map<number, number[]>();
+    const needsDisposition = new Set<number>();
+    const messageIds = new Set<number>();
+    const mapId = (id: number, seq: number) => { ids.set(id, [...(ids.get(id) ?? []), seq]); };
     // 同一个对话里一起交的几条外部消息（工单 10）：每条都带着一份上下文包（工单 04），内容大半重复，只给最新的那一份。
     const newestContext = new Map<string, number>();
     for (const event of events) {
@@ -506,16 +646,19 @@ export class LeadInput {
       if (key !== null && isRecord(event.payload.context)) newestContext.set(key, Math.max(newestContext.get(key) ?? 0, event.seq));
     }
     for (const event of events) {
-      run.inFlight.set(event.seq, event);
+      inFlight.set(event.seq, event);
       delivered.push(event);
       const row = this.inboxRow(event, cache);
       const reminder = isReminderFireEvent(event) ? this.reminderCard(event) : null;
+      let shownId = event.seq;
       if (reminder) {
         blocks.push(leadReminderEventBlock(event, reminder, { placement: options.steered ? "steered" : "dedicated", clock }));
       } else if (event.kind === MESSAGE_EVENT_KIND) {
         // 外部通道的消息事件（统一消息事件 spec D1，工单 03）：结构化的事实，加上外部标签里的原话。
         const contextIn = newestContext.get(queueKeyOf(event) ?? "");
         blocks.push(leadMessageEventBlock(event, contextIn === undefined ? {} : { contextIn }));
+        needsDisposition.add(event.seq);
+        messageIds.add(event.seq);
       } else if (event.kind === SIGNAL_RECEIVED_KIND) {
         // 信号源交来的新内容（2026-11-12）：系统的数据在系统事件里，别人写的话在外部标签里。
         blocks.push(leadSignalEventBlock(event));
@@ -525,6 +668,8 @@ export class LeadInput {
       } else if (!row) {
         blocks.push(leadEventBlock(event));
       } else {
+        shownId = row.id;
+        needsDisposition.add(row.id);
         if (!inboxIds.includes(row.id)) {
           inboxIds.push(row.id);
           blocks.push(...leadInboxEvents(row));
@@ -538,11 +683,16 @@ export class LeadInput {
           }));
         }
       }
+      mapId(shownId, event.seq);
+      // shadow 交回给你的事：附上它查到的和建议。
+      const note = options.notes ? this.shadowNotes.get(event.seq) : undefined;
+      if (note) blocks.push(leadSystemEvent("system", `关于上面的 #${shownId}：${note}`, { topic: "shadow" }));
       // 按根因合并进这一件的：跟着它交，写明是哪几张工单，Lead 说一次。
       const merged = merges.get(event.seq) ?? [];
       for (const other of merged) {
-        run.inFlight.set(other.seq, other);
+        inFlight.set(other.seq, other);
         delivered.push(other);
+        mapId(shownId, other.seq);
         const otherRow = this.inboxRow(other, cache);
         if (otherRow && !inboxIds.includes(otherRow.id)) inboxIds.push(otherRow.id);
       }
@@ -553,8 +703,8 @@ export class LeadInput {
       const standalone = this.standaloneMergeNote(event);
       if (standalone) blocks.push(leadSystemEvent("event", standalone, { topic: "merged_root_cause" }));
     }
-    if (inboxIds.length) markInbox(this.db, inboxIds, "delivered");
-    return { events: delivered, text: blocks.join("\n"), inboxIds };
+    if (inboxIds.length && options.mark !== false) markInbox(this.db, inboxIds, "delivered");
+    return { events: delivered, text: blocks.join("\n"), inboxIds, ids, needsDisposition, messageIds };
   }
 
   // 一条到点的提醒现在卡片的状态（工单 07）：推了几次、用户确认了没有、关联的工单。
@@ -596,14 +746,21 @@ export class LeadInput {
     const merges = this.carriedMerges(events, cache);
     const carried = flattenSeqs(merges);
     const open = events.filter((event) => !this.done(event, cache) && !carried.has(event.seq));
-    // 排队中：要交给 Lead、还没交的事，按类别和来源各一行。不写内容。
+    // 排队中：要交给 Lead、还没交的事，按类别和来源各一行。不写内容。shadow 在处理的、留给它的，合成一行（用户 2026-11-19）。
     const queuedCounts = new Map<string, number>();
+    const reserved = this.reservation();
+    let atShadow = 0;
     for (const event of open) {
       if (leadEventRoute(event) !== "message" || this.run?.inFlight.has(event.seq)) continue;
+      if (this.inShadow(event.seq) || reserved(event)) {
+        atShadow += 1;
+        continue;
+      }
       const label = `系统事件 ${event.kind}，来源 ${event.source}`;
       queuedCounts.set(label, (queuedCounts.get(label) ?? 0) + 1);
     }
     const queued = [...queuedCounts].map(([label, count]) => ({ label, count }));
+    if (atShadow) queued.push({ label: "shadow 在处理的事（不会交给你，处理不了的才交回来）", count: atShadow });
     if (context.queuedUserMessages > 0) queued.unshift({ label: "用户的排队消息", count: context.queuedUserMessages });
     if (context.queuedNotifications) queued.push({ label: "给用户的即时通知（系统会单独请你播报）", count: context.queuedNotifications });
     // 上一轮以后的变化：digest 级按对象合并，record 级按对象只给数量。
@@ -625,10 +782,16 @@ export class LeadInput {
     const recordGroups = new Map<string, SituationRecordGroup & { kindCounts: Map<string, number> }>();
     // 关于 Lead 自己的事（压缩失败、换了模型，工单 14）：单独一节，不按预算截断，但有自己的上限（leadSelfLines）。
     const selfEvents: EventRecord[] = [];
+    // shadow 处理完的事（lead.shadow_handled，用户 2026-11-19）：单独一节，每件一句。
+    const shadowEvents: EventRecord[] = [];
     for (const event of changes) {
       this.run?.shown.add(event.seq);
       if (LEAD_SELF_KINDS.has(event.kind)) {
         selfEvents.push(event);
+        continue;
+      }
+      if (event.kind === LEAD_SHADOW_HANDLED_KIND) {
+        shadowEvents.push(event);
         continue;
       }
       const merged = merges.get(event.seq) ?? [];
@@ -718,6 +881,7 @@ export class LeadInput {
         ...leadSelfLines(selfEvents),
       ],
       lanes: [...lanes.values()],
+      shadow: shadowLines(shadowEvents),
     }, this.options.budgetTokens ?? DEFAULT_SITUATION_BUDGET_TOKENS);
     return rendered.text;
   }
@@ -759,6 +923,7 @@ export class LeadInput {
     }
     const at = this.now().toISOString();
     let digested = 0;
+    for (const seq of run.inFlight.keys()) this.shadowNotes.delete(seq);
     this.db.transaction(() => {
       for (const seq of settledNow) this.settled.add(seq);
       const touched = new Set([...inboxIds(run.inFlight.keys(), run.inFlight), ...inboxIds(shown, null)]);
@@ -1064,6 +1229,21 @@ function rowMentions(row: InboxRow, summary: string): boolean {
 }
 
 // digest 级的一条变化在当前局面里的一行（或几行）。
+// 「shadow 处理了」一节最多几行。更多的写一行数量，Lead 用 query_events 查。
+export const MAX_SHADOW_LINES = 20;
+
+/** shadow 处理完的事，每件一行（最新的在后面）。 */
+export function shadowLines(events: readonly EventRecord[]): string[] {
+  const lines = events.map((event) => {
+    const ids = Array.isArray(event.payload.ids) ? (event.payload.ids as unknown[]).filter((id) => typeof id === "number") : [];
+    const head = ids.length ? `${ids.map((id) => `#${String(id)}`).join("、")}：` : "";
+    return `${shortTime(event.receivedAt)} ${head}${oneLine(String(event.payload.line ?? ""), 200)}`;
+  });
+  if (lines.length <= MAX_SHADOW_LINES) return lines;
+  const omitted = lines.length - MAX_SHADOW_LINES;
+  return [`（更早的 ${omitted} 件没有列出，用 query_events 查 kind=${LEAD_SHADOW_HANDLED_KIND}）`, ...lines.slice(-MAX_SHADOW_LINES)];
+}
+
 function digestLines(event: EventRecord): string[] {
   const payload = event.payload;
   if (event.kind.startsWith("inbox.")) {
@@ -1124,6 +1304,13 @@ function recordNote(event: EventRecord): string | null {
     case DAEMON_STARTED_KIND: return "daemon 启动了";
     case USER_REQUEST_EXPIRED_KIND: return oneLine(String(payload.summary ?? "请求过期了"), 80);
     case LEAD_WAIT_SATISFIED_KIND: return `你在等的事有了下一步（等待 #${String(payload.waitId)}，详情在同一件事的另一条事件里）`;
+    // 后台任务恢复了（background-models spec D3）：record 级，只记一句，不叫醒你。
+    case BACKGROUND_RECOVERED_KIND: return backgroundRecoveredNote(payload);
+    // A topic brought its conclusion back (protocol's topics.ts): the main conversation did not see the topic's turns,
+    // so the note carries the conclusion. The whole text is in list_actions(topic, <id>).
+    case TOPIC_CONCLUDED_KIND:
+      return `话题「${oneLine(String(payload.title ?? ""), 40)}」（编号 ${String(payload.topicId)}）结束了，用户在话题里和你定的结论：`
+        + `${oneLine(String(payload.conclusion ?? ""), 600)}。用户已经知道这个结论，不用再告诉他；后面的事按它做`;
     default: return null;
   }
 }

@@ -3,7 +3,7 @@ import {
 } from '@pi-lead-child/components';
 import {
   CHAT_FILE_MAX_BYTES, CHAT_FILE_MAX_COUNT, CHAT_IMAGE_MAX_COUNT, CHAT_IMAGES_MAX_TOTAL_BASE64_LENGTH, formatChatFileSize, parseCompactCommand,
-  type ChatFileInput, type ChatImageInput, type ChatPlacement, type ChatQuoteInput, type CompactLeadContextRequest,
+  type ChatFileInput, type ChatImageInput, type ChatPlacement, type ChatQuoteInput, type ChatQuoteSource, type CompactLeadContextRequest,
 } from '@pi-lead-child/protocol';
 import { useImperativeHandle, useRef, useState, type ReactNode, type Ref } from 'react';
 
@@ -21,7 +21,7 @@ import { fileMessages } from './file.messages';
 import { QuotingSlot, QuoteTray } from './QuoteTray';
 import { quoteDrafts, useQuoteDrafts } from './quoteDrafts';
 
-type MessageComposerProps = {
+export type MessageComposerProps = {
   contextKey: string;
   placeholder: string;
   // images：随消息发的图片（只有给了 attachImages 的输入框才会有）。quotes：引用的几段话（只有给了 quotes 的输入框才会有）。
@@ -59,6 +59,8 @@ type MessageComposerProps = {
   // 能不能带引用（设计规范 P17）：Lead 的会话，daemon 也收引用（CHAT_QUOTES_CAPABILITY）。给了时卡片上半截有引用托盘；
   // 手机（float）上正在引用的一段在输入区上面，这时输入的字是对这一段的说明（Q-5）。
   quotes?: boolean;
+  // "Side chat" in the quoting slot on a phone (QuoteTray's QuotingSlot): open a topic from the part being quoted.
+  onSideTopic?: (source: Extract<ChatQuoteSource, { kind: 'turn' }>, text: string) => void;
 };
 
 // focus：手机上开始引用一段以后，聚焦输入框、弹出键盘（设计规范 P17.10）。
@@ -112,7 +114,7 @@ export function MessageComposer(props: MessageComposerProps) {
 function MessageComposerField({
   contextKey, placeholder, onSend, compact = false, minimal = false, disabled = false, attachImages = false, attachFiles = false, onModelCommand, onCompactCommand,
   chip, modelControl, tray,
-  float = false, onPlus, ref, quotes = false,
+  float = false, onPlus, ref, quotes = false, onSideTopic,
 }: MessageComposerProps) {
   const locale = useLocale();
   const m = composerMessages(locale);
@@ -324,7 +326,7 @@ function MessageComposerField({
         {notice ? <Text testID="composer-notice" size="note" tone="danger" px="inline-item">{notice}</Text> : null}
         {commandNotice ? <Text testID="composer-command-notice" size="note" tone={commandNotice.tone} px="inline-item">{commandNotice.text}</Text> : null}
         {chip ? <Box px="inline-item" pt="inline-item">{chip}</Box> : null}
-        {noteMode ? <QuotingSlot onFocusInput={() => inputRef.current?.focus()} /> : null}
+        {noteMode ? <QuotingSlot onFocusInput={() => inputRef.current?.focus()} {...(onSideTopic ? { onSideTopic } : {})} /> : null}
         <Box px="inline-item" py="inline-item">{input}</Box>
         <Row items="center" gap="inline-item">
           {onPlus ? (

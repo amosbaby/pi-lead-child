@@ -122,7 +122,9 @@ describe("previewing an emoji for the settings page", () => {
 
   it("keeps emoji:read optional: in the app manifest, not in the checked scopes", () => {
     // search:read：断线以后补拉提到用户的消息（2026-11-03），缺了只是不补提到用户的消息。
-    expect(SLACK_OPTIONAL_USER_SCOPES).toEqual(["emoji:read", "files:read", "search:read"]);
+    // canvases:read、canvases:write、files:write：Lead 读、建、改 canvas 和 Markdown 文件（2026-11-20），缺了只是用不了这种文档。
+    expect(SLACK_OPTIONAL_USER_SCOPES).toEqual(["emoji:read", "files:read", "search:read", "canvases:read", "canvases:write", "files:write"]);
+    expect(SLACK_USER_SCOPES).not.toContain("canvases:write");
     expect(SLACK_USER_SCOPES).not.toContain("emoji:read");
     expect(SLACK_USER_SCOPES).not.toContain("search:read");
     expect(slackAppManifest("Leo")).toContain("      - emoji:read\n");

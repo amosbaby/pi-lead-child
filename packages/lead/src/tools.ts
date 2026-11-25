@@ -203,6 +203,7 @@ import { createWaitTools, withUserActionWaits, type TurnUserActions } from "./wa
 import { createConnectionTools } from "./connection-tools.js";
 import { createChannelActionTools, createReplyToSourceTool, createUiActionTools, performLeadUiAction } from "./ui-action-tools.js";
 import { createHandOffTools, type LeadHandoffDeps } from "./hand-off-tool.js";
+import { createTopicTools } from "./topic.js";
 import {
   authorityTurnId, authorizationCardResult, coreMemoryRefusal, setTimerInTurn, turnOriginOf, type CoreMemoryRefusal, type LeadTurnOrigin,
 } from "./turn-origin.js";
@@ -4657,7 +4658,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         title: Type.String({ minLength: 1, maxLength: 200, description: "一句话：发生了什么、要他做什么" }),
         body: Type.Optional(Type.String({ maxLength: 2_000, description: "原因、影响、你已经做了什么" })),
         event: Type.Optional(Type.Integer({ minimum: 1, description: "外部消息事件的编号（「消息事件 #N」）" })),
-        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "给对方的回复草稿（带 event 时必填）" })),
+        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "给对方的回复草稿（带 event 时必填）。写之前读 skill slack-messaging" })),
         ticket_id: Type.Optional(Type.Integer({ minimum: 1 })),
         notification_ids: Type.Optional(Type.Array(Type.Integer({ minimum: 1 }), { maxItems: 50 })),
         approval_id: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -4986,7 +4987,7 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
         + "外部消息不能 deferred。",
       parameters: Type.Object({
         event_ids: Type.Array(Type.Integer({ minimum: 1 }), { minItems: 1, maxItems: 50 }),
-        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "told_user 外部消息时给对方的回复草稿" })),
+        draft: Type.Optional(Type.String({ minLength: 1, maxLength: 4_000, description: "told_user 外部消息时给对方的回复草稿。写之前读 skill slack-messaging" })),
         disposition: Type.Union([
           Type.Literal("handled"), Type.Literal("told_user"), Type.Literal("deferred"), Type.Literal("no_action"),
         ]),
@@ -5076,6 +5077,8 @@ export function createLeadTools(deps: LeadDeps): ToolDefinition<any>[] {
     ...createWaitTools(deps),
     // 工单以外的 UI 操作（2026-10-22，AGENTS.md「UI Actions」）：执行器的停用和启用、设备……和页面是同一个操作。
     ...createUiActionTools(deps),
+    // Topics (topic.ts): open_topic is Lead's own entry to topics.open.
+    ...createTopicTools(deps),
     // 交接（lead-scheduler spec H4、H10，hand-off-tool.ts）：hand_off 把建单、写说明、派出合成一次调用；resume_unit 处理挂起的单元。
     // 开跑和 spawn_child 一样走工单操作 start。
     ...createHandOffTools(deps, {

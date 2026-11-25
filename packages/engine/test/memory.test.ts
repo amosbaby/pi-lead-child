@@ -4,7 +4,9 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { getMemorySync, listEvents, listMemorySync, openDb, saveNote, type Db } from "@pi-lead-child/store";
 import { tempDir } from "@pi-lead-child/core/testing";
-import { HindsightBackend, MemoryNotFoundError, memoryBackendSetting, NotesMemory, type NoteWriteStatus } from "../src/index.js";
+import {
+  HindsightBackend, hindsightFailureClass, MemoryNotFoundError, memoryBackendSetting, NotesMemory, type BackgroundCallResult, type NoteWriteStatus,
+} from "../src/index.js";
 import { FakeHindsight } from "../testing/index.js";
 
 // Lead 的记忆（src/memory，.scratch/hindsight-primary-memory/spec.md）：选了 Hindsight 时它是主后端，SQLite 的 notes 是镜像。
@@ -258,6 +260,40 @@ describe("NotesMemory: Hindsight write failures are tracked, shown, and retried 
     await settle(memory, hindsight);
     expect(listMemorySync(database, "hindsight.bank-1")[0]).toMatchObject({ state: "completed", operationId: row.operationId });
     expect(hindsight.operations.size).toBe(1);
+  });
+});
+
+// 后台健康（background-models spec D3）：写入任务的结果只来自同步时本来就查的任务状态，不另外去问 Hindsight。
+describe("NotesMemory: write outcomes for the background health", () => {
+  it("reports a failed operation with its class, a rejection, and a completed operation as ok; nothing while Hindsight is down", async () => {
+    const database = db();
+    const outcomes: BackgroundCallResult[] = [];
+    const memory = new NotesMemory(database, null, { onWriteOutcome: (result) => outcomes.push(result) });
+    const hindsight = new FakeHindsight();
+    hindsight.down = true;
+    memory.save({ title: "a", content: "1", tags: [] });
+    memory.setBackend(hindsight);
+    await settle(memory, hindsight);
+    expect(outcomes).toEqual([]);
+
+    hindsight.down = false;
+    hindsight.llmBroken = true;
+    await settle(memory, hindsight);
+    expect(outcomes).toEqual([{ ok: false, reasonClass: "auth", reason: "Error code: 401 - invalid api key" }]);
+
+    hindsight.llmBroken = false;
+    await settle(memory, hindsight);
+    expect(outcomes.at(-1)).toEqual({ ok: true });
+
+    hindsight.rejects = (item) => item.content.includes("BAD");
+    memory.save({ title: "BAD", content: "BAD", tags: [] });
+    await settle(memory, hindsight);
+    expect(outcomes.at(-1)).toEqual({ ok: false, reasonClass: "rejected", reason: expect.stringMatching(/HTTP 422/) });
+  });
+
+  it("classes an unknown operation error as operation_failed", () => {
+    expect(hindsightFailureClass("something odd happened")).toBe("operation_failed");
+    expect(hindsightFailureClass("Error code: 404 - model not found")).toBe("config");
   });
 });
 

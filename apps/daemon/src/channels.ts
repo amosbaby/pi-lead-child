@@ -370,12 +370,18 @@ export function startChannelMemory(input: {
   db: Db;
   notes: ChannelMemoryOptions["notes"];
   complete: ChannelMemoryOptions["complete"];
+  // 主记忆是 Hindsight 时把整段对话交给它（NotesMemory 的 channelDocuments），不问模型。
+  documents?: ChannelMemoryOptions["documents"];
+  // 一次真的整理的结果（engine 的 channels/memory.ts 第 8 点）：daemon 交给后台健康（background-health.ts，任务 channel_memory）。
+  onOutcome?: ChannelMemoryOptions["onOutcome"];
   log: (line: string) => void;
   options?: ChannelDaemonOptions;
 }): ChannelMemory | null {
   if (!input.hub || input.options === false || input.options?.memory === false) return null;
   return createChannelMemory({
     db: input.db, registry: input.hub.registry, notes: input.notes, complete: input.complete, log: input.log,
+    ...(input.documents ? { documents: input.documents } : {}),
+    ...(input.onOutcome ? { onOutcome: input.onOutcome } : {}),
     ...(input.options?.memory ?? {}),
   });
 }

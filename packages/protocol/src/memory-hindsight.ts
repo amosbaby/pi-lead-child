@@ -23,7 +23,7 @@ export const SummaryModelSlotSchema = Type.Union([Type.Literal("default"), Type.
 // 这个槽现在的模型是怎样选出来的：
 //   env       daemon 的环境变量 PLC_HINDSIGHT_LLM（只管缺省槽）。设了它时，页面上的选择不生效。
 //   settings  用户选的（config.json 的 memory.llm）。
-//   auto      自动：Lead 模型目录里版本最新的 haiku（缺省槽）。
+//   auto      自动：后台模型（lead 的 background-model.ts：kv lead.background_model，或者按价格选的第一个便宜模型；缺省槽）。
 //   inherit   跟缺省一样（整理观察槽没单独选）。
 //   none      没有可用的模型：Hindsight 只召回，不提取新事实。
 export const SUMMARY_MODEL_SOURCES = ["env", "settings", "auto", "inherit", "none"] as const;

@@ -4,6 +4,7 @@ import { useEffect } from 'react';
 import { LeadConversation } from '@/features/chat/LeadConversation';
 import { ConnectedTicketRecords } from '@/features/tickets/ConnectedTicketRecords';
 import { ConnectedTicketThread } from '@/features/tickets/ConnectedTicketThread';
+import { TopicPanel } from '@/features/topics/TopicPanel';
 import { ViewsPanel } from '@/features/views/ViewsPanel';
 import { useLocale } from '@/i18n';
 import { useWorkspaceStore } from '@/state/CompanionStateProvider';
@@ -43,6 +44,9 @@ export default function Workbench() {
   const openViews = useWorkspaceStore((state) => state.openViews);
   const closeViews = useWorkspaceStore((state) => state.closeViews);
   const toggleViews = viewsOpen ? closeViews : openViews;
+  // The panel of a topic (features/topics, design rules P16.2): the third thing that can take the place on the right.
+  const topicOpenId = useWorkspaceStore((state) => state.topicOpenId);
+  const closeTopic = useWorkspaceStore((state) => state.closeTopic);
   const openCompactPanel = useWorkspaceStore((state) => state.openCompactPanel);
   const closeCompactPanel = useWorkspaceStore((state) => state.closeCompactPanel);
   const setCompactDestination = useWorkspaceStore((state) => state.setCompactDestination);
@@ -105,6 +109,12 @@ export default function Workbench() {
               <ViewsPanel onClose={closeViews} standalone />
             </SlidePanel>
           )}
+          {/* A topic covers the conversation on a phone width too (P16.3). */}
+          {topicOpenId !== null && (
+            <SlidePanel edge="right" modal bg="workspace">
+              <TopicPanel topicId={topicOpenId} onClose={closeTopic} standalone />
+            </SlidePanel>
+          )}
         </Box>
       );
     }
@@ -129,6 +139,11 @@ export default function Workbench() {
           {compactPanel === 'thread' && selectedTicket && (
             <SlidePanel edge="right" modal bg="workspace">
               <ConnectedTicketThread ticket={selectedTicket} onClose={closeCompactThread} standalone />
+            </SlidePanel>
+          )}
+          {topicOpenId !== null && (
+            <SlidePanel edge="right" modal bg="workspace">
+              <TopicPanel topicId={topicOpenId} onClose={closeTopic} standalone />
             </SlidePanel>
           )}
         </Box>
@@ -176,6 +191,11 @@ export default function Workbench() {
         {viewsOpen && (
           <SlidePanel edge="right" {...THREAD_LAYOUT} borderLeftWidth={1} borderLeftColor="border">
             <ViewsPanel onClose={closeViews} />
+          </SlidePanel>
+        )}
+        {topicOpenId !== null && (
+          <SlidePanel edge="right" {...THREAD_LAYOUT} borderLeftWidth={1} borderLeftColor="border">
+            <TopicPanel topicId={topicOpenId} onClose={closeTopic} />
           </SlidePanel>
         )}
       </Row>

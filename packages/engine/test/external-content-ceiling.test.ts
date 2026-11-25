@@ -168,6 +168,8 @@ describe("the rule-change flag in the catalog", () => {
       "core_memory.update", "core_memory.delete", "core_memory_change.undo",
       // 来源的连接方式（2026-11-02）：连接配置。取消登录只关窗口，不改配置。
       "channel_connection.sign_in", "channel_connection.use_mode", "channel_connection.allow_writes", "channel_connection.block_writes",
+      // 固定订阅（2026-11-25）：哪些频道算订阅，是设置页的选项。
+      "channel_subscriptions.pin", "channel_subscriptions.unpin",
       // Lead 自己装 MCP 和 skill（2026-11-02，.scratch/lead-self-install D1）：连接和 skill 会改变 Lead 的行为。
       "connections.add_remote", "connections.add_local", "connection.authorize", "connection.disconnect", "skills.install", "skill.uninstall",
       // 用户本人发话时免沙箱（工单 #246）：打开授予 Lead 权力（user_direct）。关掉不改规则。
@@ -176,6 +178,8 @@ describe("the rule-change flag in the catalog", () => {
       "busy_placement.set",
       // How soon Lead wakes for ordinary system events when its cache is cold (user 2026-11-16): a settings option.
       "wake_pace.set",
+      // The background shadow (user 2026-11-19): it decides who handles background events, a settings option.
+      "lead_shadow.set",
       // 信号源（2026-11-12）：开、改、停、删一个订阅，以及能不能代用户处理。试跑和马上跑一次不改规则。
       "signal_sources.create", "signal_source.update", "signal_source.pause", "signal_source.resume", "signal_source.delete",
       // External agenda feeds (2026-11-12): create, change, pause, resume, delete a feed. Snapshots and per-entry mutes do not.

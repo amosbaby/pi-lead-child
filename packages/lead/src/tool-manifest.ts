@@ -45,14 +45,14 @@ const INSTANT_WRITES = [
   "add_comment", "record_decision", "create_continuation", "ack_reminder", "update_item", "reschedule_reminder", "defer_item",
   "confirm_item", "render_ui", "follow_up", "cancel_follow_up", "record_disposition", "watch", "wait_for_user_action",
   "cancel_wait", "record_handback", "mark_channel_card_handled", "propose_standing_order_change", "update_lead_profile",
-  "update_design_preferences", "repick_situation", "hand_off", "resume_unit", "submit_result", "update_plan", "stop_job",
+  "update_design_preferences", "repick_situation", "hand_off", "resume_unit", "open_topic", "submit_result", "update_plan", "stop_job",
 ] as const;
 
 // 本机文件、网络读、子进程读：有自己的时限或者很快，但不止读数据库。
 const BOUNDED_READS = [
   "read", "grep", "find", "ls", "obs_recall", "find_skill", "list_processes", "get_runtime_health", "get_model_catalog",
   "list_lead_models", "list_channel_conversations", "find_channel_conversations", "read_channel_conversation",
-  "read_channel_file", "search_connection_tools", "read_ticket_attachment",
+  "read_channel_file", "search_connection_tools", "read_ticket_attachment", "read_channel_document",
 ] as const;
 
 // 写文件、发消息、git、派 child、工单操作（可能推分支、开 PR）。
@@ -60,7 +60,7 @@ const BOUNDED_WRITES = [
   "edit", "write", "spawn_child", "ticket_action", "recover_ticket_run", "continue_ticket_agent", "steer_child",
   "complete_delivery", "release_workspace", "cleanup_workspace", "resolve_workspace", "provision_workspace",
   "integrate_workspace", "notify_user", "perform_action", "send_channel_message", "react_channel_message", "reply_to_source",
-  "dispatch_agent_task", "attach_to_ticket", "set_lead_avatar",
+  "dispatch_agent_task", "attach_to_ticket", "set_lead_avatar", "create_channel_document", "edit_channel_document",
 ] as const;
 
 /** bash 标了 read_only 的是只读（lead-scheduler spec D6），其余按改东西算。 */

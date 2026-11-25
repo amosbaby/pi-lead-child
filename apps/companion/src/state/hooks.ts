@@ -20,6 +20,8 @@ import type { ShellUpdateStatus } from './shellUpdate';
 import { RESOURCE_KEYS, type MessagePart, type ResourceKey } from './types';
 import { servedWebVersion, webUpdateAvailable } from './webVersion';
 import { leadNameNow } from './leadName';
+import { isTopicSessionId, topicSessionId } from './topics';
+import { LEAD_TOPICS_CAPABILITY, type TopicDto } from '@pi-lead-child/protocol';
 
 const EMPTY_BY_ID: Readonly<Record<PropertyKey, never>> = {};
 const EMPTY_ACTIONS: import('@pi-lead-child/protocol').TicketAction[] = [];
@@ -250,6 +252,39 @@ export function useBusyPlacement() {
   return { busyPlacement, resource };
 }
 
+// shadow 的设置（GET /v1/lead/shadow，2026-11-19）。设置 → Shadow 在屏幕上时才取；snapshot.required（resource 是 lead-shadow）时重取。
+export function useLeadShadow() {
+  useObservedResource(RESOURCE_KEYS.leadShadow);
+  const leadShadow = useControlPlaneStore((state) => state.leadShadow);
+  const resource = useControlPlaneStore((state) => state.resourceState[RESOURCE_KEYS.leadShadow]);
+  return { leadShadow, resource };
+}
+
+// Topics (GET /v1/topics, protocol's topics.ts). Read while a component that shows them is on screen;
+// snapshot.required (resource topics) reads the list again. An older daemon has none: the list stays empty.
+const EMPTY_TOPICS: readonly TopicDto[] = [];
+
+export function useTopicsSupported(): boolean {
+  return useControlPlaneStore((state) => state.capabilities.includes(LEAD_TOPICS_CAPABILITY));
+}
+
+export function useTopics(): readonly TopicDto[] {
+  useObservedResource(RESOURCE_KEYS.topics, useTopicsSupported());
+  return useControlPlaneStore((state) => state.topics ?? EMPTY_TOPICS);
+}
+
+export function useTopic(topicId: number | null): TopicDto | null {
+  return useControlPlaneStore((state) => (topicId === null ? null : state.topics?.find((topic) => topic.id === topicId) ?? null));
+}
+
+/** The messages of a topic, oldest first. Reads the topic (GET /v1/topics/:id) while the caller is on screen. */
+export function useTopicMessageIds(topicId: number | null) {
+  const runtime = useCompanionRuntime();
+  const key = topicId === null ? null : RESOURCE_KEYS.topic(topicId);
+  useEffect(() => key === null ? undefined : runtime.observeResource(key), [key, runtime]);
+  return useControlPlaneStore((state) => topicId === null ? EMPTY_IDS : state.messageIdsBySession[topicSessionId(topicId)] ?? EMPTY_IDS);
+}
+
 // Lead 的名字、人格和互动风格（GET /v1/lead/profile）。连上就取（runtime 的 core 资源里有它）；
 // snapshot.required（resource 是 lead-profile）时重取。设置页「身份与风格」读它。
 export function useLeadProfile() {
@@ -303,7 +338,8 @@ export function useSessionIds() {
 }
 
 export function useLeadSessionId() {
-  return useControlPlaneStore((state) => state.overview?.sessionId ?? state.sessionIds[0] ?? null);
+  // A topic is a session in the store too (topics.ts): it is never the Lead conversation.
+  return useControlPlaneStore((state) => state.overview?.sessionId ?? state.sessionIds.find((id) => !isTopicSessionId(id)) ?? null);
 }
 
 export function useMessageIds(sessionId: string | null) {

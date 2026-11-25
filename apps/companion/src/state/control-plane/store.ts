@@ -146,6 +146,8 @@ export function createInitialControlPlaneData(): ControlPlaneData {
     leadAvatarImages: {},
     hostBypass: null,
     busyPlacement: null,
+    leadShadow: null,
+    topics: null,
     designPreferences: null,
     channelSettings: null,
     sessionsById: {},

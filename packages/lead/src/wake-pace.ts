@@ -9,6 +9,10 @@
 //   - cold cache: wait until the window ends, counted from the first waiting event, then wake once for everything that
 //     arrived. A larger window never makes more cold starts than a smaller one.
 //   - something urgent waits: wake now.
+// The gather window (user 2026-11-19, protocol's lead-shadow.ts gatherSeconds): ordinary events that arrive close together
+// go out as one batch. When the cold rule above does not hold them, they wait until gatherMs after the first waiting
+// event. 350 of 635 background turns in the week to 2026-11-19 began within 60 s of the previous turn: each one paid
+// a whole wake. The window is short (seconds), so the cache stays warm while it waits.
 // What is urgent is the caller's rule (apps/daemon, wakeForEvents): the user's own messages, people who wait in an
 // external channel, reminders and the user's own follow-ups never reach this function; an event at level interrupt
 // makes the batch urgent.
@@ -26,20 +30,28 @@ export interface WakePaceFacts {
   firstWaitingAt: number | null;
   // Something in the batch must not wait.
   urgent: boolean;
+  // The gather window in milliseconds (lead_shadow.gatherSeconds). 0 or missing: no gathering.
+  gatherMs?: number;
 }
 
 export type WakePaceDecision =
-  | { wake: true; why: "off" | "urgent" | "warm" | "window_end" }
+  | { wake: true; why: "off" | "urgent" | "warm" | "window_end" | "gathered" }
   | { wake: false; at: number };
 
 export function wakePaceDecision(facts: WakePaceFacts): WakePaceDecision {
-  if (facts.coldBatchMs <= 0) return { wake: true, why: "off" };
+  const gatherMs = facts.gatherMs && facts.gatherMs > 0 ? facts.gatherMs : 0;
+  if (facts.coldBatchMs <= 0 && gatherMs <= 0) return { wake: true, why: "off" };
   if (facts.urgent) return { wake: true, why: "urgent" };
-  if (facts.lastModelCallAt !== null && facts.now - facts.lastModelCallAt <= facts.warmMs) return { wake: true, why: "warm" };
   // An event whose time is unknown, or lies in the future (a changed clock), counts as arrived now.
   const first = facts.firstWaitingAt !== null && facts.firstWaitingAt <= facts.now ? facts.firstWaitingAt : facts.now;
-  const at = first + facts.coldBatchMs;
-  return facts.now >= at ? { wake: true, why: "window_end" } : { wake: false, at };
+  const warm = facts.lastModelCallAt !== null && facts.now - facts.lastModelCallAt <= facts.warmMs;
+  if (!warm && facts.coldBatchMs > 0) {
+    const at = first + facts.coldBatchMs;
+    return facts.now >= at ? { wake: true, why: "window_end" } : { wake: false, at };
+  }
+  if (gatherMs <= 0) return { wake: true, why: warm ? "warm" : "off" };
+  const at = first + gatherMs;
+  return facts.now >= at ? { wake: true, why: "gathered" } : { wake: false, at };
 }
 
 /** The line in the situation's "about you" section: how many model calls the system made by itself, and the pace. */

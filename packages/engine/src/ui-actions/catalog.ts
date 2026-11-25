@@ -33,12 +33,16 @@ import { REPLY_STYLE_ACTIONS, REPLY_STYLE_TARGET } from "./reply-style.js";
 import { HOST_BYPASS_ACTIONS, HOST_BYPASS_TARGET } from "./host-bypass.js";
 import { BUSY_PLACEMENT_ACTIONS, BUSY_PLACEMENT_TARGET } from "./busy-placement.js";
 import { WAKE_PACE_ACTIONS, WAKE_PACE_TARGET } from "./wake-pace.js";
+import { LEAD_SHADOW_ACTIONS, LEAD_SHADOW_TARGET } from "./lead-shadow.js";
+import { BACKGROUND_MODEL_ACTIONS, BACKGROUND_MODEL_TARGET } from "./background-model.js";
 import { LEAD_CONTEXT_ACTIONS, LEAD_CONTEXT_TARGET } from "./lead-context.js";
 import {
   AGENDA_ENTRY_ACTIONS, AGENDA_ENTRY_TARGET, AGENDA_FEED_ACTIONS, AGENDA_FEED_TARGET, AGENDA_FEEDS_ACTIONS, AGENDA_FEEDS_TARGET,
 } from "./agenda-feeds.js";
 import { SIGNAL_SOURCE_ACTIONS, SIGNAL_SOURCE_TARGET, SIGNAL_SOURCES_ACTIONS, SIGNAL_SOURCES_TARGET } from "./signal-sources.js";
+import { TOPIC_ACTIONS, TOPIC_TARGET, TOPICS_ACTIONS, TOPICS_TARGET } from "./topics.js";
 import { CHANNEL_CONNECTION_ACTIONS, CHANNEL_CONNECTION_TARGET } from "./channel-connections.js";
+import { CHANNEL_SUBSCRIPTIONS_ACTIONS, CHANNEL_SUBSCRIPTIONS_TARGET } from "./channel-subscriptions.js";
 import { joinProblems } from "./problems.messages.js";
 import { CHANNEL_HANDBOOK_ACTIONS, CHANNEL_HANDBOOK_TARGET } from "./handbook.js";
 import { MODEL_SETTINGS_ACTIONS, MODEL_SETTINGS_TARGET } from "./model-settings.js";
@@ -1254,6 +1258,7 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   widget_board: WIDGET_BOARD_TARGET,
   widget: WIDGET_TARGET,
   channel_connection: CHANNEL_CONNECTION_TARGET,
+  channel_subscriptions: CHANNEL_SUBSCRIPTIONS_TARGET,
   connections: CONNECTIONS_TARGET,
   connection: CONNECTION_TARGET,
   skills: SKILLS_TARGET,
@@ -1261,10 +1266,14 @@ export const UI_ACTION_TARGETS: { readonly [T in UiActionTargetType]: UiActionTa
   host_bypass: HOST_BYPASS_TARGET,
   busy_placement: BUSY_PLACEMENT_TARGET,
   wake_pace: WAKE_PACE_TARGET,
+  lead_shadow: LEAD_SHADOW_TARGET,
+  background_model: BACKGROUND_MODEL_TARGET,
   signal_sources: SIGNAL_SOURCES_TARGET,
   signal_source: SIGNAL_SOURCE_TARGET,
   agenda_feeds: AGENDA_FEEDS_TARGET,
   agenda_feed: AGENDA_FEED_TARGET,
+  topics: TOPICS_TARGET,
+  topic: TOPIC_TARGET,
   agenda_entry: AGENDA_ENTRY_TARGET,
 };
 
@@ -1307,6 +1316,8 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   widget: WIDGET_ACTIONS,
   // 来源的连接方式（2026-11-02）：登录、换方式、「代你往来源里写」开关。定义在 channel-connections.ts。
   channel_connection: CHANNEL_CONNECTION_ACTIONS,
+  // 来源的固定订阅（2026-11-25）：加、删一条。改规则，Lead 可以做。定义在 channel-subscriptions.ts。
+  channel_subscriptions: CHANNEL_SUBSCRIPTIONS_ACTIONS,
   // Lead 自己装 MCP 和 skill（2026-11-02，.scratch/lead-self-install/spec.md）：加远程、本地 MCP，授权、断开连接，装、卸 skill。
   // 定义在 installs.ts。
   connections: CONNECTIONS_ACTIONS,
@@ -1319,11 +1330,17 @@ export const UI_ACTIONS: { readonly [T in UiActionTargetType]: Readonly<Record<s
   busy_placement: BUSY_PLACEMENT_ACTIONS,
   // How soon Lead wakes for ordinary system events when its cache is cold (user 2026-11-16). Changes rules; Lead can set it. wake-pace.ts.
   wake_pace: WAKE_PACE_ACTIONS,
+  // The background shadow (user 2026-11-19): mode, model, sources, gather window. Changes rules; Lead can set it. lead-shadow.ts.
+  lead_shadow: LEAD_SHADOW_ACTIONS,
+  // The model that background work uses (user 2026-11-20): set (Lead: cheap models only) and read. background-model.ts.
+  background_model: BACKGROUND_MODEL_ACTIONS,
   // 信号源（用户 2026-11-12）：通过对话把一个连接接进事件体系。建、试跑、改、暂停、恢复、马上跑、删。定义在 signal-sources.ts。
   signal_sources: SIGNAL_SOURCES_ACTIONS,
   signal_source: SIGNAL_SOURCE_ACTIONS,
   // External agenda feeds: create, update, pause, resume, delete, sync (Lead only); per-entry mute. See agenda-feeds.ts.
   agenda_feeds: AGENDA_FEEDS_ACTIONS,
   agenda_feed: AGENDA_FEED_ACTIONS,
+  topics: TOPICS_ACTIONS,
+  topic: TOPIC_ACTIONS,
   agenda_entry: AGENDA_ENTRY_ACTIONS,
 };

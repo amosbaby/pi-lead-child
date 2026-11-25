@@ -585,6 +585,43 @@ function ensureLeadShell(
   });
 }
 
+// The words of the user's message of a turn (a topic's turn: lead.turn.started carries them, so every device shows
+// the message at once and no separate read of the turn is needed).
+export function setTurnUserText(store: ControlPlaneStore, turnId: string, text: string): void {
+  const state = store.getState();
+  const turn = state.turnsById[turnId];
+  if (!turn) return;
+  const partId = `${turn.userMessageId}:text`;
+  const part = state.messagePartsById[partId];
+  if (part?.kind === 'text' && part.text === text) return;
+  store.setState({ messagePartsById: { ...state.messagePartsById, [partId]: { kind: 'text', id: partId, text } } });
+}
+
+// What you attached to a message of a topic, shown at once on this device (runtime.sendTopicMessage): the same
+// parts, with the same ids, as the topic's turns give later (normalize.ts), so the loaded turn keeps this data.
+export function setTurnUserAttachments(
+  store: ControlPlaneStore, turnId: string, images: readonly ChatImageInput[], files: readonly ChatFileInput[],
+): void {
+  const state = store.getState();
+  const turn = state.turnsById[turnId];
+  if (!turn || (!images.length && !files.length)) return;
+  const messageId = turn.userMessageId;
+  const parts: MessagePart[] = [
+    ...images.map((image, index): MessagePart => ({
+      kind: 'image', id: `${messageId}:image:${index}`, mimeType: image.mimeType, data: image.data,
+    })),
+    ...files.map((file, index): MessagePart => optimisticFilePart(`${messageId}:file:${index}`, file)),
+  ];
+  const added = new Set(parts.map((part) => part.id));
+  store.setState({
+    messagePartsById: { ...state.messagePartsById, ...Object.fromEntries(parts.map((part) => [part.id, part])) },
+    partIdsByMessage: {
+      ...state.partIdsByMessage,
+      [messageId]: [...(state.partIdsByMessage[messageId] ?? []).filter((partId) => !added.has(partId)), ...parts.map((part) => part.id)],
+    },
+  });
+}
+
 // 发件箱里一条消息的状态，画到它的本地消息上：待发送、发送中是 queued，发送失败是 failed，带服务端拒收的原因。
 export function setOutboxMessageState(
   store: ControlPlaneStore,

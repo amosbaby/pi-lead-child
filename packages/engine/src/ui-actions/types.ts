@@ -5,7 +5,7 @@
 import type { RuntimeDisabledBy, RuntimeId, RuntimeSwitchBy } from "@pi-lead-child/core";
 import type {
   ActionPermission, ChannelCardAction, ConnectionDto, LocalMcpLaunch, StartConnectionResponse, ChannelCardDto, ChannelPolicyParams, ChannelPolicyReplayResult, ChannelPolicyTestRequest, ChannelPolicyTestResult,
-  CompactLeadContextRequest, CompactLeadContextResult, FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
+  BackgroundJobState, BackgroundModelState, CompactLeadContextRequest, CompactLeadContextResult, FollowUpActionResult, LeadModelCatalog, LeadQueue, LeadModelChoice, LeadModelSwitchResult, MemoryHindsightDto, MemoryTestResponse,
   HandbookRehearsal, HandbookRehearsalRequest, ModelSettingsDto, SetSummaryModelRequest, SummaryModelSlot,
   RuntimeSettingsDto, RuntimeSettingsRequest, SaveFastModelRequest, SaveModelProviderRequest, Scope, SetBrainChainRequest,
   SchedulerSnapshot, SetFastChainRequest, SignalSourceDto, TimerOrigin, UiActionTargetType, UserActionRequest,
@@ -67,6 +67,9 @@ export interface UiActionServices {
   leadModels?: LeadModelService;
   // Lead's context: compact it on request (daemon's server.ts, 2026-11-18). Only after Lead's session is built.
   leadContext?: LeadContextService;
+  // The model that background work uses (lead's background-model.ts, daemon's server.ts, 2026-11-20): the cheap models
+  // now and the resolved choice. Without it, Lead cannot choose a background or shadow model (nothing to check against).
+  backgroundModels?: BackgroundModelService;
   // Lead 忙时排着的外部消息（daemon 的 lead-input.ts，工单 10）。Lead 的会话建好以后才有。
   leadQueue?: LeadQueueService;
   // Lead 忙时用户排着的追问（daemon 的 server.ts，用户 2026-10-28）。Lead 的会话建好以后才有。
@@ -94,9 +97,24 @@ export interface UiActionServices {
   installs?: InstallServices;
   // 来源的连接方式（daemon 的通道设置，2026-11-02）：登录、换方式、「代你往来源里写」开关。通道接好以后才有。
   channelConnections?: ChannelConnectionService;
+  // 来源的固定订阅（设置 → 消息通道 → 固定订阅，2026-11-25）。daemon 的通道设置；通道没有启动时没有。
+  channelSubscriptions?: ChannelSubscriptionService;
   // 信号源（daemon 的 signal-source-runner，用户 2026-11-12）：试跑一次、马上跑一次。连接中心和 Lead 的沙箱接好以后才有；
   // 没有时（测试、没接沙箱）建、试跑、改命令、马上跑被拒绝，暂停、恢复、删除照常。
   signalSources?: SignalSourceService;
+  // Topics (daemon's topics.ts, user 2026-11-25): the live sessions of the topics. Only after Lead's session is built.
+  // Without it (tests) a topic that was opened without an opening has none, and nothing answers in it.
+  topics?: TopicsService;
+}
+
+export interface TopicsService {
+  // The topic was opened without an opening: its own session writes one as the first turn. Returns before the model answers.
+  generateOpening(topicId: number, options: { bindingId: number | null }): void;
+  // The topic was closed: release its live session.
+  closed(topicId: number): void;
+  // Is this model (provider/id with an optional effort suffix) one that Lead can use? Throws an Error that says why not
+  // and which ones are available. The topic's session switches to its model at its next turn.
+  checkModel(spec: string): Promise<void>;
 }
 
 export interface SignalSourceService {
@@ -135,6 +153,26 @@ export interface ChannelConnectionService {
   // 换到一种不用登录的方式，并重连。
   useMode(source: string, mode: string): Promise<ChannelConnectionState>;
   setWrites(source: string, allowed: boolean): ChannelConnectionState;
+}
+
+/** 一个来源的固定订阅现在的样子（2026-11-25）。 */
+export interface ChannelSubscriptionsState {
+  source: string;
+  label: string;
+  // 条目的写法（来源给的，ChannelSubscriptionControl.entryHint）。
+  entryHint: string;
+  // 固定订阅的对话：不管最近有没有对话都算订阅。
+  pinned: string[];
+  // 配置里的排除名单（只读）：优先于固定订阅。
+  excluded: string[];
+}
+
+// 来源的固定订阅（daemon 的 channel-settings.ts）。设置页和 Lead 都经过操作层调它。不对的输入、不认识的来源抛 UiActionError。
+export interface ChannelSubscriptionService {
+  subscriptions(source: string): ChannelSubscriptionsState | null;
+  // 加一条（已经有同一个时不变）、删一条（没有时抛 invalid_input）。马上生效：来源每次判断订阅时现读。
+  pin(source: string, entry: string): ChannelSubscriptionsState;
+  unpin(source: string, entry: string): ChannelSubscriptionsState;
 }
 
 // 加、授权、断开连接（packages/connections 的 ConnectionHub，daemon 包一层：hub 的 ConnectionError 换成 UiActionError）。
@@ -303,6 +341,19 @@ export interface LeadModelService {
   // Lead 的会话此刻挂着的模型（provider/id），带订阅的账号（protocol 的 LeadModelCatalog.inSession）。不知道时为 null。
   // 没有它的服务（测试的替身）：GET /v1/lead/models?live=1 不给这个字段。
   inSession?(): string | null;
+}
+
+// The model that background work uses (protocol's background-model.ts). The daemon builds it from Lead's priced catalog.
+export interface BackgroundModelService {
+  // The setting, the model in use, the cheap models and the skipped ones. Reads the catalog (30 s cache).
+  state(): Promise<BackgroundModelState>;
+  // The last state without waiting, for list_actions. null before the first read.
+  snapshot(): BackgroundModelState | null;
+  // The setting changed (background_model.set): users of the model that read it once (Hindsight) pick it up.
+  changed?(): void;
+  // The health of each background job (engine's background-health.ts): background model, channel memory, Hindsight.
+  // Not given: background_model.read returns no jobs.
+  jobs?(): BackgroundJobState[];
 }
 
 export interface LeadContextService {

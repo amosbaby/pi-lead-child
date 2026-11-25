@@ -16,6 +16,8 @@ import { leadFairy } from '@/components/leadPresence';
 import { isWorkspaceControlActionId, resolveWorkspaceTickets, type Ticket } from './model';
 import { sortUpcoming, watchReminder, type UpcomingReminder } from './inboxModel';
 import { userOutboxNotifications } from './notificationOutbox';
+import { RailTopics } from '@/features/topics/RailTopics';
+
 import { InboxChannelCards } from './InboxChannelCards';
 import { WorkRail } from './WorkRail';
 
@@ -149,7 +151,7 @@ export function ConnectedWorkRail({
     <Density zone="workspace"><WorkRail
       leadName={leadName}
       fairy={fairy}
-      inboxExtra={<InboxChannelCards />}
+      inboxExtra={<><InboxChannelCards /><RailTopics /></>}
       items={items}
       projects={projects}
       projectOverviews={projectOverviews}

@@ -14,7 +14,9 @@ import {
   createWorkspace, getWorkspace, listWorkspaces, resolveWorkspace, transitionWorkspace,
 } from "@pi-lead-child/store";
 import { repositoryIdentity, warmRepositoryIdentity } from "./project-resolver.js";
-import { chooseWorktreeBase, chooseWorktreeBaseAsync, recordWorktreeBase, type WorktreeBase } from "./workspace-remote.js";
+import {
+  chooseWorktreeBase, chooseWorktreeBaseAsync, originDefaultBranchAsync, recordWorktreeBase, type WorktreeBase,
+} from "./workspace-remote.js";
 import { workspaceContentHash } from "./workspace-integrity.js";
 import { startWorktreeDependencies } from "./worktree-dependencies.js";
 import { createCheckpointDomainService } from "./checkpoints.js";
@@ -774,14 +776,15 @@ async function disposeCheckoutNow(db: Db, id: number, reason: string): Promise<W
 
 // ── 隔离 worktree 的收尾 ──────────────────────────────────────────────────────────
 // 合并或放弃以后马上删 worktree。有没合并改动的 worktree 不悄悄删，先问用户。
-// 「没合并的改动」：worktree 里有没提交的文件，或者分支上有用户仓库当前 HEAD 没有的 commit。
+// 「没合并的改动」：worktree 里有没提交的文件，或者分支上有用户仓库当前 HEAD 没有的 commit，
+// 并且这些 commit 的内容也不在 origin 的默认分支或 HEAD 里（contentMergedInto）。
 // 判断出错时按「有改动」处理：出错永远不会导致删除。
 
 export interface WorktreeChanges {
   head: string | null;
   // git status --porcelain 的前 20 行。被忽略的文件（例如 node_modules）不算。
   dirtyFiles: string[];
-  // 分支上有、用户仓库当前 HEAD 没有的 commit 数。
+  // 分支上有、用户仓库当前 HEAD 没有的 commit 数。内容已经合并（contentMergedInto）时记 0。
   unmergedCommits: number;
 }
 
@@ -796,8 +799,38 @@ export async function worktreeChanges(workspace: Workspace): Promise<WorktreeCha
   const dirtyFiles = present
     ? (await git(["status", "--porcelain", "--untracked-files=normal"], workspace.path)).split("\n").filter(Boolean).slice(0, 20)
     : [];
-  const unmergedCommits = head ? Number(await git(["rev-list", "--count", `HEAD..${head}`], workspace.repo_root)) : 0;
+  const counted = head ? Number(await git(["rev-list", "--count", `HEAD..${head}`], workspace.repo_root)) : 0;
+  const unmergedCommits = counted > 0 && head && await contentMergedInto(workspace.repo_root, head) !== null ? 0 : counted;
   return { head, dirtyFiles, unmergedCommits };
+}
+
+/**
+ * 分支 head 的内容是不是已经在默认分支里了。返回包含它的那个分支（`origin/<默认分支>` 或 `HEAD`），不在时为 null。
+ * 只看祖先关系不够：squash 合并、rebase 合并出来的提交不是分支提交的后代；用户本地的 master 落后 origin 时，
+ * 普通合并在本地也看不出来。所以先比 origin 的默认分支（daemon 每次执行前 fetch 过），再比用户 checkout 的 HEAD，
+ * 每个目标先看祖先关系，再用 `git merge-tree --write-tree` 试合并：合并结果的 tree 和目标的 tree 一样，
+ * 说明分支没有目标里还没有的改动。squash 合并以后分支又加了提交时，合并结果多了这些改动，不算已合并。
+ * 冲突、没有共同历史、git 太旧等任何错误都按「没合并」处理：出错永远不会导致删除。
+ */
+export async function contentMergedInto(repoRoot: string, head: string): Promise<string | null> {
+  const targets: string[] = [];
+  const defaultBranch = await originDefaultBranchAsync(repoRoot);
+  if (defaultBranch) targets.push(`origin/${defaultBranch}`);
+  targets.push("HEAD");
+  for (const target of targets) {
+    try {
+      const ref = target === "HEAD" ? "HEAD" : `refs/remotes/${target}`;
+      if (Number(await git(["rev-list", "--count", `${ref}..${head}`], repoRoot)) === 0) return target;
+      const [merged, current] = await Promise.all([
+        git(["merge-tree", "--write-tree", ref, head], repoRoot),
+        git(["rev-parse", `${ref}^{tree}`], repoRoot),
+      ]);
+      if (merged.split("\n")[0] === current) return target;
+    } catch {
+      // 冲突（merge-tree 退出码 1）或解析不了：这个目标不算。
+    }
+  }
+  return null;
 }
 
 function hasUnmergedChanges(changes: WorktreeChanges): boolean {
@@ -826,11 +859,20 @@ function restoreItemWorkdir(db: Db, workspace: Workspace): void {
     .run(source.path, workspace.owner_item_id, workspace.path);
 }
 
-// plc 自己建的分支（plc/…）已经全部合并进用户仓库的当前分支时删掉。git branch -d 自己会拒绝删没合并的分支。
+// plc 自己建的分支（plc/…）已经合并时删掉。git branch -d 只认祖先关系，会拒绝删没合并的分支，
+// 也会拒绝删 squash 合并过的分支：这时再看内容（contentMergedInto），内容确认已经在默认分支里才用 -D 强删。
 async function deleteMergedBranch(workspace: Workspace): Promise<boolean> {
   if (!workspace.repo_root || !workspace.branch?.startsWith("plc/")) return false;
   try {
     await git(["branch", "-d", workspace.branch], workspace.repo_root);
+    return true;
+  } catch {
+    // 往下看内容。
+  }
+  try {
+    const tip = await git(["rev-parse", "--verify", `refs/heads/${workspace.branch}^{commit}`], workspace.repo_root);
+    if (await contentMergedInto(workspace.repo_root, tip) === null) return false;
+    await git(["branch", "-D", workspace.branch], workspace.repo_root);
     return true;
   } catch {
     return false;
@@ -1169,6 +1211,13 @@ async function sweepOrphans(
     "SELECT path, branch FROM workspaces WHERE state NOT IN ('cleaned','archived')",
   ).all() as Array<{ path: string; branch: string | null }>;
   const registered = new Set(live.map((row) => realpathOr(row.path)));
+  // 子工单在父工单的 worktree 里开的隔离 worktree 登记在 <父 worktree>.plc-workspaces/<子> 下：
+  // 第一层的 <父 worktree>.plc-workspaces 自己没有登记，但它装着登记的工作区，不是孤儿。按路径段比较，名字相似的目录不算。
+  const holdsRegistered = (path: string): boolean => {
+    const prefix = path + sep;
+    for (const registeredPath of registered) if (registeredPath.startsWith(prefix)) return true;
+    return false;
+  };
   const liveRefs = new Set(live.map((row) => row.branch).filter((branch): branch is string => Boolean(branch)));
   let cleaned = 0;
   let awaiting = 0;
@@ -1203,7 +1252,7 @@ async function sweepOrphans(
       if (name === WORKTREE_TRASH_DIR) continue;
       // 不跟随符号链接：链接指向的可能是容器外面用户自己的 worktree（审查 2026-10-19 第 8 条）。plc 只在这里建真目录。
       const path = join(containerPath, name);
-      if (registered.has(path)) continue;
+      if (registered.has(path) || holdsRegistered(path)) continue;
       try {
         const entry = lstatSync(path);
         if (entry.isSymbolicLink() || !entry.isDirectory()) continue;

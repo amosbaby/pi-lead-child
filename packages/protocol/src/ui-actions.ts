@@ -33,8 +33,13 @@ import { ReplyStyleExtractRequestSchema, ReplyStyleUpdateRequestSchema } from ".
 import { DisableHostBypassRequestSchema, EnableHostBypassRequestSchema } from "./host-bypass.ts";
 import { SignalSourceInputSchema, SignalSourceUpdateSchema } from "./signal-sources.ts";
 import { AgendaEntryPatchSchema, AgendaFeedInputSchema, AgendaFeedUpdateSchema, AgendaSnapshotSchema } from "./agenda-feeds.ts";
+import {
+  CloseTopicRequestSchema, OpenTopicRequestSchema, RenameTopicRequestSchema, ReopenTopicRequestSchema, SetTopicModelRequestSchema,
+} from "./topics.ts";
 import { SetBusyPlacementRequestSchema } from "./busy-placement.ts";
 import { SetWakePaceRequestSchema } from "./wake-pace.ts";
+import { SetLeadShadowRequestSchema } from "./lead-shadow.ts";
+import { SetBackgroundModelRequestSchema } from "./background-model.ts";
 import { CompactLeadContextRequestSchema } from "./lead-context.ts";
 import { RuleChangeDecisionSchema } from "./rule-change-confirmations.ts";
 import { SurfaceActionOriginSchema } from "./surface-actions.ts";
@@ -99,6 +104,8 @@ export const ActionPermissionSchema = Type.Union([
 //   widget  一个自定义控件（视图面板里的一块）：改（包括移到别的视图）、删。编号是控件的编号（GET /v1/widgets 的 id）。
 //   channel_connection  一个来源的连接方式（设置 → 消息通道，2026-11-02，例如 Slack 的 Slack 应用和浏览器会话）：登录、
 //     换回某种方式、「代你往来源里写」开关。编号是来源，例如 slack。
+//   channel_subscriptions  一个来源的固定订阅（设置 → 消息通道 → 固定订阅，2026-11-25）：固定的对话不管最近有没有对话都算订阅，
+//     排除名单优先。加、删一条。编号是来源，例如 slack。
 //   connections  连接的清单（设置 → 连接，2026-11-02，lead-installs.ts）：加远程 MCP、本地 MCP。编号只有 connections。
 //   connection  一个连接：请用户授权、断开。编号是连接的 key（GET /v1/connections 的 key，例如 notion、custom-3）。
 //   skills  PLC 自己的 skill 目录（~/Library/Application Support/Bytezard Lead/skills，2026-11-02）：从 GitHub 装一个。编号只有 skills。
@@ -106,17 +113,22 @@ export const ActionPermissionSchema = Type.Union([
 //   host_bypass  「用户本人发话时免沙箱」开关（设置 → 免沙箱，工单 #246，host-bypass.ts）。编号只有 lead。
 //   busy_placement  Lead 忙时你发的消息怎么放：排队或插话（设置 → Lead → 身份与风格，2026-11-09，busy-placement.ts）。编号只有 lead。
 //   wake_pace  How soon Lead wakes for ordinary system events when its prompt cache is cold (user 2026-11-16, wake-pace.ts). The id is always "lead".
+//   lead_shadow  The background shadow: mode, model, sources and gather window (user 2026-11-19, lead-shadow.ts). The id is always "lead".
+//   background_model  The model that background work uses (user 2026-11-20, background-model.ts). The id is always "lead".
 //   signal_sources  信号源的清单（用户 2026-11-12，signal-sources.ts）：通过对话把一个连接接进事件体系。建、试跑。编号只有 signals。
 //   signal_source  一个信号源：改（规则、策略、间隔、命令）、暂停、恢复、马上跑一次、删。编号是信号源的名字。
 //   agenda_feeds  External agenda feeds (agenda-feeds.ts): create one. The id is always "agenda".
 //   agenda_feed  One feed: update, pause, resume, delete, sync a snapshot (Lead only). The id is the feed name.
 //   agenda_entry  One external entry: mute it or change its lead time. The id is the entry id.
+//   topics  The list of topics (topics.ts, user 2026-11-25): open one. The id is always "lead".
+//   topic  One topic: rename, close (with a conclusion for the main conversation), reopen, set its model. The id is the topic id.
 export const UI_ACTION_TARGET_TYPES = [
   "runtime", "device", "approval", "decision", "channel_card", "channel_conversation", "channel_policy", "channel_handbook", "lead_model", "lead_context",
   "reminder", "workspace", "milestone", "rule_change", "lead_queue", "timer", "timer_request", "follow_up", "reply_style",
   "model_settings", "memory_settings", "core_memory", "core_memory_change", "memory_fact", "setup_hint",
-  "widget_board", "widget", "channel_connection", "connections", "connection", "skills", "skill", "host_bypass",
-  "busy_placement", "wake_pace", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
+  "widget_board", "widget", "channel_connection", "channel_subscriptions", "connections", "connection", "skills", "skill", "host_bypass",
+  "busy_placement", "wake_pace", "lead_shadow", "background_model", "signal_sources", "signal_source", "agenda_feeds", "agenda_feed", "agenda_entry",
+  "topics", "topic",
 ] as const;
 export type UiActionTargetType = typeof UI_ACTION_TARGET_TYPES[number];
 
@@ -127,6 +139,8 @@ export function isUiActionTargetType(value: string): value is UiActionTargetType
 const Empty = StrictObject({});
 // 来源的连接方式的名字（例如 app、session）。
 const ConnectionMode = Type.String({ pattern: "^[a-z][a-z0-9_-]{0,31}$" });
+// 固定订阅的一条（来源认的写法，例如 Slack 的 C0123ABCD 或 #proj-x）。
+const PinnedEntry = Type.String({ minLength: 1, maxLength: 100 });
 // 外部消息卡的动作都可以带「看到的版本」：卡已经变了时拒绝，免得按旧的样子做决定（页面的按钮带它，Lead 可以不带）。
 const CardVersion = { expectedVersion: Type.Optional(Type.Integer({ minimum: 1 })) };
 const CardOnly = StrictObject(CardVersion);
@@ -391,6 +405,13 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     // 关掉「代你往来源里写」：Lead 只读，草稿留在卡上。
     block_writes: Empty,
   },
+  // 设置 → 消息通道里一个来源的固定订阅（2026-11-25）。条目的写法由来源定义，例如 Slack 的频道编号或者频道名。
+  channel_subscriptions: {
+    // 固定订阅一个对话：不管最近有没有对话都算订阅（只记录、沉淀进记忆）。排除名单里的照样不订阅。
+    pin: StrictObject({ entry: PinnedEntry }),
+    // 取消一个固定订阅。
+    unpin: StrictObject({ entry: PinnedEntry }),
+  },
   connections: {
     // 加一个远程 MCP（https 地址）。要授权时结果里带授权卡，用户授权完叫醒 Lead。
     add_remote: AddRemoteMcpRequestSchema,
@@ -426,6 +447,17 @@ export const UI_ACTION_INPUT_SCHEMAS = {
     // Changes rules: not in a turn that read external content.
     set: SetWakePaceRequestSchema,
   },
+  lead_shadow: {
+    // The background shadow: mode (off, shadow, on), model (null: the main session's), sources, gather window in seconds.
+    // Changes rules: not in a turn that read external content.
+    set: SetLeadShadowRequestSchema,
+  },
+  background_model: {
+    // The model for background work: provider/id, or null (automatic: the first cheap model). Not a rule change.
+    set: SetBackgroundModelRequestSchema,
+    // The setting, the model in use, the cheap models now and the models skipped after a failure. Read-only.
+    read: Empty,
+  },
   signal_sources: {
     // 建一个信号源：先试跑一次，跑通了才建。第一次定时运行只记基线，以后每条新内容一个事件。
     create: SignalSourceInputSchema,
@@ -460,6 +492,19 @@ export const UI_ACTION_INPUT_SCHEMAS = {
   agenda_entry: {
     // Mute one entry or change its lead time.
     update: AgendaEntryPatchSchema,
+  },
+  // Topics (topics.ts): a second Lead conversation with a clean context.
+  topics: {
+    // Open a topic. Lead gives the title and its own opening; the page gives the selected text.
+    open: OpenTopicRequestSchema,
+  },
+  topic: {
+    rename: RenameTopicRequestSchema,
+    // Close the topic. With a conclusion, the main conversation gets what the topic decided.
+    close: CloseTopicRequestSchema,
+    // The model of this topic only: { choice: { model, effort } }, or { choice: null } to follow the main conversation.
+    set_model: SetTopicModelRequestSchema,
+    reopen: ReopenTopicRequestSchema,
   },
 } as const satisfies Record<UiActionTargetType, Record<string, TSchema>>;
 

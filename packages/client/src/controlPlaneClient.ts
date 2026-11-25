@@ -34,7 +34,7 @@ import {
   type StartConnectionResponse,
 } from '@pi-lead-child/protocol';
 import {
-  ChannelConnectionDtoSchema, type ChannelConnectionDto,
+  ChannelConnectionDtoSchema, type ChannelConnectionDto, ChannelSubscriptionsDtoSchema, type ChannelSubscriptionsDto,
   ChannelSecretsRequestSchema,
   ChannelSecretsTestResultSchema,
   ChannelSettingsResponseSchema,
@@ -87,6 +87,7 @@ import {
   LeadAvatarResponseSchema,
   HostBypassResponseSchema,
   BusyPlacementResponseSchema,
+  LeadShadowResponseSchema,
   SlackEmojiPreviewSchema,
   DesignPreferencesResponseSchema,
   RuntimeSettingsResponseSchema,
@@ -103,6 +104,7 @@ import {
   type LeadAvatarDto,
   type HostBypassDto,
   type BusyPlacementDto,
+  type LeadShadowDto,
   type LeadAvatarImage,
   type LeadAvatarSlackEmojiRequest,
   type LeadAvatarSlot,
@@ -213,6 +215,14 @@ import {
   type CompactLeadContextResult,
   LEAD_QUEUE_OPT_IN,
   LEAD_STEP_OPT_IN,
+  TOPICS_OPT_IN,
+  TopicsResponseSchema,
+  TopicDetailResponseSchema,
+  SendTopicMessageResponseSchema,
+  type TopicDto,
+  type TopicsResponse,
+  type TopicDetailResponse,
+  type SendTopicMessageResponse,
   LeadQueueSchema,
   FollowUpActionResultSchema,
   type FollowUpAction,
@@ -408,6 +418,10 @@ export class ChannelSecretsRejectedError extends ControlPlaneClientError {
 }
 
 interface ClientDependencies {
+  // Ask the event stream for the turns of topics too (include=topics, protocol's topics.ts). Only a client that keeps
+  // them apart from the main conversation sets it (Companion): they come as lead.* events with topicId in the payload.
+  // Not set: the stream never carries them (the plc CLI prints every lead.message.delta as the main conversation).
+  topics?: boolean;
   fetch?: typeof fetch;
   credentials: CredentialStore;
   createWebSocket?: (url: string) => ControlPlaneSocket;
@@ -2098,6 +2112,47 @@ export class ControlPlaneClient {
     return (await this.request<{ busyPlacement: BusyPlacementDto }>('/v1/lead/busy-placement', BusyPlacementResponseSchema, { signal })).busyPlacement;
   }
 
+  // shadow 的设置（设置 → Shadow，契约在 protocol 的 lead-shadow.ts，2026-11-19）。读要 tickets:view；
+  // 改走 performUiAction('lead_shadow', 'lead', 'set', { input })，只写要改的字段。
+  async getLeadShadow(signal?: AbortSignal): Promise<LeadShadowDto> {
+    return (await this.request<{ shadow: LeadShadowDto }>('/v1/lead/shadow', LeadShadowResponseSchema, { signal })).shadow;
+  }
+
+  // Topics (protocol's topics.ts, user 2026-11-25): a second Lead conversation with a clean context. Reads need chat.
+  // Opening, renaming, closing and reopening go through performUiAction('topics', 'lead', 'open', …) and
+  // performUiAction('topic', id, 'rename' | 'close' | 'reopen', …). Only call these when the daemon announced
+  // LEAD_TOPICS_CAPABILITY: an older daemon has no such routes.
+  async getTopics(signal?: AbortSignal): Promise<TopicDto[]> {
+    return (await this.request<TopicsResponse>('/v1/topics', TopicsResponseSchema, { signal })).topics;
+  }
+
+  async getTopic(topicId: number, signal?: AbortSignal): Promise<TopicDetailResponse> {
+    return this.request<TopicDetailResponse>(`/v1/topics/${topicId}`, TopicDetailResponseSchema, { signal });
+  }
+
+  // images, files: what the user attached, as in a message of the main conversation (the daemon accepts them in a
+  // topic when it announced the chat image and file capabilities; the caller checks those).
+  async sendTopicMessage(
+    topicId: number, text: string,
+    attachments: { images?: readonly ChatImageInput[]; files?: readonly ChatFileInput[] } = {},
+    signal?: AbortSignal,
+  ): Promise<SendTopicMessageResponse> {
+    return this.request<SendTopicMessageResponse>(`/v1/topics/${topicId}/messages`, SendTopicMessageResponseSchema, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        ...(attachments.images?.length ? { images: attachments.images } : {}),
+        ...(attachments.files?.length ? { files: attachments.files } : {}),
+      }),
+      ...(signal ? { signal } : {}),
+    });
+  }
+
+  async stopTopic(topicId: number, signal?: AbortSignal): Promise<void> {
+    await this.requestRaw(`/v1/topics/${topicId}/stop`, { method: 'POST', ...(signal ? { signal } : {}) });
+  }
+
   // 界面的外观偏好（设置页「外观」）。
   async getDesignPreferences(signal?: AbortSignal): Promise<DesignPreferencesDto> {
     return (await this.request<{ designPreferences: DesignPreferencesDto }>('/v1/design/preferences', DesignPreferencesResponseSchema, { signal })).designPreferences;
@@ -2126,6 +2181,11 @@ export class ControlPlaneClient {
   // 有几种连接方式的来源现在的连接方式（2026-11-02）。只有一种方式的来源回 404。改动走 performUiAction('channel_connection', …)。
   async getChannelConnection(source: string, signal?: AbortSignal): Promise<ChannelConnectionDto> {
     return this.request(`${channelSourcePath(source)}/connection`, ChannelConnectionDtoSchema, { signal });
+  }
+
+  // 能固定订阅的来源现在的固定订阅（2026-11-25）。不能固定订阅的来源回 404。
+  async getChannelSubscriptions(source: string, signal?: AbortSignal): Promise<ChannelSubscriptionsDto> {
+    return this.request(`${channelSourcePath(source)}/subscriptions`, ChannelSubscriptionsDtoSchema, { signal });
   }
 
   // 用这些密钥试一次，不保存。检查没过也是一个结果（ok 是 false）：
@@ -2602,7 +2662,7 @@ export class ControlPlaneClient {
         // 选收 Lead 健康（带 lead 的 daemon.status.changed）、Lead 生成的富交互卡片（带 surface 的
         // lead.tool.updated，protocol 的 ui-surfaces.ts）、「Lead 动态」的推送（工单 06）和工单回复的动作按钮
         // 有了判断结果（2026-10-19，ticket-chat.ts）、Lead 忙时排着的外部消息（工单 10，lead-queue.ts）。旧 daemon 忽略这个参数。
-        include: `lead_health,ui_surfaces,${LEAD_ACTIVITY_OPT_IN},${TICKET_REPLY_ACTIONS_OPT_IN},${LEAD_QUEUE_OPT_IN},${LEAD_STEP_OPT_IN}`,
+        include: `lead_health,ui_surfaces,${LEAD_ACTIVITY_OPT_IN},${TICKET_REPLY_ACTIONS_OPT_IN},${LEAD_QUEUE_OPT_IN},${LEAD_STEP_OPT_IN}${this.deps.topics ? `,${TOPICS_OPT_IN}` : ''}`,
       }).toString();
       const socket = this.createSocket(url.toString());
       this.socket = socket;

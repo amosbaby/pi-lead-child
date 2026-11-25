@@ -114,8 +114,10 @@ function subscriptionRuntime(initial: ModelSettingsDto, replies: Record<string, 
   return { runtime, perform, push };
 }
 
-const inputOf = (perform: ReturnType<typeof vi.fn>, call = 0) => (perform.mock.calls[call]![3] as { input: unknown }).input;
-const actionOf = (perform: ReturnType<typeof vi.fn>, call = 0) => perform.mock.calls[call]![2];
+// 页面上的「后台工作」卡打开时读一次 background_model：只看模型设置的调用。
+const modelCalls = (perform: ReturnType<typeof vi.fn>) => perform.mock.calls.filter((call) => call[0] !== 'background_model');
+const inputOf = (perform: ReturnType<typeof vi.fn>, call = 0) => (modelCalls(perform)[call]![3] as { input: unknown }).input;
+const actionOf = (perform: ReturnType<typeof vi.fn>, call = 0) => modelCalls(perform)[call]![2];
 
 beforeEach(() => {
   vi.clearAllMocks();

@@ -1402,6 +1402,44 @@ CREATE TABLE IF NOT EXISTS widget_sources (
 CREATE INDEX IF NOT EXISTS idx_widget_sources_due ON widget_sources(paused, next_run_at);
 `;
 
+// Topics (protocol topics.ts, user 2026-11-25): a second Lead conversation with a clean context. SCHEMA creates the
+// tables for new and old databases alike, so they take no migration number (as chat_client_messages does).
+// topic_turns has the columns of channel_turns plus topic_id. The rows are kept apart on purpose: the main conversation
+// snapshot returns every row of channel_turns, and Lead's recovery treats its unfinished rows as Lead turns.
+// origin_turn_id has no foreign key: it names a turn of the main conversation for display only.
+export const TOPICS_SCHEMA = `
+CREATE TABLE IF NOT EXISTS topics (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  title             TEXT NOT NULL,
+  state             TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open','closed')),
+  opened_by         TEXT NOT NULL CHECK (opened_by IN ('user','lead')),
+  origin_turn_id    TEXT,
+  origin_quote      TEXT,
+  origin_role       TEXT CHECK (origin_role IS NULL OR origin_role IN ('assistant','user')),
+  model             TEXT,
+  conclusion        TEXT,
+  concluded_at      TEXT,
+  last_activity_at  TEXT NOT NULL,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS topics_state_activity ON topics(state, last_activity_at);
+CREATE TABLE IF NOT EXISTS topic_turns (
+  id                TEXT PRIMARY KEY,
+  topic_id          INTEGER NOT NULL REFERENCES topics(id),
+  origin_binding_id INTEGER,
+  origin_kind       TEXT NOT NULL,
+  state             TEXT NOT NULL DEFAULT 'queued'
+                    CHECK (state IN ('queued','streaming','completed','failed')),
+  user_text         TEXT NOT NULL DEFAULT '',
+  assistant_text    TEXT NOT NULL DEFAULT '',
+  error             TEXT,
+  created_at        TEXT NOT NULL,
+  updated_at        TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS topic_turns_topic_created ON topic_turns(topic_id, created_at, id);
+`;
+
 // External agenda entries (protocol agenda-feeds.ts, migration v66). One row per (feed, key). Feeds themselves live in kv.
 // muted / minutes_before are the user's own settings and a sync never overwrites them. reminder_item_id is the
 // pre-created reminder this entry carries now; reminder_planned_at is the time the system last planned for it, so a
@@ -1944,6 +1982,7 @@ ${WIDGETS_SCHEMA}
 ${WIDGET_SOURCES_SCHEMA}
 ${SURFACE_ACTIONS_SCHEMA}
 ${AGENDA_ENTRIES_SCHEMA}
+${TOPICS_SCHEMA}
 `;
 
 export const CHECKPOINT_CONTROL_PLANE_SCHEMA = `

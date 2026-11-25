@@ -3,6 +3,7 @@ export * from "./channel-tools.js";
 export * from "./connection-tools.js";
 export * from "./engine.js";
 export * from "./envelope.js";
+export * from "./background-health-text.js";
 export * from "./hands.js";
 export * from "./lookup/index.js";
 export * from "./agent-task/index.js";
@@ -12,9 +13,11 @@ export * from "./environment.js";
 export * from "./model-config.js";
 export * from "./model-failover.js";
 export * from "./model-hold.js";
+export * from "./turn-compaction.js";
 export * from "./auto-call-budget.js";
 export * from "./subscriptions.js";
 export * from "./wake-pace.js";
+export * from "./shadow/index.js";
 export * from "./model-switch.js";
 export * from "./precipitate.js";
 export * from "./compaction-settings.js";
@@ -28,6 +31,11 @@ export * from "./situation.js";
 export * from "./step-interrupt.js";
 export * from "./tool-abort-guard.js";
 export * from "./smart-model.js";
+export {
+  backgroundFailureClass, BROKEN_BACKGROUND_MODEL_MS, BrokenBackgroundModels, catalogSpec, CHEAP_RATIO, cheapModels, compareModelVersion,
+  createLeadCatalogSource, findCatalogModel, LEAD_CATALOG_TTL_MS, referencePrice, resolveBackgroundModel,
+  type BackgroundFailureClass, type BackgroundModelChoice, type BrokenBackgroundModel, type LeadCatalogSource,
+} from "./background-model.js";
 export * from "./tools.js";
 export { LEAD_CODEMODE_TOOLS, LEAD_CODEMODE_TOOL_GROUPS } from "./tool-exposure.js";
 export * from "./turn-origin.js";
@@ -35,6 +43,7 @@ export * from "./watch-commands.js";
 export * from "./wait-tools.js";
 export * from "./ui-action-tools.js";
 export * from "./hand-off-tool.js";
+export * from "./topic.js";
 export * from "./background-jobs.js";
 export { ticketRunAnnotation } from "./read-tools.js";
 export * from "./overflow.js";

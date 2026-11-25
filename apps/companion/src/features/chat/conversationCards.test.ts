@@ -124,6 +124,29 @@ describe('Lead conversation card timeline', () => {
     ]);
   });
 
+  // Topics (features/topics, design rules P18): the main conversation points at a topic with one line.
+  it('adds a line where you opened a topic, and a row where a topic brought its conclusion back', () => {
+    const user = message('user-1', 'user');
+    const assistant = message('assistant-1', 'assistant');
+    const topic = (overrides: Partial<import('@pi-lead-child/protocol').TopicDto>): import('@pi-lead-child/protocol').TopicDto => ({
+      id: 1, title: 'A topic', state: 'open', openedBy: 'user', originTurnId: 'turn-1', originQuote: 'a quote', originRole: 'assistant', model: null,
+      conclusion: null, concludedAt: null, turnCount: 1, lastTurnId: 'tturn_1', lastActivityAt: '2099-01-01T00:00:00.000Z',
+      createdAt: '2099-01-01T00:00:00.000Z', updatedAt: '2099-01-01T00:00:00.000Z', ...overrides,
+    });
+    const timeline = buildLeadTimeline([user, assistant], [], [], {
+      topics: [
+        // You opened it from a selected text: a line at that time.
+        topic({ id: 1 }),
+        // Lead opened it: its line is in that reply of Lead (TurnTopicLinks), so the timeline adds nothing for the opening.
+        // It brought a conclusion back: a row at that time.
+        topic({ id: 2, openedBy: 'lead', state: 'closed', conclusion: 'At most 3 rounds.', concludedAt: '2099-01-01T01:00:00.000Z' }),
+      ],
+    });
+    expect(timeline.map((item) => item.key)).toEqual([
+      'message:user-1', 'message:assistant-1', 'topic-opened:1', 'topic-concluded:2',
+    ]);
+  });
+
   it('represents ticket-scoped turns as lightweight direct-message notices', () => {
     const global = message('assistant-1', 'assistant', 'global-turn');
 

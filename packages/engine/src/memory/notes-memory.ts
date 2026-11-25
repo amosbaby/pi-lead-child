@@ -11,8 +11,15 @@
 //   每次同步先让后端忘掉清单里的，忘掉了才从清单里拿掉。Hindsight 删文档时连带删掉由它推出的事实和观察。
 // - 失效（D5）：让 Hindsight 里的一条事实失效或者恢复（操作层的 memory_fact，memory-facts.ts）。memory_invalidations 记一行
 //   （谁、依据、原文、来源）。最近召回到的记忆留一份缓存：操作层先按它判断一条记忆的来源（用户本人还是外部对话）。
+// - 对话文档（2026-11-20，channels/memory.ts 第 7 点）：外部通道的对话在主记忆是 Hindsight 时不经模型整理，记忆沉淀只写一条
+//   指针笔记。同步这条笔记时，交给 Hindsight 的不是笔记的文字，而是记忆沉淀从事件日志重新拼出的对话全文（channelDocuments
+//   登记的来源），文档编号还是 note-<编号>：删、换记忆库重放、召回的出处都和别的笔记一样。来源拿不到全文时这条笔记先不交。
+// - 写入的结果（2026-11-20，background-models spec）：Hindsight 的一次写入任务完成或者失败（它的摘要模型整理不了、后端拒收）
+//   时经 onWriteOutcome 报一次，daemon 交给后台健康（background-health.ts，任务 hindsight）。只用同步时本来就查的任务状态，
+//   不另外去问 Hindsight。后端连不上（同步整体失败）不报：那是服务的健康，daemon 的健康检查管。
 import { createHash, randomUUID } from "node:crypto";
-import { redactSecretText } from "@pi-lead-child/protocol";
+import { classifyLeadModelError, redactSecretText } from "@pi-lead-child/protocol";
+import type { BackgroundCallResult } from "../background-health.js";
 import {
   deleteMemorySync, deleteNote, getNote, invalidatedFactsByDocument, listMemorySync, noteSyncCounts, notesChangedSince,
   queueMemorySync, recordMemoryInvalidation, recordMemoryRecall, resetFailedMemorySync, saveNote, searchNotes,
@@ -23,7 +30,9 @@ import {
   MemoryRejectedError, noteIdFromSourceKey, noteSourceKey,
   type MemoryBackend, type MemoryFactInfo, type MemoryHitType, type MemoryItem, type MemoryStats,
 } from "./backend.js";
-import { isChannelMemoryNote } from "../channels/memory.js";
+import {
+  isChannelMemoryDocumentNote, isChannelMemoryNote, type ChannelMemoryDocument, type ChannelMemoryDocuments,
+} from "../channels/memory.js";
 
 // 一条笔记被后端拒收（400、422……）这么多次，或者它的任务在 Hindsight 里失败这么多次，就标为失败。
 const ATTEMPT_LIMIT = 3;
@@ -93,6 +102,14 @@ export interface NotesMemoryOptions {
   recallTimeoutMs?: number;
   // 有笔记的写入任务刚标为失败时调用（每次同步最多一次）：daemon 告诉 Lead，设置页显示。
   onWriteFailed?: (status: NoteWriteStatus) => void;
+  // 一次写入任务的结果：完成是 ok；任务在 Hindsight 里失败（每失败一次报一次）、后端拒收是失败。回调出错不影响同步。
+  onWriteOutcome?: (result: BackgroundCallResult) => void;
+}
+
+/** Hindsight 一次写入失败的类别（后台健康按它限流）：模型错误的类别，认不出时是 operation_failed。 */
+export function hindsightFailureClass(error: string): string {
+  const kind = classifyLeadModelError(error);
+  return kind === "unknown" ? "operation_failed" : kind;
 }
 
 // SQLite 的时间（UTC，"YYYY-MM-DD HH:MM:SS"）转成 ISO 8601。
@@ -127,6 +144,17 @@ export class NotesMemory {
   private unavailable: string | null = null;
   // 最近召回到的记忆（编号 → 召回时的样子），旧的在前。daemon 重启后是空的。
   private readonly recalled = new Map<string, RecalledMemory>();
+  // 指针笔记的对话全文从哪里来（记忆沉淀建好时登记）。
+  private documentSource: ((note: Note) => ChannelMemoryDocument | null) | null = null;
+
+  /**
+   * 记忆沉淀的对话文档端口。enabled：主记忆是 Hindsight（接上了，或者选了它但现在不能用、等它回来）。
+   * 用户关掉 Hindsight 时后端和「不能用」的说明都是 null：走老路，便宜模型整理成事实笔记。
+   */
+  readonly channelDocuments: ChannelMemoryDocuments = {
+    enabled: () => this.backend !== null || this.unavailable !== null,
+    attach: (source) => { this.documentSource = source; },
+  };
 
   constructor(
     private readonly db: Db,
@@ -471,6 +499,8 @@ export class NotesMemory {
     const documentId = noteSourceKey(note.id);
     const print = fingerprint(note);
     if (row && row.fingerprint === print && row.state !== "queued") return "skipped";
+    const item = this.memoryItem(note);
+    if (!item) return "skipped";
     let operationId: string;
     let attempts = 0;
     if (row && row.fingerprint === print) {
@@ -482,12 +512,13 @@ export class NotesMemory {
     }
     const key = { bankIndex: index, documentId, operationId };
     try {
-      await backend.remember(noteMemoryItem(note), { operationId, signal });
+      await backend.remember(item, { operationId, signal });
     } catch (error) {
       if (!(error instanceof MemoryRejectedError)) throw error;
       attempts += 1;
       const failed = attempts >= ATTEMPT_LIMIT;
       setMemorySyncState(this.db, key, { state: failed ? "failed" : "queued", attempts, error: errorText(error) });
+      this.writeOutcome({ ok: false, reasonClass: "rejected", reason: errorText(error) });
       if (failed) this.options.log?.(`[memory] ${backend.name} rejected note #${note.id} ${ATTEMPT_LIMIT} times: ${errorText(error).slice(0, 200)}`);
       return failed ? "failed" : "rejected";
     }
@@ -502,10 +533,12 @@ export class NotesMemory {
     if (status.state === "pending") return "pending";
     if (status.state === "completed" || status.state === "gone") {
       setMemorySyncState(this.db, key, { state: "completed", error: null });
+      this.writeOutcome({ ok: true });
       return "completed";
     }
     const attempts = row.attempts + 1;
     const error = redactSecretText(status.error ?? "failed").slice(0, 300);
+    this.writeOutcome({ ok: false, reasonClass: hindsightFailureClass(error), reason: error });
     if (attempts >= ATTEMPT_LIMIT) {
       setMemorySyncState(this.db, key, { state: "failed", attempts, error });
       this.options.log?.(`[memory] ${backend.name} could not write ${row.documentId} after ${ATTEMPT_LIMIT} attempts: ${error.slice(0, 200)}`);
@@ -514,6 +547,26 @@ export class NotesMemory {
     await backend.retryOperation(row.operationId, signal);
     setMemorySyncState(this.db, key, { state: "submitted", attempts, error });
     return "pending";
+  }
+
+  private writeOutcome(result: BackgroundCallResult): void {
+    try {
+      this.options.onWriteOutcome?.(result);
+    } catch (error) {
+      this.options.log?.(`[memory] reporting a write outcome failed: ${errorText(error)}`);
+    }
+  }
+
+  // 交给后端的内容。指针笔记交对话全文（拿不到时 null：先不交，记忆沉淀下次整理时会改或者删掉这条笔记）。
+  private memoryItem(note: Note): MemoryItem | null {
+    if (!isChannelMemoryDocumentNote(note)) return noteMemoryItem(note);
+    let document: ChannelMemoryDocument | null = null;
+    try {
+      document = this.documentSource?.(note) ?? null;
+    } catch (error) {
+      this.options.log?.(`[memory] the conversation of note #${note.id} could not be read: ${errorText(error)}`);
+    }
+    return document ? { ...noteMemoryItem(note), content: document.content, context: document.context } : null;
   }
 
   private scheduleSync(): void {

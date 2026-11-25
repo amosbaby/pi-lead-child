@@ -45,6 +45,14 @@ export function modelHoldError(state: Pick<ModelHoldState, "kind" | "retryAt"> |
     : `model hold: model calls keep failing; the next automatic model call is at ${until}`;
 }
 
+/**
+ * 这段错误文字是不是模型暂停拒了调用（MODEL_HOLD_ERROR、modelHoldError）：调用没有发出去。
+ * 调用记录（decision_model.called）不记它，用量统计只数真的调用（2026-11-20）。
+ */
+export function isModelHoldRefusal(text: string | null | undefined): boolean {
+  return typeof text === "string" && text.startsWith("model hold:");
+}
+
 /** 谁的失败让系统进入暂停。 */
 export type ModelHoldSource = "turn" | "compaction" | "decision";
 

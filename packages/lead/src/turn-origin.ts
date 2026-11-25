@@ -65,6 +65,8 @@ export const EXTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "read_signal_items",
   // External agenda entries (2026-11-12): meeting titles and locations are written by other people.
   "read_agenda_entries",
+  // 来源里的文档（canvas、Markdown 文件，2026-11-20）：别人也能编辑，和对话一样算。
+  "read_channel_document",
 ]);
 
 // 输出不算外部内容的工具。用户 2026-10-27：笔记、本机文件、工单状态、child 和子 agent 的报告、账本记录都不算；
@@ -105,6 +107,8 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   "attach_to_ticket",
   // 处理消息事件的通用工具（统一消息事件工单 05）：结果是派出的工单、发出的话或者卡上的草稿、卡的状态。
   "dispatch_agent_task", "reply_to_source",
+  // 建、改来源里的文档（2026-11-20）：结果是文档的编号、标题和链接，没有原文。
+  "create_channel_document", "edit_channel_document",
   // 停掉一个后台作业（.scratch/tool-occupancy/spec.md）：结果是停了哪个作业、还有哪些在跑。
   "stop_job",
   // 改选交接说明里的一句（自动代你处理方案 B，D1）：结果是用户写的句子和重算的上限，没有外部的原文。
@@ -112,6 +116,10 @@ export const INTERNAL_TEXT_TOOLS: ReadonlySet<string> = new Set([
   // 交接（lead-scheduler spec P2）：hand_off 的结果是建了哪张单、交接包多大。resume_unit 的结果是挂起时存下的交接包，
   // 是账本记录；包里外部工具的结果不放原文（handoff-package.ts），所以不算。
   "hand_off", "resume_unit",
+  // open_topic (topic.ts): the result says which topic was opened. Lead wrote the title and the opening itself.
+  "open_topic",
+  // shadow（shadow/shadow.ts）：读 Lead 自带的 skill 是本机文件；finish_shadow 的结果只是「收到」。
+  "read_skill", "finish_shadow", "more_tools",
 ]);
 
 /** 这个工具的输出算不算外部内容。没有声明的（例如以后加的）按外部内容算。 */

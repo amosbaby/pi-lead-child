@@ -106,6 +106,10 @@ export interface ChannelInbound {
   // 推回来的话（role echo）起头了它所在的对象（例如 Slack 频道里一个 thread 的根消息）：系统替用户发的消息起头的对象是
   // 用户的，interest.started 认它。用户本人的话（self_reply）不带它：用户自己起头的只关注（2026-10-21）。只和 follows 一起用。
   starts?: boolean;
+  // 别人发来的消息（role message）不是对用户说的（2026-11-20）：例如发给整个频道的广播、用户起头的对话里回别人或者说不清回谁的话。
+  // 用户在场，要知道，但不用处理：hub 把投递方式封顶在摘要（digest），不开道、不开卡、不问请求 A，所以不会代办或代回；
+  // 这个对象已经有道时只进道的上下文。不问紧急程度。投递指令说只记录时照样只记录。
+  ambient?: boolean;
 }
 
 /**
@@ -140,6 +144,58 @@ export interface ChannelFile {
   mimeType: string;
   size: number;
   data: Uint8Array;
+}
+
+/**
+ * 来源里的一份文档（ChannelAdapter.documents，2026-11-20：用户要 Lead 能写 Slack 的 canvas 和 Markdown 文件）。
+ * ref 不带来源名；url 是给人点开的地址，没有时是 null。
+ */
+export interface ChannelDocument {
+  ref: string;
+  kind: string;
+  title: string | null;
+  url: string | null;
+}
+
+/** 一份文档的 Markdown 原文。内容是不可信的外部资料（别人也能编辑）。 */
+export interface ChannelDocumentContent extends ChannelDocument {
+  markdown: string;
+}
+
+/** 文档里的一段：按段里的文字找，可以再限定段的种类（来源自己的说法，例如 h1、list）。要正好找到一段。 */
+export interface ChannelDocumentSection {
+  containsText: string;
+  types?: string[];
+}
+
+/** 改一份文档的一步。section 不给的 replace 换掉整份。 */
+export type ChannelDocumentChange =
+  | { operation: "replace"; markdown: string; section?: ChannelDocumentSection }
+  | { operation: "insert_at_start" | "insert_at_end"; markdown: string }
+  | { operation: "insert_before" | "insert_after"; markdown: string; section: ChannelDocumentSection }
+  | { operation: "delete"; section: ChannelDocumentSection }
+  | { operation: "rename"; title: string };
+
+/** 改完以后的文档。来源不能原地改、只能换一份新的时（例如 Slack 的文件），ref 是新的，replacedRef 是旧的。 */
+export interface ChannelDocumentEdited extends ChannelDocument {
+  replacedRef?: string;
+  // 换了新的以后旧的没删掉的原因（例如不是自己的文件）。删掉了或者没换时没有。
+  oldKept?: string;
+}
+
+/**
+ * 来源的文档：建、读、改。kinds 是这个来源有哪几种文档和每种是什么（给 Lead 看的一句话）。
+ * 编号不对、找不到时抛 ChannelFileNotFoundError；做不到的改法、缺权限、来源拒绝时抛错，错误的话是给人看的原因和下一步。
+ */
+export interface ChannelDocuments {
+  readonly kinds: Readonly<Record<string, string>>;
+  // target：放进哪个对话（resolveConversation 给的）。null 时只有用户自己能看。
+  create(
+    input: { kind: string; title: string; markdown: string; target: Record<string, string> | null },
+    context: ChannelAdapterContext,
+  ): Promise<ChannelDocument>;
+  read(ref: string, options: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelDocumentContent>;
+  edit(ref: string, change: ChannelDocumentChange, context: ChannelAdapterContext): Promise<ChannelDocumentEdited>;
 }
 
 /** 文件编号不对或者找不到（readFile）。 */
@@ -299,6 +355,9 @@ export interface ChannelInterest {
   followed(objectKey: string): boolean;
   // 这个对象是系统替用户发的消息起头的（记过带 starts 的推回来的话）。别人在里面接着说，是在回用户让系统发的话。
   started(objectKey: string): boolean;
+  // 这个对象是用户本人起头的（2026-11-20）：记过用户本人在这个对象里说的、编号是 messageId 的话（例如一个讨论串的第一条消息）。
+  // 用户只回复过的对象不算；系统替用户发的话（echo）也不算，那是 started。
+  ownerStarted(objectKey: string, messageId: string): boolean;
 }
 
 export interface ChannelAdapterContext {
@@ -435,6 +494,14 @@ export interface ChannelConnectionControl {
   writesSwitch(mode: string): boolean;
 }
 
+/** 固定订阅（用户 2026-11-25）：来源怎么认名单里的条目，以及优先于固定订阅的排除名单。 */
+export interface ChannelSubscriptionControl {
+  // 给人和 Lead 看的条目写法，一句话，例如「频道编号（C0123ABCD）或者频道名（#proj-x）」。
+  readonly entryHint: string;
+  // 排除名单（来源的配置里写的，只读）：里面的对话即使固定了也不订阅。
+  excluded(): readonly string[];
+}
+
 /**
  * 记忆沉淀（slack-takeover 工单 07，spec D12）：来源里哪些对话可以整理成事实笔记。内核（channels/memory.ts）按对象键
  * 把下面这些类型的事件分成对话，一个对话一条笔记；它只读事件日志，不再调来源的接口。来源的知识（哪种对话可以沉淀、
@@ -482,6 +549,8 @@ export interface ChannelAdapter {
    * 编号不对、找不到时抛 ChannelFileNotFoundError；别的原因（缺权限、下载失败）抛错，错误的话是给人看的原因。不支持时没有。
    */
   readFile?(ref: string, options: { maxBytes: number }, context: ChannelAdapterContext): Promise<ChannelFile>;
+  /** 来源里的文档（例如 Slack 的 canvas 和 Markdown 文件）。不支持时没有。建和改是写，writesBlocked 时 hub 不调。 */
+  readonly documents?: ChannelDocuments;
   /** 只读：按人名、对话名找可以发消息的对话（Lead 代用户直接发消息，2026-10-23）。不支持时没有。 */
   findConversations?(query: string, context: ChannelAdapterContext): Promise<ChannelConversationCandidate[]>;
   /**
@@ -507,6 +576,11 @@ export interface ChannelAdapter {
   writesBlocked?(): string | null;
   /** 记忆沉淀（channels/memory.ts）。没有时这个来源的对话不沉淀。 */
   readonly memory?: ChannelMemorySpec;
+  /**
+   * 能固定订阅对话的来源（用户 2026-11-25，设置 → 消息通道 → 固定订阅）。名单由 daemon 存（store 的 channel-connections.ts），
+   * 来源每次判断订阅时现读。没有时这个来源不能固定订阅。
+   */
+  readonly subscriptions?: ChannelSubscriptionControl;
   /**
    * 署名里放在助手名前面的标记，用这个来源自己的写法（例如来源里的自定义 emoji 的短代码）。没有时不加。
    * 只用在发到这个来源的署名里（hub 的 disclosure.ts）；发到别处的（例如 PR 上的 review）不加。

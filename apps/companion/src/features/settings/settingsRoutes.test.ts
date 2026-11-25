@@ -23,6 +23,7 @@ describe('settings routes', () => {
       'settings/standing-orders.tsx',
       'settings/runtimes.tsx',
       'settings/host-bypass.tsx',
+      'settings/shadow.tsx',
     ]) {
       expect.soft(existsSync(appFile(path)), path).toBe(true);
     }
@@ -47,9 +48,9 @@ describe('settings routes', () => {
     const en = settingsMessages('en');
     const zh = settingsMessages('zh');
     expect(SETTINGS_GROUPS.map((group) => en.groups[group.id])).toEqual(['Lead', 'Account', 'Devices', 'Execution']);
-    expect(items.map((item) => zh.items[item.id])).toEqual(['身份与风格', '外观', '模型', '记忆', '常设指令', '免沙箱', '连接', '消息通道', '本设备', '已配对设备', '执行器']);
+    expect(items.map((item) => zh.items[item.id])).toEqual(['身份与风格', '外观', '模型', '记忆', '常设指令', '免沙箱', '分身 shadow', '连接', '消息通道', '本设备', '已配对设备', '执行器']);
     expect(items.map((item) => en.items[item.id])).toEqual([
-      'Identity & style', 'Appearance', 'Models', 'Memory', 'Standing orders', 'Sandbox bypass', 'Connections', 'Message channels', 'This device', 'Paired devices', 'Runtimes',
+      'Identity & style', 'Appearance', 'Models', 'Memory', 'Standing orders', 'Sandbox bypass', 'Shadow', 'Connections', 'Message channels', 'This device', 'Paired devices', 'Runtimes',
     ]);
     // 消息通道在「账号」分组里，紧跟「连接」。
     expect(SETTINGS_GROUPS[1]!.items.map((item) => item.href)).toEqual(['/settings/connections', '/settings/channels']);
@@ -85,6 +86,7 @@ describe('settingsSectionForPath', () => {
       expect(settingsSectionForPath('/settings/standing-orders', { desktop })).toBe('standing-orders');
       expect(settingsSectionForPath('/settings/runtimes', { desktop })).toBe('runtimes');
       expect(settingsSectionForPath('/settings/host-bypass', { desktop })).toBe('host-bypass');
+      expect(settingsSectionForPath('/settings/shadow', { desktop })).toBe('shadow');
       expect(settingsSectionForPath('/settings/channels', { desktop })).toBe('channels');
     }
   });
