@@ -104,7 +104,7 @@ async function boot(slack: FakeSlack, options: {
       credentials: { credential: async (provider) => (provider === "slack" ? slack.credential : null) },
       audit: { rate: 0 },
     },
-    ...(options.subAgent ? { agentTasks: { sessionFactory: fauxFactory(options.subAgent) } } : {}),
+    ...(options.subAgent ? { agentTasks: { sessionFactory: fauxFactory(options.subAgent), env: { PLC_DISABLED_RUNTIMES: "claude" } } } : {}),
   });
   const owner = createLoopbackBinding(db, { name: "Mac 网页" });
   // Lead 的工具：和真的会话一样用 daemon 交来的依赖。turnId 为 null 是被事件叫醒的一轮（不是用户的一轮）。

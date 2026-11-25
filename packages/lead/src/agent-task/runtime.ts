@@ -1,3 +1,7 @@
+// 2026-11-25（工单 #464）：这是用户停用 Claude Code 时的后备。缺省跑在 Claude Code 里，见 claude-runtime.ts：
+// 当时用 --restricted、--strict-mcp-config、--tools "" 做到了下面说的隔离（hooks 不加载、没有自带工具、只连一个工具通道）。
+// 用户停用了 pi 的时候，代查不会走这里（apps/daemon 的 agent-tasks.ts 先按 pickAgentTaskRuntime 选）。
+//
 // 子 agent（通道派的工单）的 runtime：只读形态（landing.md 第 5 节）。一个 AgentRuntime，在 daemon 进程里跑一个受限的 pi 会话：
 // 不开子进程，没有 shell，拿不到环境变量，不加载用户的 MCP、扩展、技能和 AGENTS.md，也没有 pi 自带的读文件工具。
 // 工具只有 tools.ts 里经连接中心的那几个，连接中心按这个 Run 的权限清单检查每一次调用。会话的隔离和代查共用
