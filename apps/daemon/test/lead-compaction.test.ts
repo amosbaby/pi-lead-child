@@ -40,10 +40,15 @@ type Compaction = { kind: "ok" } | { kind: "fail"; errorMessage: string } | { ki
 
 // 不调用模型的 Lead。每一轮先回答一句话，再按 plan 的下一项做一次压缩（整理笔记那一轮只回 NO_REPLY，不压缩）。
 // compactError：会话有 compact（daemon 在一轮开头的补压缩用它），每次都按这句话失败；compacts 记它被调了几次。
-function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean; compactError?: string } = {}) {
+// contextOver：每一轮以后上下文到窗口的 120%；compactOk：会话的 compact 成功，上下文回到 10%。
+function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boolean; contextOver?: boolean; compactError?: string; compactOk?: boolean } = {}) {
   const compacts: number[] = [];
+  // 空闲车道碰会话的那几次（取对话、接上摘要）：不是压缩。
+  const idleCompacts: string[] = [];
   const listeners: Array<(event: any) => void> = [];
   const prompts: string[] = [];
+  // 每次 prompt 进来时上下文的用量（窗口是 100）：看有没有一轮带着超出窗口的上下文发给模型。
+  const promptUsage: number[] = [];
   const emit = (event: unknown) => { for (const listener of listeners) listener(event); };
   const say = (text: string) => {
     emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: text } });
@@ -59,7 +64,7 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
     modelName: "stub/model",
     session: {
       sessionId: "stub-session",
-      ...(options.contextFull ? {
+      ...(options.contextFull || options.contextOver ? {
         model: { contextWindow: 100 },
         agent: { state: { messages: [{ role: "assistant", usage }] } },
       } : {}),
@@ -70,7 +75,8 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
       },
       async prompt(message: string) {
         prompts.push(message);
-        usage.input = 90;
+        promptUsage.push(usage.input);
+        usage.input = options.contextOver ? 120 : 90;
         if (message.includes("沉淀检查")) {
           say("NO_REPLY");
           return;
@@ -108,13 +114,27 @@ function stubLead(plan: Array<Compaction | null>, options: { contextFull?: boole
           compacts.push(Date.now());
           throw new Error(options.compactError);
         },
+      } : options.compactOk ? {
+        async compact(instructions?: string) {
+          // 空闲车道用 session.compact 取对话（IDLE_PROBE_INSTRUCTIONS）和接上摘要（IDLE_APPLY_INSTRUCTIONS）。真的 pi 里
+          // 空闲车道的 beforeCompact 钩子取消取对话那一次，pi 抛「Compaction cancelled」，会话不变（agent-session.js 的
+          // session_before_compact）。这个替身没有那个钩子，照样做：不算一次压缩，用量不变。
+          // 以前替身把它当成真的压缩，用量降到 10%，开一轮以前就不需要压缩了（CI 上这条测试因此失败两次）。
+          if (instructions?.startsWith("[plc idle lane")) {
+            idleCompacts.push(instructions);
+            throw new Error("Compaction cancelled");
+          }
+          compacts.push(Date.now());
+          usage.input = 10;
+          return { summary: "摘要", firstKeptEntryId: "entry-1", tokensBefore: 120 };
+        },
       } : {}),
       async steer() {},
       async followUp() {},
       dispose() {},
     },
   });
-  return { factory, prompts, aborts, compacts };
+  return { factory, prompts, promptUsage, aborts, compacts, idleCompacts };
 }
 
 async function start(lead: ReturnType<typeof stubLead>) {
@@ -247,6 +267,26 @@ describe("the compaction backoff", () => {
     expect(logs.some((line) => line.includes("compaction before the turn skipped"))).toBe(true);
     const failures = db.prepare("SELECT count(*) AS n FROM events WHERE kind = 'lead.compaction_failed'").get() as { n: number };
     expect(failures.n).toBe(1);
+  });
+});
+
+// 2026-11-24 夜里：空闲车道的压缩都在机器睡眠里超时，上下文涨到窗口的 111%。以前开一轮以前只在「上一次自动压缩失败了」时
+// 才补压缩，没有这个标记就带着超出窗口的上下文直接调模型。现在开一轮以前按现在的用量看：超过窗口先压缩，再调模型。
+describe("the context before a turn", () => {
+  it("compacts first when the context is over the window, then sends the turn", async () => {
+    // 空闲车道不在两轮之间自己压缩：这里只看开一轮以前的那一次。
+    vi.stubEnv("PLC_LEAD_IDLE_GRACE_MS", "600000");
+    const lead = stubLead([], { contextOver: true, compactOk: true });
+    const { logs, chat } = await start(lead);
+    await chat("第一轮");
+    await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(1));
+    // 第一轮以后上下文到了窗口的 120%。之后开的每一轮（第二轮，也可能先有一个系统回合）都要先压缩再调模型。
+    // 以前：没有压缩失败留下的标记，第二轮带着 120% 的上下文直接发给模型。
+    await chat("第二轮");
+    await vi.waitFor(() => expect(userPrompts(lead.prompts)).toHaveLength(2));
+    expect(lead.compacts.length).toBeGreaterThanOrEqual(1);
+    expect(lead.promptUsage.every((tokens) => tokens <= 100)).toBe(true);
+    expect(logs.some((line) => line.includes("before the turn: compacting first (overflow)"))).toBe(true);
   });
 });
 
