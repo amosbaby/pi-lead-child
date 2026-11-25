@@ -1,12 +1,12 @@
 // 建隔离 worktree 时准备依赖（lead-tools-and-routing spec D15，#137 第 6 条）：真的 git 仓库、真的 worktree、真的克隆。
 import { execFileSync } from "node:child_process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
   awaitWorktreeDependencies, DEPENDENCY_STATUS_FILE, findNodeModulesDirs, forgetWorktreeDependenciesForTests,
-  peekWorktreeDependencies, startWorktreeDependencies,
+  peekWorktreeDependencies, setNpmSystemDirsForTests, startWorktreeDependencies,
 } from "../src/coordinator/worktree-dependencies.js";
 
 const supported = process.platform === "darwin" || process.platform === "linux";
@@ -166,5 +166,109 @@ describe.runIf(supported)("startWorktreeDependencies in a bun repository", () =>
     // 状态文件在 git 目录里，不会进提交。
     expect(git(worktree, "status", "--porcelain")).toBe("?? bun.lock");
     expect(peekWorktreeDependencies(tempDir("plc-deps-other-"))).toBeNull();
+  }, 60_000);
+});
+
+// #493：npm 的仓库（有 package-lock.json）在 pnpm、bun 之后、克隆之前用 npm ci 装；#473 拷 3 份 node_modules 花了约 11 分钟。
+// 用假的 npm（脚本）代替真的：它记下参数和 PATH，按退出码和是否留下装了一半的 node_modules 表现。
+function fakeNpmBin(body: string, dir = tempDir("plc-deps-npm-bin-")): string {
+  const script = join(dir, "npm");
+  writeFileSync(script, `#!/bin/sh\n${body}\n`);
+  chmodSync(script, 0o755);
+  return dir;
+}
+
+describe.runIf(supported)("startWorktreeDependencies in an npm repository", () => {
+  const saved = { ...process.env };
+  const realPath = (process.env.PATH ?? "").split(":").filter(Boolean);
+  // 一个找不到 npm 的环境：PATH 里去掉有 npm 的目录（git 要留着），没有 nvm、volta，也没有 Homebrew 的固定目录。
+  function withoutNpm(): void {
+    process.env.PATH = realPath.filter((dir) => !existsSync(join(dir, "npm"))).join(":");
+    process.env.HOME = tempDir("plc-deps-npm-home-");
+    for (const key of ["NVM_BIN", "NVM_DIR", "VOLTA_HOME"]) delete process.env[key];
+    setNpmSystemDirsForTests([]);
+  }
+  afterEach(() => {
+    process.env = { ...saved };
+    setNpmSystemDirsForTests();
+  });
+
+  it("installs once at the root with npm ci instead of cloning any node_modules, workspace packages included", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutNpm();
+    const out = tempDir("plc-deps-npm-out-");
+    const bin = fakeNpmBin(`echo "$@" > ${out}/args\necho "$PATH" > ${out}/path\npwd >> ${out}/calls\nmkdir -p node_modules/from-npm`);
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({
+      cloned: [], skipped: null, error: null, installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund",
+    });
+    expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("ci --prefer-offline --ignore-scripts --no-audit --no-fund --loglevel=error");
+    // monorepo 只在根目录跑一次，npm 所在的目录在 PATH 最前面（脚本是 env node，要找得到 node）。
+    expect(readFileSync(join(out, "calls"), "utf8").trim().split("\n")).toHaveLength(1);
+    expect(readFileSync(join(out, "path"), "utf8").startsWith(`${bin}:`)).toBe(true);
+    expect(existsSync(join(worktree, "node_modules", "from-npm"))).toBe(true);
+    // 没有拷用户 checkout 的依赖：不管是根的还是工作区包的。
+    expect(existsSync(join(worktree, "node_modules", "left-pad"))).toBe(false);
+    expect(existsSync(join(worktree, "packages", "lib", "node_modules"))).toBe(false);
+  }, 60_000);
+
+  it("skips npm and clones when npm cannot be found, and says why", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutNpm();
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
+    expect(result.fallbackReason).toMatch(/找不到 npm/);
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
+      .toMatch(/^ready: cloned node_modules.*\(installing with npm did not work: 找不到 npm/);
+  }, 60_000);
+
+  it("falls back to cloning when npm ci fails, drops the half-installed node_modules and says why", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutNpm();
+    process.env.PATH = `${fakeNpmBin("mkdir -p node_modules/half-installed\necho 'npm error code EUSAGE' >&2\necho 'npm error lock file is out of sync' >&2\nexit 1")}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
+    expect(result.fallbackReason).toMatch(/^npm ci 失败：npm error code EUSAGE npm error lock file is out of sync$/);
+    expect(existsSync(join(worktree, "node_modules", "half-installed"))).toBe(false);
+    expect(readFileSync(join(worktree, "node_modules", "left-pad", "index.js"), "utf8")).toContain("1");
+  }, 60_000);
+
+  it("does not use npm in a repository without package-lock.json, and leaves no fallback reason", async () => {
+    const { repo, worktree } = monorepo();
+    withoutNpm();
+    const out = tempDir("plc-deps-npm-out-");
+    process.env.PATH = `${fakeNpmBin(`echo called > ${out}/called`)}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
+    expect(existsSync(join(out, "called"))).toBe(false);
+  }, 60_000);
+
+  it("finds npm in the newest nvm node version and in a fixed system directory when PATH has none", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutNpm();
+    const out = tempDir("plc-deps-npm-out-");
+    for (const version of ["v18.19.0", "v20.9.0", "v9.0.0"]) {
+      fakeNpmBin(`echo ${version} > ${out}/version\nmkdir -p node_modules/from-npm`, (() => {
+        const dir = join(process.env.HOME as string, ".nvm", "versions", "node", version, "bin");
+        mkdirSync(dir, { recursive: true });
+        return dir;
+      })());
+    }
+    const nvm = await startWorktreeDependencies(repo, worktree);
+    expect(nvm.installedWith).toContain("npm ci");
+    expect(readFileSync(join(out, "version"), "utf8").trim()).toBe("v20.9.0");
+
+    forgetWorktreeDependenciesForTests();
+    rmSync(join(worktree, "node_modules"), { recursive: true, force: true });
+    withoutNpm();
+    setNpmSystemDirsForTests([fakeNpmBin("mkdir -p node_modules/from-system")]);
+    const system = await startWorktreeDependencies(repo, worktree);
+    expect(system.installedWith).toContain("npm ci");
+    expect(existsSync(join(worktree, "node_modules", "from-system"))).toBe(true);
   }, 60_000);
 });

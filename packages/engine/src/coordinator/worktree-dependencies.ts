@@ -10,13 +10,19 @@
 // bun 的仓库（有 bun.lock 或 bun.lockb）同样先用 bun install --frozen-lockfile 装（2026-11-25）：#465 给一个 bun 仓库建
 // worktree，克隆 node_modules/.bun 跑了 6 分钟以上还没完，执行者一直在等。bun 有全局缓存，通常快得多；装不上时回到克隆。
 //
+// npm 的仓库（有 package-lock.json）在 pnpm、bun 之后、克隆之前用 npm ci 装（npmInstall，#493）：#473 一次拷 3 份 node_modules
+// 花了约 11 分钟（本机有杀毒软件，拷大量小文件很慢）。命令是 npm ci --prefer-offline --ignore-scripts --no-audit --no-fund，
+// 10 分钟超时。npm workspaces 的单仓只在根目录跑一次：npm ci 把依赖提升到根 node_modules，工作区包的链接也由它建，
+// 装好就返回，不再对子包克隆。找不到 npm（daemon 的 PATH 来自 launchd）、npm ci 失败或超时，就回到克隆，
+// 并把原因写进结果的 fallbackReason（状态文件和活动记录里能看到）。
+//
 // 执行者不等依赖（2026-11-25）：建好 worktree 就启动，依赖在后台准备。准备做完时写一个状态文件（worktree 的 git 目录里，
 // 不在工作区里，不会进提交），提示里给执行者一条等它的命令；准备还在做时也可以查 peekWorktreeDependencies。
 //
 // 克隆在后台异步做：大仓库在本机要几分钟（有 Sophos 时更久），同步做会卡住 daemon（2026-10-14 的停摆）。
 // 只克隆 git 忽略的 node_modules；克隆失败不影响 Run，执行者可以在沙箱里自己装。
 import { spawn } from "node:child_process";
-import { existsSync, type Dirent } from "node:fs";
+import { existsSync, readdirSync, type Dirent } from "node:fs";
 import { readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -29,6 +35,8 @@ export interface DependencyPreparation {
   error: string | null;
   // 用包管理器装的（例如 pnpm install），没有克隆时写明。克隆的为 undefined。
   installedWith?: string;
+  // 先试了包管理器、没成功才回到克隆（或没有可克隆的）时，写明为什么没成功。目前只有 npm 这条路径会写。
+  fallbackReason?: string;
 }
 
 const pending = new Map<string, Promise<DependencyPreparation>>();
@@ -69,20 +77,23 @@ export async function findNodeModulesDirs(root: string, maxDepth = 3): Promise<s
   return found.sort();
 }
 
-function run(command: string, args: string[], cwd: string, timeoutMs: number): Promise<{ code: number | null; output: string }> {
+function run(
+  command: string, args: string[], cwd: string, timeoutMs: number, env?: NodeJS.ProcessEnv,
+): Promise<{ code: number | null; output: string; timedOut: boolean }> {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], ...(env ? { env } : {}) });
     let output = "";
+    let timedOut = false;
     child.stdout?.on("data", (data: Buffer) => { output += data.toString(); });
     child.stderr?.on("data", (data: Buffer) => { output += data.toString(); });
-    const timer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
+    const timer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
     child.on("error", (error) => {
       clearTimeout(timer);
-      resolvePromise({ code: null, output: error.message });
+      resolvePromise({ code: null, output: error.message, timedOut: false });
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      resolvePromise({ code, output: output.slice(-2_000) });
+      resolvePromise({ code, output: output.slice(-2_000), timedOut });
     });
   });
 }
@@ -134,12 +145,92 @@ async function bunInstall(worktree: string): Promise<DependencyPreparation | nul
   if (!bun) return null;
   const result = await run(bun, ["install", "--frozen-lockfile", "--ignore-scripts"], worktree, 10 * 60_000);
   if (result.code === 0) return { cloned: [], skipped: null, error: null, installedWith: "bun install --frozen-lockfile --ignore-scripts" };
+  await removeInstalledNodeModules(worktree);
+  return null;
+}
+
+// 装了一半的 node_modules 要删掉，不然克隆会因为目标已存在而跳过它们。只删 git 忽略的：装出来的 node_modules 是忽略的，别的东西不碰。
+async function removeInstalledNodeModules(worktree: string): Promise<void> {
   for (const dir of await findNodeModulesDirs(worktree)) {
-    // 只删 git 忽略的：装出来的 node_modules 是忽略的，别的东西不碰。
     const ignored = await run("git", ["-C", worktree, "check-ignore", "-q", dir], worktree, 30_000);
     if (ignored.code === 0) await rm(join(worktree, dir), { recursive: true, force: true });
   }
+}
+
+// 系统里装 npm 的固定位置：Homebrew（Apple 芯片、Intel）。测试可以换掉它，免得测到本机真装的 npm。
+const DEFAULT_SYSTEM_NPM_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
+let systemNpmDirs = DEFAULT_SYSTEM_NPM_DIRS;
+
+/** 测试用：换掉固定的 npm 目录（不传就恢复）。 */
+export function setNpmSystemDirsForTests(dirs?: string[]): void {
+  systemNpmDirs = dirs ?? DEFAULT_SYSTEM_NPM_DIRS;
+}
+
+function versionParts(name: string): number[] {
+  return name.replace(/^v/, "").split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+// nvm 装的 node 版本目录，新的在前。
+function nvmNodeBinDirs(env: NodeJS.ProcessEnv): string[] {
+  const root = env.NVM_DIR ?? (env.HOME ? join(env.HOME, ".nvm") : null);
+  if (!root) return [];
+  try {
+    return readdirSync(join(root, "versions", "node"))
+      .sort((a, b) => {
+        const [pa, pb] = [versionParts(a), versionParts(b)];
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+          if ((pa[i] ?? 0) !== (pb[i] ?? 0)) return (pb[i] ?? 0) - (pa[i] ?? 0);
+        }
+        return 0;
+      })
+      .map((version) => join(root, "versions", "node", version, "bin"));
+  } catch {
+    return [];
+  }
+}
+
+// npm 的可执行文件：daemon 的 PATH 是 launchd 给的，常常没有用户装的 node 和 npm。按这个顺序找：PATH、当前 nvm 的 NVM_BIN、
+// nvm 装的各版本、volta、Homebrew。找不到时为 null。
+function npmBinary(env: NodeJS.ProcessEnv = process.env): string | null {
+  const dirs = [
+    ...(env.PATH ?? "").split(":").filter(Boolean),
+    ...(env.NVM_BIN ? [env.NVM_BIN] : []),
+    ...nvmNodeBinDirs(env),
+    ...(env.VOLTA_HOME ? [join(env.VOLTA_HOME, "bin")] : env.HOME ? [join(env.HOME, ".volta", "bin")] : []),
+    ...systemNpmDirs,
+  ];
+  for (const dir of dirs) {
+    const path = join(dir, "npm");
+    if (existsSync(path)) return path;
+  }
   return null;
+}
+
+// 原因写进一行状态文件，所以压成一行、截短。
+function oneLine(text: string, max = 300): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `...${flat.slice(-max)}` : flat;
+}
+
+/**
+ * npm 的仓库用 npm ci 装（#493）：见文件开头。返回 { installed }：装好了；{ fallback }：该用 npm 但没成功，附原因，调用方回到克隆；
+ * null：不是 npm 的仓库（没有 package-lock.json）。
+ * npm 是 `#!/usr/bin/env node` 的脚本：daemon 的 PATH 里没有 node 时它自己跑不起来，所以把 npm 所在的目录放到 PATH 最前面
+ * （nvm、volta、Homebrew 里 node 和 npm 在同一个目录）。
+ */
+async function npmInstall(worktree: string): Promise<{ installed: DependencyPreparation } | { fallback: string } | null> {
+  if (!existsSync(join(worktree, "package-lock.json"))) return null;
+  const npm = npmBinary();
+  if (!npm) return { fallback: "找不到 npm（daemon 的 PATH 里没有，nvm、volta、Homebrew 的常见位置也没有）" };
+  const timeoutMs = 10 * 60_000;
+  const env = { ...process.env, PATH: [dirname(npm), process.env.PATH].filter(Boolean).join(":") };
+  const result = await run(npm, ["ci", "--prefer-offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"], worktree, timeoutMs, env);
+  if (result.code === 0) {
+    return { installed: { cloned: [], skipped: null, error: null, installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund" } };
+  }
+  await removeInstalledNodeModules(worktree);
+  if (result.timedOut) return { fallback: `npm ci 超过 ${timeoutMs / 60_000} 分钟，已停掉` };
+  return { fallback: `npm ci 失败：${oneLine(result.output) || `退出码 ${result.code}`}` };
 }
 
 async function prepare(source: string, worktree: string): Promise<DependencyPreparation> {
@@ -149,8 +240,11 @@ async function prepare(source: string, worktree: string): Promise<DependencyPrep
   if (installed) return installed;
   const bunInstalled = await bunInstall(worktree);
   if (bunInstalled) return bunInstalled;
+  const npmResult = await npmInstall(worktree);
+  if (npmResult && "installed" in npmResult) return npmResult.installed;
+  const because = npmResult ? { fallbackReason: npmResult.fallback } : {};
   const dirs = (await findNodeModulesDirs(source)).filter((dir) => existsSync(join(worktree, dirname(dir), "package.json")));
-  if (!dirs.length) return { cloned: [], skipped: "用户的 checkout 里没有装好的依赖", error: null };
+  if (!dirs.length) return { cloned: [], skipped: "用户的 checkout 里没有装好的依赖", error: null, ...because };
   const cloned: string[] = [];
   for (const dir of dirs) {
     const target = join(worktree, dir);
@@ -159,19 +253,20 @@ async function prepare(source: string, worktree: string): Promise<DependencyPrep
     const ignored = await run("git", ["-C", worktree, "check-ignore", "-q", dir], worktree, 30_000);
     if (ignored.code !== 0) continue;
     const clone = cloneArgs(join(source, dir), target);
-    if (!clone) return { cloned, skipped: `这个系统（${process.platform}）不支持写时复制的克隆`, error: null };
+    if (!clone) return { cloned, skipped: `这个系统（${process.platform}）不支持写时复制的克隆`, error: null, ...because };
     const result = await run(clone.command, clone.args, worktree, 20 * 60_000);
-    if (result.code !== 0) return { cloned, skipped: null, error: `克隆 ${dir} 失败：${result.output.trim() || `退出码 ${result.code}`}` };
+    if (result.code !== 0) return { cloned, skipped: null, error: `克隆 ${dir} 失败：${result.output.trim() || `退出码 ${result.code}`}`, ...because };
     cloned.push(dir);
   }
-  return { cloned, skipped: null, error: null };
+  return { cloned, skipped: null, error: null, ...because };
 }
 
 function statusLine(result: DependencyPreparation): string {
-  if (result.error) return `failed: ${result.error}`;
+  const because = result.fallbackReason ? ` (installing with npm did not work: ${oneLine(result.fallbackReason)})` : "";
+  if (result.error) return `failed: ${result.error}${because}`;
   if (result.installedWith) return `ready: installed with ${result.installedWith}`;
-  if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout`;
-  return `none: ${result.skipped ?? "nothing to prepare"}`;
+  if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout${because}`;
+  return `none: ${result.skipped ?? "nothing to prepare"}${because}`;
 }
 
 // 准备做完时写状态文件；开始时先删掉旧的（同一个 worktree 再准备一次时，不能让执行者读到上一次的结果）。
