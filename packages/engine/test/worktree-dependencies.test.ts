@@ -1,11 +1,12 @@
 // 建隔离 worktree 时准备依赖（lead-tools-and-routing spec D15，#137 第 6 条）：真的 git 仓库、真的 worktree、真的克隆。
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
-  awaitWorktreeDependencies, findNodeModulesDirs, forgetWorktreeDependenciesForTests, startWorktreeDependencies,
+  awaitWorktreeDependencies, DEPENDENCY_STATUS_FILE, findNodeModulesDirs, forgetWorktreeDependenciesForTests,
+  peekWorktreeDependencies, startWorktreeDependencies,
 } from "../src/coordinator/worktree-dependencies.js";
 
 const supported = process.platform === "darwin" || process.platform === "linux";
@@ -97,4 +98,73 @@ describe.runIf(Boolean(pnpm))("startWorktreeDependencies in a pnpm repository", 
     expect(result).toMatchObject({ cloned: [], error: null, installedWith: expect.stringContaining("pnpm install --frozen-lockfile") });
     expect(existsSync(join(worktree, "node_modules", "from-user-checkout"))).toBe(false);
   }, 120_000);
+});
+
+// 2026-11-25：#465 给一个 bun 仓库建 worktree，克隆 node_modules/.bun 跑了 6 分钟以上。bun 的仓库先用 bun install 装，装不上再克隆。
+// 用一个假的 bun（脚本）代替真的：它记下参数，按退出码和是否留下装了一半的 node_modules 表现。
+function fakeBun(body: string): string {
+  const home = tempDir("plc-deps-bun-home-");
+  mkdirSync(join(home, "bin"));
+  const script = join(home, "bin", "bun");
+  writeFileSync(script, `#!/bin/sh\n${body}\n`);
+  chmodSync(script, 0o755);
+  return home;
+}
+
+describe.runIf(supported)("startWorktreeDependencies in a bun repository", () => {
+  const savedBunInstall = process.env.BUN_INSTALL;
+  afterEach(() => {
+    if (savedBunInstall === undefined) delete process.env.BUN_INSTALL;
+    else process.env.BUN_INSTALL = savedBunInstall;
+  });
+
+  it("installs with bun install --frozen-lockfile instead of cloning the user's node_modules", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "bun.lock"), "{}\n");
+    const argsFile = join(tempDir("plc-deps-bun-args-"), "args");
+    process.env.BUN_INSTALL = fakeBun(`echo "$@" > ${argsFile}\nmkdir -p node_modules/from-bun`);
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, installedWith: expect.stringContaining("bun install --frozen-lockfile") });
+    expect(readFileSync(argsFile, "utf8")).toContain("install --frozen-lockfile");
+    expect(existsSync(join(worktree, "node_modules", "from-bun"))).toBe(true);
+    // 没有克隆用户 checkout 的依赖。
+    expect(existsSync(join(worktree, "node_modules", "left-pad"))).toBe(false);
+  }, 60_000);
+
+  it("also treats a bun.lockb lockfile as a bun repository", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "bun.lockb"), "");
+    process.env.BUN_INSTALL = fakeBun("mkdir -p node_modules/from-bun");
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.installedWith).toContain("bun install --frozen-lockfile");
+  }, 60_000);
+
+  it("falls back to cloning when bun install fails, and drops the half-installed node_modules first", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "bun.lock"), "{}\n");
+    process.env.BUN_INSTALL = fakeBun("mkdir -p node_modules/half-installed\nexit 1");
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({ cloned: ["node_modules", join("packages", "lib", "node_modules")], skipped: null, error: null });
+    expect(existsSync(join(worktree, "node_modules", "half-installed"))).toBe(false);
+    expect(readFileSync(join(worktree, "node_modules", "left-pad", "index.js"), "utf8")).toContain("1");
+  }, 60_000);
+
+  it("writes a status file in the worktree's git directory when preparation ends, and peek shows the state", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "bun.lock"), "{}\n");
+    const gate = join(tempDir("plc-deps-bun-gate-"), "go");
+    process.env.BUN_INSTALL = fakeBun(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-bun`);
+    const done = startWorktreeDependencies(repo, worktree);
+    const statusFile = join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(peekWorktreeDependencies(join(worktree, "packages", "lib"))).toEqual({ state: "preparing" });
+    expect(existsSync(statusFile)).toBe(false);
+    writeFileSync(gate, "");
+    const result = await done;
+    expect(peekWorktreeDependencies(worktree)).toEqual({ state: "done", result });
+    expect(readFileSync(statusFile, "utf8")).toMatch(/^ready: installed with bun install --frozen-lockfile/);
+    // 状态文件在 git 目录里，不会进提交。
+    expect(git(worktree, "status", "--porcelain")).toBe("?? bun.lock");
+    expect(peekWorktreeDependencies(tempDir("plc-deps-other-"))).toBeNull();
+  }, 60_000);
 });

@@ -27,7 +27,7 @@ import { stopReattachedLauncher, type AttachableLaunch } from "@pi-lead-child/ru
 import type { Item, Run, RunPurpose, RuntimeId, Workspace } from "@pi-lead-child/core";
 import type { RpcClient } from "@pi-lead-child/runtime";
 import { createLearningService } from "../coordinator/learning.js";
-import { awaitWorktreeDependencies } from "../coordinator/worktree-dependencies.js";
+import { DEPENDENCY_STATUS_FILE, peekWorktreeDependencies } from "../coordinator/worktree-dependencies.js";
 import { fetchOrigin, refreshFreshWorktree } from "../coordinator/workspace-remote.js";
 import { createCoordinator } from "../coordinator/service.js";
 import { executionPlanPromptSection } from "../coordinator/execution-plan.js";
@@ -299,6 +299,29 @@ const SANDBOX_GIT_NOTE = "\nYour commands run in a sandbox without git credentia
   + "After delivery the system pushes the branch and opens a draft pull request. If something is still missing, say exactly what "
   + "with ticket_update; do not ask the user to run git in a terminal.";
 
+// 执行者不等依赖，所以提示要说清它们现在的状态（2026-11-25）。状态文件由 worktree-dependencies.ts 在准备做完时写到 worktree 的
+// git 目录里；等待命令最多等 10 分钟，超时当作准备失败。
+const WAIT_FOR_DEPENDENCIES = `f=$(git rev-parse --git-path ${DEPENDENCY_STATUS_FILE}); for i in $(seq 1 300); do [ -e "$f" ] && break; sleep 2; done; cat "$f" 2>/dev/null || echo "timed out: dependencies are not ready"`;
+
+function dependenciesNote(worktreePath: string): string {
+  const state = peekWorktreeDependencies(worktreePath);
+  const install = "install them here yourself (use the package manager the lockfile names)";
+  if (state?.state === "done") {
+    const { result } = state;
+    if (result.error) return ` Dependencies: the background preparation failed (${result.error}); ${install} when you need to build or run tests.`;
+    if (result.installedWith) return ` Dependencies are ready (installed with \`${result.installedWith}\`).`;
+    if (result.cloned.length) return ` Dependencies are ready (cloned from the user's checkout: ${result.cloned.join(", ")}).`;
+    return ` Dependencies were not prepared (${result.skipped ?? "nothing to prepare"}); ${install} when you need to build or run tests.`;
+  }
+  if (state?.state === "preparing") {
+    return " Dependencies (for example node_modules) are still being prepared in the background; the run did not wait for them, so start on the work now. "
+      + `Before you run tests, a build or a type-check, wait for them with this command: \`${WAIT_FOR_DEPENDENCIES}\`. `
+      + "Its output starts with \"ready:\" when they can be used. If it starts with \"failed:\", \"none:\" or \"timed out:\", "
+      + `${install} when you need to build or run tests.`;
+  }
+  return ` Dependencies (for example node_modules) are not installed in this worktree: ${install} when you need to build or run tests.`;
+}
+
 function workspaceSection(db: Db, itemId: number, workspace: Workspace, role: "executor" | "reviewer"): string {
   const section = workspaceSectionBody(db, itemId, workspace, role);
   return isDisposableCheckout(workspace) ? section : `${section}${SANDBOX_GIT_NOTE}`;
@@ -321,8 +344,8 @@ function workspaceSectionBody(db: Db, itemId: number, workspace: Workspace, role
       + `on branch ${workspace.branch ?? "n/a"} (base ${workspace.base_ref ?? "n/a"}). The user's own checkout is not touched. `
       + "Commit your work on this branch. After the ticket is accepted, the branch is merged into the user's checkout "
       + "when the user agrees; nothing you leave uncommitted is merged. "
-      + "Do not switch branches, do not push, and do not edit outside this worktree. Dependencies (for example "
-      + "node_modules) are not installed in a new worktree: install them here when you need to build or run tests.";
+      + "Do not switch branches, do not push, and do not edit outside this worktree."
+      + dependenciesNote(workspace.path);
   }
   const reason = sharedWorkspaceReason(db, workspace);
   return `\n## Coding workspace\nWorkspace #${workspace.id} is the shared checkout at ${workspace.path}`
@@ -895,8 +918,8 @@ async function runItemLifecycle(
       });
     }
     if (toolBridge) secretValues = secretEnvValues({ ...process.env, ...opts.env, PLC_AGENT_TOOL_TOKEN: toolBridge.token });
-    // 新建的隔离 worktree 在后台克隆依赖（coordinator/worktree-dependencies.ts）：先等它做完，执行者一开始就能跑测试。
-    if (!adopt) await unlessShuttingDown(awaitWorktreeDependencies(workdir));
+    // 新建的隔离 worktree 在后台准备依赖（coordinator/worktree-dependencies.ts）：执行者不等它（2026-11-25，#465 克隆等了 6 分钟以上），
+    // 建好 worktree 就启动；提示里写了依赖状态和等它的命令（workspaceSection）。
     runtimeStarting = true;
     handle = adopt ? await runtime.attach!({
       itemId, runId, role, purpose, workdir, model,
