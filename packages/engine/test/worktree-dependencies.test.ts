@@ -504,7 +504,7 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
     if (options.yarnrc !== undefined) writeFileSync(join(worktree, ".yarnrc.yml"), options.yarnrc);
     withoutPackageManagers();
     const out = tempDir("plc-deps-yarn-out-");
-    const body = options.yarnBody ?? `echo "$@" > ${out}/args\necho "$YARN_ENABLE_SCRIPTS" > ${out}/scripts\nmkdir -p node_modules/from-yarn`;
+    const body = options.yarnBody ?? `echo "$@" > ${out}/args\necho "$YARN_ENABLE_SCRIPTS" > ${out}/scripts\necho "$YARN_IGNORE_PATH" > ${out}/ignorepath\nmkdir -p node_modules/from-yarn`;
     process.env.PATH = `${fakeBin("yarn", body)}:${process.env.PATH}`;
     return { repo, worktree, out };
   }
@@ -514,10 +514,12 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result).toEqual({
       cloned: [], skipped: null, error: null,
-      installedWith: "yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive",
+      installedWith: "YARN_IGNORE_PATH=1 yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive",
     });
     expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
     expect(readFileSync(join(out, "scripts"), "utf8").trim()).toBe("");
+    // yarn 1 不读 .yarnrc 的 yarn-path：安装时带 YARN_IGNORE_PATH=1（PR #85 二次复审，#516）。
+    expect(readFileSync(join(out, "ignorepath"), "utf8").trim()).toBe("1");
     expect(existsSync(join(worktree, "node_modules", "from-yarn"))).toBe(true);
     expect(existsSync(join(worktree, "node_modules", "left-pad"))).toBe(false);
   }, 60_000);
@@ -587,7 +589,7 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
     const out = tempDir("plc-deps-corepack-out-");
     process.env.PATH = `${fakeBin("corepack", `echo "$@" > ${out}/args\nmkdir -p node_modules/from-corepack`)}:${process.env.PATH}`;
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result.installedWith).toBe("yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
+    expect(result.installedWith).toBe("YARN_IGNORE_PATH=1 yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
     expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
   }, 60_000);
 
@@ -715,6 +717,33 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
       await expectSkipped(repo, worktree, out, /pnpmfile/);
     }, 60_000);
 
+    // PR #85 二次复审（#516）：pnpm 10 会加载 pnpm-workspace.yaml 里的 pnpmfile、globalPnpmfile，和 .npmrc 里的一样。
+    it.each([
+      ["pnpmfile", "packages:\n  - 'packages/*'\npnpmfile: tools/custom-pnpmfile.cjs\n", /pnpmfile/],
+      ["globalPnpmfile", "packages:\n  - 'packages/*'\nglobalPnpmfile: ~/hooks.cjs\n", /globalPnpmfile/],
+    ])("does not install a pnpm repository whose pnpm-workspace.yaml sets %s", async (_key, yaml, reason) => {
+      const { repo, worktree } = monorepo();
+      writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(worktree, "pnpm-workspace.yaml"), yaml);
+      withoutPackageManagers();
+      const out = tempDir("plc-deps-pnpm-out-");
+      delete process.env.PNPM_HOME;
+      process.env.PATH = `${fakeBin("pnpm", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, reason);
+    }, 60_000);
+
+    it("still installs a pnpm repository whose pnpm-workspace.yaml only lists packages or has a commented pnpmfile", async () => {
+      const { repo, worktree } = monorepo();
+      writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(worktree, "pnpm-workspace.yaml"), "packages:\n  - 'packages/*'\n# pnpmfile: x.cjs\n");
+      withoutPackageManagers();
+      const out = tempDir("plc-deps-pnpm-out-");
+      delete process.env.PNPM_HOME;
+      process.env.PATH = `${fakeBin("pnpm", `echo "$@" > ${out}/args\nmkdir -p node_modules/from-pnpm`)}:${process.env.PATH}`;
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(result.installedWith).toBe("pnpm install --frozen-lockfile --prefer-offline --ignore-scripts");
+    }, 60_000);
+
     it("keeps installing yarn 1 even when it has a .pnpmfile.cjs, since only pnpm runs that file", async () => {
       const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK, packageManager: "yarn@1.22.19" });
       writeFileSync(join(worktree, ".pnpmfile.cjs"), "module.exports = {};\n");
@@ -764,4 +793,68 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
       expect(result.selectionNote).toContain("选了 yarn");
     }, 60_000);
   });
+});
+
+// PR #85 二次复审（#516）：复用的工作区（返工、续接、daemon 重启后）里，执行者在沙箱里可能改过 .npmrc。
+// `git=<脚本>` 加一个 git 依赖，npm ci --ignore-scripts 也会运行那个脚本。所以复用的工作区没有 node_modules 时，daemon 一律不装、不克隆。
+describe.runIf(supported)("a reused worktree without node_modules (#516)", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+    setSystemBinDirsForTests();
+  });
+
+  const INSTALL_RAN = "install-was-run";
+
+  function reusedNpmRepo(): { repo: string; worktree: string; out: string } {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    // 执行者改过的配置：npm 的 git 可执行文件指向仓库里的脚本。
+    writeFileSync(join(worktree, ".npmrc"), "git=./tools/fake-git.sh\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-reused-out-");
+    process.env.PATH = `${fakeNpmBin(`echo run > ${out}/${INSTALL_RAN}\nmkdir -p node_modules/from-npm`)}:${process.env.PATH}`;
+    return { repo, worktree, out };
+  }
+
+  it("runs no install and does not clone, and tells the executor the command to run in the sandbox", async () => {
+    const { repo, worktree, out } = reusedNpmRepo();
+    const result = await startWorktreeDependencies(repo, worktree, undefined, { reused: true });
+    expect(existsSync(join(out, INSTALL_RAN))).toBe(false);
+    expect(existsSync(join(worktree, "node_modules"))).toBe(false); // 用户的 checkout 里有 node_modules，也不克隆
+    expect(result).toEqual({
+      cloned: [], error: null, skipped: expect.stringMatching(/复用的工作区没有 node_modules/),
+      reinstallCommand: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund",
+    });
+    const line = readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8");
+    expect(line).toMatch(/^none: /);
+    expect(line).toContain("`npm ci --prefer-offline --ignore-scripts --no-audit --no-fund`");
+    const note = dependenciesNote(worktree);
+    expect(note).toContain("Dependencies were not prepared");
+    expect(note).toContain("install them here yourself with `npm ci --prefer-offline --ignore-scripts --no-audit --no-fund`");
+  }, 60_000);
+
+  it("still installs a newly created worktree (the same repository, not reused)", async () => {
+    const { repo, worktree, out } = reusedNpmRepo();
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(existsSync(join(out, INSTALL_RAN))).toBe(true);
+    expect(result.installedWith).toContain("npm ci");
+  }, 60_000);
+
+  it("leaves a reused worktree that already has node_modules as ready", async () => {
+    const { repo, worktree, out } = reusedNpmRepo();
+    mkdirSync(join(worktree, "node_modules"));
+    const result = await startWorktreeDependencies(repo, worktree, undefined, { reused: true });
+    expect(existsSync(join(out, INSTALL_RAN))).toBe(false);
+    expect(result).toMatchObject({ cloned: [], error: null, skipped: expect.stringMatching(/已经有 node_modules/) });
+    expect(result.reinstallCommand).toBeUndefined();
+    expect(readDependencyStatus(worktree)).toMatch(/^ready: node_modules was already in the worktree/);
+  }, 60_000);
+
+  it("writes none: without a command when the repository has no lockfile", async () => {
+    const { repo, worktree } = monorepo();
+    const result = await startWorktreeDependencies(repo, worktree, undefined, { reused: true });
+    expect(result.reinstallCommand).toBeUndefined();
+    expect(readDependencyStatus(worktree)).toMatch(/^none: 复用的工作区没有 node_modules[^`]*$/);
+  }, 60_000);
 });

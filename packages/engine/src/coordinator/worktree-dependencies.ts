@@ -27,6 +27,11 @@
 // 或 plugins，或 packageManager 是 yarn@2 及以上；yarn 1 的 .yarnrc 里有 yarn-path），pnpm 仓库根目录的 .pnpmfile.cjs
 // 或 .npmrc 里的 pnpmfile、global-pnpmfile（#509 再评审补）。命中时不运行任何安装命令，也不克隆，
 // 状态写成 none: 加原因，提示让执行者在沙箱里自己装。只认这几种，别的情况照旧。
+// pnpm 还认 pnpm-workspace.yaml 里的 pnpmfile、globalPnpmfile（pnpm 10 会加载），一样算（PR #85 二次复审，#516）。yarn 1 装依赖时带
+// YARN_IGNORE_PATH=1，不读 .yarnrc 的 yarn-path，作兜底。
+// 复用的工作区（返工、续接、daemon 重启后，workspace.ts 传 reused）：执行者在沙箱里改过 .npmrc 之类的配置也有可能，
+// `git=<脚本>` 加一个 git 依赖，npm ci --ignore-scripts 也会运行那个脚本。所以复用的工作区没有 node_modules 时，daemon 一律不装、
+// 不克隆，状态写成 none: 加 reinstallCommand，让执行者在沙箱里自己装。只有新建的工作区（建好时仓库里的配置没被执行者动过）才在沙箱外装。
 // 一个仓库有几种锁文件时只选一种：package.json 的 packageManager 字段点名了其中一种就用它，没有就按表里的顺序选；
 // 结果的 selectionNote 写明选了哪一种、为什么。找 npm、yarn 的办法见 findBinary 一带：daemon 的 PATH 来自 launchd，
 // 常常没有用户装的 node，所以会看 nvm、volta、Homebrew、corepack 等常见位置。
@@ -72,6 +77,8 @@ export interface DependencyPreparation {
   rebuildError?: string;
   // 执行者要在沙箱里跑的补编译命令（例如 `npm rebuild better-sqlite3`）。包管理器没有 rebuild 命令、或认不出包管理器时为 undefined。
   rebuildCommand?: string;
+  // 复用的工作区没有 node_modules、daemon 不装时（REUSED_WORKTREE_NOT_INSTALLED），执行者要在沙箱里跑的完整安装命令。认不出包管理器时为 undefined。
+  reinstallCommand?: string;
 }
 
 const pending = new Map<string, Promise<DependencyPreparation>>();
@@ -283,9 +290,12 @@ function yarnBerrySkipReason(worktree: string): string | null {
 }
 
 // pnpmfile 默认是根目录的 .pnpmfile.cjs；.npmrc 里的 pnpmfile、global-pnpmfile 可以把它指到别处（PR #85 再评审，#509）。
+// pnpm 10 还会读 pnpm-workspace.yaml 里的 pnpmfile、globalPnpmfile（也认 global-pnpmfile），一样要拦（PR #85 二次复审，#516）。
 function pnpmfileSkipReason(worktree: string): string | null {
   const custom = /^\s*(pnpmfile|global-pnpmfile)\s*=/m.exec(readFileOrEmpty(join(worktree, ".npmrc")))?.[1];
   if (custom) return `仓库的 .npmrc 设了 ${custom}，pnpm install 会运行它指向的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖`;
+  const inWorkspaceYaml = /^\s*["']?(pnpmfile|globalPnpmfile|global-pnpmfile)["']?\s*:/m.exec(readFileOrEmpty(join(worktree, "pnpm-workspace.yaml")))?.[1];
+  if (inWorkspaceYaml) return `仓库的 pnpm-workspace.yaml 设了 ${inWorkspaceYaml}，pnpm install 会运行它指向的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖`;
   return existsSync(join(worktree, ".pnpmfile.cjs"))
     ? "仓库有 .pnpmfile.cjs，pnpm install 会运行它：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖"
     : null;
@@ -361,11 +371,12 @@ const PACKAGE_MANAGERS: PackageManager[] = [
     searched: "daemon 的 PATH、~/.yarn/bin、nvm、volta、Homebrew 的常见位置里都没有，也没有可用的 corepack",
     needsNodeOnPath: true,
     binary: yarnBinary,
-    plan: (worktree) => isYarnBerry(worktree)
+    plan: (worktree): InstallPlan => isYarnBerry(worktree)
       ? { args: ["install", "--immutable"], env: { YARN_ENABLE_SCRIPTS: "false" }, installedWith: "YARN_ENABLE_SCRIPTS=false yarn install --immutable", label: "yarn install（berry）" }
       : {
-        args: ["install", "--frozen-lockfile", "--prefer-offline", "--ignore-scripts", "--non-interactive"],
-        installedWith: "yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive", label: "yarn install（classic）",
+        // YARN_IGNORE_PATH=1：yarn 1 不去读 .yarnrc 的 yarn-path，不运行它指向的仓库里的 JS（skipInstall 只认已知写法，这是兜底；PR #85 二次复审，#516）。
+        args: ["install", "--frozen-lockfile", "--prefer-offline", "--ignore-scripts", "--non-interactive"], env: { YARN_IGNORE_PATH: "1" },
+        installedWith: "YARN_IGNORE_PATH=1 yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive", label: "yarn install（classic）",
       },
     noCopyFallback: (worktree) => (isYarnBerry(worktree) && isYarnPnp(worktree) ? "PnP 仓库，不能退回拷贝" : null),
     skipInstall: yarnBerrySkipReason,
@@ -490,9 +501,18 @@ async function prepareExisting(worktree: string): Promise<DependencyPreparation>
   return { ...base, ...(await reportMissingNativePackages(selected.manager, worktree)) };
 }
 
-async function prepare(source: string, worktree: string): Promise<DependencyPreparation> {
+// 复用的工作区（返工、续接、daemon 重启后）没有 node_modules 时的 skipped 原文：daemon 不装。
+// 执行者在沙箱里能改 .npmrc、.yarnrc 这类配置，`git=<脚本>` 加一个 git 依赖，npm ci --ignore-scripts 也会运行那个脚本
+// （PR #85 二次复审，#516）。所以复用的工作区一律不在沙箱外装、也不克隆，让执行者在沙箱里自己装。
+export const REUSED_WORKTREE_NOT_INSTALLED = "复用的工作区没有 node_modules，它的配置文件（.npmrc 等）可能被执行者改过：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖";
+
+async function prepare(source: string, worktree: string, reused: boolean): Promise<DependencyPreparation> {
   if (!existsSync(join(worktree, "package.json"))) return { cloned: [], skipped: "不是 Node 项目（没有 package.json）", error: null };
   if (existsSync(join(worktree, "node_modules"))) return prepareExisting(worktree);
+  if (reused) {
+    const command = reinstallCommand(worktree);
+    return { cloned: [], skipped: REUSED_WORKTREE_NOT_INSTALLED, error: null, ...(command ? { reinstallCommand: command } : {}) };
+  }
   const selected = selectPackageManager(worktree);
   const note = selected?.note ? { selectionNote: selected.note } : {};
   let because = {};
@@ -538,7 +558,8 @@ function statusLine(result: DependencyPreparation): string {
   // 工作区里早就有 node_modules：依赖是好的，不要写成 none:（提示会让执行者自己重装一遍）。
   if (!result.cloned.length && result.skipped === EXISTING_NODE_MODULES) return `ready: node_modules was already in the worktree${native}${chosen}`;
   if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout${because}${chosen}`;
-  return `none: ${result.skipped ?? "nothing to prepare"}${because}${chosen}`;
+  const reinstall = result.reinstallCommand ? ` (install them yourself in the sandbox with \`${result.reinstallCommand}\`)` : "";
+  return `none: ${result.skipped ?? "nothing to prepare"}${because}${chosen}${reinstall}`;
 }
 
 // 准备做完时写状态文件；开始时先删掉旧的（同一个 worktree 再准备一次时，不能让执行者读到上一次的结果）。
@@ -550,9 +571,11 @@ async function statusFilePath(worktree: string): Promise<string | null> {
 /**
  * 在后台开始准备一个 worktree 的依赖（source 是用户的 checkout）。同一个 worktree 只做一次。
  * onDone 在做完时调用（记活动、打日志），它出错不影响结果。
+ * options.reused：这是复用的工作区（执行者可能已经在里面改过配置文件），没有 node_modules 时不装、不克隆，见 REUSED_WORKTREE_NOT_INSTALLED。
  */
 export function startWorktreeDependencies(
   source: string, worktree: string, onDone?: (result: DependencyPreparation, info: { durationMs: number }) => void,
+  options: { reused?: boolean } = {},
 ): Promise<DependencyPreparation> {
   const key = resolve(worktree);
   const existing = pending.get(key);
@@ -563,7 +586,7 @@ export function startWorktreeDependencies(
   const promise = statusPath
     .then((path) => (path ? rm(path, { force: true }) : undefined))
     .catch(() => undefined)
-    .then(() => prepare(resolve(source), key))
+    .then(() => prepare(resolve(source), key, options.reused === true))
     .catch((error: unknown): DependencyPreparation => ({
       cloned: [], skipped: null, error: error instanceof Error ? error.message : String(error),
     }))
