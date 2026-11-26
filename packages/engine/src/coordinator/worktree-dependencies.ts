@@ -30,6 +30,14 @@
 // 结果的 selectionNote 写明选了哪一种、为什么。找 npm、yarn 的办法见 findBinary 一带：daemon 的 PATH 来自 launchd，
 // 常常没有用户装的 node，所以会看 nvm、volta、Homebrew、corepack 等常见位置。
 //
+// 原生程序（#499）：--ignore-scripts 不跑安装脚本，better-sqlite3 的 .node 文件就没有编出来，测试一开始全部失败。
+// 装好以后，只为 NATIVE_PACKAGES 这张表里「装了、但缺原生程序」的包补一步 `<包管理器> rebuild <包名>`（npm、pnpm 有这个命令；
+// bun、yarn 没有，只在结果里写明缺了什么）。rebuild 只跑被点名的那个包的安装脚本（prebuild-install 下载现成的程序，下不到再用
+// node-gyp 编译），别的包的安装脚本照旧不跑。补编译失败不算依赖没准备好：node_modules 留着，原因写进 rebuildError。
+// 表里只放「原生程序只靠安装脚本产生」的包；esbuild、fsevents、unrs-resolver 的程序来自可选依赖包，不需要。要加一个包，加一行。
+// 另一个同时发现的现象（缺 @anthropic-ai/claude-agent-sdk）不是安装的问题：依赖是按 worktree 的起点（origin 的默认分支）的锁文件装的，
+// 执行者后来合并了别的分支、锁文件变了，node_modules 就旧了。提示里告诉执行者：锁文件变了要重新装（见 children/manager.ts）。
+//
 // 执行者不等依赖（2026-11-25）：建好 worktree 就启动，依赖在后台准备。准备做完时写一个状态文件（worktree 的 git 目录里，
 // 不在工作区里，不会进提交），提示里给执行者一条等它的命令；准备还在做时也可以查 peekWorktreeDependencies。
 // 同一时间只有 daemon 写 node_modules：准备没做完时，等待命令让执行者再等，不让它自己装（见 children/manager.ts）。
@@ -55,6 +63,10 @@ export interface DependencyPreparation {
   fallbackReason?: string;
   // 仓库有几种锁文件时，写明选了哪一种包管理器、为什么。只有一种锁文件时为 undefined。
   selectionNote?: string;
+  // 装完以后补编译了的原生包（NATIVE_PACKAGES）。没有需要补的为 undefined。
+  rebuilt?: string[];
+  // 需要补编译、但没补成（包管理器没有 rebuild 命令、命令失败、跑完仍缺程序）时的原因。依赖本身仍算装好了。
+  rebuildError?: string;
 }
 
 const pending = new Map<string, Promise<DependencyPreparation>>();
@@ -202,6 +214,8 @@ interface PackageManager {
   needsNodeOnPath?: boolean;
   binary(worktree: string, env: NodeJS.ProcessEnv): Binary | null;
   plan(worktree: string): InstallPlan;
+  // 只为点名的包跑安装脚本的命令（原生包补编译）。没有这种命令的包管理器不写。
+  rebuildArgs?(packages: string[]): string[];
   // 装不上时不能退回克隆的原因（yarn 的 PnP 仓库没有 node_modules 可克隆）；能克隆时为 null。
   noCopyFallback?(worktree: string): string | null;
   // 这个仓库自带会在安装时运行的 JS（berry 的 yarnPath 和插件、pnpm 的 .pnpmfile.cjs）：daemon 在沙箱外装，不运行它们。
@@ -298,6 +312,7 @@ const PACKAGE_MANAGERS: PackageManager[] = [
       installedWith: "pnpm install --frozen-lockfile --prefer-offline --ignore-scripts", label: "pnpm install",
     }),
     skipInstall: pnpmfileSkipReason,
+    rebuildArgs: (packages) => ["rebuild", ...packages],
   },
   {
     // bun 的仓库用 bun 装（2026-11-25）：#465 给一个 bun 仓库建 worktree，克隆 node_modules/.bun 跑了 6 分钟以上还没完。
@@ -327,6 +342,7 @@ const PACKAGE_MANAGERS: PackageManager[] = [
       args: ["ci", "--prefer-offline", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"],
       installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund", label: "npm ci",
     }),
+    rebuildArgs: (packages) => ["rebuild", ...packages],
   },
   {
     name: "yarn",
@@ -401,6 +417,41 @@ async function installWith(manager: PackageManager, worktree: string): Promise<{
   return { fallback: `${plan.label} 失败：${oneLine(result.output) || `退出码 ${result.code}`}` };
 }
 
+// 装好以后需要补编译的原生包（#499）：原生程序只靠安装脚本产生的包。built 是它的原生程序（相对包目录）。
+const NATIVE_PACKAGES = [{ name: "better-sqlite3", built: join("build", "Release", "better_sqlite3.node") }];
+
+// 装了、但缺原生程序的包。根和工作区包的 node_modules 都看（pnpm 把直接依赖链接在用到它的那个包里）。
+async function missingNativePackages(worktree: string): Promise<string[]> {
+  const dirs = await findNodeModulesDirs(worktree);
+  return NATIVE_PACKAGES
+    .filter(({ name, built }) => dirs.some((dir) => existsSync(join(worktree, dir, name, "package.json")) && !existsSync(join(worktree, dir, name, built))))
+    .map(({ name }) => name);
+}
+
+/**
+ * 装好依赖以后，为缺原生程序的包补一步 rebuild（只点名这些包）。没有需要补的返回 {}；补成返回 rebuilt；没补成返回 rebuildError，
+ * 不删 node_modules（别的依赖是好的）。
+ */
+async function rebuildNativePackages(manager: PackageManager, worktree: string): Promise<Pick<DependencyPreparation, "rebuilt" | "rebuildError">> {
+  const missing = await missingNativePackages(worktree);
+  if (!missing.length) return {};
+  const names = missing.join("、");
+  const binary = manager.binary(worktree, process.env);
+  if (!manager.rebuildArgs || !binary) {
+    return { rebuildError: `${names} 缺原生程序，但 ${manager.name} ${manager.rebuildArgs ? "找不到了" : "没有补编译的命令"}，在沙箱里自己补` };
+  }
+  const env = {
+    ...process.env,
+    ...(manager.needsNodeOnPath ? { PATH: [...nodeDirsFor(binary, process.env), process.env.PATH].filter(Boolean).join(":") } : {}),
+  };
+  const result = await run(binary.command, [...binary.prefix, ...manager.rebuildArgs(missing)], worktree, 5 * 60_000, env);
+  if (result.timedOut) return { rebuildError: `${names}：${manager.name} rebuild 超过 5 分钟，已停掉` };
+  if (result.code !== 0) return { rebuildError: `${names}：${manager.name} rebuild 失败：${oneLine(result.output) || `退出码 ${result.code}`}` };
+  const still = await missingNativePackages(worktree);
+  if (still.length) return { rebuildError: `${still.join("、")}：${manager.name} rebuild 跑完了，原生程序还是没有（安装脚本被配置关掉了？）` };
+  return { rebuilt: missing };
+}
+
 async function prepare(source: string, worktree: string): Promise<DependencyPreparation> {
   if (!existsSync(join(worktree, "package.json"))) return { cloned: [], skipped: "不是 Node 项目（没有 package.json）", error: null };
   if (existsSync(join(worktree, "node_modules"))) return { cloned: [], skipped: "worktree 里已经有 node_modules", error: null };
@@ -412,7 +463,7 @@ async function prepare(source: string, worktree: string): Promise<DependencyPrep
     const skipReason = selected.manager.skipInstall?.(worktree);
     if (skipReason) return { cloned: [], skipped: skipReason, error: null, ...note };
     const attempt = await installWith(selected.manager, worktree);
-    if ("installed" in attempt) return { ...attempt.installed, ...note };
+    if ("installed" in attempt) return { ...attempt.installed, ...(await rebuildNativePackages(selected.manager, worktree)), ...note };
     // 没有 node_modules 可克隆的仓库（yarn 的 PnP），退回拷贝没有意义：把失败如实写在 error 里，不假装成功。
     const noCopy = selected.manager.noCopyFallback?.(worktree);
     if (noCopy) return { cloned: [], skipped: null, error: `${noCopy}：${attempt.fallback}`, fallbackReason: attempt.fallback, ...note };
@@ -441,7 +492,11 @@ function statusLine(result: DependencyPreparation): string {
   const because = result.fallbackReason ? ` (installing with the package manager did not work: ${oneLine(result.fallbackReason)})` : "";
   const chosen = result.selectionNote ? ` (${oneLine(result.selectionNote)})` : "";
   if (result.error) return `failed: ${result.error}${chosen}`;
-  if (result.installedWith) return `ready: installed with ${result.installedWith}${chosen}`;
+  if (result.installedWith) {
+    const native = result.rebuilt?.length ? ` (rebuilt native packages: ${result.rebuilt.join(", ")})`
+      : result.rebuildError ? ` (native packages not built: ${oneLine(result.rebuildError)})` : "";
+    return `ready: installed with ${result.installedWith}${native}${chosen}`;
+  }
   if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout${because}${chosen}`;
   return `none: ${result.skipped ?? "nothing to prepare"}${because}${chosen}`;
 }

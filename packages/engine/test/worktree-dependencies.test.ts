@@ -291,6 +291,102 @@ describe.runIf(supported)("startWorktreeDependencies in an npm repository", () =
   }, 60_000);
 });
 
+// #499：--ignore-scripts 装完以后 better-sqlite3 没有原生程序（build/Release/better_sqlite3.node），测试一开始全部失败。
+// 装完后只为这张表里的包补一步 `<包管理器> rebuild <包名>`，别的包的安装脚本不跑。
+// 假的包管理器：install / ci 装出 better-sqlite3（可以带或不带原生程序），rebuild 记下参数，再装出原生程序。
+const SQLITE = "node_modules/better-sqlite3";
+const fakeInstaller = (installCommand: string, out: string, opts: { builtAtInstall?: boolean; rebuildExit?: number } = {}): string => [
+  `case "$1" in`,
+  `  ${installCommand}) mkdir -p ${SQLITE}/build/Release; echo '{"name":"better-sqlite3"}' > ${SQLITE}/package.json`,
+  opts.builtAtInstall ? `    : > ${SQLITE}/build/Release/better_sqlite3.node` : `    rmdir ${SQLITE}/build/Release ${SQLITE}/build`,
+  `    ;;`,
+  `  rebuild) echo "$@" >> ${out}/rebuild-calls`,
+  `    if [ "${opts.rebuildExit ?? 0}" != "0" ]; then echo 'gyp ERR! build error' >&2; exit ${opts.rebuildExit ?? 0}; fi`,
+  `    mkdir -p ${SQLITE}/build/Release; : > ${SQLITE}/build/Release/better_sqlite3.node ;;`,
+  `esac`,
+].join("\n");
+
+describe.runIf(supported)("native packages after an install without scripts", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+    setSystemBinDirsForTests();
+  });
+
+  it("npm: rebuilds only better-sqlite3 when npm ci left it without its native binary", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-native-out-");
+    process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out))}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({
+      cloned: [], skipped: null, error: null, rebuilt: ["better-sqlite3"],
+      installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund",
+    });
+    // 只点名这一个包，不是不带包名的 `npm rebuild`（那会跑所有包的安装脚本）。
+    expect(readFileSync(join(out, "rebuild-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
+    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(true);
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
+      .toBe("ready: installed with npm ci --prefer-offline --ignore-scripts --no-audit --no-fund (rebuilt native packages: better-sqlite3)\n");
+  }, 60_000);
+
+  it("npm: does not rebuild when the native binary is already there", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-native-out-");
+    process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out, { builtAtInstall: true }))}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toEqual({
+      cloned: [], skipped: null, error: null, installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund",
+    });
+    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+  }, 60_000);
+
+  it("npm: keeps the install as ready when the rebuild fails, and says so in the result and the status file", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-native-out-");
+    process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out, { rebuildExit: 1 }))}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, installedWith: expect.stringContaining("npm ci") });
+    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildError).toMatch(/better-sqlite3.*npm rebuild 失败：gyp ERR! build error/);
+    // 装好的 node_modules 不删。
+    expect(existsSync(join(worktree, SQLITE, "package.json"))).toBe(true);
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
+      .toMatch(/^ready: installed with npm ci .*\(native packages not built: .*gyp ERR! build error/);
+  }, 60_000);
+
+  it("pnpm: rebuilds only better-sqlite3 with pnpm rebuild", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-native-out-");
+    process.env.PNPM_HOME = fakeBin("pnpm", fakeInstaller("install", out));
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, rebuilt: ["better-sqlite3"], installedWith: expect.stringContaining("pnpm install") });
+    expect(readFileSync(join(out, "rebuild-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
+  }, 60_000);
+
+  it("bun: has no rebuild command, so it reports the missing native binary instead of running something else", async () => {
+    const { repo, worktree } = monorepo();
+    writeFileSync(join(worktree, "bun.lock"), "{}\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-native-out-");
+    const home = tempDir("plc-deps-bun-home-");
+    fakeBin("bun", fakeInstaller("install", out), join(home, "bin"));
+    process.env.BUN_INSTALL = home;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, installedWith: expect.stringContaining("bun install") });
+    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildError).toMatch(/better-sqlite3.*bun.*没有补编译的命令/);
+    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+  }, 60_000);
+});
+
 // 2026-11-25：包管理器按锁文件认（PACKAGE_MANAGERS），加了 yarn：1（classic）和 2 及以上（berry）分开，PnP 没有 node_modules 可拷。
 // 假的 yarn 记下参数和 YARN_ENABLE_SCRIPTS，再装出一个 node_modules。
 describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () => {

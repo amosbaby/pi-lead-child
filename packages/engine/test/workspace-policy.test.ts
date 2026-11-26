@@ -283,6 +283,18 @@ describe("the executor does not wait for dependencies", () => {
     expect(readFileSync(statusFile, "utf8")).toMatch(/^ready: installed with bun install/);
   }, 30_000);
 
+  // #499：依赖按 worktree 起点的锁文件装；执行者合并别的分支后锁文件变了，node_modules 就旧了（#498 缺 claude-agent-sdk）。
+  it("tells the executor to install again from the lockfile after a merge changes it, rather than patching single packages", async () => {
+    bunRepo("mkdir -p node_modules/from-bun");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies are ready (installed with `bun install");
+    expect(second.request.prompt).toContain("If you merge or rebase and the lockfile changes");
+    expect(second.request.prompt).toContain("`npm ci --ignore-scripts`, then `npm rebuild better-sqlite3`");
+  }, 30_000);
+
   it("tells the executor to install the dependencies itself when the preparation already failed", async () => {
     bunRepo("exit 1");
     const itemId = genericTicket();

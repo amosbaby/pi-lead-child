@@ -308,6 +308,12 @@ const WAITING_RUNS_BEFORE_BLOCKED = 6;
 const WAITING_MESSAGE = "waiting: the system is still installing the dependencies in this worktree. Run this same command again. "
   + "Do not install the dependencies yourself while it says waiting.";
 
+// 依赖是按 worktree 起点的锁文件装的（#499）。执行者合并或 rebase 别的分支、锁文件变了以后，node_modules 就旧了，
+// 会缺包（#498 缺 @anthropic-ai/claude-agent-sdk）。装的时候不跑安装脚本，所以原生包（better-sqlite3）要单独补编译。
+// 只在 daemon 已经装完（ready）时写这条：daemon 还在装（preparing / waiting）时执行者不能写 node_modules（PR #85 评审第 1 条）。
+const LOCKFILE_CHANGE_NOTE = " They match the lockfile as it was when this worktree was created. If you merge or rebase and the lockfile changes, "
+  + "install again from the lockfile (for npm: `npm ci --ignore-scripts`, then `npm rebuild better-sqlite3`) instead of adding single packages with --no-save.";
+
 /** 执行者等依赖用的命令。loops、seconds 只有测试会改小。 */
 export function waitForDependenciesCommand(loops = 300, seconds = 2): string {
   return `f=$(git rev-parse --git-path ${DEPENDENCY_STATUS_FILE}); for i in $(seq 1 ${loops}); do [ -e "$f" ] && break; sleep ${seconds}; done; cat "$f" 2>/dev/null || echo "${WAITING_MESSAGE}"`;
@@ -319,7 +325,12 @@ export function dependenciesNote(worktreePath: string): string {
   if (state?.state === "done") {
     const { result } = state;
     if (result.error) return ` Dependencies: the background preparation failed (${result.error}); ${install} when you need to build or run tests.`;
-    if (result.installedWith) return ` Dependencies are ready (installed with \`${result.installedWith}\`).`;
+    if (result.installedWith) {
+      // 安装脚本没跑，原生包由系统补编译；没补成时写明，执行者自己补一步。
+      const native = result.rebuilt?.length ? ` The native package ${result.rebuilt.join(", ")} was rebuilt.` : "";
+      const notBuilt = result.rebuildError ? ` Warning: a native package is not built (${result.rebuildError}); rebuild it yourself before you run tests.` : "";
+      return ` Dependencies are ready (installed with \`${result.installedWith}\`).${native}${notBuilt}${LOCKFILE_CHANGE_NOTE}`;
+    }
     if (result.cloned.length) return ` Dependencies are ready (cloned from the user's checkout: ${result.cloned.join(", ")}).`;
     const why = result.fallbackReason ? `; installing with the package manager did not work: ${result.fallbackReason}` : "";
     return ` Dependencies were not prepared (${result.skipped ?? "nothing to prepare"}${why}); ${install} when you need to build or run tests.`;
