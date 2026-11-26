@@ -118,7 +118,7 @@ async function boot(slack: FakeSlack, options: BootOptions = {}) {
       audit: { rate: 0 },
       ...(options.memory ? { memory: { quietMs: 100, maxWaitMs: 60_000, intervalMs: 0 } } : {}),
     },
-    ...(options.subAgent ? { agentTasks: { sessionFactory: fauxFactory(options.subAgent), env: { PLC_DISABLED_RUNTIMES: "claude" } } } : {}),
+    ...(options.subAgent ? { agentTasks: { sessionFactory: fauxFactory(options.subAgent) } } : {}),
   });
   const owner = createLoopbackBinding(db, { name: "Mac 网页" });
   // 能看、能改设置，但不能做用户的决定（没有 approvals:respond）。

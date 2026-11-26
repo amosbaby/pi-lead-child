@@ -24,8 +24,6 @@ type Step = Parameters<ReturnType<typeof fauxProvider>["setResponses"]>[0][numbe
 
 const PR = { owner: "Acme", repo: "x", number: 101 };
 const DIFF = ["diff --git a/a.ts b/a.ts", "--- a/a.ts", "+++ b/a.ts", "@@ -1 +1,2 @@", " const a = 1;", "+const b = 2;"].join("\n");
-// 这些测试走进程内的 pi 会话（假模型）：Claude Code 是缺省，所以先停用它（工单 #464）。
-const PI_ONLY = { PLC_DISABLED_RUNTIMES: "claude" };
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
@@ -85,7 +83,7 @@ describe("the agent task dispatcher", () => {
     const outcomes: AgentTaskOutcome[] = [];
     const dispatcher = createAgentTaskDispatcher({
       db: f.db, dbPath: f.dbPath, dataDir: f.dir, connections: f.hub, resolveLocalRepo: () => null, ownerName: () => "Leo",
-      env: PI_ONLY, sessionFactory: fauxFactory([
+      sessionFactory: fauxFactory([
         call("pull_request_read", { ...pr, method: "get" }),
         call("pull_request_read", { ...pr, method: "get_diff" }),
         call("pull_request_review_write", { ...pr, method: "create", event: "APPROVE", body: "lgtm" }),
@@ -148,7 +146,7 @@ describe("the agent task dispatcher", () => {
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const dispatcher = createAgentTaskDispatcher({
       db: f.db, dbPath: f.dbPath, dataDir: f.dir, connections: f.hub, resolveLocalRepo: () => null, ownerName: () => null,
-      env: PI_ONLY, sessionFactory: fauxFactory([
+      sessionFactory: fauxFactory([
         async () => { await gate; return fauxAssistantMessage([fauxToolCall("search_connection_tools", {})], { stopReason: "toolUse" }); },
         fauxAssistantMessage("x"),
       ]),
@@ -171,7 +169,7 @@ describe("the agent task dispatcher", () => {
     const never = new Promise<never>(() => {});
     const dispatcher = createAgentTaskDispatcher({
       db: f.db, dbPath: f.dbPath, dataDir: f.dir, connections: f.hub, resolveLocalRepo: () => null, ownerName: () => null,
-      env: PI_ONLY, sessionFactory: fauxFactory([async () => never]),
+      sessionFactory: fauxFactory([async () => never]),
     });
     const dispatched = await dispatcher.dispatch(REQUEST);
     // 模拟进程被杀：Run 留在 running，派单器不再存在。
@@ -185,7 +183,7 @@ describe("the agent task dispatcher", () => {
   });
 });
 
-// 代查选 runtime（工单 #464）。Claude Code 是假的 runtime：它经工具桥（内存里的）调 submit_result，和真的 MCP 通道转发的一样。
+// 代查选 runtime（工单 #464，#501 按评审改回 pi 优先）。缺省仍是进程内的 pi；pi 被停用才落到 Claude Code。Claude Code 是假的 runtime：它经工具桥（内存里的）调 submit_result，和真的 MCP 通道转发的一样。
 // 真实的 task-mcp-server 和 unix socket 桥在 engine 的 task-bridge.test.ts 里测。
 describe("the agent task dispatcher picks its runtime", () => {
   const SUBMITTED = {
@@ -242,8 +240,18 @@ describe("the agent task dispatcher picks its runtime", () => {
     return { f, claude, pi, dispatcher, outcomes };
   }
 
-  it("runs on Claude Code with sonnet and medium effort when nothing says otherwise", async () => {
-    const { f, claude, pi, dispatcher, outcomes } = await dispatchOnce({});
+  it("keeps running on pi by default and does not touch Claude Code", async () => {
+    const { f, claude, pi, dispatcher } = await dispatchOnce({});
+    const dispatched = await dispatcher.dispatch(REQUEST);
+    await dispatcher.idle();
+    expect(getRun(f.db, dispatched.runId)).toMatchObject({ runtime: "pi", purpose: "lookup" });
+    // 假的会话工厂一被调用就抛错：说明派到了进程内的 pi，没有走 Claude Code。
+    expect(pi.calls).toEqual([1]);
+    expect(claude.started).toEqual([]);
+  });
+
+  it("never dispatches to pi while pi is disabled: runs on Claude Code with sonnet and medium effort", async () => {
+    const { f, claude, pi, dispatcher, outcomes } = await dispatchOnce({ PLC_DISABLED_RUNTIMES: "pi" });
     const dispatched = await dispatcher.dispatch(REQUEST);
     await dispatcher.idle();
     expect(getRun(f.db, dispatched.runId)).toMatchObject({ runtime: "claude", model: "sonnet", effort: "medium", purpose: "lookup" });
@@ -255,7 +263,7 @@ describe("the agent task dispatcher picks its runtime", () => {
     expect(outcomes).toMatchObject([{ status: "finished", runId: dispatched.runId, result: { found: "yes" } }]);
   });
 
-  it("never dispatches to pi while pi is disabled, and keeps a model that was asked for", async () => {
+  it("keeps a model that was asked for when it falls to Claude Code", async () => {
     const { f, claude, pi, dispatcher } = await dispatchOnce({ PLC_DISABLED_RUNTIMES: "pi" }, { model: "opus", effort: "high" });
     const dispatched = await dispatcher.dispatch(REQUEST);
     await dispatcher.idle();
@@ -268,7 +276,7 @@ describe("the agent task dispatcher picks its runtime", () => {
     const { f, claude, pi, dispatcher } = await dispatchOnce({ PLC_DISABLED_RUNTIMES: "claude,pi" });
     const count = (table: string) => (f.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
     const before = { items: count("items"), runs: count("runs") };
-    await expect(dispatcher.dispatch(REQUEST)).rejects.toThrow(/没有可用的 runtime 能跑代查.*Claude Code.*Pi agent/s);
+    await expect(dispatcher.dispatch(REQUEST)).rejects.toThrow(/没有可用的 runtime 能跑代查.*Pi agent.*Claude Code/s);
     expect({ items: count("items"), runs: count("runs") }).toEqual(before);
     expect(claude.started).toEqual([]);
     expect(pi.calls).toEqual([]);

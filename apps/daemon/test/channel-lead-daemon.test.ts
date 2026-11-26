@@ -106,7 +106,7 @@ describe("a channel request through Lead in the daemon (landing plan B)", () => 
         // 抽查（落地计划 D2）是随机的：这里关掉。
         audit: { rate: 0 },
       },
-      agentTasks: { sessionFactory: fauxFactory(reviewing()), env: { PLC_DISABLED_RUNTIMES: "claude" } },
+      agentTasks: { sessionFactory: fauxFactory(reviewing()) },
       connections: { fetch: gh.fetch, gh: { token: async () => FAKE_GH_TOKEN }, tickMs: 3_600_000 },
     });
     const owner = createLoopbackBinding(db, { name: "test-web" });

@@ -85,14 +85,15 @@ export function runtimeDisabledReason(runtime: RuntimeId): string {
   return `用户在设置里停用了 ${findRuntimeAdapter(runtime)?.displayName ?? runtime}（设置 → 执行器）。`;
 }
 
-// 通道派的代查（lead 的 agent-task/）能跑在哪些 runtime 上，按优先顺序（工单 #464，2026-11-25）：
-//   - claude：Claude Code 命令行的只读形态（claude.ts 的 buildAgentTaskArgs）：没有自带工具，只连代查的三个工具；
-//   - pi：daemon 进程内的受限会话，模型按 Lead 的便宜模型选。用户停用 pi 以后不再用它。
+// 通道派的代查（lead 的 agent-task/）能跑在哪些 runtime 上，按优先顺序（工单 #464，2026-11-25；工单 #501，2026-11-26 按评审改回 pi 优先）：
+//   - pi：daemon 进程内的受限会话，模型按 Lead 的便宜模型选。这是缺省，和以前一样；
+//   - claude：Claude Code 命令行的只读形态（claude.ts 的 buildAgentTaskArgs）：没有自带工具，只连代查的三个工具。
+//     只有用户停用了 pi 才用它：缺省换成 Claude Code 会把代查的模型额度换到用户自己的账号，那是产品决定，这里不做。
 // codex 跑不了：它的 exec 一定带 shell 工具，隔离不了（agent-task/runtime.ts 开头）。
-export const AGENT_TASK_RUNTIMES: readonly RuntimeId[] = [claudeAdapter.id, piAdapter.id];
+export const AGENT_TASK_RUNTIMES: readonly RuntimeId[] = [piAdapter.id, claudeAdapter.id];
 // 认识 RuntimeStartRequest.agentTask（只读形态、工具通道）的 runtime。别的 runtime 拿不来跑代查：它们会给子 agent 全部自带工具。
 export const AGENT_TASK_TOOL_CHANNEL_RUNTIME: RuntimeId = claudeAdapter.id;
-// 代查在 Claude Code 上缺省用的模型和推理强度。调用方没有指定时用它。
+// 代查落到 Claude Code（pi 被停用）时缺省用的模型和推理强度。调用方没有指定时用它。
 export const AGENT_TASK_CLAUDE_DEFAULTS = Object.freeze({ model: "sonnet", effort: "medium" });
 
 export interface AgentTaskRuntimeChoice {
@@ -111,7 +112,7 @@ export class AgentTaskRuntimeUnavailableError extends Error {
 }
 
 // 选代查的 runtime：按 AGENT_TASK_RUNTIMES 的顺序取第一个没被用户停用的。都停用了就抛错，写明每一个为什么不能用。
-// 调用方没有指定模型和推理强度时，Claude Code 用 AGENT_TASK_CLAUDE_DEFAULTS。
+// 调用方没有指定模型和推理强度时，落到 Claude Code 的用 AGENT_TASK_CLAUDE_DEFAULTS；pi 自己选模型。
 // 这里只管用户的停用（设置 → 执行器）；账号故障由 Run 失败时的健康账本处理。
 export function pickAgentTaskRuntime(
   input: { model?: string; effort?: string } = {},

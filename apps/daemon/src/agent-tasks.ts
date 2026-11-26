@@ -1,7 +1,7 @@
 // 派单器（landing.md 第 3 节 C1，给 B 的接口）：实现 protocol 的 AgentTaskDispatcher。
 //   - dispatch：算权限清单（上限 ∩ Lead 选的范围，protocol 的 computeRunGrant），在同一笔事务里建工单、建 Run、建清单、
-//     写活动；再交给 runItem。runtime 先按用户的停用名单选（runtime 包的 pickAgentTaskRuntime）：缺省 Claude Code（sonnet，medium），
-//     它被停用时用进程内的 pi 会话，都停用了就在建工单以前明确失败（工单 #464）。两种都是只读形态，工具都经连接中心（lead 的 agent-task/）。立刻返回。
+//     写活动；再交给 runItem。runtime 先按用户的停用名单选（runtime 包的 pickAgentTaskRuntime）：缺省仍是进程内的 pi 会话，
+//     pi 被停用时才用 Claude Code（sonnet，medium），都停用了就在建工单以前明确失败（工单 #464，#501）。两种都是只读形态，工具都经连接中心（lead 的 agent-task/）。立刻返回。
 //   - 结束：工单按结局进 done 或 cancelled（store 的 transition，不直接改 stage）；结果交给发起方登记的回调（callback.kind），
 //     不叫醒 Lead（purpose=lookup 的 Run 不经过 onChildDone，run-finished.ts 也排除了它）。
 //   - cancel：停掉 Run（记成 stopped），工单进 cancelled，回调 cancelled。超时：停掉 Run（记成 failed），回调 failed。
@@ -62,13 +62,13 @@ export interface AgentTaskDispatcherOptions {
   resolveLocalRepo: (name: string) => GrantLocalRepo | null;
   // 用户的名字（子 agent 的提示词用）。
   ownerName: () => string | null;
-  // 进程内 pi 会话的工厂：只有用户停用了 Claude Code、代查落到 pi 的时候才用（测试注入假模型）。
+  // 进程内 pi 会话的工厂：缺省的代查走它（测试注入假模型）。用户停用了 pi，代查改走 Claude Code，就不用它。
   sessionFactory?: LookupSessionFactory;
   // 代查用哪个 runtime 看用户的停用名单（PLC_DISABLED_RUNTIMES）。缺省读 daemon 的环境；测试注入自己的表。
   env?: RuntimeEnv;
-  // 装着 Claude Code 的 registry。缺省是默认配置的 registry（用到时才建）。
+  // 装着 Claude Code 的 registry（pi 被停用时才用到）。缺省是默认配置的 registry（用到时才建）。
   runtimes?: Pick<RuntimeRegistry, "get">;
-  // 没有指定时，Claude Code 用 runtime 包的缺省（sonnet，medium）。
+  // 代查落到 Claude Code（pi 被停用）而没有指定时，用 runtime 包的缺省（sonnet，medium）。pi 自己选模型。
   model?: string;
   effort?: string;
   // 测试接缝：Claude Code 的工具桥（缺省是真的 unix socket 桥）。
@@ -272,7 +272,7 @@ export function createAgentTaskDispatcher(options: AgentTaskDispatcherOptions): 
       throw new Error(`agent task request is invalid: ${first ? `${(first as { instancePath?: string }).instancePath || "/"} ${first.message}` : "?"}`);
     }
     // 先选 runtime，再写库：用户停用的跳过；都停用了就在这里明确失败，不建工单，也不悄悄落到停用的那个（工单 #464）。
-    // 代查的缺省是 Claude Code（sonnet，medium）；它被停用时才用进程内的 pi 会话。
+    // 代查的缺省仍是进程内的 pi 会话；它被停用时才用 Claude Code（sonnet，medium）（工单 #501：不改缺省）。
     const choice = pickAgentTaskRuntime({
       ...(options.model ? { model: options.model } : {}), ...(options.effort ? { effort: options.effort } : {}),
     }, options.env);
