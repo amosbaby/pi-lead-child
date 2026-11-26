@@ -6,11 +6,11 @@
 //   - 权限清单、调用次数上限、出处核实和 runtime.ts 用同一份代码（tools.ts、provenance.ts）。
 // 内核照常管它：runItem 建 Run、落事件、按 purpose=lookup 收尾。Run 的结局：交了结果（submit_result）并且 CLI 正常结束是
 // run.completed；CLI 正常结束却没交结果、超过工具调用上限或时长上限、CLI 出错、被中断，都是 run.failed。
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Value } from "typebox/value";
-import { agentTaskMcpServer, type TypedFailure } from "@pi-lead-child/core";
+import { agentTaskMcpServer, removeTree, type TypedFailure } from "@pi-lead-child/core";
 import { startTaskToolBridge, type TaskToolBridge } from "@pi-lead-child/engine";
 import type { GrantIntent } from "@pi-lead-child/protocol";
 import {
@@ -98,7 +98,8 @@ export function createClaudeAgentTaskRuntime(options: {
       const closeBridge = async (): Promise<void> => {
         const closing = bridge;
         bridge = null;
-        rmSync(scratchDir, { recursive: true, force: true });
+        // 在子进程里删（core 的 removeTree），不在 daemon 进程里递归删除（lead-scheduler spec P0）。删不掉不影响这次的结局。
+        await removeTree(scratchDir, { kind: "agent-task-scratch-delete", label: "agent task scratch", priority: "utility" }).catch(() => undefined);
         await closing?.close().catch(() => {});
       };
       // 结局：没交结果或超限，就算 CLI 自己正常退出，这次也是失败。
