@@ -292,8 +292,56 @@ describe("the executor does not wait for dependencies", () => {
     const second = await run(itemId);
     expect(second.request.prompt).toContain("Dependencies are ready (installed with `bun install");
     expect(second.request.prompt).toContain("If you merge or rebase and the lockfile changes");
-    expect(second.request.prompt).toContain("`npm ci --ignore-scripts`, then `npm rebuild better-sqlite3`");
+    // bun 没有 rebuild 命令：给的是它自己的安装命令，不是 npm 的。
+    expect(second.request.prompt).toContain("run `bun install --frozen-lockfile --ignore-scripts` again");
+    expect(second.request.prompt).not.toContain("npm rebuild");
   }, 30_000);
+
+  // #502：执行者照提示重装以后 better-sqlite3 也要能用。提示给的是一条完整命令（安装加补编译），
+  // 而且在「还在准备」「装失败」「没准备」这些要自己装的地方都一样，不只在锁文件变了的那一句里。
+  describe("the reinstall command in an npm repository that uses better-sqlite3", () => {
+    const savedPath = process.env.PATH;
+    afterEach(() => { process.env.PATH = savedPath; });
+    const COMMAND = "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund && npm rebuild better-sqlite3";
+
+    function npmRepo(npmBody: string): void {
+      writeFileSync(join(repo, "package.json"), JSON.stringify({ name: "demo", private: true }));
+      writeFileSync(join(repo, "package-lock.json"), JSON.stringify({ lockfileVersion: 3, packages: { "node_modules/better-sqlite3": { version: "1.0.0" } } }));
+      git(repo, "add", ".");
+      git(repo, "commit", "-qm", "npm project");
+      const bin = join(dir, "npm-bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, "npm"), `#!/bin/sh\n${npmBody}\n`);
+      chmodSync(join(bin, "npm"), 0o755);
+      process.env.PATH = `${bin}:${process.env.PATH}`;
+    }
+
+    it("gives one command that installs and rebuilds while the dependencies are still being prepared", async () => {
+      const gate = join(dir, "npm-gate");
+      npmRepo(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-npm`);
+      const itemId = genericTicket();
+      const { request } = await run(itemId);
+      expect(request.prompt).toContain("still being prepared in the background");
+      // 只在 failed:/none: 时才自己装；daemon 还在写 node_modules，所以这时不提「锁文件变了就重装」（PR #85 评审第 1 条）。
+      expect(request.prompt).toContain(`If it starts with "failed:" or "none:", install them here yourself with \`${COMMAND}\``);
+      expect(request.prompt).not.toContain("If you merge or rebase and the lockfile changes");
+      writeFileSync(gate, "");
+      await awaitWorktreeDependencies(request.workdir);
+      // daemon 装完以后才给重装的建议，用同一条完整命令。
+      const after = await run(itemId);
+      expect(after.request.prompt).toContain("Dependencies are ready");
+      expect(after.request.prompt).toContain(`run \`${COMMAND}\` again`);
+    }, 30_000);
+
+    it("gives the same command when the background preparation failed", async () => {
+      npmRepo("exit 1");
+      const itemId = genericTicket();
+      const first = await run(itemId);
+      await awaitWorktreeDependencies(first.request.workdir);
+      const { request } = await run(itemId);
+      expect(request.prompt).toContain(`install them here yourself with \`${COMMAND}\``);
+    }, 30_000);
+  });
 
   it("tells the executor to install the dependencies itself when the preparation already failed", async () => {
     bunRepo("exit 1");

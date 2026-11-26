@@ -387,6 +387,103 @@ describe.runIf(supported)("native packages after an install without scripts", ()
   }, 60_000);
 });
 
+// #502：#499 之前建的工作区已经有 node_modules（npm ci --ignore-scripts 装的，better-sqlite3 没有原生程序）。
+// 以前「已经有 node_modules」就直接跳过，执行者一开始跑测试就失败。现在派发时发现缺原生程序就补编译，不重装别的。
+describe.runIf(supported)("a worktree that already has node_modules without the native binary (#502)", () => {
+  const saved = { ...process.env };
+  afterEach(() => {
+    process.env = { ...saved };
+    setSystemBinDirsForTests();
+  });
+
+  // 旧工作区：装好了 better-sqlite3 的包，没有 build/Release/*.node。
+  function oldWorktree(opts: { built?: boolean; lockfile?: string | null } = {}): { repo: string; worktree: string } {
+    const { repo, worktree } = monorepo();
+    if (opts.lockfile !== null) writeFileSync(join(worktree, opts.lockfile ?? "package-lock.json"), "{}\n");
+    mkdirSync(join(worktree, SQLITE, "build", "Release"), { recursive: true });
+    writeFileSync(join(worktree, SQLITE, "package.json"), '{"name":"better-sqlite3"}\n');
+    if (opts.built) writeFileSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"), "");
+    else rmSync(join(worktree, SQLITE, "build"), { recursive: true });
+    return { repo, worktree };
+  }
+
+  it("rebuilds only better-sqlite3 and does not reinstall anything", async () => {
+    const { repo, worktree } = oldWorktree();
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-old-out-");
+    process.env.PATH = `${fakeNpmBin(`echo "$@" >> ${out}/all-calls\n${fakeInstaller("ci", out)}`)}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, rebuilt: ["better-sqlite3"] });
+    expect(result.rebuildError).toBeUndefined();
+    // 只跑了 rebuild，没有 npm ci，也没有克隆用户的 node_modules。
+    expect(readFileSync(join(out, "all-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
+    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(true);
+    expect(existsSync(join(worktree, "node_modules", "left-pad"))).toBe(false);
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
+      .toBe("ready: node_modules was already in the worktree (rebuilt native packages: better-sqlite3)\n");
+  }, 60_000);
+
+  it("does nothing when the native binary is already there, and the status says the dependencies are ready", async () => {
+    const { repo, worktree } = oldWorktree({ built: true });
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-old-out-");
+    process.env.PATH = `${fakeNpmBin(`echo "$@" >> ${out}/all-calls`)}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.cloned).toEqual([]);
+    expect(result.skipped).toMatch(/已经有 node_modules/);
+    expect(result.rebuilt).toBeUndefined();
+    expect(existsSync(join(out, "all-calls"))).toBe(false);
+    // 执行者看到的状态不是「none:」（那会让它自己重装一遍）。
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
+      .toBe("ready: node_modules was already in the worktree\n");
+  }, 60_000);
+
+  it("keeps node_modules and says so when the rebuild fails", async () => {
+    const { repo, worktree } = oldWorktree();
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-old-out-");
+    process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out, { rebuildExit: 1 }))}:${process.env.PATH}`;
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildError).toMatch(/better-sqlite3.*npm rebuild 失败：gyp ERR! build error/);
+    expect(existsSync(join(worktree, SQLITE, "package.json"))).toBe(true);
+    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
+      .toMatch(/^ready: node_modules was already in the worktree \(native packages not built: .*gyp ERR! build error/);
+  }, 60_000);
+
+  it("rebuilds with pnpm in a pnpm repository", async () => {
+    const { repo, worktree } = oldWorktree({ lockfile: "pnpm-lock.yaml" });
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-old-out-");
+    process.env.PNPM_HOME = fakeBin("pnpm", fakeInstaller("install", out));
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result).toMatchObject({ cloned: [], error: null, rebuilt: ["better-sqlite3"] });
+    expect(readFileSync(join(out, "rebuild-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
+  }, 60_000);
+
+  // PR #85 评审第 2 条：有 .pnpmfile.cjs 的 pnpm 仓库，daemon 不在沙箱外跑 pnpm；旧工作区的补编译也一样，交给执行者在沙箱里补。
+  it("does not run pnpm rebuild outside the sandbox when the repository has .pnpmfile.cjs", async () => {
+    const { repo, worktree } = oldWorktree({ lockfile: "pnpm-lock.yaml" });
+    writeFileSync(join(worktree, ".pnpmfile.cjs"), "module.exports = { hooks: {} };\n");
+    withoutPackageManagers();
+    const out = tempDir("plc-deps-old-out-");
+    process.env.PNPM_HOME = fakeBin("pnpm", fakeInstaller("install", out));
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildError).toMatch(/better-sqlite3.*\.pnpmfile\.cjs/);
+    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(false);
+  }, 60_000);
+
+  it("says what is missing when the repository has no lockfile, so no package manager is known", async () => {
+    const { repo, worktree } = oldWorktree({ lockfile: null });
+    withoutPackageManagers();
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildError).toMatch(/better-sqlite3.*没有锁文件/);
+  }, 60_000);
+});
+
 // 2026-11-25：包管理器按锁文件认（PACKAGE_MANAGERS），加了 yarn：1（classic）和 2 及以上（berry）分开，PnP 没有 node_modules 可拷。
 // 假的 yarn 记下参数和 YARN_ENABLE_SCRIPTS，再装出一个 node_modules。
 describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () => {

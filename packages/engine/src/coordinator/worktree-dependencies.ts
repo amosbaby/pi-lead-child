@@ -381,6 +381,9 @@ function selectPackageManager(worktree: string): { manager: PackageManager; note
   return { manager: first, note: `有几种锁文件（${found}），${why}，按固定顺序（${order}）选了 ${first.name}` };
 }
 
+// prepare 在工作区已经有 node_modules 时的 skipped 原文；状态文件按它认出「依赖早就在」。
+export const EXISTING_NODE_MODULES = "worktree 里已经有 node_modules";
+
 // 原因写进一行状态文件，所以压成一行、截短。
 function oneLine(text: string, max = 300): string {
   const flat = text.replace(/\s+/g, " ").trim();
@@ -436,6 +439,10 @@ async function rebuildNativePackages(manager: PackageManager, worktree: string):
   const missing = await missingNativePackages(worktree);
   if (!missing.length) return {};
   const names = missing.join("、");
+  // 仓库自带安装时运行的 JS（.pnpmfile.cjs）：daemon 在沙箱外不跑 pnpm，补编译也不跑（PR #85 评审第 2 条）。
+  // 新装的路径在 prepare() 里已经先跳过了；这里管的是已经有 node_modules 的旧工作区。
+  const skipReason = manager.skipInstall?.(worktree);
+  if (skipReason) return { rebuildError: `${names} 缺原生程序，但${skipReason}` };
   const binary = manager.binary(worktree, process.env);
   if (!manager.rebuildArgs || !binary) {
     return { rebuildError: `${names} 缺原生程序，但 ${manager.name} ${manager.rebuildArgs ? "找不到了" : "没有补编译的命令"}，在沙箱里自己补` };
@@ -452,9 +459,41 @@ async function rebuildNativePackages(manager: PackageManager, worktree: string):
   return { rebuilt: missing };
 }
 
+/**
+ * 执行者自己重装依赖时用的一条完整命令（#502）：按锁文件认出包管理器，按锁文件装、不跑安装脚本，
+ * 再为这个仓库用到的原生包（NATIVE_PACKAGES）补编译。写进执行者的提示，免得它只照 `npm ci --ignore-scripts` 装完、
+ * 忘了补 better-sqlite3，测试一开始全部失败。认不出包管理器（没有锁文件）时返回 null；
+ * 包管理器没有 rebuild 命令（bun、yarn）时只有安装的那一半。
+ */
+export function reinstallCommand(worktree: string): string | null {
+  const selected = selectPackageManager(worktree);
+  if (!selected) return null;
+  const { manager } = selected;
+  const install = manager.plan(worktree).installedWith;
+  if (!manager.rebuildArgs) return install;
+  // 这个仓库用到哪些原生包：锁文件里写了它，或者 node_modules 里装着它。
+  const lockfile = manager.lockfiles.map((file) => readFileOrEmpty(join(worktree, file))).join("\n");
+  const used = NATIVE_PACKAGES
+    .filter(({ name }) => lockfile.includes(name) || existsSync(join(worktree, "node_modules", name, "package.json")))
+    .map(({ name }) => name);
+  return used.length ? `${install} && ${manager.name} ${manager.rebuildArgs(used).join(" ")}` : install;
+}
+
+// 已经有 node_modules 的工作区（#502）：#499 之前建的工作区是 npm ci --ignore-scripts 装的，better-sqlite3 没有原生程序。
+// 不重装，只在缺原生程序时按锁文件认出包管理器、补编译（派发时按需检查，不去批量改旧工作区）。
+// 判断「加载不了」用的是和新装之后同一个办法：包在、build/Release 里的 .node 文件不在。
+async function prepareExisting(worktree: string): Promise<DependencyPreparation> {
+  const base: DependencyPreparation = { cloned: [], skipped: EXISTING_NODE_MODULES, error: null };
+  const missing = await missingNativePackages(worktree);
+  if (!missing.length) return base;
+  const selected = selectPackageManager(worktree);
+  if (!selected) return { ...base, rebuildError: `${missing.join("、")} 缺原生程序，但仓库没有锁文件，认不出包管理器，在沙箱里自己补` };
+  return { ...base, ...(await rebuildNativePackages(selected.manager, worktree)) };
+}
+
 async function prepare(source: string, worktree: string): Promise<DependencyPreparation> {
   if (!existsSync(join(worktree, "package.json"))) return { cloned: [], skipped: "不是 Node 项目（没有 package.json）", error: null };
-  if (existsSync(join(worktree, "node_modules"))) return { cloned: [], skipped: "worktree 里已经有 node_modules", error: null };
+  if (existsSync(join(worktree, "node_modules"))) return prepareExisting(worktree);
   const selected = selectPackageManager(worktree);
   const note = selected?.note ? { selectionNote: selected.note } : {};
   let because = {};
@@ -492,11 +531,11 @@ function statusLine(result: DependencyPreparation): string {
   const because = result.fallbackReason ? ` (installing with the package manager did not work: ${oneLine(result.fallbackReason)})` : "";
   const chosen = result.selectionNote ? ` (${oneLine(result.selectionNote)})` : "";
   if (result.error) return `failed: ${result.error}${chosen}`;
-  if (result.installedWith) {
-    const native = result.rebuilt?.length ? ` (rebuilt native packages: ${result.rebuilt.join(", ")})`
-      : result.rebuildError ? ` (native packages not built: ${oneLine(result.rebuildError)})` : "";
-    return `ready: installed with ${result.installedWith}${native}${chosen}`;
-  }
+  const native = result.rebuilt?.length ? ` (rebuilt native packages: ${result.rebuilt.join(", ")})`
+    : result.rebuildError ? ` (native packages not built: ${oneLine(result.rebuildError)})` : "";
+  if (result.installedWith) return `ready: installed with ${result.installedWith}${native}${chosen}`;
+  // 工作区里早就有 node_modules：依赖是好的，不要写成 none:（提示会让执行者自己重装一遍）。
+  if (!result.cloned.length && result.skipped === EXISTING_NODE_MODULES) return `ready: node_modules was already in the worktree${native}${chosen}`;
   if (result.cloned.length) return `ready: cloned ${result.cloned.join(", ")} from the user's checkout${because}${chosen}`;
   return `none: ${result.skipped ?? "nothing to prepare"}${because}${chosen}`;
 }
@@ -512,12 +551,13 @@ async function statusFilePath(worktree: string): Promise<string | null> {
  * onDone 在做完时调用（记活动、打日志），它出错不影响结果。
  */
 export function startWorktreeDependencies(
-  source: string, worktree: string, onDone?: (result: DependencyPreparation) => void,
+  source: string, worktree: string, onDone?: (result: DependencyPreparation, info: { durationMs: number }) => void,
 ): Promise<DependencyPreparation> {
   const key = resolve(worktree);
   const existing = pending.get(key);
   if (existing) return existing;
   settled.delete(key);
+  const startedAt = Date.now();
   const statusPath = statusFilePath(key);
   const promise = statusPath
     .then((path) => (path ? rm(path, { force: true }) : undefined))
@@ -535,7 +575,7 @@ export function startWorktreeDependencies(
         // 写不了状态文件时，执行者的等待命令一直输出 waiting，等够轮数后报阻塞（不会自己去装，免得和这里同时写）。
       }
       try {
-        onDone?.(result);
+        onDone?.(result, { durationMs: Date.now() - startedAt });
       } catch {
         // 记录失败不影响依赖本身。
       }
