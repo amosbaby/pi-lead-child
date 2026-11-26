@@ -1017,6 +1017,10 @@ export async function updateDeliveryPullRequest(
     const delivery = await ticketDelivery(db, itemId);
     const url = delivery.workspace?.pullRequestUrl ?? null;
     if (!url) throw new DeliveryError("unavailable", "这张工单还没有 PR。");
+    // 人工登记的 PR 不更新（auto-pull-request.ts 排计划时也跳过）。计划和拿锁之间用户可能刚登记，所以这里再认一次。
+    if (latestDecision(db, itemId, "workspace_pr_opened", workspace.id)?.linked) {
+      throw new DeliveryError("unavailable", "这个 PR 是人工登记的，系统不更新它。");
+    }
     if (delivery.workspace!.uncommittedFiles > 0) {
       throw new DeliveryError("unavailable", `分支上还有 ${delivery.workspace!.uncommittedFiles} 个没提交的文件，先让工单的 agent 提交。`);
     }

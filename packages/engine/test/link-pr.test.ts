@@ -11,7 +11,7 @@ import {
 import { tempDir } from "@pi-lead-child/core/testing";
 import { parseGithubPullRequestUrl } from "@pi-lead-child/protocol";
 import { prepareRunWorkspaceNowForTesting } from "../src/coordinator/workspace-policy.js";
-import { ticketDelivery, type PullRequestRunner } from "../src/coordinator/delivery.js";
+import { DeliveryError, ticketDelivery, updateDeliveryPullRequest, type PullRequestRunner } from "../src/coordinator/delivery.js";
 import { autoPullRequestPlan, markAutoPullRequestRollout, syncAutoPullRequests } from "../src/coordinator/auto-pull-request.js";
 import { createWorkspaceActionService } from "../src/coordinator/workspace-actions.js";
 import { listTicketActions, runTicketAction, TicketActionError } from "../src/ticket-actions/index.js";
@@ -172,6 +172,24 @@ describe("link_pr", { timeout: 90_000 }, () => {
     const calls: string[][] = [];
     const runner: PullRequestRunner = { async gh(args) { calls.push(args); return { ok: true, stdout: "", stderr: "" }; } };
     expect(await syncAutoPullRequests(db, { runner })).toMatchObject({ opened: [], updated: [], failed: [] });
+    expect(calls).toEqual([]);
+    expect(git(remote, "branch", "--list")).not.toContain("plc/");
+  });
+
+  // 定时扫描先判断「该更新」，再排队拿锁；这两步之间用户登记了 PR，更新就会照旧推送、改 PR 描述。
+  // 所以更新函数自己也要认「人工登记」，不能只靠判断那一步。
+  it("refuses to update a linked PR even when the update was planned before the link", async () => {
+    const { itemId, worktree } = codingTicket();
+    await link(itemId, PR_85);
+    db.prepare("UPDATE items SET stage='active' WHERE id=?").run(itemId);
+    commitIn(worktree, "fix.md");
+    deliver(itemId, "2026-10-26T09:00:00.000Z");
+
+    const calls: string[][] = [];
+    const runner: PullRequestRunner = { async gh(args) { calls.push(args); return { ok: true, stdout: "", stderr: "" }; } };
+    const error = await updateDeliveryPullRequest(db, itemId, { reason: "返工交付以后更新 PR", runner }).then(() => null, (caught: unknown) => caught);
+    expect(error).toBeInstanceOf(DeliveryError);
+    expect((error as DeliveryError).code).toBe("unavailable");
     expect(calls).toEqual([]);
     expect(git(remote, "branch", "--list")).not.toContain("plc/");
   });
