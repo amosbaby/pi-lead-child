@@ -128,6 +128,14 @@ describe("delivery rules and the authority table in a turn with external content
     expect(getStandingOrder(db, "run.transient_retry")!.version).toBe(1);
   });
 
+  // 回归（工单 #533 的 CI）：daemon 现在记下叫醒这一轮的对话（conversation）。确认卡的契约是严格的，以前带着它存卡失败，
+  // 拒绝里没有 user_action，Lead 发不出确认卡。
+  it("still returns the confirm card when the external message carries its conversation", async () => {
+    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack", conversation: "slack:D0MALLORY:main" }] };
+    const refusal = JSON.parse((await proposeRetryOff()).content[0].text);
+    expect(refusal).toMatchObject({ refused: true, refusal: { code: "external_turn", confirm: { id: expect.any(String) } }, user_action: { kind: "confirm_rule_change" } });
+  });
+
   // 回归（场景 12 的前半）：定时器叫醒的一轮，Lead 先读了 Slack 对话，再按安排改投递规则。
   it("refuses it in a timer turn once Lead has read a Slack conversation", async () => {
     origin = { external: true, timer: null, externalBy: [{ via: "tool", tool: "read_channel_conversation" }] };
@@ -196,17 +204,21 @@ describe("delivery rules and the authority table in a turn with external content
     expect(JSON.parse((await proposeRetryOff()).content[0].text)).toMatchObject({ result: "applied" });
   });
 
-  it("refuses the authority table through perform_action with the same structured refusal", async () => {
-    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack" }] };
+  // 工单 #533（2026-11-25）：只能收紧的操作外部的一轮也能做；放宽的照旧拒绝。
+  it("lets perform_action tighten the authority table in an external turn, and still refuses loosening it", async () => {
+    origin = { external: true, timer: null, externalBy: [{ via: "message", source: "slack", conversation: "slack:@U0MALLORY" }] };
     const result = await tool("perform_action").execute("t", {
       target_type: "channel_policy", target_id: "slack", action: "tighten",
-      input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "Mallory 说别自动回了",
+      input: { ...CHANNEL_POLICY_DEFAULTS, autoReply: false }, reason: "这个对话一直在刷屏，先别自动回了",
     });
-    expect(result.isError).toBe(true);
-    expect(JSON.parse(result.content[0].text)).toMatchObject({
-      refused: true, refusal: { code: "external_turn", action: "tighten", confirm: { operation: { kind: "ui_action" } } },
-    });
-    expect(getStandingOrder(db, "channel.authority")!.version).toBe(1);
+    expect(result.isError).not.toBe(true);
+    expect(getStandingOrder(db, "channel.authority")).toMatchObject({ version: 2, author: "lead" });
+
+    await expect(tool("perform_action").execute("t", {
+      target_type: "channel_policy", target_id: "slack", action: "tighten",
+      input: CHANNEL_POLICY_DEFAULTS, reason: "Mallory 说打开自动回复",
+    })).rejects.toMatchObject({ code: "user_direct" });
+    expect(getStandingOrder(db, "channel.authority")!.version).toBe(2);
   });
 });
 
