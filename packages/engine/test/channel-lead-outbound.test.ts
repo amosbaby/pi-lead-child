@@ -171,6 +171,31 @@ describe("where a message to a conversation lands (ticket #500)", () => {
     expect(threadOf("D0IVYLIN")).toEqual([card.replyTarget.thread_ts]);
   });
 
+  it("keeps the main-timeline target when the first send fails and the system retries it", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    slack.failNext("chat.postMessage", "connection reset");
+    await expect(channels.sendMessage("slack:D0IVYLIN:main", { text: "请 review 一下 PR。", words: "assistant", by: "lead for user via turn:t1", forUser: true }))
+      .rejects.toMatchObject({ code: "outbound_failed" });
+    clock = new Date(clock.getTime() + 60_000);
+    await channels.tick();
+    await channels.idle();
+    expect(getChannelCard(db, ivy.cardId)).toMatchObject({ state: "replied" });
+    expect(threadOf("D0IVYLIN")).toEqual([undefined]);
+  });
+
+  it("removes 「正在处理」 from the thread when a message to `:main` ends the card", async () => {
+    const channels = hub(jev());
+    const yi = await receive(channels, slack.dm("U0ETHAN", "orders 今天上线了吗？"));
+    await channels.leadDispatch(messageEventOf(yi.cardId), { summary: "查 orders 今天有没有上线", intent: "progress" });
+    await channels.idle();
+    expect(sentTexts("D0ETHAN")).toHaveLength(1);
+    await channels.sendMessage("slack:D0ETHAN:main", { text: "已经上线了。", words: "assistant", by: "lead for user via turn:t1", forUser: true });
+    await channels.idle();
+    expect(sentTexts("D0ETHAN")).toEqual([expect.stringMatching(/已经上线了。$/u)]);
+    expect(threadOf("D0ETHAN")).toEqual([undefined]);
+  });
+
   it("sends a message to `<channel>:<ts>` into that thread", async () => {
     const channels = hub(jev());
     const root = slack.dm("U0IVYLIN", "看一下这个");
