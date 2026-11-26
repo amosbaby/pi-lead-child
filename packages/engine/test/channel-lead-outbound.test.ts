@@ -134,6 +134,53 @@ describe("the external channel's outbound extension for Lead's replies", () => {
   });
 });
 
+// 工单 #500：私信里的根消息卡，replyTarget 带 thread_ts（回复进根消息下的 thread），objectKey 却是 `:main`。
+// 往 `:main` 发消息以前用了卡的 replyTarget，消息掉进旧 thread，主时间线上看不到。
+describe("where a message to a conversation lands (ticket #500)", () => {
+  const threadOf = (channel: string) => slack.sent(channel).map((message) => message.thread_ts);
+
+  it("sends a message to `:main` to the main timeline, without thread_ts, even when an open card sits in a thread", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    const card = getChannelCard(db, ivy.cardId)!;
+    expect(card.objectKey).toBe("slack:D0IVYLIN:main");
+    expect(card.replyTarget.thread_ts).toBeTruthy();
+    const sent = await channels.sendMessage("slack:D0IVYLIN:main", {
+      text: "请 review 一下 PR。", words: "assistant", by: "lead for user via turn:t1", forUser: true,
+    });
+    expect(sent).toMatchObject({ outcome: "sent", card: { id: ivy.cardId, state: "replied" } });
+    expect(sentTexts("D0IVYLIN")).toEqual([expect.stringMatching(/\n请 review 一下 PR。$/u)]);
+    expect(threadOf("D0IVYLIN")).toEqual([undefined]);
+  });
+
+  it("does the same for Lead's own message in an event turn, and keeps the card's end", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    const sent = await channels.sendMessage("slack:D0IVYLIN:main", { text: "已经发了。", words: "assistant", by: "lead", forUser: false });
+    expect(sent).toMatchObject({ outcome: "auto_sent", card: { id: ivy.cardId, state: "auto_replied" } });
+    expect(threadOf("D0IVYLIN")).toEqual([undefined]);
+  });
+
+  it("still sends a reply to a message event back into the thread of that message (reply_to_source)", async () => {
+    const channels = hub(jev());
+    const ivy = await receive(channels, slack.dm("U0IVYLIN", "按照下面映射关系，发相应的 slack 消息"));
+    const card = getChannelCard(db, ivy.cardId)!;
+    await channels.sendMessage("slack:D0IVYLIN:main", {
+      text: "已经发了。", words: "assistant", by: "lead", forUser: false, event: messageEventOf(ivy.cardId),
+    });
+    expect(threadOf("D0IVYLIN")).toEqual([card.replyTarget.thread_ts]);
+  });
+
+  it("sends a message to `<channel>:<ts>` into that thread", async () => {
+    const channels = hub(jev());
+    const root = slack.dm("U0IVYLIN", "看一下这个");
+    const ivy = await receive(channels, root);
+    const thread = getChannelCard(db, ivy.cardId)!.replyTarget.thread_ts!;
+    await channels.sendMessage(`slack:D0IVYLIN:${thread}`, { text: "在 thread 里回。", words: "assistant", by: "lead for user via turn:t1", forUser: true });
+    expect(threadOf("D0IVYLIN")).toEqual([thread]);
+  });
+});
+
 describe("the status notice and the request follow Lead's own actions", () => {
   it("posts 「正在处理」 when Lead dispatches, and the system never dispatches or says it when Lead cannot work", async () => {
     const channels = hub(jev());
