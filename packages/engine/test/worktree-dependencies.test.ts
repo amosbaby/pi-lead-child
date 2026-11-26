@@ -292,19 +292,23 @@ describe.runIf(supported)("startWorktreeDependencies in an npm repository", () =
 });
 
 // #499：--ignore-scripts 装完以后 better-sqlite3 没有原生程序（build/Release/better_sqlite3.node），测试一开始全部失败。
-// 装完后只为这张表里的包补一步 `<包管理器> rebuild <包名>`，别的包的安装脚本不跑。
-// 假的包管理器：install / ci 装出 better-sqlite3（可以带或不带原生程序），rebuild 记下参数，再装出原生程序。
+// PR #85 评审第 3 条：daemon 在沙箱外，不能跑 `<包管理器> rebuild`（它会执行 node_modules 里那个包的 install 脚本，执行者写得到）。
+// 所以装完只检查：缺原生程序时，结果和状态文件写明缺了什么和沙箱里要跑的命令，daemon 一条 rebuild 也不运行。
+// 假的包管理器：install / ci 装出 better-sqlite3（可以带或不带原生程序），rebuild 记下参数再装出原生程序——
+// 测试靠 rebuild-calls 文件证明 daemon 没有调用它。
 const SQLITE = "node_modules/better-sqlite3";
-const fakeInstaller = (installCommand: string, out: string, opts: { builtAtInstall?: boolean; rebuildExit?: number } = {}): string => [
+const fakeInstaller = (installCommand: string, out: string, opts: { builtAtInstall?: boolean } = {}): string => [
   `case "$1" in`,
   `  ${installCommand}) mkdir -p ${SQLITE}/build/Release; echo '{"name":"better-sqlite3"}' > ${SQLITE}/package.json`,
   opts.builtAtInstall ? `    : > ${SQLITE}/build/Release/better_sqlite3.node` : `    rmdir ${SQLITE}/build/Release ${SQLITE}/build`,
   `    ;;`,
   `  rebuild) echo "$@" >> ${out}/rebuild-calls`,
-  `    if [ "${opts.rebuildExit ?? 0}" != "0" ]; then echo 'gyp ERR! build error' >&2; exit ${opts.rebuildExit ?? 0}; fi`,
   `    mkdir -p ${SQLITE}/build/Release; : > ${SQLITE}/build/Release/better_sqlite3.node ;;`,
   `esac`,
 ].join("\n");
+
+const statusOf = (worktree: string): string =>
+  readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8");
 
 describe.runIf(supported)("native packages after an install without scripts", () => {
   const saved = { ...process.env };
@@ -313,7 +317,7 @@ describe.runIf(supported)("native packages after an install without scripts", ()
     setSystemBinDirsForTests();
   });
 
-  it("npm: rebuilds only better-sqlite3 when npm ci left it without its native binary", async () => {
+  it("npm: does not run npm rebuild after npm ci; the result, the status file and the prompt carry the command for the sandbox", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "package-lock.json"), "{}\n");
     withoutPackageManagers();
@@ -321,17 +325,22 @@ describe.runIf(supported)("native packages after an install without scripts", ()
     process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out))}:${process.env.PATH}`;
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result).toEqual({
-      cloned: [], skipped: null, error: null, rebuilt: ["better-sqlite3"],
+      cloned: [], skipped: null, error: null,
       installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund",
+      rebuildError: expect.stringMatching(/better-sqlite3.*缺原生程序/),
+      rebuildCommand: "npm rebuild better-sqlite3",
     });
-    // 只点名这一个包，不是不带包名的 `npm rebuild`（那会跑所有包的安装脚本）。
-    expect(readFileSync(join(out, "rebuild-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
-    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(true);
-    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
-      .toBe("ready: installed with npm ci --prefer-offline --ignore-scripts --no-audit --no-fund (rebuilt native packages: better-sqlite3)\n");
+    // daemon 没有运行 rebuild，原生程序还是没有；node_modules 留着，状态仍是 ready:。
+    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(false);
+    expect(statusOf(worktree)).toBe(
+      "ready: installed with npm ci --prefer-offline --ignore-scripts --no-audit --no-fund"
+      + " (native packages not built: better-sqlite3 缺原生程序，系统不在沙箱外补编译，在沙箱里补; run `npm rebuild better-sqlite3` in the sandbox before you run tests)\n",
+    );
+    expect(dependenciesNote(worktree)).toContain("run `npm rebuild better-sqlite3` in the sandbox before you run tests.");
   }, 60_000);
 
-  it("npm: does not rebuild when the native binary is already there", async () => {
+  it("npm: reports nothing when the native binary is already there", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "package-lock.json"), "{}\n");
     withoutPackageManagers();
@@ -342,36 +351,23 @@ describe.runIf(supported)("native packages after an install without scripts", ()
       cloned: [], skipped: null, error: null, installedWith: "npm ci --prefer-offline --ignore-scripts --no-audit --no-fund",
     });
     expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+    expect(dependenciesNote(worktree)).not.toContain("native package is not built");
   }, 60_000);
 
-  it("npm: keeps the install as ready when the rebuild fails, and says so in the result and the status file", async () => {
-    const { repo, worktree } = monorepo();
-    writeFileSync(join(worktree, "package-lock.json"), "{}\n");
-    withoutPackageManagers();
-    const out = tempDir("plc-deps-native-out-");
-    process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out, { rebuildExit: 1 }))}:${process.env.PATH}`;
-    const result = await startWorktreeDependencies(repo, worktree);
-    expect(result).toMatchObject({ cloned: [], error: null, installedWith: expect.stringContaining("npm ci") });
-    expect(result.rebuilt).toBeUndefined();
-    expect(result.rebuildError).toMatch(/better-sqlite3.*npm rebuild 失败：gyp ERR! build error/);
-    // 装好的 node_modules 不删。
-    expect(existsSync(join(worktree, SQLITE, "package.json"))).toBe(true);
-    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
-      .toMatch(/^ready: installed with npm ci .*\(native packages not built: .*gyp ERR! build error/);
-  }, 60_000);
-
-  it("pnpm: rebuilds only better-sqlite3 with pnpm rebuild", async () => {
+  it("pnpm: does not run pnpm rebuild; the command for the sandbox is pnpm rebuild better-sqlite3", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
     withoutPackageManagers();
     const out = tempDir("plc-deps-native-out-");
     process.env.PNPM_HOME = fakeBin("pnpm", fakeInstaller("install", out));
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result).toMatchObject({ cloned: [], error: null, rebuilt: ["better-sqlite3"], installedWith: expect.stringContaining("pnpm install") });
-    expect(readFileSync(join(out, "rebuild-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
+    expect(result).toMatchObject({
+      cloned: [], error: null, installedWith: expect.stringContaining("pnpm install"), rebuildCommand: "pnpm rebuild better-sqlite3",
+    });
+    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
   }, 60_000);
 
-  it("bun: has no rebuild command, so it reports the missing native binary instead of running something else", async () => {
+  it("bun: has no rebuild command, so it reports the missing native binary and gives no command", async () => {
     const { repo, worktree } = monorepo();
     writeFileSync(join(worktree, "bun.lock"), "{}\n");
     withoutPackageManagers();
@@ -381,14 +377,16 @@ describe.runIf(supported)("native packages after an install without scripts", ()
     process.env.BUN_INSTALL = home;
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result).toMatchObject({ cloned: [], error: null, installedWith: expect.stringContaining("bun install") });
-    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildCommand).toBeUndefined();
     expect(result.rebuildError).toMatch(/better-sqlite3.*bun.*没有补编译的命令/);
     expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+    expect(dependenciesNote(worktree)).toContain("rebuild it yourself in the sandbox before you run tests.");
   }, 60_000);
 });
 
 // #502：#499 之前建的工作区已经有 node_modules（npm ci --ignore-scripts 装的，better-sqlite3 没有原生程序）。
-// 以前「已经有 node_modules」就直接跳过，执行者一开始跑测试就失败。现在派发时发现缺原生程序就补编译，不重装别的。
+// PR #85 评审第 3 条：复用工作区时 node_modules 可能被执行者在沙箱里写过，daemon 不运行 rebuild（也不运行任何包管理器命令），
+// 只发现缺原生程序，把沙箱里要跑的命令写进状态文件和给执行者的提示。
 describe.runIf(supported)("a worktree that already has node_modules without the native binary (#502)", () => {
   const saved = { ...process.env };
   afterEach(() => {
@@ -407,20 +405,31 @@ describe.runIf(supported)("a worktree that already has node_modules without the 
     return { repo, worktree };
   }
 
-  it("rebuilds only better-sqlite3 and does not reinstall anything", async () => {
+  it("runs no package manager command at all, and tells the executor which rebuild command to run in the sandbox", async () => {
     const { repo, worktree } = oldWorktree();
+    // 执行者在沙箱里留下的 install 脚本：daemon 一旦运行 `npm rebuild`，它就会在沙箱外执行。
+    writeFileSync(join(worktree, SQLITE, "package.json"), JSON.stringify({ name: "better-sqlite3", scripts: { install: "echo planted" } }));
     withoutPackageManagers();
     const out = tempDir("plc-deps-old-out-");
     process.env.PATH = `${fakeNpmBin(`echo "$@" >> ${out}/all-calls\n${fakeInstaller("ci", out)}`)}:${process.env.PATH}`;
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result).toMatchObject({ cloned: [], error: null, rebuilt: ["better-sqlite3"] });
-    expect(result.rebuildError).toBeUndefined();
-    // 只跑了 rebuild，没有 npm ci，也没有克隆用户的 node_modules。
-    expect(readFileSync(join(out, "all-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
-    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(true);
+    expect(result).toMatchObject({
+      cloned: [], error: null, skipped: expect.stringMatching(/已经有 node_modules/), rebuildCommand: "npm rebuild better-sqlite3",
+    });
+    expect(result.rebuildError).toMatch(/better-sqlite3.*缺原生程序/);
+    // npm 一次也没被调用：没有 rebuild、没有 ci，也没有克隆用户的 node_modules。
+    expect(existsSync(join(out, "all-calls"))).toBe(false);
+    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+    expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(false);
     expect(existsSync(join(worktree, "node_modules", "left-pad"))).toBe(false);
-    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
-      .toBe("ready: node_modules was already in the worktree (rebuilt native packages: better-sqlite3)\n");
+    expect(statusOf(worktree)).toBe(
+      "ready: node_modules was already in the worktree"
+      + " (native packages not built: better-sqlite3 缺原生程序，系统不在沙箱外补编译，在沙箱里补; run `npm rebuild better-sqlite3` in the sandbox before you run tests)\n",
+    );
+    // 执行者收到的提示：依赖是好的，缺原生程序，要在沙箱里跑这条命令。
+    const note = dependenciesNote(worktree);
+    expect(note).toContain("Dependencies are ready (node_modules was already in this worktree).");
+    expect(note).toContain("run `npm rebuild better-sqlite3` in the sandbox before you run tests.");
   }, 60_000);
 
   it("does nothing when the native binary is already there, and the status says the dependencies are ready", async () => {
@@ -431,47 +440,34 @@ describe.runIf(supported)("a worktree that already has node_modules without the 
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result.cloned).toEqual([]);
     expect(result.skipped).toMatch(/已经有 node_modules/);
-    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildError).toBeUndefined();
+    expect(result.rebuildCommand).toBeUndefined();
     expect(existsSync(join(out, "all-calls"))).toBe(false);
     // 执行者看到的状态不是「none:」（那会让它自己重装一遍）。
-    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
-      .toBe("ready: node_modules was already in the worktree\n");
+    expect(statusOf(worktree)).toBe("ready: node_modules was already in the worktree\n");
+    expect(dependenciesNote(worktree)).not.toContain("native package is not built");
   }, 60_000);
 
-  it("keeps node_modules and says so when the rebuild fails", async () => {
-    const { repo, worktree } = oldWorktree();
-    withoutPackageManagers();
-    const out = tempDir("plc-deps-old-out-");
-    process.env.PATH = `${fakeNpmBin(fakeInstaller("ci", out, { rebuildExit: 1 }))}:${process.env.PATH}`;
-    const result = await startWorktreeDependencies(repo, worktree);
-    expect(result.rebuilt).toBeUndefined();
-    expect(result.rebuildError).toMatch(/better-sqlite3.*npm rebuild 失败：gyp ERR! build error/);
-    expect(existsSync(join(worktree, SQLITE, "package.json"))).toBe(true);
-    expect(readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8"))
-      .toMatch(/^ready: node_modules was already in the worktree \(native packages not built: .*gyp ERR! build error/);
-  }, 60_000);
-
-  it("rebuilds with pnpm in a pnpm repository", async () => {
+  it("gives the pnpm command in a pnpm repository and does not run pnpm", async () => {
     const { repo, worktree } = oldWorktree({ lockfile: "pnpm-lock.yaml" });
     withoutPackageManagers();
     const out = tempDir("plc-deps-old-out-");
-    process.env.PNPM_HOME = fakeBin("pnpm", fakeInstaller("install", out));
+    process.env.PNPM_HOME = fakeBin("pnpm", `echo "$@" >> ${out}/all-calls\n${fakeInstaller("install", out)}`);
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result).toMatchObject({ cloned: [], error: null, rebuilt: ["better-sqlite3"] });
-    expect(readFileSync(join(out, "rebuild-calls"), "utf8").trim().split("\n")).toEqual(["rebuild better-sqlite3"]);
+    expect(result).toMatchObject({ cloned: [], error: null, rebuildCommand: "pnpm rebuild better-sqlite3" });
+    expect(existsSync(join(out, "all-calls"))).toBe(false);
+    expect(dependenciesNote(worktree)).toContain("run `pnpm rebuild better-sqlite3` in the sandbox before you run tests.");
   }, 60_000);
 
-  // PR #85 评审第 2 条：有 .pnpmfile.cjs 的 pnpm 仓库，daemon 不在沙箱外跑 pnpm；旧工作区的补编译也一样，交给执行者在沙箱里补。
-  it("does not run pnpm rebuild outside the sandbox when the repository has .pnpmfile.cjs", async () => {
+  it("also gives the sandbox command, and runs nothing, when the repository has .pnpmfile.cjs", async () => {
     const { repo, worktree } = oldWorktree({ lockfile: "pnpm-lock.yaml" });
     writeFileSync(join(worktree, ".pnpmfile.cjs"), "module.exports = { hooks: {} };\n");
     withoutPackageManagers();
     const out = tempDir("plc-deps-old-out-");
-    process.env.PNPM_HOME = fakeBin("pnpm", fakeInstaller("install", out));
+    process.env.PNPM_HOME = fakeBin("pnpm", `echo "$@" >> ${out}/all-calls\n${fakeInstaller("install", out)}`);
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result.rebuilt).toBeUndefined();
-    expect(result.rebuildError).toMatch(/better-sqlite3.*\.pnpmfile\.cjs/);
-    expect(existsSync(join(out, "rebuild-calls"))).toBe(false);
+    expect(result.rebuildCommand).toBe("pnpm rebuild better-sqlite3");
+    expect(existsSync(join(out, "all-calls"))).toBe(false);
     expect(existsSync(join(worktree, SQLITE, "build", "Release", "better_sqlite3.node"))).toBe(false);
   }, 60_000);
 
@@ -479,7 +475,7 @@ describe.runIf(supported)("a worktree that already has node_modules without the 
     const { repo, worktree } = oldWorktree({ lockfile: null });
     withoutPackageManagers();
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result.rebuilt).toBeUndefined();
+    expect(result.rebuildCommand).toBeUndefined();
     expect(result.rebuildError).toMatch(/better-sqlite3.*没有锁文件/);
   }, 60_000);
 });

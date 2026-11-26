@@ -536,9 +536,9 @@ function failProvisioning(db: Db, itemId: number, workspace: Workspace, error: u
 function prepareDependencies(db: Db, workspace: Workspace, source: string): void {
   if (!existsSync(workspace.path)) return;
   void startWorktreeDependencies(source, workspace.path, (result, { durationMs }) => {
-    // 装好（installedWith）和补编译也记一条：以前 npm ci 装成功不留记录，没法回头看装一次花多久（#502）。
+    // 装好（installedWith）和缺原生程序也记一条：以前 npm ci 装成功不留记录，没法回头看装一次花多久（#502）。
     if (!result.cloned.length && !result.error && !result.fallbackReason && !result.selectionNote
-      && !result.installedWith && !result.rebuilt?.length && !result.rebuildError) return;
+      && !result.installedWith && !result.rebuildError) return;
     addActivity(db, {
       itemId: workspace.owner_item_id, actor: "system", kind: "decision",
       payload: {
@@ -546,8 +546,8 @@ function prepareDependencies(db: Db, workspace: Workspace, source: string): void
         ...(result.installedWith ? { installedWith: result.installedWith } : {}),
         ...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
         ...(result.selectionNote ? { selectionNote: result.selectionNote } : {}),
-        ...(result.rebuilt?.length ? { rebuilt: result.rebuilt } : {}),
         ...(result.rebuildError ? { rebuildError: result.rebuildError } : {}),
+        ...(result.rebuildCommand ? { rebuildCommand: result.rebuildCommand } : {}),
         durationMs,
       },
     });

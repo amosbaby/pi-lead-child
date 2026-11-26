@@ -335,12 +335,17 @@ export function dependenciesNote(worktreePath: string): string {
   if (state?.state === "done") {
     const { result } = state;
     if (result.error) return ` Dependencies: the background preparation failed (${result.error}); ${install} when you need to build or run tests.`;
-    // 原生包：安装脚本没跑，由系统补编译；没补成时写明，执行者自己补一步。
-    const native = result.rebuilt?.length ? ` The native package ${result.rebuilt.join(", ")} was rebuilt.` : "";
-    const notBuilt = result.rebuildError ? ` Warning: a native package is not built (${result.rebuildError}); rebuild it yourself before you run tests.` : "";
-    if (result.installedWith) return ` Dependencies are ready (installed with \`${result.installedWith}\`).${native}${notBuilt}${lockfileNote}`;
-    // 已经有 node_modules 的旧工作区：依赖是好的，缺原生程序时系统在派发时补过（#502）。
-    if (result.skipped === EXISTING_NODE_MODULES) return ` Dependencies are ready (node_modules was already in this worktree).${native}${notBuilt}${lockfileNote}`;
+    // 原生包：安装脚本没跑，系统也不在沙箱外补编译（rebuild 会跑 node_modules 里的脚本，PR #85 评审第 3 条）：写明缺了什么，
+    // 以及执行者要在沙箱里跑的那条命令。
+    const notBuilt = result.rebuildError
+      ? ` Warning: a native package is not built (${result.rebuildError}); `
+        + (result.rebuildCommand
+          ? `run \`${result.rebuildCommand}\` in the sandbox before you run tests.`
+          : "rebuild it yourself in the sandbox before you run tests.")
+      : "";
+    if (result.installedWith) return ` Dependencies are ready (installed with \`${result.installedWith}\`).${notBuilt}${lockfileNote}`;
+    // 已经有 node_modules 的旧工作区：依赖是好的，缺原生程序时只提示，不在沙箱外补（#502）。
+    if (result.skipped === EXISTING_NODE_MODULES) return ` Dependencies are ready (node_modules was already in this worktree).${notBuilt}${lockfileNote}`;
     if (result.cloned.length) return ` Dependencies are ready (cloned from the user's checkout: ${result.cloned.join(", ")}).`;
     const why = result.fallbackReason ? `; installing with the package manager did not work: ${result.fallbackReason}` : "";
     return ` Dependencies were not prepared (${result.skipped ?? "nothing to prepare"}${why}); ${install} when you need to build or run tests.`;
