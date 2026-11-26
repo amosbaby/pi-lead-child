@@ -692,6 +692,33 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
       expect(readFileSync(join(out, "args"), "utf8")).toContain("--frozen-lockfile");
     }, 60_000);
 
+    // PR #85 再评审（#509）：yarn 1 的 .yarnrc 里 yarn-path 指向仓库里的 JS，yarn 一启动就会运行它，和 berry 的 yarnPath 一样。
+    it("does not install a yarn 1 repository whose .yarnrc sets yarn-path", async () => {
+      const { repo, worktree, out } = yarnRepo({ lock: YARN1_LOCK, packageManager: "yarn@1.22.19" });
+      writeFileSync(join(worktree, ".yarnrc"), '# comment\nyarn-path ".yarn/releases/yarn-1.22.19.cjs"\n');
+      process.env.PATH = `${fakeBin("yarn", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, /yarn-path/);
+    }, 60_000);
+
+    it("still installs yarn 1 when .yarnrc only has other settings or a commented yarn-path", async () => {
+      const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK });
+      writeFileSync(join(worktree, ".yarnrc"), '# yarn-path "x.cjs"\nyarn-offline-mirror "./mirror"\n');
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(result.installedWith).toContain("yarn install --frozen-lockfile");
+    }, 60_000);
+
+    // pnpm 的 pnpmfile 位置可以在 .npmrc 里改（pnpmfile、global-pnpmfile）：不在默认位置，也是仓库自带的 JS。
+    it("does not install a pnpm repository whose .npmrc points pnpmfile at another script", async () => {
+      const { repo, worktree } = monorepo();
+      writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(worktree, ".npmrc"), "# registry stuff\npnpmfile=tools/custom-pnpmfile.cjs\n");
+      withoutPackageManagers();
+      const out = tempDir("plc-deps-pnpm-out-");
+      delete process.env.PNPM_HOME;
+      process.env.PATH = `${fakeBin("pnpm", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, /pnpmfile/);
+    }, 60_000);
+
     it("keeps installing yarn 1 even when it has a .pnpmfile.cjs, since only pnpm runs that file", async () => {
       const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK, packageManager: "yarn@1.22.19" });
       writeFileSync(join(worktree, ".pnpmfile.cjs"), "module.exports = {};\n");

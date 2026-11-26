@@ -24,7 +24,8 @@
 //         packageManager 字段，没有就看 .yarnrc.yml、yarn.lock 里的 __metadata。berry 默认是 PnP（.yarnrc.yml 里 nodeLinker
 //         不是 node-modules 或 pnpm），没有 node_modules 可克隆：装不上时结果的 error 写「PnP 仓库，不能退回拷贝」，不假装成功。
 // 仓库自带安装时会运行的 JS 时，daemon 不装（PR #85 评审第 2 条，2026-11-26）：yarn berry 的 yarnPath 和插件（.yarnrc.yml 里有 yarnPath
-// 或 plugins，或 packageManager 是 yarn@2 及以上），pnpm 仓库根目录的 .pnpmfile.cjs。命中时不运行任何安装命令，也不克隆，
+// 或 plugins，或 packageManager 是 yarn@2 及以上；yarn 1 的 .yarnrc 里有 yarn-path），pnpm 仓库根目录的 .pnpmfile.cjs
+// 或 .npmrc 里的 pnpmfile、global-pnpmfile（#509 再评审补）。命中时不运行任何安装命令，也不克隆，
 // 状态写成 none: 加原因，提示让执行者在沙箱里自己装。只认这几种，别的情况照旧。
 // 一个仓库有几种锁文件时只选一种：package.json 的 packageManager 字段点名了其中一种就用它，没有就按表里的顺序选；
 // 结果的 selectionNote 写明选了哪一种、为什么。找 npm、yarn 的办法见 findBinary 一带：daemon 的 PATH 来自 launchd，
@@ -263,7 +264,7 @@ function isYarnPnp(worktree: string): boolean {
 }
 
 // 为什么 daemon 不装：yarn berry 的 yarnPath 指向仓库里的 JS，插件也是仓库里的 JS，yarn install 会运行它们。
-// 只认这三种（.yarnrc.yml 顶层的 yarnPath、plugins，package.json 的 packageManager 是 yarn@2 及以上），别的情况保持原样。
+// 只认这几种（.yarnrc.yml 顶层的 yarnPath、plugins，package.json 的 packageManager 是 yarn@2 及以上，yarn 1 的 .yarnrc 里的 yarn-path），别的情况保持原样。
 function yarnBerrySkipReason(worktree: string): string | null {
   const declared = declaredPackageManager(worktree);
   const yarnrc = readFileOrEmpty(join(worktree, ".yarnrc.yml"));
@@ -271,10 +272,16 @@ function yarnBerrySkipReason(worktree: string): string | null {
   const found = key
     ? `.yarnrc.yml 里有 ${key}`
     : declared?.name === "yarn" && versionParts(declared.version)[0]! >= 2 ? `package.json 的 packageManager 是 yarn@${declared.version}` : null;
-  return found ? `yarn berry 仓库（${found}），安装时会运行仓库自带的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖` : null;
+  if (found) return `yarn berry 仓库（${found}），安装时会运行仓库自带的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖`;
+  // yarn 1（classic）：.yarnrc 里的 yarn-path 指向仓库里的 JS，yarn 一启动就运行它（PR #85 再评审，#509）。
+  const classicKey = /^(yarn-path|yarnPath)\s/m.exec(readFileOrEmpty(join(worktree, ".yarnrc")))?.[1];
+  return classicKey ? `yarn 仓库（.yarnrc 里有 ${classicKey}），yarn 会运行仓库自带的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖` : null;
 }
 
+// pnpmfile 默认是根目录的 .pnpmfile.cjs；.npmrc 里的 pnpmfile、global-pnpmfile 可以把它指到别处（PR #85 再评审，#509）。
 function pnpmfileSkipReason(worktree: string): string | null {
+  const custom = /^\s*(pnpmfile|global-pnpmfile)\s*=/m.exec(readFileOrEmpty(join(worktree, ".npmrc")))?.[1];
+  if (custom) return `仓库的 .npmrc 设了 ${custom}，pnpm install 会运行它指向的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖`;
   return existsSync(join(worktree, ".pnpmfile.cjs"))
     ? "仓库有 .pnpmfile.cjs，pnpm install 会运行它：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖"
     : null;
