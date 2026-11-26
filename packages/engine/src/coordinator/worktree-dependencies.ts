@@ -59,6 +59,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { removeTree } from "@pi-lead-child/core";
 
 export interface DependencyPreparation {
   // 克隆过去的 node_modules（相对仓库根目录）。
@@ -150,7 +151,11 @@ function cloneArgs(source: string, target: string): { command: string; args: str
 async function removeInstalledNodeModules(worktree: string): Promise<void> {
   for (const dir of await findNodeModulesDirs(worktree)) {
     const ignored = await run("git", ["-C", worktree, "check-ignore", "-q", dir], worktree, 30_000);
-    if (ignored.code === 0) await rm(join(worktree, dir), { recursive: true, force: true });
+    // 在子进程里删（core 的 removeTree），不在 daemon 的线程池里删整棵 node_modules（lead-scheduler spec P0）。
+    // 克隆在等这次删除，用 utility 优先级。
+    if (ignored.code === 0) {
+      await removeTree(resolve(worktree, dir), { kind: "node-modules-delete", label: dir, priority: "utility" });
+    }
   }
 }
 
