@@ -27,7 +27,7 @@ import { stopReattachedLauncher, type AttachableLaunch } from "@pi-lead-child/ru
 import type { Item, Run, RunPurpose, RuntimeId, Workspace } from "@pi-lead-child/core";
 import type { RpcClient } from "@pi-lead-child/runtime";
 import { createLearningService } from "../coordinator/learning.js";
-import { DEPENDENCY_STATUS_FILE, peekWorktreeDependencies } from "../coordinator/worktree-dependencies.js";
+import { DEPENDENCY_STATUS_FILE, peekWorktreeDependencies, readDependencyStatus } from "../coordinator/worktree-dependencies.js";
 import { fetchOrigin, refreshFreshWorktree } from "../coordinator/workspace-remote.js";
 import { createCoordinator } from "../coordinator/service.js";
 import { executionPlanPromptSection } from "../coordinator/execution-plan.js";
@@ -300,10 +300,20 @@ const SANDBOX_GIT_NOTE = "\nYour commands run in a sandbox without git credentia
   + "with ticket_update; do not ask the user to run git in a terminal.";
 
 // 执行者不等依赖，所以提示要说清它们现在的状态（2026-11-25）。状态文件由 worktree-dependencies.ts 在准备做完时写到 worktree 的
-// git 目录里；等待命令最多等 10 分钟，超时当作准备失败。
-const WAIT_FOR_DEPENDENCIES = `f=$(git rev-parse --git-path ${DEPENDENCY_STATUS_FILE}); for i in $(seq 1 300); do [ -e "$f" ] && break; sleep 2; done; cat "$f" 2>/dev/null || echo "timed out: dependencies are not ready"`;
+// git 目录里。
+// 同一时间只有一方写 node_modules（PR #85 评审第 1 条，2026-11-26）：准备最长可能要「安装 10 分钟 + 每个 node_modules 克隆 20 分钟」，
+// 比这条命令能等的 10 分钟长。所以命令等到时限还没有状态文件时，输出 waiting:，让执行者再跑一遍；只有 failed:、none: 才让它自己装
+// （那时 daemon 已经不写了）。等了很久（WAITING_RUNS_BEFORE_BLOCKED 轮）还是 waiting:，说明准备卡住了：让执行者报阻塞，不去装。
+const WAITING_RUNS_BEFORE_BLOCKED = 6;
+const WAITING_MESSAGE = "waiting: the system is still installing the dependencies in this worktree. Run this same command again. "
+  + "Do not install the dependencies yourself while it says waiting.";
 
-function dependenciesNote(worktreePath: string): string {
+/** 执行者等依赖用的命令。loops、seconds 只有测试会改小。 */
+export function waitForDependenciesCommand(loops = 300, seconds = 2): string {
+  return `f=$(git rev-parse --git-path ${DEPENDENCY_STATUS_FILE}); for i in $(seq 1 ${loops}); do [ -e "$f" ] && break; sleep ${seconds}; done; cat "$f" 2>/dev/null || echo "${WAITING_MESSAGE}"`;
+}
+
+export function dependenciesNote(worktreePath: string): string {
   const state = peekWorktreeDependencies(worktreePath);
   const install = "install them here yourself (use the package manager the lockfile names)";
   if (state?.state === "done") {
@@ -311,14 +321,23 @@ function dependenciesNote(worktreePath: string): string {
     if (result.error) return ` Dependencies: the background preparation failed (${result.error}); ${install} when you need to build or run tests.`;
     if (result.installedWith) return ` Dependencies are ready (installed with \`${result.installedWith}\`).`;
     if (result.cloned.length) return ` Dependencies are ready (cloned from the user's checkout: ${result.cloned.join(", ")}).`;
-    return ` Dependencies were not prepared (${result.skipped ?? "nothing to prepare"}); ${install} when you need to build or run tests.`;
+    const why = result.fallbackReason ? `; installing with the package manager did not work: ${result.fallbackReason}` : "";
+    return ` Dependencies were not prepared (${result.skipped ?? "nothing to prepare"}${why}); ${install} when you need to build or run tests.`;
   }
   if (state?.state === "preparing") {
     return " Dependencies (for example node_modules) are still being prepared in the background; the run did not wait for them, so start on the work now. "
-      + `Before you run tests, a build or a type-check, wait for them with this command: \`${WAIT_FOR_DEPENDENCIES}\`. `
-      + "Its output starts with \"ready:\" when they can be used. If it starts with \"failed:\", \"none:\" or \"timed out:\", "
-      + `${install} when you need to build or run tests.`;
+      + `Before you run tests, a build or a type-check, wait for them with this command: \`${waitForDependenciesCommand()}\`. `
+      + "Its output starts with \"ready:\" when they can be used. "
+      + `If it starts with "failed:" or "none:", ${install} when you need to build or run tests. `
+      + "If it starts with \"waiting:\", the system is still writing node_modules: run the command again and do not install, "
+      + "because two writers at once break node_modules. "
+      + `If it still says "waiting:" after ${WAITING_RUNS_BEFORE_BLOCKED} runs (about an hour), the preparation is stuck: `
+      + "report the ticket as blocked with ticket_update and say so; still do not install.";
   }
+  // daemon 重启后内存里没有记录：这个 worktree 以前准备过的话，状态文件还在，照它写。
+  const earlier = readDependencyStatus(worktreePath);
+  if (earlier?.startsWith("ready:")) return ` Dependencies are ready (${earlier.slice("ready:".length).trim()}).`;
+  if (earlier) return ` Dependencies were not prepared (${earlier}); ${install} when you need to build or run tests.`;
   return ` Dependencies (for example node_modules) are not installed in this worktree: ${install} when you need to build or run tests.`;
 }
 

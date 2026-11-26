@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
 import {
   awaitWorktreeDependencies, DEPENDENCY_STATUS_FILE, findNodeModulesDirs, forgetWorktreeDependenciesForTests,
-  peekWorktreeDependencies, setSystemBinDirsForTests, startWorktreeDependencies,
+  peekWorktreeDependencies, readDependencyStatus, setSystemBinDirsForTests, startWorktreeDependencies,
 } from "../src/coordinator/worktree-dependencies.js";
 
 const supported = process.platform === "darwin" || process.platform === "linux";
@@ -39,6 +39,16 @@ function monorepo(): { repo: string; worktree: string } {
 }
 
 afterEach(() => forgetWorktreeDependenciesForTests());
+
+describe.runIf(supported)("readDependencyStatus", () => {
+  it("reads the status line from the worktree's git directory, and is null when there is none", () => {
+    const { worktree } = monorepo();
+    expect(readDependencyStatus(worktree)).toBeNull();
+    writeFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "ready: installed with npm ci\n");
+    expect(readDependencyStatus(worktree)).toBe("ready: installed with npm ci");
+    expect(readDependencyStatus(tempDir("plc-deps-not-a-worktree-"))).toBeNull();
+  });
+});
 
 describe("findNodeModulesDirs", () => {
   it("finds the root and workspace packages' node_modules, not nested ones", async () => {
@@ -397,6 +407,24 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
     withoutPackageManagers();
     fakeBin("yarn", "mkdir -p node_modules/from-home-yarn", join(process.env.HOME as string, ".yarn", "bin"));
     expect((await startWorktreeDependencies(repo, worktree)).installedWith).toContain("yarn install");
+    expect(existsSync(join(worktree, "node_modules", "from-home-yarn"))).toBe(true);
+  }, 60_000);
+
+  // PR #85 评审第 4 条：~/.yarn/bin 里只有 yarn 没有 node。yarn 是 `#!/usr/bin/env node` 的脚本，PATH 里没有 node 就跑不起来，
+  // 所以要从 nvm、volta、Homebrew 这些目录里再找一个有 node 的放到 PATH 前面。假的 yarn 在找不到 node 时失败，真装不出来。
+  it("puts a directory that has node on PATH when yarn comes from ~/.yarn/bin, which has no node", async () => {
+    const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK });
+    withoutPackageManagers();
+    const nodeDir = fakeBin("node", "exit 0");
+    setSystemBinDirsForTests([nodeDir]);
+    fakeBin(
+      "yarn",
+      `[ "$(command -v node)" = "${nodeDir}/node" ] || { echo "env: node: No such file or directory" >&2; exit 127; }\nmkdir -p node_modules/from-home-yarn`,
+      join(process.env.HOME as string, ".yarn", "bin"),
+    );
+    const result = await startWorktreeDependencies(repo, worktree);
+    expect(result.installedWith).toContain("yarn install");
+    expect(result.fallbackReason).toBeUndefined();
     expect(existsSync(join(worktree, "node_modules", "from-home-yarn"))).toBe(true);
   }, 60_000);
 

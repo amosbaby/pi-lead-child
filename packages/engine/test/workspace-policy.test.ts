@@ -294,6 +294,62 @@ describe("the executor does not wait for dependencies", () => {
     expect(second.request.prompt).toContain("install them here yourself");
     expect(second.request.prompt).not.toContain("still being prepared");
   }, 30_000);
+
+  // PR #85 评审第 1 条（2026-11-26）：等待命令超时就让执行者自己装，daemon 却还在往同一个 node_modules 里写。
+  // 现在只有 daemon 写：准备没做完时，等待命令输出的是「再等一轮」，只有 failed:/none: 才让执行者自己装。
+  it("never tells the executor to install while the daemon is still writing node_modules", async () => {
+    const gate = join(dir, "gate");
+    bunRepo(`while [ ! -e ${gate} ]; do sleep 0.05; done\nmkdir -p node_modules/from-bun`);
+    const itemId = genericTicket();
+    const { request } = await run(itemId);
+    const prompt = request.prompt;
+    // 提示里的等待命令，只把等的时间缩短。
+    const command = /wait for them with this command: `([^`]+)`/.exec(prompt)?.[1];
+    expect(command).toBeTruthy();
+    const quick = command!.replace("seq 1 300", "seq 1 2").replace("sleep 2", "sleep 0.1");
+    const wait = (): string => execFileSync("bash", ["-c", quick], { cwd: request.workdir, encoding: "utf8" }).trim();
+
+    // bun 还在装（卡在 gate 上）：等待命令超时。它的输出不能是让执行者自己装的那几种。
+    const stillRunning = wait();
+    expect(stillRunning).toMatch(/^waiting:/);
+    expect(stillRunning).toMatch(/Run this same command again/);
+    expect(stillRunning).not.toMatch(/^(failed|none|timed out):/);
+    expect(existsSync(join(request.workdir, "node_modules", "from-bun"))).toBe(false);
+    // 提示只在 failed:/none: 时让执行者自己装；waiting 时让它再等，等了很久就报阻塞，不去装。
+    expect(prompt).toMatch(/If it starts with "failed:" or "none:", install them here yourself/);
+    expect(prompt).toMatch(/If it starts with "waiting:".*do not install/s);
+    expect(prompt).toContain("ticket_update");
+    expect(prompt).not.toMatch(/"timed out:"/);
+
+    writeFileSync(gate, "");
+    await awaitWorktreeDependencies(request.workdir);
+    expect(wait()).toMatch(/^ready: installed with bun install/);
+  }, 30_000);
+
+  // PR #85 评审第 3 条：daemon 重启后内存里没有记录，但状态文件还在，提示要照它写。
+  it("tells the executor the dependencies are ready after a daemon restart, from the status file", async () => {
+    bunRepo("mkdir -p node_modules/from-bun");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    forgetWorktreeDependenciesForTests(); // daemon 重启：pending / settled 都空了
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies are ready");
+    expect(second.request.prompt).toContain("installed with bun install");
+    expect(second.request.prompt).not.toContain("are not installed in this worktree");
+  }, 30_000);
+
+  // PR #85 评审第 3 条：没有可克隆的依赖时，提示要带包管理器装失败的原因。
+  it("gives the reason the package manager failed when nothing could be prepared", async () => {
+    bunRepo("echo 'registry unreachable' >&2\nexit 1");
+    const itemId = genericTicket();
+    const first = await run(itemId);
+    await awaitWorktreeDependencies(first.request.workdir);
+    const second = await run(itemId);
+    expect(second.request.prompt).toContain("Dependencies were not prepared");
+    expect(second.request.prompt).toContain("installing with the package manager did not work");
+    expect(second.request.prompt).toContain("registry unreachable");
+  }, 30_000);
 });
 
 describe("preparing a new worktree does not stop the daemon", () => {

@@ -29,11 +29,13 @@
 //
 // 执行者不等依赖（2026-11-25）：建好 worktree 就启动，依赖在后台准备。准备做完时写一个状态文件（worktree 的 git 目录里，
 // 不在工作区里，不会进提交），提示里给执行者一条等它的命令；准备还在做时也可以查 peekWorktreeDependencies。
+// 同一时间只有 daemon 写 node_modules：准备没做完时，等待命令让执行者再等，不让它自己装（见 children/manager.ts）。
+// 写不了状态文件时执行者会一直看到 waiting，等够轮数后报阻塞，不会自己去装。
 //
 // 克隆在后台异步做：大仓库在本机要几分钟（有 Sophos 时更久），同步做会卡住 daemon（2026-10-14 的停摆）。
 // 只克隆 git 忽略的 node_modules；克隆失败不影响 Run，执行者可以在沙箱里自己装。
 import { spawn } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, type Dirent } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, type Dirent } from "node:fs";
 import { readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -46,7 +48,7 @@ export interface DependencyPreparation {
   error: string | null;
   // 用包管理器装的（例如 pnpm install），没有克隆时写明。克隆的为 undefined。
   installedWith?: string;
-  // 先试了包管理器、没成功才回到克隆（或没有可克隆的）时，写明为什么没成功。目前只有 npm 这条路径会写。
+  // 先试了包管理器、没成功才回到克隆（或没有可克隆的）时，写明为什么没成功。每种包管理器装不上时都会写。
   fallbackReason?: string;
   // 仓库有几种锁文件时，写明选了哪一种包管理器、为什么。只有一种锁文件时为 undefined。
   selectionNote?: string;
@@ -193,7 +195,7 @@ interface PackageManager {
   // 找不到可执行文件时，写进原因里的「找过哪里」。
   searched: string;
   // npm、yarn 是 `#!/usr/bin/env node` 的脚本：daemon 的 PATH 里没有 node 时跑不起来，所以把它所在的目录放到 PATH 最前面
-  // （nvm、volta、Homebrew 里 node 和它们在同一个目录）。
+  // （nvm、volta、Homebrew 里 node 和它们在同一个目录；~/.yarn/bin 这类没有 node 的目录，见 nodeDirsFor，会再加一个有 node 的目录）。
   needsNodeOnPath?: boolean;
   binary(worktree: string, env: NodeJS.ProcessEnv): Binary | null;
   plan(worktree: string): InstallPlan;
@@ -343,6 +345,15 @@ function oneLine(text: string, max = 300): string {
   return flat.length > max ? `...${flat.slice(-max)}` : flat;
 }
 
+// 放到 PATH 最前面的目录：可执行文件所在的目录；那里没有 node（~/.yarn/bin、~/.config/yarn/global/node_modules/.bin 就是这样）时，
+// 再加一个有 node 的目录（nvm、volta、Homebrew），不然 `#!/usr/bin/env node` 的脚本启动不了。
+function nodeDirsFor(binary: Binary, env: NodeJS.ProcessEnv): string[] {
+  const own = dirname(binary.command);
+  if (existsSync(join(own, "node"))) return [own];
+  const nodeDir = findIn(nodeToolDirs(env), "node");
+  return nodeDir ? [own, dirname(nodeDir)] : [own];
+}
+
 /**
  * 用选中的包管理器装一次依赖（根目录）。{ installed }：装好了；{ fallback }：没成功，附原因，调用方回到克隆。
  * 装不上时先删掉装了一半的 node_modules。
@@ -354,7 +365,7 @@ async function installWith(manager: PackageManager, worktree: string): Promise<{
   const timeoutMs = 10 * 60_000;
   const env = {
     ...process.env,
-    ...(manager.needsNodeOnPath ? { PATH: [dirname(binary.command), process.env.PATH].filter(Boolean).join(":") } : {}),
+    ...(manager.needsNodeOnPath ? { PATH: [...nodeDirsFor(binary, process.env), process.env.PATH].filter(Boolean).join(":") } : {}),
     ...plan.env,
   };
   const result = await run(binary.command, [...binary.prefix, ...plan.args], worktree, timeoutMs, env);
@@ -437,7 +448,7 @@ export function startWorktreeDependencies(
         const path = await statusPath;
         if (path) await writeFile(path, `${statusLine(result)}\n`);
       } catch {
-        // 写不了状态文件时，执行者的等待命令会超时，然后自己装。
+        // 写不了状态文件时，执行者的等待命令一直输出 waiting，等够轮数后报阻塞（不会自己去装，免得和这里同时写）。
       }
       try {
         onDone?.(result);
@@ -458,6 +469,26 @@ function within(path: string, root: string): boolean {
 export type WorktreeDependencyState =
   | { state: "preparing" }
   | { state: "done"; result: DependencyPreparation };
+
+/**
+ * worktree 的状态文件里记着的那一行（同步读）。daemon 重启后内存里没有准备记录，用它告诉执行者上一次准备的结果。
+ * 没有状态文件（没准备过、或这次还没做完）、不是 worktree 时返回 null。
+ */
+export function readDependencyStatus(worktree: string): string | null {
+  try {
+    const dotGit = join(resolve(worktree), ".git");
+    let gitDir = dotGit;
+    if (statSync(dotGit).isFile()) {
+      const pointer = /^gitdir:\s*(.+)$/m.exec(readFileSync(dotGit, "utf8"))?.[1]?.trim();
+      if (!pointer) return null;
+      gitDir = resolve(dirname(dotGit), pointer);
+    }
+    const line = readFileSync(join(gitDir, DEPENDENCY_STATUS_FILE), "utf8").split("\n")[0]?.trim();
+    return line || null;
+  } catch {
+    return null;
+  }
+}
 
 /** 工作目录所在 worktree 的依赖现在是什么状态（不等）。这个 daemon 没有准备过它时返回 null。 */
 export function peekWorktreeDependencies(workdir: string): WorktreeDependencyState | null {
