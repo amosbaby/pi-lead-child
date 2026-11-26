@@ -1,4 +1,4 @@
-// 通道派的子 agent 缺省跑在 Claude Code 里（工单 #464，2026-11-25）：用户停用了 pi，代查不能再落到进程内的 pi 会话。
+// 通道派的子 agent 在用户停用 pi 时跑在 Claude Code 里（工单 #464，2026-11-25）：代查不能再落到停用的 pi 会话。缺省仍是 pi（工单 #501）。
 // 形态还是只读，和 runtime.ts 的进程内会话一样：
 //   - CLI 没有自带工具，不读用户的设置和 hooks，只连一个工具通道（claude.ts 的 buildAgentTaskArgs，RuntimeStartRequest.agentTask）；
 //   - 工具通道是 task-mcp-server.ts，它把「列工具」「调工具」经 daemon 里的 task-bridge 转给 tools.ts 的三个工具：
@@ -6,6 +6,10 @@
 //   - 权限清单、调用次数上限、出处核实和 runtime.ts 用同一份代码（tools.ts、provenance.ts）。
 // 内核照常管它：runItem 建 Run、落事件、按 purpose=lookup 收尾。Run 的结局：交了结果（submit_result）并且 CLI 正常结束是
 // run.completed；CLI 正常结束却没交结果、超过工具调用上限或时长上限、CLI 出错、被中断，都是 run.failed。
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Value } from "typebox/value";
 import { agentTaskMcpServer, type TypedFailure } from "@pi-lead-child/core";
 import { startTaskToolBridge, type TaskToolBridge } from "@pi-lead-child/engine";
 import type { GrantIntent } from "@pi-lead-child/protocol";
@@ -88,9 +92,13 @@ export function createClaudeAgentTaskRuntime(options: {
       });
       toolState = state;
       let bridge: TaskToolBridge | null = null;
+      // 代查工单没有工作目录，CLI 会在 daemon 的 cwd 里启动，可能读到那里往上的 CLAUDE.md（评审意见）。
+      // 换成一个空的临时目录：项目里的记忆文件读不到。用户自己的 ~/.claude/CLAUDE.md 不在这里管：--restricted 没说它会跳过。
+      const scratchDir = mkdtempSync(join(tmpdir(), "plc-agent-task-"));
       const closeBridge = async (): Promise<void> => {
         const closing = bridge;
         bridge = null;
+        rmSync(scratchDir, { recursive: true, force: true });
         await closing?.close().catch(() => {});
       };
       // 结局：没交结果或超限，就算 CLI 自己正常退出，这次也是失败。
@@ -113,6 +121,15 @@ export function createClaudeAgentTaskRuntime(options: {
             description: tool.description,
             inputSchema: tool.parameters,
             call: async (args, signal) => {
+              // 进程内的 pi 会话在调 execute 以前按 schema 校验参数；经桥直接调 execute 就没有这一步，所以这里补上，
+              // 不通过的当成工具报错还给模型（和 pi 的行为一致）。
+              if (!Value.Check(tool.parameters, args)) {
+                const first = [...Value.Errors(tool.parameters, args)][0] as { instancePath?: string; message?: string } | undefined;
+                return {
+                  content: [{ type: "text" as const, text: `参数不符合这个工具的要求：${first ? `${first.instancePath || "/"} ${first.message}` : "格式不对"}。改好参数再调。` }],
+                  isError: true,
+                };
+              }
               const out = await (tool.execute as (...input: unknown[]) => Promise<{ content: Array<{ type: "text"; text: string }>; isError?: boolean }>)(
                 `${request.runId}:${tool.name}`, args, signal, undefined, undefined,
               );
@@ -124,6 +141,7 @@ export function createClaudeAgentTaskRuntime(options: {
         const maxDurationMs = options.maxDurationMs ?? DEFAULT_AGENT_TASK_MAX_DURATION_MS;
         handle = await inner.start({
           ...request,
+          workdir: scratchDir,
           ...(options.model ? { model: options.model } : {}),
           ...(options.effort ? { effort: options.effort } : {}),
           mcpServer: { ...server, env: { PLC_AGENT_TASK_SOCKET: bridge.socketPath, PLC_AGENT_TASK_TOKEN: bridge.token } },

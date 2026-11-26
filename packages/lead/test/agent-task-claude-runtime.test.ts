@@ -4,6 +4,7 @@
 //   - 桥上只有三个工具，调用走 tools.ts：权限清单照常检查，结果照常核实；
 //   - 交了结果并且 CLI 正常结束才算成功；没交结果、超过调用次数上限、CLI 出错都是失败，桥用完就关；
 //   - 不是 Claude Code 的 runtime 不能拿来跑代查。
+import { existsSync, readdirSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import type { RunGrant } from "@pi-lead-child/protocol";
 import {
@@ -33,8 +34,8 @@ interface Script {
 }
 
 function harness(script: Script, extra: { id?: string } = {}) {
-  const seen: { request: RuntimeStartRequest | null; tools: string[]; bridgeClosed: boolean; interrupted: string | null } = {
-    request: null, tools: [], bridgeClosed: false, interrupted: null,
+  const seen: { request: RuntimeStartRequest | null; tools: string[]; bridgeClosed: boolean; interrupted: string | null; workdirEntries: string[] | null } = {
+    request: null, tools: [], bridgeClosed: false, interrupted: null, workdirEntries: null,
   };
   let bridgeTools = new Map<string, TaskBridgeTool>();
   const startBridge = async (args: { tools: readonly TaskBridgeTool[] }): Promise<TaskToolBridge> => {
@@ -47,6 +48,7 @@ function harness(script: Script, extra: { id?: string } = {}) {
     capabilities: { streaming: true, steering: true, resume: true, interrupt: true, approvals: false, mcp: true, executableReadOnlyReview: true },
     async start(request) {
       seen.request = request;
+      seen.workdirEntries = existsSync(request.workdir) ? readdirSync(request.workdir) : null;
       const queue = new AsyncEventQueue<RuntimeEvent>();
       const events = new RuntimeEventSequencer(request.runId);
       const abort = new AbortController();
@@ -114,6 +116,17 @@ describe("the Claude Code agent task runtime", () => {
     expect(request.agentTask?.systemPrompt).toContain("mcp__plc__submit_result");
   });
 
+  // 工单 #464 评审：代查工单没有 workdir，CLI 会在 daemon 的 cwd 里启动，可能读到那里往上的 CLAUDE.md。
+  it("starts Claude Code in an empty temporary directory, not the daemon's cwd, and removes it afterwards", async () => {
+    const h = harness(async (tools) => { await callTool(tools, "submit_result", RESULT); return "completed"; });
+    await run(h);
+    const workdir = h.seen.request!.workdir;
+    expect(workdir).not.toBe("/");
+    expect(workdir).not.toBe(process.cwd());
+    expect(h.seen.workdirEntries).toEqual([]);
+    expect(existsSync(workdir)).toBe(false);
+  });
+
   it("succeeds when the result is submitted and the CLI ends normally; the grant check and the source check stay in code", async () => {
     const h = harness(async (tools) => {
       expect((await callTool(tools, "call_connection_tool", { connection: "github", tool: "get_file_contents", arguments: {} })).content[0]!.text)
@@ -137,6 +150,23 @@ describe("the Claude Code agent task runtime", () => {
       return "completed";
     });
     const { terminal } = await run(h, {}, connections({ call: async () => { throw Object.assign(new Error("不在清单里"), { code: "grant_refused" }); } }));
+    expect(terminal.type).toBe("run.completed");
+  });
+
+  // 工单 #464 评审：进程内的 pi 会话先按 schema 校验参数再调 execute；经桥直接调 execute 就没有这一步。
+  it("refuses tool arguments that do not match the tool schema, without calling the connection", async () => {
+    let calls = 0;
+    const h = harness(async (tools) => {
+      for (const bad of [{ connection: 42, tool: "get_file_contents" }, { connection: "github" }, { connection: "x".repeat(41), tool: "t" }]) {
+        const refused = await callTool(tools, "call_connection_tool", bad);
+        expect(refused).toMatchObject({ isError: true });
+        expect(refused.content[0]!.text).toContain("参数不符合");
+      }
+      await callTool(tools, "submit_result", RESULT);
+      return "completed";
+    });
+    const { terminal } = await run(h, {}, connections({ call: async () => { calls += 1; return { text: "x", truncated: false, isError: false }; } }));
+    expect(calls).toBe(0);
     expect(terminal.type).toBe("run.completed");
   });
 
