@@ -4,6 +4,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { tempDir } from "@pi-lead-child/core/testing";
+import { dependenciesNote } from "../src/children/manager.js";
 import {
   awaitWorktreeDependencies, DEPENDENCY_STATUS_FILE, findNodeModulesDirs, forgetWorktreeDependenciesForTests,
   peekWorktreeDependencies, readDependencyStatus, setSystemBinDirsForTests, startWorktreeDependencies,
@@ -333,7 +334,6 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
   }, 60_000);
 
   it.each([
-    ["packageManager says yarn 4", { lock: BERRY_LOCK, packageManager: "yarn@4.1.0+sha224.abc", yarnrc: "nodeLinker: node-modules\n" }],
     ["there is a .yarnrc.yml", { lock: YARN1_LOCK, yarnrc: "nodeLinker: node-modules\n" }],
     ["yarn.lock has __metadata", { lock: BERRY_LOCK, yarnrc: "nodeLinker: node-modules\n" }],
   ])("installs a yarn berry repository with yarn install --immutable and scripts off when %s", async (_why, options) => {
@@ -352,7 +352,7 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
 
   it("says a PnP repository cannot fall back to copying when yarn install fails, and does not pretend it worked", async () => {
     // nodeLinker 没写：berry 默认就是 PnP。
-    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, packageManager: "yarn@4.1.0", yarnBody: "echo 'YN0028: lockfile would have been modified' >&2\nexit 1" });
+    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, yarnBody: "echo 'YN0028: lockfile would have been modified' >&2\nexit 1" });
     const result = await startWorktreeDependencies(repo, worktree);
     expect(result.cloned).toEqual([]);
     expect(result.installedWith).toBeUndefined();
@@ -393,13 +393,13 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
   }, 60_000);
 
   it("runs yarn through corepack when packageManager names yarn and no yarn command exists", async () => {
-    const { repo, worktree } = yarnRepo({ lock: BERRY_LOCK, packageManager: "yarn@4.1.0", yarnrc: "nodeLinker: node-modules\n" });
+    const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK, packageManager: "yarn@1.22.19" });
     withoutPackageManagers();
     const out = tempDir("plc-deps-corepack-out-");
     process.env.PATH = `${fakeBin("corepack", `echo "$@" > ${out}/args\nmkdir -p node_modules/from-corepack`)}:${process.env.PATH}`;
     const result = await startWorktreeDependencies(repo, worktree);
-    expect(result.installedWith).toBe("YARN_ENABLE_SCRIPTS=false yarn install --immutable");
-    expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("yarn install --immutable");
+    expect(result.installedWith).toBe("yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
+    expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive");
   }, 60_000);
 
   it("finds yarn in ~/.yarn/bin when PATH has none", async () => {
@@ -427,6 +427,85 @@ describe.runIf(supported)("startWorktreeDependencies in a yarn repository", () =
     expect(result.fallbackReason).toBeUndefined();
     expect(existsSync(join(worktree, "node_modules", "from-home-yarn"))).toBe(true);
   }, 60_000);
+
+  // PR #85 评审第 2 条（2026-11-26）：berry 的 yarnPath 和插件、pnpm 的 .pnpmfile.cjs 是仓库自带的 JS，安装时会被运行。
+  // daemon 在沙箱外装，所以碰到它们就不装也不克隆，状态写成 none:，提示让执行者在沙箱里自己装。
+  describe("a repository that carries its own install-time JavaScript", () => {
+    const NOT_RUN = "install-was-run";
+
+    async function expectSkipped(repo: string, worktree: string, out: string, reason: RegExp): Promise<void> {
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(existsSync(join(out, NOT_RUN))).toBe(false);
+      expect(result).toMatchObject({ cloned: [], error: null, skipped: expect.stringMatching(reason) });
+      expect(result.installedWith).toBeUndefined();
+      expect(existsSync(join(worktree, "node_modules"))).toBe(false);
+      const line = readFileSync(join(git(worktree, "rev-parse", "--absolute-git-dir"), DEPENDENCY_STATUS_FILE), "utf8");
+      expect(line).toMatch(/^none: /);
+      // 执行者看到的提示：没准备，让它自己装。
+      const note = dependenciesNote(worktree);
+      expect(note).toContain("Dependencies were not prepared");
+      expect(note).toContain("install them here yourself");
+      expect(note).toMatch(reason);
+    }
+
+    const calledBody = (out: string): string => `echo run > ${out}/${NOT_RUN}\nmkdir -p node_modules/from-yarn`;
+
+    it("does not install a yarn berry repository whose .yarnrc.yml sets yarnPath", async () => {
+      const { repo, worktree, out } = yarnRepo({ lock: BERRY_LOCK, yarnrc: "nodeLinker: node-modules\nyarnPath: .yarn/releases/yarn-4.1.0.cjs\n" });
+      process.env.PATH = `${fakeBin("yarn", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, /yarnPath/);
+    }, 60_000);
+
+    it("does not install a yarn berry repository whose .yarnrc.yml lists plugins", async () => {
+      const { repo, worktree, out } = yarnRepo({ lock: BERRY_LOCK, yarnrc: "nodeLinker: node-modules\nplugins:\n  - path: .yarn/plugins/x.cjs\n" });
+      process.env.PATH = `${fakeBin("yarn", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, /plugins/);
+    }, 60_000);
+
+    it("does not install when package.json packageManager says yarn 2 or later", async () => {
+      const { repo, worktree, out } = yarnRepo({ lock: BERRY_LOCK, packageManager: "yarn@4.1.0+sha224.abc" });
+      process.env.PATH = `${fakeBin("yarn", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, /packageManager/);
+    }, 60_000);
+
+    it("ignores yarnPath and plugins that are only in a comment", async () => {
+      const { repo, worktree, out } = yarnRepo({ lock: BERRY_LOCK, yarnrc: "nodeLinker: node-modules\n# yarnPath: x.cjs\n# plugins:\n" });
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(result.installedWith).toBe("YARN_ENABLE_SCRIPTS=false yarn install --immutable");
+      expect(readFileSync(join(out, "args"), "utf8").trim()).toBe("install --immutable");
+    }, 60_000);
+
+    it("does not install a pnpm repository that has .pnpmfile.cjs", async () => {
+      const { repo, worktree } = monorepo();
+      writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      writeFileSync(join(worktree, ".pnpmfile.cjs"), "module.exports = { hooks: {} };\n");
+      withoutPackageManagers();
+      const out = tempDir("plc-deps-pnpm-out-");
+      delete process.env.PNPM_HOME; // 找 pnpm 先看它，不然会用到本机真装的
+      process.env.PATH = `${fakeBin("pnpm", calledBody(out))}:${process.env.PATH}`;
+      await expectSkipped(repo, worktree, out, /\.pnpmfile\.cjs/);
+    }, 60_000);
+
+    it("still installs a pnpm repository without .pnpmfile.cjs", async () => {
+      const { repo, worktree } = monorepo();
+      writeFileSync(join(worktree, "pnpm-lock.yaml"), "lockfileVersion: '9.0'\n");
+      withoutPackageManagers();
+      const out = tempDir("plc-deps-pnpm-out-");
+      delete process.env.PNPM_HOME; // 找 pnpm 先看它，不然会用到本机真装的
+      process.env.PATH = `${fakeBin("pnpm", `echo "$@" > ${out}/args\nmkdir -p node_modules/from-pnpm`)}:${process.env.PATH}`;
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(result.fallbackReason).toBeUndefined();
+      expect(result.installedWith).toBe("pnpm install --frozen-lockfile --prefer-offline --ignore-scripts");
+      expect(readFileSync(join(out, "args"), "utf8")).toContain("--frozen-lockfile");
+    }, 60_000);
+
+    it("keeps installing yarn 1 even when it has a .pnpmfile.cjs, since only pnpm runs that file", async () => {
+      const { repo, worktree } = yarnRepo({ lock: YARN1_LOCK, packageManager: "yarn@1.22.19" });
+      writeFileSync(join(worktree, ".pnpmfile.cjs"), "module.exports = {};\n");
+      const result = await startWorktreeDependencies(repo, worktree);
+      expect(result.installedWith).toContain("yarn install --frozen-lockfile");
+    }, 60_000);
+  });
 
   describe("when a repository has several lockfiles", () => {
     // npm 和 yarn 都是假的，各记下自己被叫过。

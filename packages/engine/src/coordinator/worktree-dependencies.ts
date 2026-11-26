@@ -23,6 +23,9 @@
 //         2 及以上（berry）：yarn install --immutable，用环境变量 YARN_ENABLE_SCRIPTS=false 关安装脚本。版本看 package.json 的
 //         packageManager 字段，没有就看 .yarnrc.yml、yarn.lock 里的 __metadata。berry 默认是 PnP（.yarnrc.yml 里 nodeLinker
 //         不是 node-modules 或 pnpm），没有 node_modules 可克隆：装不上时结果的 error 写「PnP 仓库，不能退回拷贝」，不假装成功。
+// 仓库自带安装时会运行的 JS 时，daemon 不装（PR #85 评审第 2 条，2026-11-26）：yarn berry 的 yarnPath 和插件（.yarnrc.yml 里有 yarnPath
+// 或 plugins，或 packageManager 是 yarn@2 及以上），pnpm 仓库根目录的 .pnpmfile.cjs。命中时不运行任何安装命令，也不克隆，
+// 状态写成 none: 加原因，提示让执行者在沙箱里自己装。只认这几种，别的情况照旧。
 // 一个仓库有几种锁文件时只选一种：package.json 的 packageManager 字段点名了其中一种就用它，没有就按表里的顺序选；
 // 结果的 selectionNote 写明选了哪一种、为什么。找 npm、yarn 的办法见 findBinary 一带：daemon 的 PATH 来自 launchd，
 // 常常没有用户装的 node，所以会看 nvm、volta、Homebrew、corepack 等常见位置。
@@ -201,6 +204,9 @@ interface PackageManager {
   plan(worktree: string): InstallPlan;
   // 装不上时不能退回克隆的原因（yarn 的 PnP 仓库没有 node_modules 可克隆）；能克隆时为 null。
   noCopyFallback?(worktree: string): string | null;
+  // 这个仓库自带会在安装时运行的 JS（berry 的 yarnPath 和插件、pnpm 的 .pnpmfile.cjs）：daemon 在沙箱外装，不运行它们。
+  // 返回跳过的原因（daemon 不装、也不克隆，让执行者在沙箱里自己装）；没有这类文件时为 null。PR #85 评审第 2 条（2026-11-26）。
+  skipInstall?(worktree: string): string | null;
 }
 
 function readPackageJson(worktree: string): { packageManager?: unknown } {
@@ -242,6 +248,24 @@ function isYarnPnp(worktree: string): boolean {
   return linker !== "node-modules" && linker !== "pnpm";
 }
 
+// 为什么 daemon 不装：yarn berry 的 yarnPath 指向仓库里的 JS，插件也是仓库里的 JS，yarn install 会运行它们。
+// 只认这三种（.yarnrc.yml 顶层的 yarnPath、plugins，package.json 的 packageManager 是 yarn@2 及以上），别的情况保持原样。
+function yarnBerrySkipReason(worktree: string): string | null {
+  const declared = declaredPackageManager(worktree);
+  const yarnrc = readFileOrEmpty(join(worktree, ".yarnrc.yml"));
+  const key = /^(yarnPath|plugins)\s*:/m.exec(yarnrc)?.[1];
+  const found = key
+    ? `.yarnrc.yml 里有 ${key}`
+    : declared?.name === "yarn" && versionParts(declared.version)[0]! >= 2 ? `package.json 的 packageManager 是 yarn@${declared.version}` : null;
+  return found ? `yarn berry 仓库（${found}），安装时会运行仓库自带的 JS：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖` : null;
+}
+
+function pnpmfileSkipReason(worktree: string): string | null {
+  return existsSync(join(worktree, ".pnpmfile.cjs"))
+    ? "仓库有 .pnpmfile.cjs，pnpm install 会运行它：daemon 不在沙箱外装，请执行者在沙箱里自己装依赖"
+    : null;
+}
+
 function yarnBinary(worktree: string, env: NodeJS.ProcessEnv): Binary | null {
   const dirs = [
     ...pathDirs(env), env.HOME ? join(env.HOME, ".yarn", "bin") : undefined,
@@ -273,6 +297,7 @@ const PACKAGE_MANAGERS: PackageManager[] = [
       args: ["install", "--frozen-lockfile", "--prefer-offline", "--ignore-scripts", "--reporter=silent"],
       installedWith: "pnpm install --frozen-lockfile --prefer-offline --ignore-scripts", label: "pnpm install",
     }),
+    skipInstall: pnpmfileSkipReason,
   },
   {
     // bun 的仓库用 bun 装（2026-11-25）：#465 给一个 bun 仓库建 worktree，克隆 node_modules/.bun 跑了 6 分钟以上还没完。
@@ -316,6 +341,7 @@ const PACKAGE_MANAGERS: PackageManager[] = [
         installedWith: "yarn install --frozen-lockfile --prefer-offline --ignore-scripts --non-interactive", label: "yarn install（classic）",
       },
     noCopyFallback: (worktree) => (isYarnBerry(worktree) && isYarnPnp(worktree) ? "PnP 仓库，不能退回拷贝" : null),
+    skipInstall: yarnBerrySkipReason,
   },
 ];
 
@@ -382,6 +408,9 @@ async function prepare(source: string, worktree: string): Promise<DependencyPrep
   const note = selected?.note ? { selectionNote: selected.note } : {};
   let because = {};
   if (selected) {
+    // 仓库自带安装时运行的 JS：什么都不运行，状态写成跳过。克隆也不做，执行者在沙箱里装。
+    const skipReason = selected.manager.skipInstall?.(worktree);
+    if (skipReason) return { cloned: [], skipped: skipReason, error: null, ...note };
     const attempt = await installWith(selected.manager, worktree);
     if ("installed" in attempt) return { ...attempt.installed, ...note };
     // 没有 node_modules 可克隆的仓库（yarn 的 PnP），退回拷贝没有意义：把失败如实写在 error 里，不假装成功。
