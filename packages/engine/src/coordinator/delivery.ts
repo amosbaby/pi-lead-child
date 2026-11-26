@@ -23,7 +23,7 @@ import {
 } from "@pi-lead-child/store";
 import type { Item, ItemStage, Workspace } from "@pi-lead-child/core";
 import { readHead } from "@pi-lead-child/core";
-import { redactSecretText } from "@pi-lead-child/protocol";
+import { parseGithubPullRequestUrl, redactSecretText } from "@pi-lead-child/protocol";
 import { abandonIsolatedWorkspace, contentMergedInto, integrateIsolatedWorkspace, withWorkspaceLock } from "./workspace.js";
 import { worktreeBaseBranch } from "./workspace-remote.js";
 import { checkPushAgainstOrigin } from "./push-guard.js";
@@ -35,7 +35,7 @@ import {
 import {
   currentDeliverySnapshot, DELIVERY_MAX_FILES, deliveryDiff, latestDeliveryCaptureFailure, recordedDeliverySnapshot,
 } from "./delivery-snapshot.js";
-import { transitionBy, type ActionAttribution } from "../ticket-actions/attribution.js";
+import { behalfCursor, behalfFields, transitionBy, type ActionAttribution } from "../ticket-actions/attribution.js";
 
 export { deliveryFileHiddenReason, normalizeDeliveryPath, type DeliveryFileStatus };
 
@@ -877,6 +877,32 @@ export async function openDeliveryPullRequest(
       },
     });
     return { ...(await ticketDelivery(db, itemId)), pullRequestUrl: url };
+  });
+}
+
+/**
+ * 登记一个已经开好的 PR（工单 #497）。这台机器没有 origin 的推送权限时，PR 是分支推到 fork 以后手动开的，
+ * openDeliveryPullRequest 不会写记录，工单就不知道有这个 PR。这里只写一条 workspace_pr_opened（带 linked 标记），
+ * 不推送、不调 gh：交付视图、工单列表和产物区都读这一条。工单已经有别的 PR 时用新的换掉，旧地址记在 replaces 里。
+ */
+export async function linkDeliveryPullRequest(
+  db: Db, itemId: number, input: { url: string; reason: string; by: ActionAttribution },
+): Promise<{ url: string; changed: boolean; replaced: string | null }> {
+  const ref = parseGithubPullRequestUrl(input.url);
+  if (!ref) throw new DeliveryError("invalid_request", "PR 的地址要写成 https://github.com/<owner>/<repo>/pull/<编号>。");
+  return oneAtATime(itemId, async () => {
+    const workspace = requireIsolated(db, itemId);
+    const previous = latestDecision(db, itemId, "workspace_pr_opened", workspace.id)?.url ?? null;
+    if (previous === ref.url) return { url: ref.url, changed: false, replaced: null };
+    const head = await workspaceHead(db, workspace, { timeout: 5_000 }).catch(() => null);
+    addActivity(db, {
+      itemId, actor: input.by.actor, kind: "decision", ...behalfCursor(input.by),
+      payload: {
+        decision: "workspace_pr_opened", workspaceId: workspace.id, branch: workspace.branch, url: ref.url, head,
+        linked: true, ...(previous ? { replaces: previous } : {}), reason: input.reason, ...behalfFields(input.by),
+      },
+    });
+    return { url: ref.url, changed: true, replaced: previous };
   });
 }
 
